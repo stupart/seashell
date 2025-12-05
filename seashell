@@ -1,5 +1,14 @@
 #!/bin/bash
-cd "$(dirname "$0")"
+
+# Resolve symlinks to get actual script location
+SCRIPT="$0"
+while [ -L "$SCRIPT" ]; do
+    SCRIPT_DIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
+    SCRIPT="$(readlink "$SCRIPT")"
+    [[ $SCRIPT != /* ]] && SCRIPT="$SCRIPT_DIR/$SCRIPT"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT")" && pwd)"
+cd "$SCRIPT_DIR"
 
 # Find bun - check PATH first, then common install locations
 if command -v bun &> /dev/null; then
