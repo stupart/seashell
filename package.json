@@ -1,0 +1,26 @@
+{
+  "name": "seashell",
+  "version": "1.0.0",
+  "module": "src/cli.tsx",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "seashell": "./src/cli.tsx"
+  },
+  "scripts": {
+    "start": "bun run src/cli.tsx",
+    "dev": "bun --watch src/cli.tsx"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^24.10.1"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@types/react": "^19.2.7",
+    "ink": "^6.5.1",
+    "react": "^19.2.1"
+  }
+}
