@@ -17,8 +17,9 @@ Uses [whisper.cpp](https://github.com/ggerganov/whisper.cpp) with Metal GPU acce
 
 - macOS (Apple Silicon recommended)
 - [Bun](https://bun.sh) - JavaScript runtime
-- sox - Audio recording
-- cmake - For building whisper.cpp
+- sox - Audio recording (`brew install sox`)
+- cmake - For building whisper.cpp (`brew install cmake`)
+- git - For cloning whisper.cpp
 
 ## Installation
 
