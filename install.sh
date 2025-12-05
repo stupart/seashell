@@ -56,10 +56,12 @@ if [ ! -f "models/ggml-large-v3-turbo-q5_0.bin" ]; then
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin"
 fi
 
-# VAD model for voice detection
-if [ ! -f "whisper.cpp/models/ggml-silero-v6.2.0.bin" ]; then
+# VAD model for voice detection (check size - whisper.cpp has a tiny placeholder file)
+VAD_MODEL="whisper.cpp/models/ggml-silero-v6.2.0.bin"
+VAD_SIZE=$(stat -f%z "$VAD_MODEL" 2>/dev/null || echo "0")
+if [ "$VAD_SIZE" -lt 100000 ]; then
     echo "Downloading Silero VAD model..."
-    curl -L -o whisper.cpp/models/ggml-silero-v6.2.0.bin \
+    curl -L -o "$VAD_MODEL" \
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-silero-v6.2.0.bin"
 fi
 
