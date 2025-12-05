@@ -24,7 +24,7 @@ Uses [whisper.cpp](https://github.com/ggerganov/whisper.cpp) with Metal GPU acce
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/seashell.git
+git clone https://github.com/stupart/seashell.git
 cd seashell
 
 # Run the installer
