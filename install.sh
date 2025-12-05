@@ -62,7 +62,7 @@ VAD_SIZE=$(stat -f%z "$VAD_MODEL" 2>/dev/null || echo "0")
 if [ "$VAD_SIZE" -lt 100000 ]; then
     echo "Downloading Silero VAD model..."
     curl -L -o "$VAD_MODEL" \
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-silero-v6.2.0.bin"
+        "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin"
 fi
 
 echo "Models downloaded."
