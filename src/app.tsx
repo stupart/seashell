@@ -34,6 +34,22 @@ const VAD_MODEL_PATH = join(PROJECT_ROOT, 'whisper.cpp/models/ggml-silero-v6.2.0
 
 type ListenerState = 'listening' | 'recording';
 
+// Clean a path that arrived via paste or drag-drop in the terminal.
+// Handles bracketed-paste markers, surrounding quotes, backslash-escaped spaces, ~.
+function cleanDroppedPath(raw: string): string | null {
+  let s = raw.replace(/\x1b\[20[01]~/g, '').trim();
+  if (!s) return null;
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    s = s.slice(1, -1);
+  }
+  s = s.replace(/\\(.)/g, '$1');
+  if (s.startsWith('~/') || s === '~') {
+    s = (process.env.HOME ?? '') + s.slice(1);
+  }
+  if (!s.startsWith('/')) return null;
+  return s;
+}
+
 export default function App() {
   const { exit } = useApp();
   const [listenerState, setListenerState] = useState<ListenerState>('listening');
@@ -42,8 +58,11 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [paused, setPaused] = useState(false);
+  const [fileTranscribing, setFileTranscribing] = useState(false);
+  const [fileProgress, setFileProgress] = useState<string>('');
 
   const listenerProcess = useRef<ChildProcess | null>(null);
+  const fileTranscribeProcess = useRef<ChildProcess | null>(null);
   const fileCounter = useRef(0);
   const isExiting = useRef(false);
   const pausedRef = useRef(false);  // Ref for event handlers (avoids stale closure)
@@ -91,6 +110,7 @@ export default function App() {
       '-t', '6',
       '-nt',
       '-np',
+      '-mc', '0',  // No text context carryover - prevents hallucination loops
     ], {
       stdio: ['pipe', 'pipe', 'pipe']
     });
@@ -259,6 +279,9 @@ export default function App() {
       if (listenerProcess.current) {
         listenerProcess.current.kill('SIGTERM');
       }
+      if (fileTranscribeProcess.current) {
+        fileTranscribeProcess.current.kill('SIGTERM');
+      }
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -280,6 +303,133 @@ export default function App() {
       setTimeout(() => setError(null), 3000);
     }
   }, [transcript]);
+
+  // Shared: convert any audio file to wav and run whisper-cli on it.
+  // Callers must have set fileTranscribing=true before invoking.
+  const runFileTranscription = useCallback((filePath: string) => {
+    const wasListening = !pausedRef.current;
+    if (wasListening && listenerProcess.current) {
+      listenerProcess.current.kill('SIGTERM');
+    }
+
+    if (!existsSync(filePath)) {
+      setError('File not found');
+      setFileTranscribing(false);
+      setFileProgress('');
+      if (wasListening) startListener();
+      return;
+    }
+
+    setFileProgress('Converting audio...');
+
+    const tempWav = '/tmp/whisper-file-input.wav';
+    try {
+      execSync(`afconvert -f WAVE -d LEI16@16000 ${JSON.stringify(filePath)} ${JSON.stringify(tempWav)}`, { encoding: 'utf-8' });
+    } catch {
+      setError('Failed to convert audio file');
+      setFileTranscribing(false);
+      setFileProgress('');
+      if (wasListening) startListener();
+      return;
+    }
+
+    setFileProgress('Transcribing 0%...');
+
+    const proc = spawn(WHISPER_CLI, [
+      '-m', MODEL_PATH,
+      '-vm', VAD_MODEL_PATH,
+      '--vad',
+      '-f', tempWav,
+      '-l', 'en',
+      '-t', '6',
+      '-nt',
+      '-pp',          // print progress -> stderr "progress = N%"
+      '-mc', '0',     // No text context carryover - prevents hallucination loops
+    ], {
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    fileTranscribeProcess.current = proc;
+    let output = '';
+
+    proc.stdout?.on('data', (data) => {
+      output += data.toString();
+    });
+
+    proc.stderr?.on('data', (data) => {
+      const text = data.toString();
+      const progressMatch = text.match(/progress\s*=\s*(\d+)%/);
+      if (progressMatch) {
+        setFileProgress(`Transcribing ${progressMatch[1]}%...`);
+      }
+    });
+
+    proc.on('close', () => {
+      fileTranscribeProcess.current = null;
+      cleanupFile(tempWav);
+      setFileTranscribing(false);
+      setFileProgress('');
+
+      const cleaned = output
+        .replace(/\[.*?\]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (cleaned && cleaned.length > 1) {
+        setTranscript(prev => (prev ? prev + ' ' + cleaned : cleaned));
+      }
+
+      if (wasListening && !isExiting.current) {
+        startListener();
+      }
+    });
+
+    proc.on('error', () => {
+      fileTranscribeProcess.current = null;
+      cleanupFile(tempWav);
+      setFileTranscribing(false);
+      setFileProgress('');
+      setError('File transcription failed');
+      if (wasListening && !isExiting.current) {
+        startListener();
+      }
+    });
+  }, [cleanupFile, startListener]);
+
+  // Open native macOS file picker and transcribe selected file
+  const transcribeFile = useCallback(() => {
+    if (fileTranscribing) return;
+
+    setFileTranscribing(true);
+    setFileProgress('Opening file picker...');
+
+    const script = `
+      set theFile to choose file with prompt "Select audio file to transcribe" of type {"public.audio"}
+      return POSIX path of theFile
+    `;
+
+    let filePath: string;
+    try {
+      filePath = execSync(`osascript -e '${script}'`, { encoding: 'utf-8' }).trim();
+    } catch {
+      // User cancelled
+      setFileTranscribing(false);
+      setFileProgress('');
+      return;
+    }
+
+    runFileTranscription(filePath);
+  }, [fileTranscribing, runFileTranscription]);
+
+  // Handle a file path that arrived via drag-drop or paste in the TUI
+  const handleDroppedPath = useCallback((rawInput: string) => {
+    if (fileTranscribing) return;
+    const filePath = cleanDroppedPath(rawInput);
+    if (!filePath) return;
+    setFileTranscribing(true);
+    setFileProgress('Loading dropped file...');
+    runFileTranscription(filePath);
+  }, [fileTranscribing, runFileTranscription]);
 
   const togglePause = useCallback(() => {
     if (paused) {
@@ -306,6 +456,12 @@ export default function App() {
   }, [paused, startListener]);
 
   useInput((input, key) => {
+    // Multi-character input = paste or drag-drop. Try to interpret as a file path.
+    if (input.length > 1) {
+      handleDroppedPath(input);
+      return;
+    }
+
     if (key.escape || input === 'q') {
       isExiting.current = true;
       if (listenerProcess.current) {
@@ -330,23 +486,20 @@ export default function App() {
       setError(null);
       return;
     }
+
+    if (input === 'f') {
+      transcribeFile();
+      return;
+    }
   });
 
   const getStatusDisplay = () => {
+    if (fileTranscribing) {
+      return <Text color="magenta">◐ {fileProgress}</Text>;
+    }
+
     if (paused) {
       return <Text dimColor>⏸ Paused</Text>;
-    }
-
-    const parts: string[] = [];
-
-    if (listenerState === 'recording') {
-      parts.push('● Recording');
-    } else {
-      parts.push('◉ Listening');
-    }
-
-    if (transcribingCount > 0) {
-      parts.push(`◐ Transcribing${transcribingCount > 1 ? ` (${transcribingCount})` : ''}`);
     }
 
     return (
@@ -372,7 +525,7 @@ export default function App() {
 
       <Box marginBottom={1}>
         <Text dimColor>
-          [SPACE] {paused ? 'Resume' : 'Pause'}  [C] Copy  [DEL] Clear  [Q] Quit
+          [SPACE] {paused ? 'Resume' : 'Pause'}  [F] File  [C] Copy  [DEL] Clear  [Q] Quit
         </Text>
       </Box>
 
@@ -386,6 +539,7 @@ export default function App() {
       <Box
         borderStyle="round"
         borderColor={
+          fileTranscribing ? 'magenta' :
           paused ? 'gray' :
           listenerState === 'recording' ? 'red' :
           transcribingCount > 0 ? 'yellow' : 'green'
