@@ -4,10 +4,13 @@ Local speech-to-text that runs entirely on your Mac. No cloud, no API keys, no l
 
 Uses [whisper.cpp](https://github.com/ggerganov/whisper.cpp) with Metal GPU acceleration for fast transcription.
 
+![Sea Shell — the live transcription TUI: it keeps listening for your next words while whisper is still transcribing the last ones, so nothing gets dropped.](docs/seashell.png)
+
 ## Features
 
 - **Always listening** - Auto-detects when you start/stop speaking
 - **Never misses speech** - Concurrent architecture transcribes while still listening
+- **Transcribe audio files** - Drag-and-drop a file onto the window, press `F` for a file picker, or run `seashell file.mp3` — wav, mp3, ogg, flac and more (auto-converted)
 - **30-second chunking** - Long recordings are automatically split for faster transcription
 - **Pause/resume** - Space to pause, transcribes captured audio before pausing
 - **Copy to clipboard** - Press C to copy transcript
@@ -51,9 +54,23 @@ seashell
 | Key | Action |
 |-----|--------|
 | `Space` | Pause/Resume |
+| `F` | Transcribe an audio file (opens a file picker) |
 | `C` | Copy transcript to clipboard |
 | `Delete` | Clear transcript |
 | `Q` or `Esc` | Quit |
+
+### Transcribe a file
+
+Got an existing recording? seashell transcribes files too — no mic required:
+
+```bash
+seashell interview.m4a              # prints the transcript to stdout
+seashell voicmemo.mp3 meeting.wav   # transcribe several, in order
+```
+
+Supported out of the box: wav, mp3, ogg, flac — anything else is auto-converted via `afconvert` first. Because it writes to stdout, it pipes: `seashell talk.mp3 > talk.txt`.
+
+Or do it live from inside the TUI: **drag an audio file from Finder onto the window** (its path pastes in and transcribes), or press **`F`** for a native file picker. The mic pauses while the file transcribes, shows progress, and resumes listening when it's done.
 
 ## How It Works
 
@@ -72,3 +89,9 @@ seashell
 ## License
 
 MIT
+
+---
+
+Sea Shell is the local-first STT engine behind [conch](https://github.com/stupart/conch), a hands-free voice loop for Claude Code.
+
+A small open experiment from [Blueprint Studio](https://blueprintstudio.ai) — we build AI products that feel good to use.
