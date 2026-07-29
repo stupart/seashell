@@ -9,7 +9,9 @@
   },
   "scripts": {
     "start": "bun run src/cli.tsx",
-    "dev": "bun --watch src/cli.tsx"
+    "dev": "bun --watch src/cli.tsx",
+    "test": "bun test ./test && python3 -m unittest discover -s test -p '*_test.py'",
+    "typecheck": "bunx tsc --noEmit"
   },
   "devDependencies": {
     "@types/bun": "latest",

@@ -1,0 +1,4 @@
+# Current local pyannote Community-1 pipeline. Kept optional so Sea Shell's
+# existing whisper.cpp transcription path has no Python/PyTorch dependency.
+pyannote.audio==4.0.7
+soundfile>=0.12,<1

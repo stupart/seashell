@@ -24,4 +24,4 @@ else
     exit 1
 fi
 
-exec "$BUN" run src/cli.tsx
+exec "$BUN" run src/cli.tsx "$@"

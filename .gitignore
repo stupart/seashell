@@ -1,5 +1,9 @@
 # dependencies (bun install)
 node_modules
+.venv-diarization/
+.venv-pyannote31/
+__pycache__/
+*.pyc
 
 # whisper.cpp (cloned during install)
 whisper.cpp/
@@ -42,3 +46,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Finder (MacOS) folder config
 .DS_Store
+
+# Local codebase-analysis notes
+docs/codebase-analysis/
