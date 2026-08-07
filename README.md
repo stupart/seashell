@@ -88,15 +88,18 @@ only data written to stdout, so piping remains reliable.
 
 ## Terminal UI
 
-The left pane contains Live, Import, and saved transcripts. The right pane
-shows the selected transcript with fixed-width timestamps and stable colors for
-speaker IDs.
+On wide terminals, the left pane contains Live, Import, and saved transcripts
+while the right pane shows the selected transcript. Saved items include their
+date, duration, and speaker count. Terminals narrower than 100 columns switch to
+a single-pane library/reader flow so timestamps, speaker labels, and wrapped
+transcript text keep their alignment at a standard `80x24` size.
 
 | Key | Action |
 | --- | --- |
 | `Tab` | Switch between library and transcript panes |
 | `↑`/`↓` or `J`/`K` | Navigate the focused pane |
 | `Enter` | Open the selected library item |
+| `Esc` | Return to the library in the compact reader; close a prompt or help |
 | `/` | Search saved titles, source names, speaker names, and transcript text |
 | `L` | Return to live transcription |
 | `Space` | Pause/resume live microphone capture |
@@ -111,7 +114,11 @@ speaker IDs.
 | `O` | Open the transcript folder in Finder |
 | `D` | Move a saved transcript to recoverable `_Trash` after confirmation |
 | `Delete` | Start a fresh live transcript |
-| `Q` or `Esc` | Quit |
+| `?` | Show contextual keyboard help |
+| `Q` | Quit from any normal view |
+
+In the compact library, `Esc` also quits. The footer intentionally shows only
+the commands relevant to the active pane; press `?` for the complete key map.
 
 Drag-and-drop also accepts absolute audio or video paths. The microphone pauses
 while an import runs and resumes afterward.

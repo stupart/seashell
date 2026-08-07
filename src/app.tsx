@@ -25,10 +25,12 @@ import {
 import type { TranscriptFormat, TranscriptRecord } from './transcript-types.ts';
 import { transcribeMedia } from './transcription-service.ts';
 import {
+  formatLibraryEntryMeta,
   moveSelection,
   moveTranscriptScroll,
   SPEAKER_COLORS,
   speakerColorIndex,
+  tuiLayout,
   type TuiFocus,
 } from './tui-state.ts';
 
@@ -41,6 +43,7 @@ const MAX_RECORDING_DURATION = 30_000;
 
 type ListenerState = 'listening' | 'recording';
 type View = 'live' | 'record';
+type CompactPane = 'library' | 'transcript';
 
 interface ProcessingState {
   label: string;
@@ -92,6 +95,22 @@ function truncate(value: string, width: number): string {
   return value.length <= width ? value : `${value.slice(0, width - 1)}…`;
 }
 
+function useTerminalSize(): { columns: number; rows: number } {
+  const read = () => ({
+    columns: process.stdout.columns ?? 100,
+    rows: process.stdout.rows ?? 30,
+  });
+  const [size, setSize] = useState(read);
+  useEffect(() => {
+    const onResize = () => setSize(read());
+    process.stdout.on('resize', onResize);
+    return () => {
+      process.stdout.off('resize', onResize);
+    };
+  }, []);
+  return size;
+}
+
 export default function App(props: { libraryDir?: string } = {}) {
   const { exit } = useApp();
   const config = useMemo(() => loadConfig(), []);
@@ -100,6 +119,11 @@ export default function App(props: { libraryDir?: string } = {}) {
     [props.libraryDir, config],
   );
   const saveByDefault = useMemo(() => resolveSaveByDefault(config), [config]);
+  const terminal = useTerminalSize();
+  const layout = useMemo(
+    () => tuiLayout(terminal.columns, terminal.rows),
+    [terminal.columns, terminal.rows],
+  );
 
   const [listenerState, setListenerState] = useState<ListenerState>('listening');
   const [transcribingCount, setTranscribingCount] = useState(0);
@@ -115,12 +139,14 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [selectedRecord, setSelectedRecord] = useState<TranscriptRecord | null>(null);
   const [selectionIndex, setSelectionIndex] = useState(0);
   const [focus, setFocus] = useState<TuiFocus>('sidebar');
+  const [compactPane, setCompactPane] = useState<CompactPane>('library');
   const [transcriptScroll, setTranscriptScroll] = useState(0);
   const [showTimestamps, setShowTimestamps] = useState(true);
   const [showSpeakers, setShowSpeakers] = useState(true);
   const [speakerSelection, setSpeakerSelection] = useState(0);
   const [renameState, setRenameState] = useState<RenameState | null>(null);
   const [exportMode, setExportMode] = useState(false);
+  const [helpMode, setHelpMode] = useState(false);
   const [confirmTrashId, setConfirmTrashId] = useState<string | null>(null);
   const [liveRecord, setLiveRecord] = useState<TranscriptRecord>(() => createLiveRecord());
 
@@ -385,6 +411,8 @@ export default function App(props: { libraryDir?: string } = {}) {
         const saved = saveTranscriptRecord(libraryRoot, record);
         setSelectedRecord(record);
         setView('record');
+        setCompactPane('transcript');
+        setFocus('transcript');
         setTranscriptScroll(0);
         setSpeakerSelection(0);
         refreshLibrary();
@@ -415,6 +443,8 @@ export default function App(props: { libraryDir?: string } = {}) {
     try {
       setSelectedRecord(findTranscriptRecord(libraryRoot, entry.id).record);
       setView('record');
+      setCompactPane('transcript');
+      setFocus('transcript');
       setTranscriptScroll(0);
       setSpeakerSelection(0);
       setError(null);
@@ -428,8 +458,15 @@ export default function App(props: { libraryDir?: string } = {}) {
     () => currentRecord ? coalesceTranscriptSegments(currentRecord) : [],
     [currentRecord],
   );
-  const visibleRows = Math.max(5, (process.stdout.rows ?? 30) - 14);
-  const sidebarStart = Math.max(0, selectionIndex - visibleRows + 1);
+  const segmentRowEstimate = layout.compact && terminal.columns < 66 ? 4 : 2;
+  const visibleRows = Math.max(
+    2,
+    Math.floor(layout.visibleTranscriptRows / segmentRowEstimate),
+  );
+  const sidebarStart = Math.max(
+    0,
+    selectionIndex - layout.visibleLibraryItems + 1,
+  );
   const visibleSegments = displaySegments.slice(
     transcriptScroll,
     transcriptScroll + visibleRows,
@@ -559,6 +596,8 @@ export default function App(props: { libraryDir?: string } = {}) {
           trashTranscriptRecord(libraryRoot, confirmTrashId);
           setSelectedRecord(null);
           setView('live');
+          setCompactPane('library');
+          setFocus('sidebar');
           refreshLibrary();
           setNotice('Transcript moved to the library Trash folder.');
         } catch (trashError) {
@@ -571,12 +610,32 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
 
+    if (helpMode) {
+      if (input === '?' || key.escape) {
+        setHelpMode(false);
+      } else if (input === 'q') {
+        isExiting.current = true;
+        listenerProcess.current?.kill('SIGTERM');
+        exit();
+      }
+      return;
+    }
+
     if (input.length > 1) {
       const path = cleanDroppedPath(input);
       if (path) importMedia(path, false);
       return;
     }
 
+    if (input === '?') {
+      setHelpMode(true);
+      return;
+    }
+    if (key.escape && layout.compact && compactPane === 'transcript') {
+      setCompactPane('library');
+      setFocus('sidebar');
+      return;
+    }
     if (key.escape || input === 'q') {
       isExiting.current = true;
       listenerProcess.current?.kill('SIGTERM');
@@ -584,16 +643,25 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
     if (key.tab || input === '\t') {
-      setFocus((current) => current === 'sidebar' ? 'transcript' : 'sidebar');
+      if (layout.compact) {
+        const next = compactPane === 'library' ? 'transcript' : 'library';
+        setCompactPane(next);
+        setFocus(next === 'library' ? 'sidebar' : 'transcript');
+      } else {
+        setFocus((current) => current === 'sidebar' ? 'transcript' : 'sidebar');
+      }
       return;
     }
     if (input === '/') {
       setSearchMode(true);
       setFocus('sidebar');
+      setCompactPane('library');
       return;
     }
     if (input === 'l') {
       setView('live');
+      setCompactPane('transcript');
+      setFocus('transcript');
       setTranscriptScroll(0);
       return;
     }
@@ -694,6 +762,8 @@ export default function App(props: { libraryDir?: string } = {}) {
       const item = navigationItems[selectionIndex];
       if (item?.kind === 'live') {
         setView('live');
+        setCompactPane('transcript');
+        setFocus('transcript');
         setTranscriptScroll(0);
       } else if (item?.kind === 'import') {
         pickMedia(false);
@@ -717,114 +787,231 @@ export default function App(props: { libraryDir?: string } = {}) {
             ? `Recording${transcribingCount ? ` + ${transcribingCount} transcribing` : ''}`
             : `Listening${transcribingCount ? ` + ${transcribingCount} transcribing` : ''}`;
 
-  const sidebarWidth = Math.min(36, Math.max(24, Math.floor((process.stdout.columns ?? 100) * 0.3)));
   const title = view === 'live' ? liveRecord.title : selectedRecord?.title ?? 'Transcript';
+  const transcriptPaneWidth = layout.compact
+    ? terminal.columns - 4
+    : terminal.columns - layout.sidebarWidth - 7;
+  const viewMode = terminal.columns < 66
+    ? showTimestamps && showSpeakers
+      ? 'time+spk'
+      : showTimestamps
+        ? 'time'
+        : showSpeakers
+          ? 'speakers'
+          : 'plain'
+    : [
+      showTimestamps ? 'time' : undefined,
+      showSpeakers ? 'speakers' : undefined,
+    ].filter(Boolean).join(' + ') || 'plain text';
+  const titleWidth = Math.max(10, transcriptPaneWidth - viewMode.length - 3);
+  const transcriptActive = layout.compact || focus === 'transcript';
+  const libraryActive = layout.compact || focus === 'sidebar';
+  const timestampWidth = showTimestamps ? 14 : 0;
+  const speakerWidth = showSpeakers ? 16 : 0;
+  const stackSegmentMeta = transcriptPaneWidth < timestampWidth + speakerWidth + 32;
 
-  return (
-    <Box flexDirection="column" paddingX={1} height={process.stdout.rows ?? 30}>
+  const libraryPane = (
+    <Box
+      width={layout.compact ? undefined : layout.sidebarWidth}
+      flexGrow={layout.compact ? 1 : 0}
+      flexShrink={0}
+      flexDirection="column"
+      borderStyle="round"
+      borderColor={libraryActive ? 'cyan' : 'gray'}
+      borderDimColor={!libraryActive}
+      paddingX={1}
+      overflow="hidden"
+      aria-role="listbox"
+      aria-label="Transcript library"
+    >
       <Box justifyContent="space-between">
-        <Text bold color="cyan">🐚 Sea Shell</Text>
-        <Text color={error ? 'red' : processing ? 'magenta' : 'gray'}>
-          {truncate(status, Math.max(20, (process.stdout.columns ?? 100) - 22))}
+        <Text bold>Library</Text>
+        <Text dimColor>
+          {searchQuery
+            ? `${visibleEntries.length} ${visibleEntries.length === 1 ? 'result' : 'results'}`
+            : `${libraryEntries.length} saved`}
         </Text>
       </Box>
-
-      <Box flexDirection="row" flexGrow={1} marginTop={1}>
-        <Box
-          width={sidebarWidth}
-          flexDirection="column"
-          borderStyle="round"
-          borderColor={focus === 'sidebar' ? 'cyan' : 'gray'}
-          paddingX={1}
-        >
-          <Text bold>Library</Text>
-          <Text dimColor>{searchQuery ? `/${truncate(searchQuery, sidebarWidth - 5)}` : 'Recent transcripts'}</Text>
-          <Box height={1} />
-          {navigationItems
-            .slice(sidebarStart, sidebarStart + Math.max(3, visibleRows))
-            .map((item, windowIndex) => {
-            const index = sidebarStart + windowIndex;
-            const selected = selectionIndex === index;
-            const suffix = item.kind === 'record'
-              ? `  ${item.entry.speakerCount ? `${item.entry.speakerCount}spk` : ''}`
-              : '';
-            return (
+      <Text dimColor>
+        {searchQuery
+          ? `Search · ${truncate(searchQuery, Math.max(8, layout.sidebarWidth - 12))}`
+          : 'Recent transcripts'}
+      </Text>
+      <Box height={1} />
+      {navigationItems
+        .slice(sidebarStart, sidebarStart + layout.visibleLibraryItems)
+        .map((item, windowIndex) => {
+          const index = sidebarStart + windowIndex;
+          const selected = selectionIndex === index;
+          const rowWidth = layout.compact
+            ? Math.max(12, terminal.columns - 8)
+            : Math.max(12, layout.sidebarWidth - 6);
+          return (
+            <Box
+              key={item.kind === 'record' ? item.entry.id : item.kind}
+              flexDirection="column"
+              flexShrink={0}
+              aria-role="option"
+              aria-state={{ selected }}
+            >
               <Text
-                key={item.kind === 'record' ? item.entry.id : item.kind}
                 color={selected ? 'cyan' : item.kind === 'live' ? 'green' : undefined}
-                inverse={selected && focus === 'sidebar'}
+                inverse={selected && libraryActive}
                 wrap="truncate-end"
               >
-                {selected ? '› ' : '  '}{truncate(item.label + suffix, sidebarWidth - 6)}
+                {selected ? '› ' : '  '}{truncate(item.label, rowWidth)}
+              </Text>
+              {item.kind === 'record' && (
+                <Text dimColor wrap="truncate-end">
+                  {'   '}{truncate(
+                    formatLibraryEntryMeta(item.entry, !layout.compact),
+                    Math.max(8, rowWidth - 1),
+                  )}
+                </Text>
+              )}
+            </Box>
+          );
+        })}
+      {searchQuery && visibleEntries.length === 0 && (
+        <Text color="yellow">No saved transcripts match this search.</Text>
+      )}
+    </Box>
+  );
+
+  const transcriptPane = (
+    <Box
+      flexGrow={1}
+      minWidth={0}
+      flexDirection="column"
+      borderStyle="round"
+      borderColor={transcriptActive ? 'cyan' : 'gray'}
+      borderDimColor={!transcriptActive}
+      paddingX={1}
+      marginLeft={layout.compact ? 0 : 1}
+      overflow="hidden"
+      aria-label="Transcript reader"
+    >
+      <Box justifyContent="space-between" flexShrink={0}>
+        <Text bold wrap="truncate-end">{truncate(title, titleWidth)}</Text>
+        <Text dimColor>{viewMode}</Text>
+      </Box>
+      {currentRecord && (
+        <Box flexShrink={0}>
+          <Text dimColor wrap="truncate-end">
+            {truncate([
+              currentRecord.source.filename,
+              currentRecord.source.duration === undefined
+                ? undefined
+                : formatClock(currentRecord.source.duration).slice(0, 8),
+              `${currentRecord.transcript.length} segments`,
+            ].filter(Boolean).join(' · '), Math.max(12, transcriptPaneWidth - 2))}
+          </Text>
+        </Box>
+      )}
+      {currentRecord?.speakers.length ? (
+        <Box flexWrap="wrap" flexShrink={0}>
+          <Text dimColor>Speakers  </Text>
+          {currentRecord.speakers.map((speaker, index) => {
+            const selected = index === speakerSelection;
+            return (
+              <Text
+                key={speaker.id}
+                color={SPEAKER_COLORS[speakerColorIndex(speaker.id)]}
+                inverse={selected && transcriptActive}
+              >
+                {selected ? ` ${truncate(speaker.label, 16)} ` : `${truncate(speaker.label, 16)}  `}
               </Text>
             );
           })}
         </Box>
+      ) : <Text dimColor>{view === 'live' ? 'Live transcript' : 'No speaker labels'}</Text>}
+      <Box height={1} flexShrink={0} />
 
-        <Box
-          flexGrow={1}
-          flexDirection="column"
-          borderStyle="round"
-          borderColor={focus === 'transcript' ? 'cyan' : 'gray'}
-          paddingX={1}
-          marginLeft={1}
-        >
-          <Box justifyContent="space-between">
-            <Text bold>{truncate(title, Math.max(20, (process.stdout.columns ?? 100) - sidebarWidth - 28))}</Text>
-            <Text dimColor>
-              {showTimestamps ? 'TIME ' : ''}{showSpeakers ? 'SPEAKERS' : ''}
-            </Text>
-          </Box>
-          {currentRecord && (
-            <Text dimColor>
-              {currentRecord.source.filename}
-              {currentRecord.source.duration === undefined
-                ? ''
-                : ` · ${formatClock(currentRecord.source.duration).slice(0, 8)}`}
-              {` · ${currentRecord.transcript.length} segments`}
-            </Text>
+      {visibleSegments.length === 0 ? (
+        <Box flexDirection="column">
+          <Text bold>{view === 'live' ? 'Ready when you are' : 'No transcript text'}</Text>
+          <Text dimColor>
+            {view === 'live'
+              ? 'Start speaking to transcribe live.'
+              : 'This recording has no text segments.'}
+          </Text>
+          {view === 'live' && (
+            <Text dimColor>F imports audio or video · ⇧F also identifies speakers</Text>
           )}
-          {currentRecord?.speakers.length ? (
-            <Text>
-              {currentRecord.speakers.map((speaker, index) => (
-                <Text
-                  key={speaker.id}
-                  color={SPEAKER_COLORS[speakerColorIndex(speaker.id)]}
-                  inverse={index === speakerSelection}
-                >
-                  {index === speakerSelection ? '›' : ' '}{truncate(speaker.label, 18)}{' '}
-                </Text>
-              ))}
-            </Text>
-          ) : <Text dimColor>{view === 'live' ? 'Live transcript' : 'No speaker labels'}</Text>}
-          <Box height={1} />
-
-          {visibleSegments.length === 0 ? (
-            <Text dimColor>
-              {view === 'live'
-                ? 'Start speaking, or press F to import audio or video.'
-                : 'This transcript has no text segments.'}
-            </Text>
-          ) : visibleSegments.map((segment, index) => {
-            const label = showSpeakers ? speakerLabel(currentRecord!, segment.speaker) : undefined;
-            return (
-              <Box key={`${segment.start}-${segment.end}-${index}`}>
-                {showTimestamps && (
-                  <Text dimColor>{formatClock(segment.start)}  </Text>
-                )}
-                {label && (
-                  <Text color={SPEAKER_COLORS[speakerColorIndex(segment.speaker!)]}>
-                    {truncate(label, 14).padEnd(14)}{'  '}
-                  </Text>
-                )}
-                <Text wrap="wrap">{segment.text}</Text>
-              </Box>
-            );
-          })}
         </Box>
+      ) : visibleSegments.map((segment, index) => {
+        const label = showSpeakers ? speakerLabel(currentRecord!, segment.speaker) : undefined;
+        const speakerColor = segment.speaker
+          ? SPEAKER_COLORS[speakerColorIndex(segment.speaker)]
+          : undefined;
+        const metadata = (
+          <>
+            {showTimestamps && <Text dimColor>{formatClock(segment.start)}</Text>}
+            {showTimestamps && showSpeakers && <Text dimColor>  </Text>}
+            {showSpeakers && <Text color={speakerColor}>{truncate(label ?? 'Unknown', 14)}</Text>}
+          </>
+        );
+        return stackSegmentMeta ? (
+          <Box
+            key={`${segment.start}-${segment.end}-${index}`}
+            flexDirection="column"
+            flexShrink={0}
+            marginBottom={1}
+          >
+            <Box flexDirection="row" flexShrink={0}>{metadata}</Box>
+            <Box paddingLeft={2}>
+              <Text wrap="wrap">{segment.text}</Text>
+            </Box>
+          </Box>
+        ) : (
+          <Box
+            key={`${segment.start}-${segment.end}-${index}`}
+            flexDirection="row"
+            flexShrink={0}
+          >
+            {showTimestamps && (
+              <Box width={timestampWidth} flexShrink={0}>
+                <Text dimColor>{formatClock(segment.start)}</Text>
+              </Box>
+            )}
+            {showSpeakers && (
+              <Box width={speakerWidth} flexShrink={0}>
+                <Text color={speakerColor}>{truncate(label ?? 'Unknown', 14)}</Text>
+              </Box>
+            )}
+            <Box flexGrow={1} minWidth={1}>
+              <Text wrap="wrap">{segment.text}</Text>
+            </Box>
+          </Box>
+        );
+      })}
+    </Box>
+  );
+
+  const compactFooter = compactPane === 'library'
+    ? '↑↓ Move  ↵ Open  / Search  F Import  ? Help  Q Quit'
+    : terminal.columns < 66
+      ? 'Esc Back  ↑↓ Scroll  T/S View  E Export  ? Help'
+      : 'Esc Library  ↑↓ Scroll  T Time  S Speakers  E Export  ? Help';
+  const wideFooter = focus === 'sidebar'
+    ? '[↑↓] Move  [Enter] Open  [/] Search  [F] Import  [Tab] Reader  [?] Help  [Q] Quit'
+    : '[↑↓] Scroll  [T] Time  [S] Speakers  [R] Rename  [E] Export  [Tab] Library  [?] Help';
+
+  return (
+    <Box flexDirection="column" paddingX={1} height={terminal.rows} overflow="hidden">
+      <Box justifyContent="space-between">
+        <Text bold color="cyan">🐚 Sea Shell</Text>
+        <Text color={error ? 'red' : processing ? 'magenta' : 'gray'}>
+          {truncate(status, Math.max(16, terminal.columns - 22))}
+        </Text>
       </Box>
 
-      <Box flexDirection="column" marginTop={1}>
+      <Box flexDirection="row" flexGrow={1} marginTop={1} overflow="hidden">
+        {(!layout.compact || compactPane === 'library') && libraryPane}
+        {(!layout.compact || compactPane === 'transcript') && transcriptPane}
+      </Box>
+
+      <Box flexDirection="column" marginTop={1} flexShrink={0}>
         {renameState ? (
           <Text color="yellow">Rename {renameState.speakerId}: {renameState.input}█  [Enter save · Esc cancel]</Text>
         ) : searchMode ? (
@@ -833,15 +1020,25 @@ export default function App(props: { libraryDir?: string } = {}) {
           <Text color="yellow">Export: [S] SRT  [V] WebVTT  [T] Text  [J] JSON  [Esc] Cancel</Text>
         ) : confirmTrashId ? (
           <Text color="red">Move this transcript to recoverable Trash? [Y/N]</Text>
+        ) : helpMode ? (
+          <Box flexDirection="column">
+            <Text color="yellow">Keyboard help · [?] or [Esc] close</Text>
+            {layout.compact ? (
+              <>
+                <Text dimColor>↑↓/JK move or scroll · Enter open · Tab switch · / search · L live</Text>
+                <Text dimColor>F import · ⇧F + speakers · T time · S labels · [/] speaker · R rename</Text>
+                <Text dimColor>E export · C copy · O folder · D trash · Space pause live · Q quit</Text>
+              </>
+            ) : (
+              <>
+                <Text dimColor>↑↓/JK move or scroll · Enter open · Tab switch panes · / search · L live</Text>
+                <Text dimColor>F import · ⇧F import + speakers · T time · S speakers · [/] choose speaker · R rename</Text>
+                <Text dimColor>E export · C copy · O folder · D trash · Space pause live · Q quit</Text>
+              </>
+            )}
+          </Box>
         ) : (
-          <>
-            <Text dimColor>
-              [Tab] Pane  [↑↓/JK] Navigate  [Enter] Open  [/] Search  [L] Live  [F] Import  [⇧F] Import + speakers
-            </Text>
-            <Text dimColor>
-              [T] Times  [S] Speakers  [Brackets] Speaker  [R] Rename  [E] Export  [C] Copy  [O] Folder  [D] Trash  [Q] Quit
-            </Text>
-          </>
+          <Text dimColor wrap="truncate-end">{layout.compact ? compactFooter : wideFooter}</Text>
         )}
         {copied && <Text color="green">Copied transcript.</Text>}
       </Box>
