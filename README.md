@@ -1,91 +1,226 @@
 # Sea Shell
 
-Local speech-to-text that runs entirely on your Mac. Core transcription needs
-no cloud account or API key. Optional speaker diarization needs a one-time
-Hugging Face token to download its gated model; inference stays local.
+Local-first speech-to-text for audio, video, live microphone sessions, speaker
+diarization, subtitles, and a durable transcript library on macOS.
 
-Uses [whisper.cpp](https://github.com/ggerganov/whisper.cpp) with Metal GPU acceleration for fast transcription.
+Sea Shell uses [whisper.cpp](https://github.com/ggerganov/whisper.cpp) with
+Metal acceleration. File and live transcription stay on your machine. Optional
+speaker diarization needs a Hugging Face token for its first gated model
+download; inference remains local afterward.
 
-![Sea Shell — the live transcription TUI: it keeps listening for your next words while whisper is still transcribing the last ones, so nothing gets dropped.](docs/seashell.png)
+![Sea Shell live transcription](docs/seashell.png)
 
-## Features
+## What it does
 
-- **Always listening** - Auto-detects when you start/stop speaking
-- **Never misses speech** - Concurrent architecture transcribes while still listening
-- **Transcribe audio files** - Drag-and-drop a file onto the window, press `F` for a file picker, or run `seashell file.mp3` — wav, mp3, ogg, flac and more (auto-converted)
-- **Speaker diarization** - Opt-in local pyannote speaker attribution with structured JSON
-- **Stereo channel roles** - Preserve mic/system separation as local/remote before speaker clustering
-- **30-second chunking** - Long recordings are automatically split for faster transcription
-- **Pause/resume** - Space to pause, transcribes captured audio before pausing
-- **Copy to clipboard** - Press C to copy transcript
-- **GPU accelerated** - Uses Apple Metal for fast inference
+- Transcribes WAV, MP3, FLAC, OGG, Opus, M4A, AAC, MP4, MOV, M4V, MKV, and
+  WebM when the installed FFmpeg build supports their codecs.
+- Extracts audio streams from video and prepares deterministic 16 kHz PCM for
+  Whisper.
+- Produces plain text, timestamped text, speaker-aware text, JSON, SRT, and
+  WebVTT without rerunning transcription for each rendering.
+- Saves successful file and live transcripts to a readable local folder.
+- Lets you rename anonymous diarization clusters such as `SPEAKER_00` to human
+  names without retranscribing.
+- Provides a two-pane terminal UI for live capture, imports, search, history,
+  speaker labels, timestamps, and exports.
+- Keeps command output clean for shell pipelines and AI agents.
 
 ## Requirements
 
-- macOS (Apple Silicon recommended)
-- [Bun](https://bun.sh) - JavaScript runtime
-- sox - Audio recording (`brew install sox`)
-- cmake - For building whisper.cpp (`brew install cmake`)
-- git - For cloning whisper.cpp
+- macOS; Apple Silicon is recommended
+- [Bun](https://bun.sh)
+- FFmpeg and ffprobe for media inspection and audio extraction
+- SoX for live microphone capture
+- CMake and Git for building whisper.cpp
 
-Speaker diarization is optional and additionally needs Python 3.10+ (3.12
-recommended) and FFmpeg. Its PyTorch dependencies are intentionally not part of
-the base installer.
+Install the system dependencies with Homebrew:
+
+```bash
+brew install ffmpeg sox cmake git
+```
+
+Speaker diarization additionally needs Python 3.10+ (3.12 recommended) and
+the Python packages described under [Speaker diarization](#speaker-diarization).
 
 ## Installation
 
 ```bash
-# Clone the repo
 git clone https://github.com/stupart/seashell.git
 cd seashell
-
-# Run the installer
 chmod +x install.sh
 ./install.sh
+seashell doctor
 ```
 
-The installer will:
-1. Build whisper.cpp with Metal support
-2. Download the Whisper large-v3-turbo model (547MB)
-3. Download the Silero VAD model
-4. Install dependencies
-5. Create global `seashell` command
+The installer builds whisper.cpp with Metal, downloads the Whisper
+large-v3-turbo and Silero VAD models, installs Bun dependencies, and creates a
+global `seashell` command.
 
-## Usage
+## Quick start
+
+Open the live transcription and library TUI:
 
 ```bash
 seashell
 ```
 
-### Controls
-
-| Key | Action |
-|-----|--------|
-| `Space` | Pause/Resume |
-| `F` | Transcribe an audio file (opens a file picker) |
-| `C` | Copy transcript to clipboard |
-| `Delete` | Clear transcript |
-| `Q` or `Esc` | Quit |
-
-### Transcribe a file
-
-Got an existing recording? seashell transcribes files too — no mic required:
+Transcribe audio or video while preserving the original plain-text shortcut:
 
 ```bash
-seashell interview.m4a              # prints the transcript to stdout
-seashell voicmemo.mp3 meeting.wav   # transcribe several, in order
+seashell interview.m4a
+seashell product-demo.mp4
+seashell transcribe meeting.mov --timestamps
+seashell transcribe meeting.mov --speakers
+seashell transcribe meeting.mov --timestamps --speakers
 ```
 
-Supported out of the box: wav, mp3, ogg, flac — anything else is auto-converted via `afconvert` first. Because it writes to stdout, it pipes: `seashell talk.mp3 > talk.txt`.
+Create subtitle or structured output:
 
-Or do it live from inside the TUI: **drag an audio file from Finder onto the window** (its path pastes in and transcribes), or press **`F`** for a native file picker. The mic pauses while the file transcribes, shows progress, and resumes listening when it's done.
+```bash
+seashell transcribe demo.mp4 --format srt --output demo.srt
+seashell transcribe demo.mp4 --format vtt > demo.vtt
+seashell transcribe meeting.mp4 --speakers --format json > meeting.json
+seashell transcribe meeting.mp4 --speakers --format srt > meeting.srt
+```
 
-### Speaker diarization
+Progress and save locations are written to stderr. Transcript content is the
+only data written to stdout, so piping remains reliable.
 
-Sea Shell uses the current fully local
+## Terminal UI
+
+The left pane contains Live, Import, and saved transcripts. The right pane
+shows the selected transcript with fixed-width timestamps and stable colors for
+speaker IDs.
+
+| Key | Action |
+| --- | --- |
+| `Tab` | Switch between library and transcript panes |
+| `↑`/`↓` or `J`/`K` | Navigate the focused pane |
+| `Enter` | Open the selected library item |
+| `/` | Search saved titles, source names, speaker names, and transcript text |
+| `L` | Return to live transcription |
+| `Space` | Pause/resume live microphone capture |
+| `F` | Import audio or video |
+| `Shift+F` | Import and run speaker diarization |
+| `T` | Toggle timestamp presentation |
+| `S` | Toggle speaker presentation |
+| `[` / `]` | Select a speaker label |
+| `R` | Rename the selected speaker |
+| `E` | Export as SRT, WebVTT, text, or JSON |
+| `C` | Copy the current rendering |
+| `O` | Open the transcript folder in Finder |
+| `D` | Move a saved transcript to recoverable `_Trash` after confirmation |
+| `Delete` | Start a fresh live transcript |
+| `Q` or `Esc` | Quit |
+
+Drag-and-drop also accepts absolute audio or video paths. The microphone pauses
+while an import runs and resumes afterward.
+
+## Transcript library
+
+Successful transcriptions save by default to:
+
+```text
+~/Documents/Sea Shell/Transcripts/
+└── 2026-08-06/
+    └── product-interview--20260806143000-a1b2c3d4/
+        ├── transcript.json
+        ├── transcript.txt
+        ├── transcript.srt   # after SRT export
+        └── transcript.vtt   # after WebVTT export
+```
+
+`transcript.json` is authoritative. Text and subtitle files are derived views.
+The original media is never copied into the library; its local path and media
+metadata are recorded. Listings are rebuilt by scanning transcript folders, so
+there is no irreplaceable database or index.
+
+Use `--no-save` for an ephemeral command or `--library-dir` to override the
+destination:
+
+```bash
+seashell talk.mp3 --no-save
+seashell talk.mp3 --library-dir ./project-transcripts
+```
+
+Library commands:
+
+```bash
+seashell library list
+seashell library list --json
+seashell library search "launch notes" --json
+seashell library show <id> --timestamps --speakers
+seashell library show <id> --format json
+seashell library export <id> --format srt
+seashell library speakers <id> set SPEAKER_00 "Tyler"
+seashell library open <id>
+seashell library trash <id> --confirm
+```
+
+Trash is recoverable inside `<library>/_Trash`; Sea Shell does not permanently
+delete records from its TUI or CLI.
+
+## Canonical transcript schema
+
+Every record retains timestamps whether or not the selected text view displays
+them. Speaker IDs remain stable, while labels are editable:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "20260806143000-a1b2c3d4",
+  "title": "Product interview",
+  "createdAt": "2026-08-06T14:30:00.000Z",
+  "updatedAt": "2026-08-06T14:32:10.000Z",
+  "source": {
+    "path": "/Users/me/Movies/interview.mp4",
+    "filename": "interview.mp4",
+    "duration": 130.4,
+    "format": "mov,mp4,m4a,3gp,3g2,mj2",
+    "audioStreamIndex": 1,
+    "channels": 2
+  },
+  "transcript": [
+    {
+      "start": 0.42,
+      "end": 2.18,
+      "speaker": "SPEAKER_00",
+      "text": "Let's ship it."
+    }
+  ],
+  "speakers": [
+    { "id": "SPEAKER_00", "label": "Tyler" }
+  ]
+}
+```
+
+Non-diarized segments omit `speaker`. Optional `summary`, `decisions`, and
+`action_items` fields remain available for provider-neutral enrichment.
+
+## Media preparation
+
+Sea Shell uses ffprobe to enumerate audio streams and reject media without
+audio. FFmpeg selects one stream, ignores video, decodes its codec, resamples
+it, and writes 16 kHz signed PCM WAV for Whisper. This is not loudness
+normalization.
+
+Ordinary transcription produces mono PCM. Speaker diarization preserves source
+channels, and `--channel-roles` can assign explicit channel identity. When a
+container has multiple audio tracks, inspect them with ffprobe and select one by
+its absolute stream index:
+
+```bash
+ffprobe -v error -select_streams a -show_streams movie.mkv
+seashell transcribe movie.mkv --audio-stream 3
+```
+
+## Speaker diarization
+
+Sea Shell uses the local
 [`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1)
-pipeline. It improves on the now-legacy 3.1 pipeline and exposes exclusive
-speaker turns designed for speech-to-text alignment.
+pipeline. Diarization creates recording-local clusters; it does not inherently
+know human identities. Rename those clusters later through the TUI or library
+CLI.
 
 One-time setup:
 
@@ -96,146 +231,147 @@ source .venv-diarization/bin/activate
 python -m pip install -r scripts/requirements-diarization.txt
 ```
 
-Then:
-
-1. Sign in to Hugging Face and accept the
-   [Community-1 model conditions](https://huggingface.co/pyannote/speaker-diarization-community-1).
-2. Create a read token at
-   [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
-3. Export it for the first download:
+Then accept the Community-1 model conditions, create a Hugging Face read token,
+and use it for the first model download:
 
 ```bash
 export HF_TOKEN=hf_your_read_token
-seashell --diarize meeting.m4a > meeting.json
+seashell transcribe meeting.m4a --speakers --format json
 ```
 
-The first run downloads the model into the Hugging Face cache. Later runs use
-the local copy; `HF_HUB_OFFLINE=1` can enforce cached-only operation.
-`PYANNOTE_METRICS_ENABLED=0` disables pyannote's anonymous telemetry.
-Whisper uses Metal on supported Macs; pyannote defaults to CPU there. An
-experimental MPS run can be requested with
-`SEASHELL_DIARIZATION_DEVICE=mps`, but it is not pyannote's documented default.
+Later runs use the Hugging Face cache. `HF_HUB_OFFLINE=1` enforces cached-only
+operation, and `PYANNOTE_METRICS_ENABLED=0` disables pyannote telemetry. The
+experimental `SEASHELL_DIARIZATION_DEVICE=mps` setting requests MPS; CPU is the
+documented macOS default.
 
-If you specifically need the legacy `speaker-diarization-3.1` checkpoint, use a
-separate Python 3.11 environment with `pyannote.audio==3.4.0`, accept both the
-[`segmentation-3.0`](https://huggingface.co/pyannote/segmentation-3.0) and
-[`speaker-diarization-3.1`](https://huggingface.co/pyannote/speaker-diarization-3.1)
-conditions, and select it explicitly:
+Speaker count hints remain available:
 
 ```bash
-python3.11 -m venv .venv-pyannote31
-.venv-pyannote31/bin/python -m pip install "pyannote.audio==3.4.0" soundfile
-seashell --diarize \
-  --python .venv-pyannote31/bin/python \
-  --diarization-model pyannote/speaker-diarization-3.1 \
-  meeting.wav
+seashell transcribe meeting.wav --speakers --num-speakers 3
+seashell transcribe meeting.wav --speakers --min-speakers 2 --max-speakers 5
 ```
 
-Speaker IDs are recording-local clusters, not identities that remain stable
-across files. If the count is known, pass `--num-speakers 3`; bounds are also
-available through `--min-speakers` and `--max-speakers`. Counts describe the
-whole recording: with `--channel-roles local,remote`, the fixed local identity
-is subtracted before constraining the remote clustering pass.
+The legacy command remains valid and defaults to JSON:
 
-The JSON schema uses seconds:
+```bash
+seashell --diarize meeting.m4a
+```
+
+### Known channel roles
+
+For a verified two-channel mic/system recording:
+
+```bash
+seashell transcribe meeting-stereo.wav \
+  --speakers \
+  --channel-roles local,remote \
+  --format json
+```
+
+The first channel is fixed to `LOCAL`; remote channels are clustered as
+`REMOTE_00`, `REMOTE_01`, and so on. Sea Shell never guesses physical channel
+order. Verify routing before assigning roles.
+
+## Configuration
+
+Library-directory precedence is:
+
+1. `--library-dir`
+2. `SEASHELL_LIBRARY_DIR`
+3. `libraryDir` in the config file
+4. `~/Documents/Sea Shell/Transcripts`
+
+The default macOS config path is:
+
+```text
+~/Library/Application Support/Sea Shell/config.json
+```
+
+Override that path with `SEASHELL_CONFIG`. Example:
 
 ```json
 {
-  "transcript": [
-    {
-      "start": 0.42,
-      "end": 2.18,
-      "speaker": "SPEAKER_00",
-      "text": "Let's ship it."
-    }
-  ],
-  "speakers": [
-    { "id": "SPEAKER_00", "label": "SPEAKER_00" }
-  ]
+  "libraryDir": "~/Documents/Work Transcripts",
+  "saveByDefault": true
 }
 ```
 
-`summary`, `decisions`, and `action_items` are optional fields reserved for a
-later enrichment pass. No LLM provider is built in.
+## CLI reference for scripts and AI agents
 
-### Two-channel mic + system audio
+Run `seashell --help` for the complete command summary and `seashell doctor
+--json` for machine-readable readiness checks.
 
-The current live TUI deliberately remains a low-latency mono listener. The
-diarization file path does accept stereo audio and can treat explicit channel
-identity as stronger evidence than voice clustering:
+Operational guarantees:
 
-```bash
-seashell --diarize \
-  --channel-roles local,remote \
-  meeting-stereo.wav > meeting.json
-```
+- stdout contains only requested transcript or JSON data;
+- progress, save locations, and errors go to stderr;
+- non-interactive commands never prompt;
+- paths are passed to subprocesses as argument arrays, not interpolated shell
+  commands;
+- JSON, SRT, and WebVTT accept exactly one source file;
+- multiple files remain supported for plain-text output;
+- exit code `0` means success and `1` means validation, dependency, media, or
+  processing failure; signal exits use the standard `130`/`143` codes.
 
-With that mapping, the left/first channel is transcribed separately and fixed
-to `LOCAL`. The right/second channel is transcribed separately, then pyannote
-splits remote participants into `REMOTE_00`, `REMOTE_01`, and so on. Because
-aggregate-device channel order varies, Sea Shell never guesses this mapping.
-Check it with `soxi -c meeting-stereo.wav` and listen to each channel before
-assigning roles.
-
-One pragmatic macOS routing setup:
-
-1. Install [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole).
-2. In Audio MIDI Setup, create a Multi-Output Device containing your headphones
-   and BlackHole; use it as macOS output so meeting audio reaches both.
-3. Create a separate Aggregate Device containing the physical microphone and
-   BlackHole. Use the same sample rate for both and enable drift correction on
-   every non-clock device, following
-   [Apple's aggregate-device guide](https://support.apple.com/en-au/HT202000).
-4. Keep Google Meet's microphone set to the physical mic, not the aggregate, to
-   avoid feeding remote audio back into the call. Headphones also reduce bleed.
-5. Record/remix the actual aggregate channel numbers into two channels. For
-   example, if mic is input 1 and BlackHole is inputs 2–3:
+Example agent workflow:
 
 ```bash
-sox -t coreaudio "Seashell Capture" \
-  -r 16000 -b 16 meeting-stereo.wav remix 1 2,3
+seashell doctor --json
+seashell transcribe input.mp4 --format json --no-save --quiet > transcript.json
+seashell library list --json
+seashell library show <id> --format json
 ```
 
-Substitute the device name and input indices shown in Audio MIDI Setup. This
-external recording step is necessary today because the live TUI forces mono.
+## Privacy
 
-## How It Works
+- Audio, video, transcripts, and speaker inference stay local.
+- Source media is not copied into the transcript library.
+- Core transcription needs no cloud account or API key.
+- Speaker diarization contacts Hugging Face only when model files must be
+  downloaded, unless offline mode is enforced.
+- Saved JSON contains the original source path by default; use `--no-save` when
+  path retention is undesirable.
 
-1. **sox** listens for voice activity (1.5% threshold)
-2. When speech is detected, recording begins
-3. After 2 seconds of silence (or 30 seconds max), recording stops
-4. **whisper.cpp** transcribes the audio using GPU
-5. A new listener starts immediately (concurrent with transcription)
-6. Transcribed text appears in the terminal
+## Troubleshooting
 
-The opt-in diarization path is separate:
+Run this first:
 
-1. Normalize the source to 16 kHz WAV without discarding channels
-2. Run whisper.cpp with DTW timing (and without its timeline-compacting VAD)
-3. Run local pyannote diarization (or split known channels first)
-4. Assign each word by its DTW anchor (or greatest-overlap fallback)
-5. Merge adjacent same-speaker text and emit structured JSON
+```bash
+seashell doctor
+```
 
-For future Meet name attribution, `SpeakerLabeler` accepts timestamped
-screenshots and an attendee list; the included stub preserves current IDs. A
-separate provider-neutral `TranscriptEnricher` interface can add summaries,
-decisions, and action items without coupling Sea Shell to an LLM vendor.
+- **`ffprobe` or `ffmpeg` missing:** `brew install ffmpeg`.
+- **No audio stream found:** the selected video has no audio track, or its track
+  is not exposed by the container. Inspect it with `ffprobe -show_streams`.
+- **Wrong language/audio track:** use `--audio-stream <index>`.
+- **whisper.cpp/model missing:** rerun `./install.sh`.
+- **Metal initialization crashes:** Sea Shell automatically retries file and
+  live transcription on CPU. Set `SEASHELL_DISABLE_GPU=1` to skip the Metal
+  attempt entirely while diagnosing the local whisper.cpp build.
+- **Speaker setup failure:** activate `.venv-diarization`, verify the pyannote
+  packages, accept the model terms, and provide `HF_TOKEN` for the first run.
+- **Aggregate channel mismatch:** verify the channel count and physical routing
+  before using `--channel-roles`.
+- **Malformed config:** validate the JSON at the config path printed above.
 
-## Models
+## Development
 
-- **Whisper large-v3-turbo-q5_0** - Main transcription model (547MB, quantized)
-- **Silero VAD v6.2.0** - Voice activity detection
+```bash
+bun install
+bun run typecheck
+bun run test
+```
+
+The standard suite does not download pyannote models. FFmpeg-backed integration
+tests generate tiny local fixtures when FFmpeg is available.
 
 ## License
 
-MIT
-
-The optional Community-1 model weights are downloaded separately under
-[CC BY 4.0](https://huggingface.co/pyannote/speaker-diarization-community-1);
-they are not bundled with Sea Shell.
+MIT. Optional Community-1 model weights are downloaded separately under CC BY
+4.0 and are not bundled with Sea Shell.
 
 ---
 
-Sea Shell is the local-first STT engine behind [conch](https://github.com/stupart/conch), a hands-free voice loop for Claude Code.
-
-A small open experiment from [Blueprint Studio](https://blueprintstudio.ai) — we build AI products that feel good to use.
+Sea Shell is the local-first STT engine behind
+[conch](https://github.com/stupart/conch), an open experiment from
+[Blueprint Studio](https://blueprintstudio.ai).

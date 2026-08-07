@@ -1,97 +1,206 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Box, Text, useInput, useApp } from 'ink';
-import { spawn, ChildProcess, execSync } from 'child_process';
-import { join, dirname } from 'path';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Box, Text, useApp, useInput } from 'ink';
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'child_process';
+import { existsSync, statSync, unlinkSync } from 'fs';
+import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
-import { unlinkSync, existsSync, statSync } from 'fs';
+import { loadConfig, resolveLibraryDir, resolveSaveByDefault } from './config.ts';
+import {
+  findTranscriptRecord,
+  listTranscriptRecords,
+  renameTranscriptSpeaker,
+  saveTranscriptRecord,
+  searchTranscriptRecords,
+  trashTranscriptRecord,
+  writeTranscriptExport,
+  type TranscriptLibraryEntry,
+} from './transcript-library.ts';
+import { createTranscriptRecord } from './transcript-record.ts';
+import {
+  coalesceTranscriptSegments,
+  formatClock,
+  renderText,
+  speakerLabel,
+} from './transcript-renderer.ts';
+import type { TranscriptFormat, TranscriptRecord } from './transcript-types.ts';
+import { transcribeMedia } from './transcription-service.ts';
+import {
+  moveSelection,
+  moveTranscriptScroll,
+  SPEAKER_COLORS,
+  speakerColorIndex,
+  type TuiFocus,
+} from './tui-state.ts';
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-const PROJECT_ROOT = join(__dirname, '..');
+const PROJECT_ROOT = join(dirname(__filename), '..');
 const WHISPER_CLI = join(PROJECT_ROOT, 'whisper.cpp/build/bin/whisper-cli');
 const MODEL_PATH = join(PROJECT_ROOT, 'models/ggml-large-v3-turbo-q5_0.bin');
 const VAD_MODEL_PATH = join(PROJECT_ROOT, 'whisper.cpp/models/ggml-silero-v6.2.0.bin');
-
-/*
- * CONCURRENT ARCHITECTURE:
- *
- * Problem: If user speaks while transcribing, that speech is lost.
- * Solution: Always have a listener running, even during transcription.
- *
- * Flow:
- * 1. Listener 1 starts → detects speech → captures audio to file_1.wav
- * 2. When speech ends:
- *    - Immediately start Listener 2 (new temp file)
- *    - Start transcribing file_1.wav in parallel
- * 3. If user speaks during transcription:
- *    - Listener 2 captures it to file_2.wav
- *    - When it ends, start Listener 3, transcribe file_2.wav
- * 4. Transcriptions complete and append to transcript in order received
- *
- * This ensures we NEVER miss speech, even during transcription.
- */
+const MAX_RECORDING_DURATION = 30_000;
 
 type ListenerState = 'listening' | 'recording';
+type View = 'live' | 'record';
 
-// Clean a path that arrived via paste or drag-drop in the terminal.
-// Handles bracketed-paste markers, surrounding quotes, backslash-escaped spaces, ~.
-function cleanDroppedPath(raw: string): string | null {
-  let s = raw.replace(/\x1b\[20[01]~/g, '').trim();
-  if (!s) return null;
-  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
-    s = s.slice(1, -1);
-  }
-  s = s.replace(/\\(.)/g, '$1');
-  if (s.startsWith('~/') || s === '~') {
-    s = (process.env.HOME ?? '') + s.slice(1);
-  }
-  if (!s.startsWith('/')) return null;
-  return s;
+interface ProcessingState {
+  label: string;
+  progress?: number;
 }
 
-export default function App() {
+interface RenameState {
+  speakerId: string;
+  input: string;
+}
+
+type NavigationItem =
+  | { kind: 'live'; label: string }
+  | { kind: 'import'; label: string }
+  | { kind: 'record'; label: string; entry: TranscriptLibraryEntry };
+
+function cleanDroppedPath(raw: string): string | null {
+  let value = raw.replace(/\x1b\[20[01]~/gu, '').trim();
+  if (!value) return null;
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    value = value.slice(1, -1);
+  }
+  value = value.replace(/\\(.)/gu, '$1');
+  if (value.startsWith('~/') || value === '~') {
+    value = (process.env.HOME ?? '') + value.slice(1);
+  }
+  return value.startsWith('/') ? value : null;
+}
+
+function liveTitle(now = new Date()): string {
+  return `Live ${now.toLocaleDateString()} ${now.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+  })}`;
+}
+
+function createLiveRecord(): TranscriptRecord {
+  return createTranscriptRecord({ transcript: [], speakers: [] }, {
+    title: liveTitle(),
+    source: { filename: 'Live microphone session' },
+  });
+}
+
+function truncate(value: string, width: number): string {
+  if (width <= 1) return value.slice(0, Math.max(0, width));
+  return value.length <= width ? value : `${value.slice(0, width - 1)}…`;
+}
+
+export default function App(props: { libraryDir?: string } = {}) {
   const { exit } = useApp();
+  const config = useMemo(() => loadConfig(), []);
+  const libraryRoot = useMemo(
+    () => resolveLibraryDir(props.libraryDir, process.env, config),
+    [props.libraryDir, config],
+  );
+  const saveByDefault = useMemo(() => resolveSaveByDefault(config), [config]);
+
   const [listenerState, setListenerState] = useState<ListenerState>('listening');
   const [transcribingCount, setTranscribingCount] = useState(0);
-  const [transcript, setTranscript] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [paused, setPaused] = useState(false);
-  const [fileTranscribing, setFileTranscribing] = useState(false);
-  const [fileProgress, setFileProgress] = useState<string>('');
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [processing, setProcessing] = useState<ProcessingState | null>(null);
+  const [libraryEntries, setLibraryEntries] = useState<TranscriptLibraryEntry[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchMode, setSearchMode] = useState(false);
+  const [view, setView] = useState<View>('live');
+  const [selectedRecord, setSelectedRecord] = useState<TranscriptRecord | null>(null);
+  const [selectionIndex, setSelectionIndex] = useState(0);
+  const [focus, setFocus] = useState<TuiFocus>('sidebar');
+  const [transcriptScroll, setTranscriptScroll] = useState(0);
+  const [showTimestamps, setShowTimestamps] = useState(true);
+  const [showSpeakers, setShowSpeakers] = useState(true);
+  const [speakerSelection, setSpeakerSelection] = useState(0);
+  const [renameState, setRenameState] = useState<RenameState | null>(null);
+  const [exportMode, setExportMode] = useState(false);
+  const [confirmTrashId, setConfirmTrashId] = useState<string | null>(null);
+  const [liveRecord, setLiveRecord] = useState<TranscriptRecord>(() => createLiveRecord());
 
   const listenerProcess = useRef<ChildProcess | null>(null);
-  const fileTranscribeProcess = useRef<ChildProcess | null>(null);
   const fileCounter = useRef(0);
   const isExiting = useRef(false);
-  const pausedRef = useRef(false);  // Ref for event handlers (avoids stale closure)
+  const pausedRef = useRef(false);
   const checkInterval = useRef<NodeJS.Timeout | null>(null);
   const maxDurationTimeout = useRef<NodeJS.Timeout | null>(null);
-  const immediateStartRef = useRef(false);  // Skip voice detection on next start (for seamless chunking)
+  const immediateStartRef = useRef(false);
+  const liveRecordRef = useRef(liveRecord);
+  const liveSessionStartedAt = useRef(Date.now());
 
-  const MAX_RECORDING_DURATION = 30000;  // 30 seconds max per chunk
+  const refreshLibrary = useCallback(() => {
+    setLibraryEntries(listTranscriptRecords(libraryRoot));
+  }, [libraryRoot]);
 
-  // Generate unique temp file path
+  useEffect(() => {
+    refreshLibrary();
+  }, [refreshLibrary]);
+
+  const visibleEntries = useMemo(
+    () => searchQuery.trim()
+      ? searchTranscriptRecords(libraryRoot, searchQuery)
+      : libraryEntries,
+    [libraryEntries, libraryRoot, searchQuery],
+  );
+  const navigationItems: NavigationItem[] = useMemo(() => [
+    { kind: 'live', label: '● Live transcription' },
+    { kind: 'import', label: '+ Import media' },
+    ...visibleEntries.map((entry) => ({
+      kind: 'record' as const,
+      label: entry.title,
+      entry,
+    })),
+  ], [visibleEntries]);
+
+  useEffect(() => {
+    setSelectionIndex((current) => moveSelection(current, 0, navigationItems.length));
+  }, [navigationItems.length]);
+
   const getTempFile = useCallback(() => {
     fileCounter.current += 1;
-    return `/tmp/whisper-recording-${fileCounter.current}.wav`;
+    return `/tmp/seashell-live-${process.pid}-${fileCounter.current}.wav`;
   }, []);
 
-  // Cleanup a specific audio file
-  const cleanupFile = useCallback((filepath: string) => {
+  const cleanupFile = useCallback((path: string) => {
     try {
-      if (existsSync(filepath)) unlinkSync(filepath);
+      if (existsSync(path)) unlinkSync(path);
     } catch {}
   }, []);
 
-  // Transcribe audio file (runs in parallel, doesn't block listener)
-  const transcribe = useCallback((audioFile: string) => {
-    if (!existsSync(audioFile)) return;
+  const appendLiveSegment = useCallback((segment: TranscriptRecord['transcript'][number]) => {
+    const current = liveRecordRef.current;
+    const next: TranscriptRecord = {
+      ...current,
+      updatedAt: new Date().toISOString(),
+      transcript: [...current.transcript, segment]
+        .toSorted((a, b) => a.start - b.start || a.end - b.end),
+    };
+    liveRecordRef.current = next;
+    setLiveRecord(next);
+    if (saveByDefault) {
+      try {
+        saveTranscriptRecord(libraryRoot, next);
+        refreshLibrary();
+      } catch (saveError) {
+        setError(saveError instanceof Error ? saveError.message : String(saveError));
+      }
+    }
+  }, [libraryRoot, refreshLibrary, saveByDefault]);
 
+  const transcribeLiveChunk = useCallback((
+    audioFile: string,
+    start: number,
+    end: number,
+  ) => {
+    if (!existsSync(audioFile)) return;
     try {
-      const stats = statSync(audioFile);
-      if (stats.size < 1000) {
+      if (statSync(audioFile).size < 1000) {
         cleanupFile(audioFile);
         return;
       }
@@ -99,465 +208,643 @@ export default function App() {
       return;
     }
 
-    setTranscribingCount(c => c + 1);
-
-    const proc = spawn(WHISPER_CLI, [
-      '-m', MODEL_PATH,
-      '-vm', VAD_MODEL_PATH,
-      '--vad',
-      '-f', audioFile,
-      '-l', 'en',
-      '-t', '6',
-      '-nt',
-      '-np',
-      '-mc', '0',  // No text context carryover - prevents hallucination loops
-    ], {
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-
-    let output = '';
-
-    proc.stdout?.on('data', (data) => {
-      output += data.toString();
-    });
-
-    proc.stderr?.on('data', (data) => {
-      const text = data.toString();
-      if (text.toLowerCase().includes('error') &&
-          !text.includes('whisper_init') &&
-          !text.includes('silero') &&
-          !text.includes('vad')) {
-        setError(text.trim().slice(0, 80));
-      }
-    });
-
-    proc.on('close', () => {
+    setTranscribingCount((count) => count + 1);
+    let finished = false;
+    const finish = (text: string, failure?: string) => {
+      if (finished) return;
+      finished = true;
       cleanupFile(audioFile);
-      setTranscribingCount(c => Math.max(0, c - 1));
-
-      const cleaned = output
-        .replace(/\[.*?\]/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      if (cleaned && cleaned.length > 1) {
-        setTranscript(prev => (prev ? prev + ' ' + cleaned : cleaned));
+      setTranscribingCount((count) => Math.max(0, count - 1));
+      if (text) {
+        appendLiveSegment({ start, end: Math.max(start, end), text });
+      } else if (failure) {
+        setError(`Live transcription failed: ${failure}`);
       }
-    });
+    };
 
-    proc.on('error', () => {
-      cleanupFile(audioFile);
-      setTranscribingCount(c => Math.max(0, c - 1));
-    });
-  }, [cleanupFile]);
+    const runAttempt = (disableGpu: boolean) => {
+      const process = spawn(WHISPER_CLI, [
+        ...(disableGpu ? ['-ng'] : []),
+        '-m', MODEL_PATH,
+        '-vm', VAD_MODEL_PATH,
+        '--vad',
+        '-f', audioFile,
+        '-l', 'en',
+        '-t', '6',
+        '-nt',
+        '-np',
+        '-mc', '0',
+      ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
-  // Start a new listener (always runs, even during transcription)
+      let output = '';
+      let stderr = '';
+      process.stdout?.on('data', (data) => { output += data.toString(); });
+      process.stderr?.on('data', (data) => { stderr = (stderr + data.toString()).slice(-2000); });
+      process.on('close', (code, signal) => {
+        if (!disableGpu && (Boolean(signal) || code === 139)) {
+          setNotice('Metal unavailable; using CPU transcription fallback.');
+          runAttempt(true);
+          return;
+        }
+        const text = output.replace(/\[.*?\]/gu, '').replace(/\s+/gu, ' ').trim();
+        const reason = signal ? `signal ${signal}` : stderr.trim().slice(-120) || `exit ${code}`;
+        finish(text, code === 0 ? undefined : reason);
+      });
+      process.on('error', (processError) => finish('', processError.message));
+    };
+
+    runAttempt(process.env.SEASHELL_DISABLE_GPU === '1');
+  }, [appendLiveSegment, cleanupFile]);
+
   const startListener = useCallback(() => {
     if (isExiting.current || pausedRef.current) return;
-
-    // Kill any existing listener first
     if (listenerProcess.current) {
       listenerProcess.current.kill('SIGTERM');
       listenerProcess.current = null;
     }
-
-    if (checkInterval.current) {
-      clearInterval(checkInterval.current);
-      checkInterval.current = null;
-    }
+    if (checkInterval.current) clearInterval(checkInterval.current);
 
     const audioFile = getTempFile();
-    const shouldStartImmediately = immediateStartRef.current;
-    immediateStartRef.current = false;  // Reset after use
+    const immediate = immediateStartRef.current;
+    immediateStartRef.current = false;
+    let recordingStartedAt = immediate
+      ? (Date.now() - liveSessionStartedAt.current) / 1000
+      : undefined;
+    setListenerState(immediate ? 'recording' : 'listening');
 
-    setListenerState(shouldStartImmediately ? 'recording' : 'listening');
-
-    // Normal mode: wait for voice, then record until 2s silence
-    // Immediate mode: start recording NOW (for seamless chunking), stop on 2s silence
-    const soxArgs = shouldStartImmediately
+    const soxArgs = immediate
       ? ['-d', '-r', '16000', '-c', '1', '-b', '16', audioFile,
-         'silence', '1', '0', '0%',    // No wait for voice (0% threshold = everything passes)
-                   '1', '2.0', '1.5%'] // Still stop on 2s silence
+        'silence', '1', '0', '0%', '1', '2.0', '1.5%']
       : ['-d', '-r', '16000', '-c', '1', '-b', '16', audioFile,
-         'silence', '1', '0.05', '1.5%',  // Start faster: 1.5% threshold, 0.05s
-                   '1', '2.0', '1.5%'];   // Stop slower: wait 2s of silence
+        'silence', '1', '0.05', '1.5%', '1', '2.0', '1.5%'];
+    const process = spawn('sox', soxArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
 
-    const proc = spawn('sox', soxArgs, {
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-
-    // Check file size to detect when recording starts
     checkInterval.current = setInterval(() => {
       try {
-        if (existsSync(audioFile)) {
-          const stats = statSync(audioFile);
-          if (stats.size > 1000) {
-            setListenerState('recording');
-
-            // Start max duration timer (only once per recording)
-            if (!maxDurationTimeout.current) {
-              maxDurationTimeout.current = setTimeout(() => {
-                maxDurationTimeout.current = null;
-                if (listenerProcess.current && !pausedRef.current && !isExiting.current) {
-                  immediateStartRef.current = true;  // Next listener starts recording immediately
-                  listenerProcess.current.kill('SIGTERM');  // Triggers close handler
-                }
-              }, MAX_RECORDING_DURATION);
-            }
+        if (existsSync(audioFile) && statSync(audioFile).size > 1000) {
+          if (recordingStartedAt === undefined) {
+            recordingStartedAt = (Date.now() - liveSessionStartedAt.current) / 1000;
+          }
+          setListenerState('recording');
+          if (!maxDurationTimeout.current) {
+            maxDurationTimeout.current = setTimeout(() => {
+              maxDurationTimeout.current = null;
+              if (listenerProcess.current && !pausedRef.current && !isExiting.current) {
+                immediateStartRef.current = true;
+                listenerProcess.current.kill('SIGTERM');
+              }
+            }, MAX_RECORDING_DURATION);
           }
         }
       } catch {}
     }, 100);
 
-    proc.on('error', (err) => {
+    process.on('error', (processError) => {
       if (checkInterval.current) clearInterval(checkInterval.current);
-      if (maxDurationTimeout.current) {
-        clearTimeout(maxDurationTimeout.current);
-        maxDurationTimeout.current = null;
-      }
-      setError(`Recording failed: ${err.message}`);
+      if (maxDurationTimeout.current) clearTimeout(maxDurationTimeout.current);
+      checkInterval.current = null;
+      maxDurationTimeout.current = null;
       listenerProcess.current = null;
-      // Retry after delay
-      if (!isExiting.current && !pausedRef.current) {
-        setTimeout(startListener, 1000);
-      }
+      setError(`Recording failed: ${processError.message}`);
+      if (!isExiting.current && !pausedRef.current) setTimeout(startListener, 1000);
     });
 
-    proc.on('close', () => {
-      // Cleanup timers
-      if (checkInterval.current) {
-        clearInterval(checkInterval.current);
-        checkInterval.current = null;
-      }
-      if (maxDurationTimeout.current) {
-        clearTimeout(maxDurationTimeout.current);
-        maxDurationTimeout.current = null;
-      }
+    process.on('close', () => {
+      if (checkInterval.current) clearInterval(checkInterval.current);
+      if (maxDurationTimeout.current) clearTimeout(maxDurationTimeout.current);
+      checkInterval.current = null;
+      maxDurationTimeout.current = null;
       listenerProcess.current = null;
-
       if (isExiting.current) return;
 
-      // Transcribe if we have meaningful audio (works for normal end, pause, OR timeout kill)
       let hasAudio = false;
-      if (existsSync(audioFile)) {
-        try {
-          const stats = statSync(audioFile);
-          if (stats.size > 1000) {
-            hasAudio = true;
-            transcribe(audioFile);
-          } else {
-            cleanupFile(audioFile);
-          }
-        } catch {
-          cleanupFile(audioFile);
-        }
+      try {
+        hasAudio = existsSync(audioFile) && statSync(audioFile).size > 1000;
+      } catch {}
+      if (hasAudio) {
+        const end = (Date.now() - liveSessionStartedAt.current) / 1000;
+        transcribeLiveChunk(audioFile, recordingStartedAt ?? Math.max(0, end - 0.1), end);
+      } else {
+        cleanupFile(audioFile);
       }
 
-      // Restart listener if not paused
       if (!pausedRef.current) {
-        if (immediateStartRef.current) {
-          startListener();  // Immediate restart for seamless chunking
-        } else if (hasAudio) {
-          startListener();  // Normal restart after speech
-        } else {
-          setTimeout(startListener, 100);  // Brief delay if no audio captured
-        }
+        if (immediateStartRef.current || hasAudio) startListener();
+        else setTimeout(startListener, 100);
       }
     });
+    listenerProcess.current = process;
+  }, [cleanupFile, getTempFile, transcribeLiveChunk]);
 
-    listenerProcess.current = proc;
-  }, [getTempFile, transcribe, cleanupFile]);
-
-  // Start on mount
   useEffect(() => {
     startListener();
-
     return () => {
       isExiting.current = true;
       if (checkInterval.current) clearInterval(checkInterval.current);
       if (maxDurationTimeout.current) clearTimeout(maxDurationTimeout.current);
-      if (listenerProcess.current) {
-        listenerProcess.current.kill('SIGTERM');
-      }
-      if (fileTranscribeProcess.current) {
-        fileTranscribeProcess.current.kill('SIGTERM');
-      }
+      listenerProcess.current?.kill('SIGTERM');
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [startListener]);
 
-  // Handle pause/unpause
-  useEffect(() => {
-    if (!paused && !listenerProcess.current && !isExiting.current) {
+  const setListeningPaused = useCallback((nextPaused: boolean) => {
+    pausedRef.current = nextPaused;
+    setPaused(nextPaused);
+    if (nextPaused) {
+      listenerProcess.current?.kill('SIGTERM');
+      if (checkInterval.current) clearInterval(checkInterval.current);
+      if (maxDurationTimeout.current) clearTimeout(maxDurationTimeout.current);
+      checkInterval.current = null;
+      maxDurationTimeout.current = null;
+      setListenerState('listening');
+    } else if (!listenerProcess.current) {
       startListener();
     }
-  }, [paused, startListener]);
+  }, [startListener]);
 
-  const copyToClipboard = useCallback(() => {
-    if (!transcript) return;
-    try {
-      execSync(`printf '%s' ${JSON.stringify(transcript)} | pbcopy`);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 3000);
-    } catch {
-      setError('Copy failed');
-      setTimeout(() => setError(null), 3000);
-    }
-  }, [transcript]);
-
-  // Shared: convert any audio file to wav and run whisper-cli on it.
-  // Callers must have set fileTranscribing=true before invoking.
-  const runFileTranscription = useCallback((filePath: string) => {
+  const importMedia = useCallback((filePath: string, withSpeakers: boolean) => {
+    if (processing) return;
     const wasListening = !pausedRef.current;
-    if (wasListening && listenerProcess.current) {
-      listenerProcess.current.kill('SIGTERM');
-    }
+    setListeningPaused(true);
+    setError(null);
+    setNotice(null);
+    setProcessing({ label: 'Inspecting media…' });
 
-    if (!existsSync(filePath)) {
-      setError('File not found');
-      setFileTranscribing(false);
-      setFileProgress('');
-      if (wasListening) startListener();
-      return;
-    }
-
-    setFileProgress('Converting audio...');
-
-    const tempWav = '/tmp/whisper-file-input.wav';
-    try {
-      execSync(`afconvert -f WAVE -d LEI16@16000 ${JSON.stringify(filePath)} ${JSON.stringify(tempWav)}`, { encoding: 'utf-8' });
-    } catch {
-      setError('Failed to convert audio file');
-      setFileTranscribing(false);
-      setFileProgress('');
-      if (wasListening) startListener();
-      return;
-    }
-
-    setFileProgress('Transcribing 0%...');
-
-    const proc = spawn(WHISPER_CLI, [
-      '-m', MODEL_PATH,
-      '-vm', VAD_MODEL_PATH,
-      '--vad',
-      '-f', tempWav,
-      '-l', 'en',
-      '-t', '6',
-      '-nt',
-      '-pp',          // print progress -> stderr "progress = N%"
-      '-mc', '0',     // No text context carryover - prevents hallucination loops
-    ], {
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
-
-    fileTranscribeProcess.current = proc;
-    let output = '';
-
-    proc.stdout?.on('data', (data) => {
-      output += data.toString();
-    });
-
-    proc.stderr?.on('data', (data) => {
-      const text = data.toString();
-      const progressMatch = text.match(/progress\s*=\s*(\d+)%/);
-      if (progressMatch) {
-        setFileProgress(`Transcribing ${progressMatch[1]}%...`);
+    void (async () => {
+      try {
+        const record = await transcribeMedia(filePath, {
+          speakers: withSpeakers,
+          onStatus: (label) => setProcessing((current) => ({ ...current, label })),
+          onWhisperProgress: (progress) => setProcessing({
+            label: 'Transcribing…',
+            progress,
+          }),
+          onWhisperFallback: (label) => setProcessing({ label }),
+          onDiarizationMessage: () => setProcessing({ label: 'Identifying speakers…' }),
+        });
+        setProcessing({ label: 'Saving transcript…' });
+        const saved = saveTranscriptRecord(libraryRoot, record);
+        setSelectedRecord(record);
+        setView('record');
+        setTranscriptScroll(0);
+        setSpeakerSelection(0);
+        refreshLibrary();
+        setNotice(`Saved ${saved.directory}`);
+      } catch (importError) {
+        setError(importError instanceof Error ? importError.message : String(importError));
+      } finally {
+        setProcessing(null);
+        if (wasListening) setListeningPaused(false);
       }
-    });
+    })();
+  }, [libraryRoot, processing, refreshLibrary, setListeningPaused]);
 
-    proc.on('close', () => {
-      fileTranscribeProcess.current = null;
-      cleanupFile(tempWav);
-      setFileTranscribing(false);
-      setFileProgress('');
-
-      const cleaned = output
-        .replace(/\[.*?\]/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      if (cleaned && cleaned.length > 1) {
-        setTranscript(prev => (prev ? prev + ' ' + cleaned : cleaned));
-      }
-
-      if (wasListening && !isExiting.current) {
-        startListener();
-      }
-    });
-
-    proc.on('error', () => {
-      fileTranscribeProcess.current = null;
-      cleanupFile(tempWav);
-      setFileTranscribing(false);
-      setFileProgress('');
-      setError('File transcription failed');
-      if (wasListening && !isExiting.current) {
-        startListener();
-      }
-    });
-  }, [cleanupFile, startListener]);
-
-  // Open native macOS file picker and transcribe selected file
-  const transcribeFile = useCallback(() => {
-    if (fileTranscribing) return;
-
-    setFileTranscribing(true);
-    setFileProgress('Opening file picker...');
-
+  const pickMedia = useCallback((withSpeakers: boolean) => {
     const script = `
-      set theFile to choose file with prompt "Select audio file to transcribe" of type {"public.audio"}
+      set theFile to choose file with prompt "Select audio or video to transcribe" of type {"public.audio", "public.movie", "public.mpeg-4"}
       return POSIX path of theFile
     `;
-
-    let filePath: string;
     try {
-      filePath = execSync(`osascript -e '${script}'`, { encoding: 'utf-8' }).trim();
+      const filePath = execFileSync('osascript', ['-e', script], { encoding: 'utf8' }).trim();
+      if (filePath) importMedia(filePath, withSpeakers);
     } catch {
-      // User cancelled
-      setFileTranscribing(false);
-      setFileProgress('');
+      setNotice('Import cancelled.');
+    }
+  }, [importMedia]);
+
+  const openRecord = useCallback((entry: TranscriptLibraryEntry) => {
+    try {
+      setSelectedRecord(findTranscriptRecord(libraryRoot, entry.id).record);
+      setView('record');
+      setTranscriptScroll(0);
+      setSpeakerSelection(0);
+      setError(null);
+    } catch (openError) {
+      setError(openError instanceof Error ? openError.message : String(openError));
+    }
+  }, [libraryRoot]);
+
+  const currentRecord = view === 'live' ? liveRecord : selectedRecord;
+  const displaySegments = useMemo(
+    () => currentRecord ? coalesceTranscriptSegments(currentRecord) : [],
+    [currentRecord],
+  );
+  const visibleRows = Math.max(5, (process.stdout.rows ?? 30) - 14);
+  const sidebarStart = Math.max(0, selectionIndex - visibleRows + 1);
+  const visibleSegments = displaySegments.slice(
+    transcriptScroll,
+    transcriptScroll + visibleRows,
+  );
+  const selectedSpeaker = currentRecord?.speakers[speakerSelection];
+
+  const copyCurrentTranscript = useCallback(() => {
+    if (!currentRecord) return;
+    const text = renderText(currentRecord, {
+      timestamps: showTimestamps,
+      speakers: showSpeakers,
+    });
+    if (!text) return;
+    const result = spawnSync('pbcopy', [], { input: text, encoding: 'utf8' });
+    if (result.error || result.status !== 0) {
+      setError('Copy failed');
+      return;
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  }, [currentRecord, showSpeakers, showTimestamps]);
+
+  const performExport = useCallback((format: TranscriptFormat) => {
+    if (!currentRecord) return;
+    try {
+      const path = writeTranscriptExport(libraryRoot, currentRecord.id, format);
+      setNotice(`Exported ${path}`);
+    } catch (exportError) {
+      setError(exportError instanceof Error ? exportError.message : String(exportError));
+    }
+    setExportMode(false);
+  }, [currentRecord, libraryRoot]);
+
+  const openCurrentFolder = useCallback(() => {
+    try {
+      const path = currentRecord
+        ? dirname(findTranscriptRecord(libraryRoot, currentRecord.id).path)
+        : libraryRoot;
+      const result = spawnSync('open', [path], { stdio: 'ignore' });
+      if (result.error || result.status !== 0) throw new Error(`Could not open ${path}`);
+    } catch (openError) {
+      setError(openError instanceof Error ? openError.message : String(openError));
+    }
+  }, [currentRecord, libraryRoot]);
+
+  const resetLiveSession = useCallback(() => {
+    const next = createLiveRecord();
+    liveRecordRef.current = next;
+    liveSessionStartedAt.current = Date.now();
+    setLiveRecord(next);
+    setTranscriptScroll(0);
+    setNotice('Started a fresh live transcript.');
+  }, []);
+
+  useInput((input, key) => {
+    if (renameState) {
+      if (key.escape) {
+        setRenameState(null);
+        return;
+      }
+      if (key.return) {
+        if (currentRecord && renameState.input.trim()) {
+          try {
+            const renamed = renameTranscriptSpeaker(
+              libraryRoot,
+              currentRecord.id,
+              renameState.speakerId,
+              renameState.input,
+            );
+            if (view === 'live') {
+              liveRecordRef.current = renamed;
+              setLiveRecord(renamed);
+            } else {
+              setSelectedRecord(renamed);
+            }
+            refreshLibrary();
+            setNotice(`${renameState.speakerId} renamed to ${renameState.input.trim()}.`);
+          } catch (renameError) {
+            setError(renameError instanceof Error ? renameError.message : String(renameError));
+          }
+        }
+        setRenameState(null);
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setRenameState((current) => current ? { ...current, input: current.input.slice(0, -1) } : null);
+        return;
+      }
+      if (input && !key.ctrl && !key.meta) {
+        setRenameState((current) => current ? { ...current, input: current.input + input } : null);
+      }
       return;
     }
 
-    runFileTranscription(filePath);
-  }, [fileTranscribing, runFileTranscription]);
-
-  // Handle a file path that arrived via drag-drop or paste in the TUI
-  const handleDroppedPath = useCallback((rawInput: string) => {
-    if (fileTranscribing) return;
-    const filePath = cleanDroppedPath(rawInput);
-    if (!filePath) return;
-    setFileTranscribing(true);
-    setFileProgress('Loading dropped file...');
-    runFileTranscription(filePath);
-  }, [fileTranscribing, runFileTranscription]);
-
-  const togglePause = useCallback(() => {
-    if (paused) {
-      pausedRef.current = false;  // Update ref BEFORE state (sync)
-      setPaused(false);
-      startListener();
-    } else {
-      pausedRef.current = true;   // Update ref BEFORE state (sync)
-      setPaused(true);
-      if (listenerProcess.current) {
-        listenerProcess.current.kill('SIGTERM');
-        // Note: close handler will transcribe any captured audio
+    if (searchMode) {
+      if (key.escape || key.return) {
+        setSearchMode(false);
+        return;
       }
-      if (checkInterval.current) {
-        clearInterval(checkInterval.current);
-        checkInterval.current = null;
+      if (key.backspace || key.delete) {
+        setSearchQuery((query) => query.slice(0, -1));
+        return;
       }
-      if (maxDurationTimeout.current) {
-        clearTimeout(maxDurationTimeout.current);
-        maxDurationTimeout.current = null;
-      }
-      setListenerState('listening');
+      if (input && !key.ctrl && !key.meta) setSearchQuery((query) => query + input);
+      return;
     }
-  }, [paused, startListener]);
 
-  useInput((input, key) => {
-    // Multi-character input = paste or drag-drop. Try to interpret as a file path.
+    if (exportMode) {
+      if (key.escape) {
+        setExportMode(false);
+        return;
+      }
+      const formats: Record<string, TranscriptFormat> = {
+        s: 'srt',
+        v: 'vtt',
+        t: 'text',
+        j: 'json',
+      };
+      const format = formats[input.toLowerCase()];
+      if (format) performExport(format);
+      return;
+    }
+
+    if (confirmTrashId) {
+      if (input.toLowerCase() === 'y') {
+        try {
+          trashTranscriptRecord(libraryRoot, confirmTrashId);
+          setSelectedRecord(null);
+          setView('live');
+          refreshLibrary();
+          setNotice('Transcript moved to the library Trash folder.');
+        } catch (trashError) {
+          setError(trashError instanceof Error ? trashError.message : String(trashError));
+        }
+        setConfirmTrashId(null);
+      } else if (input.toLowerCase() === 'n' || key.escape) {
+        setConfirmTrashId(null);
+      }
+      return;
+    }
+
     if (input.length > 1) {
-      handleDroppedPath(input);
+      const path = cleanDroppedPath(input);
+      if (path) importMedia(path, false);
       return;
     }
 
     if (key.escape || input === 'q') {
       isExiting.current = true;
-      if (listenerProcess.current) {
-        listenerProcess.current.kill('SIGTERM');
-      }
+      listenerProcess.current?.kill('SIGTERM');
       exit();
       return;
     }
-
-    if (input === ' ' || key.return) {
-      togglePause();
+    if (key.tab || input === '\t') {
+      setFocus((current) => current === 'sidebar' ? 'transcript' : 'sidebar');
+      return;
+    }
+    if (input === '/') {
+      setSearchMode(true);
+      setFocus('sidebar');
+      return;
+    }
+    if (input === 'l') {
+      setView('live');
+      setTranscriptScroll(0);
+      return;
+    }
+    if (input === 'f' || input === 'F') {
+      pickMedia(input === 'F');
+      return;
+    }
+    if (input === 't') {
+      setShowTimestamps((visible) => !visible);
+      return;
+    }
+    if (input === 's') {
+      setShowSpeakers((visible) => !visible);
+      return;
+    }
+    if (input === 'c') {
+      copyCurrentTranscript();
+      return;
+    }
+    if (input === 'o') {
+      openCurrentFolder();
+      return;
+    }
+    if (input === 'e' && currentRecord?.transcript.length) {
+      setExportMode(true);
+      return;
+    }
+    if (input === 'r' && selectedSpeaker) {
+      setRenameState({ speakerId: selectedSpeaker.id, input: selectedSpeaker.label });
+      return;
+    }
+    if (input === '[' && currentRecord?.speakers.length) {
+      setSpeakerSelection((index) => moveSelection(index, -1, currentRecord.speakers.length));
+      return;
+    }
+    if (input === ']' && currentRecord?.speakers.length) {
+      setSpeakerSelection((index) => moveSelection(index, 1, currentRecord.speakers.length));
+      return;
+    }
+    if (input === 'd' && view === 'record' && selectedRecord) {
+      setConfirmTrashId(selectedRecord.id);
+      return;
+    }
+    if ((key.delete || key.backspace) && view === 'live') {
+      resetLiveSession();
+      return;
+    }
+    if (input === ' ' && view === 'live') {
+      setListeningPaused(!pausedRef.current);
       return;
     }
 
-    if (input === 'c' && transcript) {
-      copyToClipboard();
+    if (key.upArrow || input === 'k') {
+      if (focus === 'sidebar') {
+        setSelectionIndex((index) => moveSelection(index, -1, navigationItems.length));
+      } else {
+        setTranscriptScroll((scroll) => moveTranscriptScroll(
+          scroll,
+          -1,
+          displaySegments.length,
+          visibleRows,
+        ));
+      }
       return;
     }
-
-    if (key.delete || key.backspace) {
-      setTranscript('');
-      setError(null);
+    if (key.downArrow || input === 'j') {
+      if (focus === 'sidebar') {
+        setSelectionIndex((index) => moveSelection(index, 1, navigationItems.length));
+      } else {
+        setTranscriptScroll((scroll) => moveTranscriptScroll(
+          scroll,
+          1,
+          displaySegments.length,
+          visibleRows,
+        ));
+      }
       return;
     }
-
-    if (input === 'f') {
-      transcribeFile();
+    if (key.pageUp) {
+      setTranscriptScroll((scroll) => moveTranscriptScroll(
+        scroll,
+        -visibleRows,
+        displaySegments.length,
+        visibleRows,
+      ));
       return;
+    }
+    if (key.pageDown) {
+      setTranscriptScroll((scroll) => moveTranscriptScroll(
+        scroll,
+        visibleRows,
+        displaySegments.length,
+        visibleRows,
+      ));
+      return;
+    }
+    if (key.return && focus === 'sidebar') {
+      const item = navigationItems[selectionIndex];
+      if (item?.kind === 'live') {
+        setView('live');
+        setTranscriptScroll(0);
+      } else if (item?.kind === 'import') {
+        pickMedia(false);
+      } else if (item?.kind === 'record') {
+        openRecord(item.entry);
+      }
     }
   });
 
-  const getStatusDisplay = () => {
-    if (fileTranscribing) {
-      return <Text color="magenta">◐ {fileProgress}</Text>;
-    }
+  const status = processing
+    ? `${processing.label}${processing.progress === undefined
+      ? ''
+      : ` ${String(processing.progress).padStart(3, ' ')}%`}`
+    : error
+      ? `Error: ${error}`
+      : notice
+        ? notice
+        : paused
+          ? 'Paused'
+          : listenerState === 'recording'
+            ? `Recording${transcribingCount ? ` + ${transcribingCount} transcribing` : ''}`
+            : `Listening${transcribingCount ? ` + ${transcribingCount} transcribing` : ''}`;
 
-    if (paused) {
-      return <Text dimColor>⏸ Paused</Text>;
-    }
-
-    return (
-      <Text>
-        <Text color={listenerState === 'recording' ? 'red' : 'green'}>
-          {listenerState === 'recording' ? '● Recording' : '◉ Listening'}
-        </Text>
-        {transcribingCount > 0 && (
-          <Text color="yellow">
-            {' + '}◐ Transcribing{transcribingCount > 1 ? ` (${transcribingCount})` : ''}
-          </Text>
-        )}
-      </Text>
-    );
-  };
+  const sidebarWidth = Math.min(36, Math.max(24, Math.floor((process.stdout.columns ?? 100) * 0.3)));
+  const title = view === 'live' ? liveRecord.title : selectedRecord?.title ?? 'Transcript';
 
   return (
-    <Box flexDirection="column" padding={1}>
-      <Box marginBottom={1}>
-        <Text>🐚 </Text>
-        <Text bold color="cyan">Sea Shell</Text>
-      </Box>
-
-      <Box marginBottom={1}>
-        <Text dimColor>
-          [SPACE] {paused ? 'Resume' : 'Pause'}  [F] File  [C] Copy  [DEL] Clear  [Q] Quit
+    <Box flexDirection="column" paddingX={1} height={process.stdout.rows ?? 30}>
+      <Box justifyContent="space-between">
+        <Text bold color="cyan">🐚 Sea Shell</Text>
+        <Text color={error ? 'red' : processing ? 'magenta' : 'gray'}>
+          {truncate(status, Math.max(20, (process.stdout.columns ?? 100) - 22))}
         </Text>
       </Box>
 
-      {error && <Text color="red">{error}</Text>}
-      {copied && <Text color="green">Copied!</Text>}
-
-      <Box marginBottom={1}>
-        {getStatusDisplay()}
-      </Box>
-
-      <Box
-        borderStyle="round"
-        borderColor={
-          fileTranscribing ? 'magenta' :
-          paused ? 'gray' :
-          listenerState === 'recording' ? 'red' :
-          transcribingCount > 0 ? 'yellow' : 'green'
-        }
-        paddingX={2}
-        paddingY={1}
-        minHeight={8}
-      >
-        <Text wrap="wrap">
-          {transcript || <Text dimColor>Start speaking - always listening</Text>}
-        </Text>
-      </Box>
-
-      {transcript && (
-        <Box marginTop={1}>
-          <Text dimColor>{transcript.length} chars</Text>
+      <Box flexDirection="row" flexGrow={1} marginTop={1}>
+        <Box
+          width={sidebarWidth}
+          flexDirection="column"
+          borderStyle="round"
+          borderColor={focus === 'sidebar' ? 'cyan' : 'gray'}
+          paddingX={1}
+        >
+          <Text bold>Library</Text>
+          <Text dimColor>{searchQuery ? `/${truncate(searchQuery, sidebarWidth - 5)}` : 'Recent transcripts'}</Text>
+          <Box height={1} />
+          {navigationItems
+            .slice(sidebarStart, sidebarStart + Math.max(3, visibleRows))
+            .map((item, windowIndex) => {
+            const index = sidebarStart + windowIndex;
+            const selected = selectionIndex === index;
+            const suffix = item.kind === 'record'
+              ? `  ${item.entry.speakerCount ? `${item.entry.speakerCount}spk` : ''}`
+              : '';
+            return (
+              <Text
+                key={item.kind === 'record' ? item.entry.id : item.kind}
+                color={selected ? 'cyan' : item.kind === 'live' ? 'green' : undefined}
+                inverse={selected && focus === 'sidebar'}
+                wrap="truncate-end"
+              >
+                {selected ? '› ' : '  '}{truncate(item.label + suffix, sidebarWidth - 6)}
+              </Text>
+            );
+          })}
         </Box>
-      )}
+
+        <Box
+          flexGrow={1}
+          flexDirection="column"
+          borderStyle="round"
+          borderColor={focus === 'transcript' ? 'cyan' : 'gray'}
+          paddingX={1}
+          marginLeft={1}
+        >
+          <Box justifyContent="space-between">
+            <Text bold>{truncate(title, Math.max(20, (process.stdout.columns ?? 100) - sidebarWidth - 28))}</Text>
+            <Text dimColor>
+              {showTimestamps ? 'TIME ' : ''}{showSpeakers ? 'SPEAKERS' : ''}
+            </Text>
+          </Box>
+          {currentRecord && (
+            <Text dimColor>
+              {currentRecord.source.filename}
+              {currentRecord.source.duration === undefined
+                ? ''
+                : ` · ${formatClock(currentRecord.source.duration).slice(0, 8)}`}
+              {` · ${currentRecord.transcript.length} segments`}
+            </Text>
+          )}
+          {currentRecord?.speakers.length ? (
+            <Text>
+              {currentRecord.speakers.map((speaker, index) => (
+                <Text
+                  key={speaker.id}
+                  color={SPEAKER_COLORS[speakerColorIndex(speaker.id)]}
+                  inverse={index === speakerSelection}
+                >
+                  {index === speakerSelection ? '›' : ' '}{truncate(speaker.label, 18)}{' '}
+                </Text>
+              ))}
+            </Text>
+          ) : <Text dimColor>{view === 'live' ? 'Live transcript' : 'No speaker labels'}</Text>}
+          <Box height={1} />
+
+          {visibleSegments.length === 0 ? (
+            <Text dimColor>
+              {view === 'live'
+                ? 'Start speaking, or press F to import audio or video.'
+                : 'This transcript has no text segments.'}
+            </Text>
+          ) : visibleSegments.map((segment, index) => {
+            const label = showSpeakers ? speakerLabel(currentRecord!, segment.speaker) : undefined;
+            return (
+              <Box key={`${segment.start}-${segment.end}-${index}`}>
+                {showTimestamps && (
+                  <Text dimColor>{formatClock(segment.start)}  </Text>
+                )}
+                {label && (
+                  <Text color={SPEAKER_COLORS[speakerColorIndex(segment.speaker!)]}>
+                    {truncate(label, 14).padEnd(14)}{'  '}
+                  </Text>
+                )}
+                <Text wrap="wrap">{segment.text}</Text>
+              </Box>
+            );
+          })}
+        </Box>
+      </Box>
+
+      <Box flexDirection="column" marginTop={1}>
+        {renameState ? (
+          <Text color="yellow">Rename {renameState.speakerId}: {renameState.input}█  [Enter save · Esc cancel]</Text>
+        ) : searchMode ? (
+          <Text color="yellow">Search: {searchQuery}█  [Enter apply · Esc close]</Text>
+        ) : exportMode ? (
+          <Text color="yellow">Export: [S] SRT  [V] WebVTT  [T] Text  [J] JSON  [Esc] Cancel</Text>
+        ) : confirmTrashId ? (
+          <Text color="red">Move this transcript to recoverable Trash? [Y/N]</Text>
+        ) : (
+          <>
+            <Text dimColor>
+              [Tab] Pane  [↑↓/JK] Navigate  [Enter] Open  [/] Search  [L] Live  [F] Import  [⇧F] Import + speakers
+            </Text>
+            <Text dimColor>
+              [T] Times  [S] Speakers  [Brackets] Speaker  [R] Rename  [E] Export  [C] Copy  [O] Folder  [D] Trash  [Q] Quit
+            </Text>
+          </>
+        )}
+        {copied && <Text color="green">Copied transcript.</Text>}
+      </Box>
     </Box>
   );
 }
