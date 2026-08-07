@@ -1,13 +1,12 @@
 import { spawn } from 'child_process';
-import { existsSync, mkdtempSync, rmSync } from 'fs';
-import { tmpdir } from 'os';
+import { existsSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { prepareMedia, type PreparedMedia } from './media-preparation.ts';
 import { mergeDiarization } from './merge-diarization.ts';
 import {
   beginManagedProcessSession,
   trackChildProcess,
-  trackTempDirectory,
 } from './process-lifecycle.ts';
 import {
   applySpeakerLabels,
@@ -37,12 +36,6 @@ interface ProcessResult {
   stderr: string;
 }
 
-interface PreparedAudio {
-  path: string;
-  tempDirectory: string;
-  stopTracking: () => void;
-}
-
 interface PythonDiarization {
   turns: DiarizationTurn[];
   speakers: Speaker[];
@@ -57,13 +50,16 @@ export interface DiarizeFileOptions {
   numSpeakers?: number;
   minSpeakers?: number;
   maxSpeakers?: number;
+  audioStreamIndex?: number;
   model?: string;
   pythonPath?: string;
   speakerLabeler?: SpeakerLabeler;
   labelingEvidence?: SpeakerLabelingEvidence;
   enricher?: TranscriptEnricher;
   onWhisperProgress?: (percentage: number) => void;
+  onWhisperFallback?: (message: string) => void;
   onDiarizationMessage?: (message: string) => void;
+  onMediaStatus?: (message: string) => void;
 }
 
 async function runProcess(
@@ -108,63 +104,12 @@ async function runProcess(
   });
 }
 
-async function prepareAudio(filePath: string): Promise<PreparedAudio> {
-  if (!existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
-
-  const tempDirectory = mkdtempSync(join(tmpdir(), 'seashell-diarize-'));
-  const stopTracking = trackTempDirectory(tempDirectory);
-  const normalizedPath = join(tempDirectory, 'input.wav');
-
-  try {
-    await runProcess('sox', [
-      filePath,
-      '-r', '16000',
-      '-b', '16',
-      '-e', 'signed-integer',
-      normalizedPath,
-    ]);
-  } catch (soxError) {
-    // afconvert covers common macOS containers (notably m4a) that a Homebrew
-    // SoX build may not decode. Neither command forces mono, preserving stereo.
-    rmSync(normalizedPath, { force: true });
-    try {
-      await runProcess('afconvert', [
-        '-f', 'WAVE',
-        '-d', 'LEI16@16000',
-        filePath,
-        normalizedPath,
-      ]);
-    } catch (afconvertError) {
-      rmSync(tempDirectory, { recursive: true, force: true });
-      stopTracking();
-      const soxMessage = soxError instanceof Error ? soxError.message : String(soxError);
-      const afconvertMessage = afconvertError instanceof Error
-        ? afconvertError.message
-        : String(afconvertError);
-      throw new Error(
-        `Could not convert audio while preserving channels. ` +
-        `SoX: ${soxMessage}. afconvert: ${afconvertMessage}`,
-      );
-    }
-  }
-
-  return { path: normalizedPath, tempDirectory, stopTracking };
-}
-
-async function audioChannelCount(audioPath: string): Promise<number> {
-  const result = await runProcess('soxi', ['-c', audioPath]);
-  const count = Number.parseInt(result.stdout.trim(), 10);
-  if (!Number.isInteger(count) || count < 1) {
-    throw new Error(`Could not determine channel count for ${audioPath}`);
-  }
-  return count;
-}
-
 async function splitChannels(
-  audio: PreparedAudio,
+  audio: PreparedMedia,
   channelRoles: string[],
 ): Promise<Array<{ path: string; role: string }>> {
-  const count = await audioChannelCount(audio.path);
+  const count = audio.selectedAudioStream.channels;
+  if (!count) throw new Error(`Could not determine channel count for ${audio.sourcePath}`);
   if (count !== channelRoles.length) {
     throw new Error(
       `--channel-roles listed ${channelRoles.length} roles, but the audio has ${count} channels`,
@@ -175,7 +120,7 @@ async function splitChannels(
   for (const [index, providedRole] of channelRoles.entries()) {
     const role = providedRole.trim().toLowerCase();
     if (!role) throw new Error('Channel roles cannot be empty');
-    const channelPath = join(audio.tempDirectory, `channel-${index + 1}.wav`);
+    const channelPath = join(dirname(audio.path), `channel-${index + 1}.wav`);
     await runProcess('sox', [
       audio.path,
       channelPath,
@@ -188,12 +133,13 @@ async function splitChannels(
 }
 
 async function transcribePreparedAudio(
-  audio: PreparedAudio,
+  audio: PreparedMedia,
   options: DiarizeFileOptions,
 ): Promise<TimedTranscriptUnit[]> {
   if (!options.channelRoles) {
     return transcribeWithTimestamps(audio.path, {
       onProgress: options.onWhisperProgress,
+      onFallback: options.onWhisperFallback,
     });
   }
 
@@ -204,6 +150,7 @@ async function transcribePreparedAudio(
   for (const channel of channels) {
     const channelUnits = await transcribeWithTimestamps(channel.path, {
       onProgress: options.onWhisperProgress,
+      onFallback: options.onWhisperFallback,
     });
     units.push(...channelUnits.map((unit) => ({ ...unit, role: channel.role })));
   }
@@ -331,6 +278,7 @@ function completeSpeakerList(
 ): Speaker[] {
   const labels = new Map(speakers.map((speaker) => [speaker.id, speaker.label]));
   for (const segment of transcript) {
+    if (!segment.speaker) continue;
     if (!labels.has(segment.speaker)) {
       labels.set(
         segment.speaker,
@@ -342,17 +290,15 @@ function completeSpeakerList(
 }
 
 /**
- * Run timestamped whisper.cpp ASR, local pyannote diarization, deterministic
- * temporal alignment, optional speaker labeling, and optional enrichment.
+ * Enrich already-prepared media with pyannote speakers. Whisper runs exactly
+ * once per prepared channel and its timed units are reused for alignment.
  */
-export async function diarizeFile(
-  filePath: string,
+export async function diarizePreparedMedia(
+  audio: PreparedMedia,
   options: DiarizeFileOptions = {},
 ): Promise<StructuredTranscript> {
   const endManagedSession = beginManagedProcessSession();
-  let audio: PreparedAudio | undefined;
   try {
-    audio = await prepareAudio(filePath);
     // Fail fast on missing Python dependencies, gated model access, or invalid
     // channel routing before spending time on one or more Whisper passes.
     const diarization = await runPythonDiarization(audio.path, options);
@@ -386,10 +332,23 @@ export async function diarizeFile(
 
     return document;
   } finally {
-    if (audio) {
-      rmSync(audio.tempDirectory, { recursive: true, force: true });
-      audio.stopTracking();
-    }
     endManagedSession();
+  }
+}
+
+/** Prepare a source file, then run the speaker-aware timestamp pipeline. */
+export async function diarizeFile(
+  filePath: string,
+  options: DiarizeFileOptions = {},
+): Promise<StructuredTranscript> {
+  const audio = await prepareMedia(filePath, {
+    preserveChannels: true,
+    audioStreamIndex: options.audioStreamIndex,
+    onStatus: options.onMediaStatus,
+  });
+  try {
+    return await diarizePreparedMedia(audio, options);
+  } finally {
+    audio.cleanup();
   }
 }

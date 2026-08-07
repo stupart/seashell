@@ -5,17 +5,23 @@ const activeChildren = new Set<ChildProcess>();
 const activeTempDirectories = new Set<string>();
 let activeSessions = 0;
 
-function terminateForSignal(signal: 'SIGINT' | 'SIGTERM'): never {
+export function cleanupManagedResources(): void {
   for (const child of activeChildren) {
     try {
       if (!child.killed) child.kill('SIGTERM');
     } catch {}
   }
+  activeChildren.clear();
   for (const directory of activeTempDirectories) {
     try {
       rmSync(directory, { recursive: true, force: true });
     } catch {}
   }
+  activeTempDirectories.clear();
+}
+
+function terminateForSignal(signal: 'SIGINT' | 'SIGTERM'): never {
+  cleanupManagedResources();
   process.exit(signal === 'SIGINT' ? 130 : 143);
 }
 

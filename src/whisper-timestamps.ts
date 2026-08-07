@@ -173,11 +173,20 @@ export function timedUnitsFromWhisperJson(value: unknown): TimedTranscriptUnit[]
 
 export interface TimestampTranscriptionOptions {
   onProgress?: (percentage: number) => void;
+  onFallback?: (message: string) => void;
+}
+
+class WhisperExecutionError extends Error {
+  constructor(
+    message: string,
+    readonly retryWithoutGpu: boolean,
+  ) {
+    super(message);
+  }
 }
 
 /**
- * Opt-in detailed transcription path for diarization. The legacy plain-text
- * transcriber intentionally remains separate and unchanged.
+ * Canonical detailed transcription path for all file-based workflows.
  */
 export async function transcribeWithTimestamps(
   filePath: string,
@@ -204,8 +213,9 @@ export async function transcribeWithTimestamps(
   const outputJson = `${outputBase}.json`;
 
   try {
-    await new Promise<void>((resolve, reject) => {
+    const runWhisper = (disableGpu: boolean) => new Promise<void>((resolve, reject) => {
       const proc = spawn(WHISPER_CLI, [
+        ...(disableGpu ? ['-ng'] : []),
         '-m', MODEL_PATH,
         '-f', filePath,
         '-l', 'en',
@@ -241,17 +251,38 @@ export async function transcribeWithTimestamps(
         reject(new Error(`Failed to start whisper.cpp: ${error.message}`));
       });
 
-      proc.on('close', (code) => {
+      proc.on('close', (code, signal) => {
         stopTrackingChild();
         if (settled) return;
         settled = true;
         if (code !== 0) {
-          reject(new Error(`whisper.cpp failed (${code}): ${stderr.trim() || 'no details'}`));
+          const reason = signal ? `signal ${signal}` : `exit ${code}`;
+          reject(new WhisperExecutionError(
+            `whisper.cpp failed (${reason}): ${stderr.trim() || 'no details'}`,
+            Boolean(signal) || code === 139,
+          ));
           return;
         }
         resolve();
       });
     });
+
+    const forceCpu = process.env.SEASHELL_DISABLE_GPU === '1';
+    try {
+      await runWhisper(forceCpu);
+    } catch (error) {
+      if (
+        !forceCpu &&
+        error instanceof WhisperExecutionError &&
+        error.retryWithoutGpu
+      ) {
+        rmSync(outputJson, { force: true });
+        options.onFallback?.('Metal transcription failed; retrying on CPU…');
+        await runWhisper(true);
+      } else {
+        throw error;
+      }
+    }
 
     if (!existsSync(outputJson)) {
       throw new Error('whisper.cpp completed without writing timestamp JSON');

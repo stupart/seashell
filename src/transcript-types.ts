@@ -18,7 +18,8 @@ export interface DiarizationTurn {
 export interface TranscriptSegment {
   start: number;
   end: number;
-  speaker: string;
+  /** Stable diarization cluster ID. Human-readable names live in speakers. */
+  speaker?: string;
   text: string;
 }
 
@@ -42,3 +43,24 @@ export interface StructuredTranscript extends TranscriptInsights {
   transcript: TranscriptSegment[];
   speakers: Speaker[];
 }
+
+export interface TranscriptSource {
+  path?: string;
+  filename: string;
+  duration?: number;
+  format?: string;
+  audioStreamIndex?: number;
+  channels?: number;
+}
+
+/** Canonical, durable representation used by renderers and the library. */
+export interface TranscriptRecord extends StructuredTranscript {
+  schemaVersion: 1;
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  source: TranscriptSource;
+}
+
+export type TranscriptFormat = 'text' | 'json' | 'srt' | 'vtt';
