@@ -41,6 +41,16 @@ function slugify(value: string): string {
     .slice(0, 60) || 'transcript';
 }
 
+function localDateKey(isoTimestamp: string): string {
+  const date = new Date(isoTimestamp);
+  if (Number.isNaN(date.getTime())) throw new Error(`Invalid transcript date: ${isoTimestamp}`);
+  return [
+    String(date.getFullYear()).padStart(4, '0'),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0'),
+  ].join('-');
+}
+
 function atomicWrite(path: string, contents: string): void {
   mkdirSync(dirname(path), { recursive: true });
   const temporaryPath = join(
@@ -141,7 +151,7 @@ export function saveTranscriptRecord(
   record: TranscriptRecord,
 ): SavedTranscript {
   const existingPath = existingRecordPath(libraryDir, record.id);
-  const date = record.createdAt.slice(0, 10);
+  const date = localDateKey(record.createdAt);
   const directory = existingPath
     ? dirname(existingPath)
     : join(libraryDir, date, `${slugify(record.title)}--${record.id}`);
