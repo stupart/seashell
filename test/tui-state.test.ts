@@ -1,8 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
   filterLibraryEntries,
-  formatCompactDuration,
-  formatLibraryEntryMeta,
   moveSelection,
   moveTranscriptScroll,
   speakerColorIndex,
@@ -40,49 +38,24 @@ describe('TUI navigation state', () => {
     expect(speakerColorIndex('SPEAKER_00')).toBeLessThan(6);
   });
 
-  test('switches from two panes to a compact single-pane layout', () => {
-    expect(tuiLayout(99, 24).compact).toBe(true);
-    expect(tuiLayout(100, 24).compact).toBe(false);
+  test('keeps the history drawer beside the transcript until space gets tight', () => {
+    expect(tuiLayout(71, 24).compact).toBe(true);
+    expect(tuiLayout(72, 24).compact).toBe(false);
     expect(tuiLayout(120, 36)).toMatchObject({
       compact: false,
       sidebarWidth: 33,
       visibleTranscriptRows: 27,
-      visibleLibraryItems: 12,
+      visibleLibraryItems: 24,
     });
     expect(tuiLayout(80, 24)).toMatchObject({
-      compact: true,
-      sidebarWidth: 76,
+      compact: false,
+      sidebarWidth: 24,
       visibleTranscriptRows: 15,
-      visibleLibraryItems: 6,
+      visibleLibraryItems: 12,
     });
-  });
-
-  test('formats scannable library metadata without noisy precision', () => {
-    expect(formatCompactDuration(260)).toBe('4m20s');
-    expect(formatCompactDuration(3660)).toBe('1h01m');
-    const metadata = formatLibraryEntryMeta({
-      id: 'one',
-      title: 'Product interview',
-      createdAt: '2026-08-06T00:00:00.000Z',
-      updatedAt: '2026-08-06T00:00:00.000Z',
-      duration: 260,
-      sourceFilename: 'meeting.MP4',
-      speakerCount: 2,
-      segmentCount: 10,
-      directory: '/tmp/one',
+    expect(tuiLayout(60, 24)).toMatchObject({
+      compact: true,
+      sidebarWidth: 56,
     });
-    expect(metadata).toContain('4m20s');
-    expect(metadata).toContain('2 speakers');
-    expect(formatLibraryEntryMeta({
-      id: 'one',
-      title: 'Product interview',
-      createdAt: '2026-08-06T00:00:00.000Z',
-      updatedAt: '2026-08-06T00:00:00.000Z',
-      duration: 260,
-      sourceFilename: 'meeting.MP4',
-      speakerCount: 2,
-      segmentCount: 10,
-      directory: '/tmp/one',
-    }, true)).toContain('2spk');
   });
 });

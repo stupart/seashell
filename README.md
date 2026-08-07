@@ -21,8 +21,8 @@ download; inference remains local afterward.
 - Saves successful file and live transcripts to a readable local folder.
 - Lets you rename anonymous diarization clusters such as `SPEAKER_00` to human
   names without retranscribing.
-- Provides a two-pane terminal UI for live capture, imports, search, history,
-  speaker labels, timestamps, and exports.
+- Keeps the terminal UI transcript-first, with an on-demand history drawer for
+  saved recordings, search, speaker labels, timestamps, and exports.
 - Keeps command output clean for shell pipelines and AI agents.
 
 ## Requirements
@@ -88,19 +88,24 @@ only data written to stdout, so piping remains reliable.
 
 ## Terminal UI
 
-On wide terminals, the left pane contains Live, Import, and saved transcripts
-while the right pane shows the selected transcript. Saved items include their
-date, duration, and speaker count. Terminals narrower than 100 columns switch to
-a single-pane library/reader flow so timestamps, speaker labels, and wrapped
-transcript text keep their alignment at a standard `80x24` size.
+Sea Shell opens on the same simple, transcript-first screen used for live
+capture. Press `H` (or `Tab`) to slide open a history drawer with Live at the
+top and saved transcripts below it. Moving through history previews each saved
+transcript in the main panel; `Enter` selects it and closes the drawer.
+
+Timestamps and speaker labels are visible by default when the transcript has
+them. `T` and `S` hide or show those presentation layers without changing the
+stored transcript. At 72 columns and wider, history and the transcript remain
+side by side. On narrower terminals, the drawer temporarily uses the full body
+until it is closed.
 
 | Key | Action |
 | --- | --- |
-| `Tab` | Switch between library and transcript panes |
-| `↑`/`↓` or `J`/`K` | Navigate the focused pane |
-| `Enter` | Open the selected library item |
-| `Esc` | Return to the library in the compact reader; close a prompt or help |
-| `/` | Search saved titles, source names, speaker names, and transcript text |
+| `H` or `Tab` | Open or close transcript history |
+| `↑`/`↓` or `J`/`K` | Preview history items when the drawer is open; otherwise scroll the transcript |
+| `Enter` | Open the selected history item and close the drawer; pause/resume in live view |
+| `Esc` | Close history, a prompt, or help; otherwise quit |
+| `/` | Open history and search saved titles, source names, speaker names, and transcript text |
 | `L` | Return to live transcription |
 | `Space` | Pause/resume live microphone capture |
 | `F` | Import audio or video |
@@ -117,8 +122,8 @@ transcript text keep their alignment at a standard `80x24` size.
 | `?` | Show contextual keyboard help |
 | `Q` | Quit from any normal view |
 
-In the compact library, `Esc` also quits. The footer intentionally shows only
-the commands relevant to the active pane; press `?` for the complete key map.
+The main shortcut row stays intentionally small; press `?` for the complete key
+map.
 
 Drag-and-drop also accepts absolute audio or video paths. The microphone pauses
 while an import runs and resumes afterward.

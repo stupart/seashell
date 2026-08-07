@@ -1,7 +1,5 @@
 import type { TranscriptLibraryEntry } from './transcript-library.ts';
 
-export type TuiFocus = 'sidebar' | 'transcript';
-
 export interface TuiLayout {
   compact: boolean;
   sidebarWidth: number;
@@ -9,7 +7,7 @@ export interface TuiLayout {
   visibleLibraryItems: number;
 }
 
-export const COMPACT_TUI_COLUMNS = 100;
+export const COMPACT_TUI_COLUMNS = 72;
 
 export function tuiLayout(columns: number, rows: number): TuiLayout {
   const safeColumns = Math.max(40, columns);
@@ -20,38 +18,10 @@ export function tuiLayout(columns: number, rows: number): TuiLayout {
     compact,
     sidebarWidth: compact
       ? safeColumns - 4
-      : Math.min(38, Math.max(30, Math.floor(safeColumns * 0.28))),
+      : Math.min(34, Math.max(24, Math.floor(safeColumns * 0.28))),
     visibleTranscriptRows: contentRows,
-    visibleLibraryItems: Math.max(3, Math.floor((contentRows - 2) / 2)),
+    visibleLibraryItems: Math.max(3, contentRows - 3),
   };
-}
-
-export function formatCompactDuration(seconds: number | undefined): string | undefined {
-  if (seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return undefined;
-  const rounded = Math.round(seconds);
-  const hours = Math.floor(rounded / 3600);
-  const minutes = Math.floor((rounded % 3600) / 60);
-  const remainingSeconds = rounded % 60;
-  if (hours) return `${hours}h${String(minutes).padStart(2, '0')}m`;
-  if (minutes) return `${minutes}m${String(remainingSeconds).padStart(2, '0')}s`;
-  return `${remainingSeconds}s`;
-}
-
-export function formatLibraryEntryMeta(
-  entry: TranscriptLibraryEntry,
-  terse = false,
-): string {
-  const date = new Date(entry.createdAt);
-  const dateLabel = Number.isNaN(date.getTime())
-    ? 'Unknown date'
-    : date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  const duration = formatCompactDuration(entry.duration);
-  const speakers = entry.speakerCount
-    ? terse
-      ? `${entry.speakerCount}spk`
-      : `${entry.speakerCount} ${entry.speakerCount === 1 ? 'speaker' : 'speakers'}`
-    : undefined;
-  return [dateLabel, duration, speakers].filter(Boolean).join(' · ');
 }
 
 export function moveSelection(current: number, delta: number, count: number): number {
