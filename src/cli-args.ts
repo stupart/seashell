@@ -1,5 +1,8 @@
 import type { DiarizeFileOptions } from './diarize.ts';
 import type { TranscriptFormat } from './transcript-types.ts';
+import type { HumainBackend } from './humain-client.ts';
+import type { MeetingEnrichmentMode } from './meeting-artifact.ts';
+import type { MeetingCapturePolicy } from './calendar.ts';
 
 export interface TranscribeCommandOptions extends DiarizeFileOptions {
   format: TranscriptFormat;
@@ -12,6 +15,38 @@ export interface TranscribeCommandOptions extends DiarizeFileOptions {
   speakerEvidencePath?: string;
   quiet: boolean;
 }
+
+export type MeetingCommand = {
+  kind: 'meeting';
+  action:
+    | { kind: 'create'; id: string; eventJsonPath?: string; mode?: MeetingEnrichmentMode }
+    | {
+        kind: 'enrich';
+        id: string;
+        mode?: MeetingEnrichmentMode;
+        backend?: HumainBackend;
+        model?: string;
+        contextPath?: string;
+      }
+    | {
+        kind: 'chat';
+        id: string;
+        question: string;
+        backend?: HumainBackend;
+        model?: string;
+      }
+    | { kind: 'show'; id: string }
+    | {
+        kind: 'setup';
+        mode?: MeetingEnrichmentMode;
+        backend?: HumainBackend;
+        model?: string;
+        calendarPolicy?: MeetingCapturePolicy;
+      }
+    | { kind: 'calendar' };
+  libraryDir?: string;
+  json: boolean;
+};
 
 export type LibraryAction =
   | { kind: 'list' }
@@ -39,6 +74,7 @@ export type CliCommand =
   | { kind: 'doctor'; json: boolean }
   | { kind: 'update'; check: boolean; json: boolean }
   | { kind: 'transcribe'; files: string[]; options: TranscribeCommandOptions }
+  | MeetingCommand
   | LibraryCommand;
 
 const FORMATS = new Set<TranscriptFormat>(['text', 'json', 'srt', 'vtt']);
@@ -280,6 +316,135 @@ function parseLibrary(args: string[]): LibraryCommand {
   };
 }
 
+function meetingMode(value: string): MeetingEnrichmentMode {
+  if (value === 'streaming' || value === 'post-session' || value === 'hybrid') return value;
+  throw new Error('--mode must be streaming, post-session, or hybrid');
+}
+
+function meetingBackend(value: string): HumainBackend {
+  if (value === 'codex' || value === 'claude-code' || value === 'openrouter') return value;
+  throw new Error('--backend must be codex, claude-code, or openrouter');
+}
+
+function parseMeeting(args: string[]): MeetingCommand {
+  const actionName = args[1];
+  if (!actionName) throw new Error('Meeting command requires setup, create, enrich, show, chat, or calendar');
+  const positional: string[] = [];
+  let libraryDir: string | undefined;
+  let json = false;
+  let eventJsonPath: string | undefined;
+  let contextPath: string | undefined;
+  let mode: MeetingEnrichmentMode | undefined;
+  let backend: HumainBackend | undefined;
+  let model: string | undefined;
+  let calendarPolicy: MeetingCapturePolicy | undefined;
+
+  for (let index = 2; index < args.length; index += 1) {
+    const arg = args[index]!;
+    const next = () => {
+      const [value, consumedIndex] = takeValue(args, index, arg);
+      index = consumedIndex;
+      return value;
+    };
+    switch (arg) {
+      case '--library-dir': libraryDir = next(); break;
+      case '--json': json = true; break;
+      case '--event-json': eventJsonPath = next(); break;
+      case '--context': contextPath = next(); break;
+      case '--mode': mode = meetingMode(next()); break;
+      case '--backend': backend = meetingBackend(next()); break;
+      case '--model': model = next(); break;
+      case '--calendar': {
+        const value = next();
+        if (value !== 'off' && value !== 'ask' && value !== 'selected-calendars' && value !== 'all') {
+          throw new Error('--calendar must be off, ask, selected-calendars, or all');
+        }
+        calendarPolicy = value;
+        break;
+      }
+      default:
+        if (arg.startsWith('-')) throw new Error(`Unknown meeting option: ${arg}`);
+        positional.push(arg);
+    }
+  }
+
+  let action: MeetingCommand['action'];
+  switch (actionName) {
+    case 'create':
+      if (!positional[0]) throw new Error('meeting create requires a transcript ID');
+      if (positional.length > 1) throw new Error('meeting create accepts one transcript ID');
+      action = {
+        kind: 'create',
+        id: positional[0],
+        ...(eventJsonPath ? { eventJsonPath } : {}),
+        ...(mode ? { mode } : {}),
+      };
+      break;
+    case 'enrich':
+      if (!positional[0]) throw new Error('meeting enrich requires a transcript ID');
+      if (positional.length > 1) throw new Error('meeting enrich accepts one transcript ID');
+      action = {
+        kind: 'enrich',
+        id: positional[0],
+        ...(mode ? { mode } : {}),
+        ...(backend ? { backend } : {}),
+        ...(model ? { model } : {}),
+        ...(contextPath ? { contextPath } : {}),
+      };
+      break;
+    case 'show':
+      if (!positional[0]) throw new Error('meeting show requires a transcript ID');
+      if (positional.length > 1) throw new Error('meeting show accepts one transcript ID');
+      action = { kind: 'show', id: positional[0] };
+      break;
+    case 'setup':
+      if (positional.length > 0) throw new Error('meeting setup accepts no positional arguments');
+      if ((backend === undefined) !== (model === undefined)) {
+        throw new Error('meeting setup requires --backend and --model together');
+      }
+      if (!backend && !model && !mode && !calendarPolicy) {
+        throw new Error('meeting setup requires a route, mode, or calendar policy');
+      }
+      action = {
+        kind: 'setup',
+        ...(mode ? { mode } : {}),
+        ...(backend ? { backend } : {}),
+        ...(model ? { model } : {}),
+        ...(calendarPolicy ? { calendarPolicy } : {}),
+      };
+      break;
+    case 'chat':
+      if (!positional[0] || positional.length < 2) {
+        throw new Error('meeting chat requires a transcript ID and question');
+      }
+      action = {
+        kind: 'chat',
+        id: positional[0],
+        question: positional.slice(1).join(' '),
+        ...(backend ? { backend } : {}),
+        ...(model ? { model } : {}),
+      };
+      break;
+    case 'calendar':
+      if (positional.length > 0) throw new Error('meeting calendar accepts no positional arguments');
+      action = { kind: 'calendar' };
+      break;
+    default:
+      throw new Error(`Unknown meeting action: ${actionName}`);
+  }
+  const validForAction = action.kind === 'create'
+    ? !backend && !model && !contextPath && !calendarPolicy
+    : action.kind === 'enrich'
+      ? !eventJsonPath && !calendarPolicy
+      : action.kind === 'chat'
+        ? !eventJsonPath && !contextPath && !mode && !calendarPolicy
+        : action.kind === 'setup'
+          ? !eventJsonPath && !contextPath
+          : !eventJsonPath && !contextPath && !mode && !backend && !model && !calendarPolicy;
+  if (!validForAction) throw new Error(`One or more options do not apply to meeting ${action.kind}`);
+  return { kind: 'meeting', action, ...(libraryDir ? { libraryDir } : {}), json };
+}
+
 export function parseCliArgs(args: string[]): CliCommand {
   if (args.length === 0) return { kind: 'tui' };
   if (args.includes('--help') || args.includes('-h') || args[0] === 'help') {
@@ -302,6 +467,7 @@ export function parseCliArgs(args: string[]): CliCommand {
     if (unknown.length) throw new Error(`Unknown update option: ${unknown[0]}`);
     return { kind: 'update', check: args.includes('--check'), json: args.includes('--json') };
   }
+  if (args[0] === 'meeting') return parseMeeting(args);
   if (args[0] === 'library') return parseLibrary(args);
   return parseTranscribe(args, args[0] === 'transcribe');
 }
@@ -313,6 +479,7 @@ Usage:
   seashell <file> ...                       Backward-compatible plain-text transcription
   seashell transcribe <file> [options]      Transcribe audio or video
   seashell library <action> [options]       Browse and manage saved transcripts
+  seashell meeting <action> [options]       Create, enrich, browse, or chat with meetings
   seashell doctor [--json]                  Check dependencies and models
   seashell update [--check] [--json]        Safely update this Git checkout
 
@@ -345,6 +512,16 @@ Library actions:
   library speakers <id> set <speaker-id> <name> [--json]
   library open [id]
   library trash <id> --confirm
+
+Meeting actions:
+  meeting setup --backend <backend> --model <exact-model> [--mode <mode>]
+                [--calendar off|ask|selected-calendars|all]
+  meeting create <id> [--event-json <path>] [--mode streaming|post-session|hybrid]
+  meeting enrich <id> [--mode <mode>] [--backend <backend>] [--model <exact-model>]
+                      [--context <json>]
+  meeting show <id> [--json]
+  meeting chat <id> <question> [--backend <backend>] [--model <exact-model>]
+  meeting calendar [--json]
 
 Configuration precedence:
   CLI flag > SEASHELL_LIBRARY_DIR > config.json > ~/Documents/Sea Shell/Transcripts

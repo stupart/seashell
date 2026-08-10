@@ -23,6 +23,8 @@ download; inference remains local afterward.
   names without retranscribing.
 - Can conservatively identify clusters from meeting rosters, timestamped
   active-speaker observations, self-introductions, and explicit handoffs.
+- Can turn any saved transcript into an optional meeting artifact with notes,
+  evidence-linked analysis, cited chat, and friendly Markdown/JSON/subtitle files.
 - Keeps the terminal UI transcript-first, with an on-demand history drawer for
   saved recordings, search, speaker labels, timestamps, and exports.
 - Keeps command output clean for shell pipelines and AI agents.
@@ -43,6 +45,9 @@ brew install ffmpeg sox cmake git
 
 Speaker diarization additionally needs Python 3.10+ (3.12 recommended) and
 the Python packages described under [Speaker diarization](#speaker-diarization).
+Meeting intelligence optionally uses the separate
+[Humain engine](https://github.com/stupart/humain-engine); ordinary capture,
+transcription, diarization, history, and exports do not require it.
 
 ## Installation
 
@@ -100,6 +105,16 @@ seashell transcribe meeting.mp4 --speakers --format json > meeting.json
 seashell transcribe meeting.mp4 --speakers --format srt > meeting.srt
 ```
 
+Create and enrich a saved meeting:
+
+```bash
+seashell meeting setup --backend codex --model <exact-model> --mode hybrid
+seashell meeting create <transcript-id>
+seashell meeting enrich <transcript-id>
+seashell meeting show <transcript-id>
+seashell meeting chat <transcript-id> "What did we decide?"
+```
+
 Progress and save locations are written to stderr. Transcript content is the
 only data written to stdout, so piping remains reliable.
 
@@ -127,6 +142,10 @@ until it is closed.
 | `Space` | Pause/resume live microphone capture |
 | `F` | Import audio or video |
 | `Shift+F` | Import and run speaker diarization |
+| `M` | Mark the current transcript as a meeting; attach a pending calendar suggestion |
+| `1`–`4` | Open meeting Notes, Transcript, Analysis, or Chat |
+| `G` | Run/finalize the configured meeting enrichment workflow |
+| `A` | Ask an evidence-cited question about the current meeting |
 | `T` | Toggle timestamp presentation |
 | `S` | Toggle speaker presentation |
 | `[` / `]` | Select a speaker label |
@@ -188,6 +207,92 @@ seashell library trash <id> --confirm
 
 Trash is recoverable inside `<library>/_Trash`; Sea Shell does not permanently
 delete records from its TUI or CLI.
+
+## Meeting mode
+
+A meeting is a companion artifact, not a replacement transcript. Marking a
+transcript creates `meeting.json` beside the authoritative `transcript.json`.
+The normal Sea Shell screen remains unchanged for ordinary recordings. Meeting
+tabs appear only when the selected history item has a meeting artifact.
+
+Configure one exact Humain route. This stores model selection and workflow
+preferences, never an API key:
+
+```bash
+# ChatGPT subscription through the local Codex harness
+seashell meeting setup \
+  --backend codex \
+  --model <exact-codex-model> \
+  --mode hybrid \
+  --calendar ask
+
+# Or a metered model through OpenRouter
+seashell meeting setup \
+  --backend openrouter \
+  --model <callable-openrouter-model-id> \
+  --mode hybrid
+```
+
+Humain must be installed as `humain`, or `HUMAIN_CLI` can point to its built
+`dist/cli.js`. Codex and Claude Code routes use Humain's verified subscription
+adapters. OpenRouter uses the API key configured in Humain and keeps exact
+model, token, and cost provenance in its private run store.
+
+The three enrichment modes share one artifact contract:
+
+- `streaming` observes only newly committed transcript segments plus a small
+  overlap and publishes provisional claims.
+- `post-session` reads the complete frozen transcript once.
+- `hybrid` runs the incremental observer and then reconciles the complete
+  meeting, resolving late corrections and reversals before publishing final
+  notes.
+
+Every model claim must cite stable transcript segment IDs. Invalid citations
+are rejected. Observer runs are bounded by a durable cursor and maximum run
+count, so a growing transcript is not resent in full on every iteration.
+Failures leave the base transcript and exports intact.
+
+The full artifact bundle is readable without Sea Shell:
+
+```text
+<meeting-folder>/
+├── transcript.json
+├── transcript.txt
+├── meeting.json
+├── transcript.md
+├── transcript.srt
+├── transcript.vtt
+├── overlays/
+│   ├── provisional.jsonl
+│   └── final.json
+├── enriched/
+│   ├── transcript.json
+│   ├── transcript.md
+│   ├── transcript.srt
+│   └── transcript.vtt
+├── documents/
+│   ├── summary.md
+│   ├── decisions.md
+│   ├── actions.md
+│   ├── notes.md
+│   └── resources.md
+└── .humain/                 # private durable run receipts and evidence
+```
+
+### Calendar suggestions
+
+Calendar access is read-only and opt-in. `--calendar ask` suggests the current
+or next macOS Calendar event in the TUI. `all` attaches matching events
+automatically; `off` disables the connector. The first enabled read can trigger
+the normal macOS Calendar permission prompt. Calendar context never grants
+recording consent, and automatic model use still requires an exact configured
+route.
+
+Inspect the read-only event window without opening the TUI:
+
+```bash
+seashell meeting calendar --json
+```
 
 ## Canonical transcript schema
 
@@ -395,12 +500,17 @@ seashell update --check --json
 seashell transcribe input.mp4 --format json --no-save --quiet > transcript.json
 seashell library list --json
 seashell library show <id> --format json
+seashell meeting show <id> --json
 ```
 
 ## Privacy
 
 - Audio, video, transcripts, and speaker inference stay local.
 - Roster and active-speaker evidence stays local in the built-in identity pass.
+- Meeting enrichment sends only the selected transcript and explicitly supplied
+  context to the configured Humain route. Codex/Claude Code subscription and
+  OpenRouter routes are remote; use meeting mode only when that data sharing is
+  appropriate.
 - Source media is not copied into the transcript library.
 - Core transcription needs no cloud account or API key.
 - Speaker diarization contacts Hugging Face only when model files must be

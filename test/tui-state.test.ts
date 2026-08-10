@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   filterLibraryEntries,
+  formatTuiClock,
   moveSelection,
   moveTranscriptScroll,
   speakerColorIndex,
@@ -25,6 +26,7 @@ describe('TUI navigation state', () => {
       sourceFilename: 'meeting.MP4',
       speakerCount: 2,
       segmentCount: 10,
+      kind: 'transcript' as const,
       directory: '/tmp/one',
     }];
     expect(filterLibraryEntries(entries, 'mp4')).toEqual(entries);
@@ -36,6 +38,12 @@ describe('TUI navigation state', () => {
     expect(speakerColorIndex('SPEAKER_00')).toBe(speakerColorIndex('SPEAKER_00'));
     expect(speakerColorIndex('SPEAKER_00')).toBeGreaterThanOrEqual(0);
     expect(speakerColorIndex('SPEAKER_00')).toBeLessThan(6);
+  });
+
+  test('formats a compact media-relative clock for the terminal', () => {
+    expect(formatTuiClock(4.9)).toBe('00:04');
+    expect(formatTuiClock(65)).toBe('01:05');
+    expect(formatTuiClock(3_661)).toBe('1:01:01');
   });
 
   test('keeps the history drawer beside the transcript until space gets tight', () => {

@@ -4,6 +4,10 @@ import { execFileSync, spawn, spawnSync, type ChildProcess } from 'child_process
 import { existsSync, statSync, unlinkSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import {
+  readMacCalendarEvents,
+  suggestCalendarMeeting,
+} from './calendar.ts';
 import { loadConfig, resolveLibraryDir, resolveSaveByDefault } from './config.ts';
 import {
   findTranscriptRecord,
@@ -17,8 +21,17 @@ import {
 } from './transcript-library.ts';
 import { createTranscriptRecord } from './transcript-record.ts';
 import {
+  createChatMessage,
+  createMeetingArtifact,
+  loadMeetingArtifact,
+  saveMeetingArtifact,
+  type MeetingArtifact,
+  type MeetingCalendarEvent,
+} from './meeting-artifact.ts';
+import { chatWithMeeting, enrichMeeting } from './meeting-enrichment.ts';
+import { meetingViewLines, type MeetingView } from './meeting-tui.ts';
+import {
   coalesceTranscriptSegments,
-  formatClock,
   renderText,
   speakerLabel,
 } from './transcript-renderer.ts';
@@ -27,6 +40,7 @@ import { transcribeMedia } from './transcription-service.ts';
 import {
   moveSelection,
   moveTranscriptScroll,
+  formatTuiClock,
   SPEAKER_COLORS,
   speakerColorIndex,
   tuiLayout,
@@ -49,6 +63,10 @@ interface ProcessingState {
 
 interface RenameState {
   speakerId: string;
+  input: string;
+}
+
+interface ChatInputState {
   input: string;
 }
 
@@ -115,6 +133,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     [props.libraryDir, config],
   );
   const saveByDefault = useMemo(() => resolveSaveByDefault(config), [config]);
+  const listenerDisabled = process.env.SEASHELL_DISABLE_LISTENER === '1';
   const terminal = useTerminalSize();
   const layout = useMemo(
     () => tuiLayout(terminal.columns, terminal.rows),
@@ -133,6 +152,11 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [searchMode, setSearchMode] = useState(false);
   const [view, setView] = useState<View>('live');
   const [selectedRecord, setSelectedRecord] = useState<TranscriptRecord | null>(null);
+  const [selectedMeeting, setSelectedMeeting] = useState<MeetingArtifact | null>(null);
+  const [liveMeeting, setLiveMeeting] = useState<MeetingArtifact | null>(null);
+  const [meetingView, setMeetingView] = useState<MeetingView>('transcript');
+  const [chatInputState, setChatInputState] = useState<ChatInputState | null>(null);
+  const [calendarSuggestion, setCalendarSuggestion] = useState<MeetingCalendarEvent | null>(null);
   const [selectionIndex, setSelectionIndex] = useState(0);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [transcriptScroll, setTranscriptScroll] = useState(0);
@@ -153,6 +177,8 @@ export default function App(props: { libraryDir?: string } = {}) {
   const maxDurationTimeout = useRef<NodeJS.Timeout | null>(null);
   const immediateStartRef = useRef(false);
   const liveRecordRef = useRef(liveRecord);
+  const liveMeetingRef = useRef<MeetingArtifact | null>(null);
+  const observerActiveRef = useRef(false);
   const liveSessionStartedAt = useRef(Date.now());
 
   const refreshLibrary = useCallback(() => {
@@ -173,7 +199,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     { kind: 'live', label: '● Live transcription' },
     ...visibleEntries.map((entry) => ({
       kind: 'record' as const,
-      label: entry.title,
+      label: entry.kind === 'meeting' ? `M · ${entry.title}` : entry.title,
       entry,
     })),
   ], [visibleEntries]);
@@ -203,7 +229,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     };
     liveRecordRef.current = next;
     setLiveRecord(next);
-    if (saveByDefault) {
+    if (saveByDefault || liveMeetingRef.current) {
       try {
         saveTranscriptRecord(libraryRoot, next);
         refreshLibrary();
@@ -277,7 +303,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   }, [appendLiveSegment, cleanupFile]);
 
   const startListener = useCallback(() => {
-    if (isExiting.current || pausedRef.current) return;
+    if (listenerDisabled || isExiting.current || pausedRef.current) return;
     if (listenerProcess.current) {
       listenerProcess.current.kill('SIGTERM');
       listenerProcess.current = null;
@@ -354,9 +380,10 @@ export default function App(props: { libraryDir?: string } = {}) {
       }
     });
     listenerProcess.current = process;
-  }, [cleanupFile, getTempFile, transcribeLiveChunk]);
+  }, [cleanupFile, getTempFile, listenerDisabled, transcribeLiveChunk]);
 
   useEffect(() => {
+    if (listenerDisabled) return;
     startListener();
     return () => {
       isExiting.current = true;
@@ -364,7 +391,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       if (maxDurationTimeout.current) clearTimeout(maxDurationTimeout.current);
       listenerProcess.current?.kill('SIGTERM');
     };
-  }, [startListener]);
+  }, [listenerDisabled, startListener]);
 
   const setListeningPaused = useCallback((nextPaused: boolean) => {
     pausedRef.current = nextPaused;
@@ -404,6 +431,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         setProcessing({ label: 'Saving transcript…' });
         saveTranscriptRecord(libraryRoot, record);
         setSelectedRecord(record);
+        setSelectedMeeting(null);
         setView('record');
         setHistoryOpen(false);
         setTranscriptScroll(0);
@@ -435,7 +463,9 @@ export default function App(props: { libraryDir?: string } = {}) {
   const openRecord = useCallback((entry: TranscriptLibraryEntry) => {
     try {
       setSelectedRecord(findTranscriptRecord(libraryRoot, entry.id).record);
+      setSelectedMeeting(loadMeetingArtifact(libraryRoot, entry.id) ?? null);
       setView('record');
+      setMeetingView('transcript');
       setTranscriptScroll(0);
       setSpeakerSelection(0);
       setError(null);
@@ -470,6 +500,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   }, [historyOpen, navigationItems, selectedRecord, view]);
 
   const currentRecord = view === 'live' ? liveRecord : selectedRecord;
+  const currentMeeting = view === 'live' ? liveMeeting : selectedMeeting;
   const displaySegments = useMemo(
     () => currentRecord ? coalesceTranscriptSegments(currentRecord) : [],
     [currentRecord],
@@ -496,6 +527,237 @@ export default function App(props: { libraryDir?: string } = {}) {
     transcriptScroll + visibleRows,
   );
   const selectedSpeaker = currentRecord?.speakers[speakerSelection];
+  const configuredMeetingRoute = useMemo(() => {
+    if (!config.meeting?.backend || !config.meeting.model) return null;
+    return {
+      backend: config.meeting.backend,
+      model: config.meeting.model,
+      ...(config.meeting.maxOutputTokens === undefined
+        ? {}
+        : { maxOutputTokens: config.meeting.maxOutputTokens }),
+      ...(config.meeting.maxBudgetMicrousd === undefined
+        ? {}
+        : { maxBudgetMicrousd: config.meeting.maxBudgetMicrousd }),
+      ...(config.meeting.maxCostMicrousd === undefined
+        ? {}
+        : { maxCostMicrousd: config.meeting.maxCostMicrousd }),
+    };
+  }, [config.meeting]);
+
+  const commitMeetingState = useCallback((artifact: MeetingArtifact) => {
+    if (view === 'live') {
+      liveMeetingRef.current = artifact;
+      setLiveMeeting(artifact);
+    } else {
+      setSelectedMeeting(artifact);
+    }
+  }, [view]);
+
+  const markCurrentAsMeeting = useCallback((calendar?: MeetingCalendarEvent) => {
+    if (!currentRecord) return;
+    try {
+      saveTranscriptRecord(libraryRoot, currentRecord);
+      const existing = loadMeetingArtifact(libraryRoot, currentRecord.id);
+      const artifact = existing ?? createMeetingArtifact(currentRecord, {
+        mode: config.meeting?.mode ?? 'hybrid',
+        ...(calendar ? { calendar } : {}),
+        maxObserverRuns: config.meeting?.maxObserverRuns,
+      });
+      saveMeetingArtifact(libraryRoot, artifact);
+      commitMeetingState(artifact);
+      setMeetingView('transcript');
+      setCalendarSuggestion(null);
+      refreshLibrary();
+      setNotice(calendar
+        ? `Meeting attached: ${calendar.title}.`
+        : 'Marked as a meeting. The base transcript remains independent.');
+    } catch (meetingError) {
+      setError(meetingError instanceof Error ? meetingError.message : String(meetingError));
+    }
+  }, [commitMeetingState, config.meeting, currentRecord, libraryRoot, refreshLibrary]);
+
+  const runCurrentMeetingEnrichment = useCallback(() => {
+    if (!currentRecord || !currentMeeting || processing) return;
+    if (observerActiveRef.current) {
+      setNotice('The live meeting observer is finishing its current window. Try again in a moment.');
+      return;
+    }
+    if (!configuredMeetingRoute) {
+      setError('Configure meeting.backend and meeting.model before running meeting intelligence.');
+      return;
+    }
+    const wasListening = view === 'live' && !pausedRef.current;
+    if (wasListening) setListeningPaused(true);
+    saveTranscriptRecord(libraryRoot, currentRecord);
+    setError(null);
+    setProcessing({ label: 'Preparing meeting enrichment…' });
+    void enrichMeeting(libraryRoot, currentRecord.id, {
+      route: configuredMeetingRoute,
+      mode: config.meeting?.mode ?? currentMeeting.mode,
+      minimumNewSegments: config.meeting?.observerMinSegments,
+      maximumNewSegments: config.meeting?.observerMaxSegments,
+      maxObserverRuns: config.meeting?.maxObserverRuns,
+      onStatus: (label) => setProcessing({ label }),
+    }).then((artifact) => {
+      commitMeetingState(artifact);
+      refreshLibrary();
+      setMeetingView('notes');
+      setNotice('Meeting notes and analysis are ready.');
+    }).catch((meetingError) => {
+      setError(meetingError instanceof Error ? meetingError.message : String(meetingError));
+      const failed = loadMeetingArtifact(libraryRoot, currentRecord.id);
+      if (failed) commitMeetingState(failed);
+    }).finally(() => {
+      setProcessing(null);
+      if (wasListening) setListeningPaused(false);
+    });
+  }, [
+    commitMeetingState,
+    config.meeting,
+    configuredMeetingRoute,
+    currentMeeting,
+    currentRecord,
+    libraryRoot,
+    processing,
+    refreshLibrary,
+    setListeningPaused,
+    view,
+  ]);
+
+  const submitMeetingQuestion = useCallback((question: string) => {
+    if (!currentRecord || !currentMeeting || !configuredMeetingRoute || processing) return;
+    setProcessing({ label: 'Reading the meeting…' });
+    setError(null);
+    void chatWithMeeting(
+      libraryRoot,
+      currentRecord.id,
+      question,
+      configuredMeetingRoute,
+      (label) => setProcessing({ label }),
+    ).then((artifact) => {
+      commitMeetingState(artifact);
+      setMeetingView('chat');
+    }).catch((chatError) => {
+      setError(chatError instanceof Error ? chatError.message : String(chatError));
+    }).finally(() => setProcessing(null));
+  }, [
+    commitMeetingState,
+    configuredMeetingRoute,
+    currentMeeting,
+    currentRecord,
+    libraryRoot,
+    processing,
+  ]);
+
+  useEffect(() => {
+    const calendar = config.meeting?.calendar;
+    if (!calendar?.enabled || (calendar.policy ?? 'ask') === 'off') return;
+    let cancelled = false;
+    const poll = () => {
+      try {
+        const events = readMacCalendarEvents({ leadMinutes: calendar.leadMinutes });
+        const suggestion = suggestCalendarMeeting(events, {
+          policy: calendar.policy ?? 'ask',
+          selectedCalendars: calendar.selectedCalendars,
+          leadMinutes: calendar.leadMinutes,
+        });
+        if (!cancelled) setCalendarSuggestion(suggestion ?? null);
+      } catch (calendarError) {
+        if (!cancelled) {
+          setNotice(calendarError instanceof Error ? calendarError.message : String(calendarError));
+        }
+      }
+    };
+    poll();
+    const interval = setInterval(poll, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [config.meeting?.calendar]);
+
+  useEffect(() => {
+    if (!calendarSuggestion || liveMeeting || view !== 'live') return;
+    const policy = config.meeting?.calendar?.policy ?? 'ask';
+    if (policy === 'all' || policy === 'selected-calendars') {
+      markCurrentAsMeeting(calendarSuggestion);
+    } else if (policy === 'ask') {
+      setNotice(`Meeting starting: ${calendarSuggestion.title}. Press M to attach it.`);
+    }
+  }, [
+    calendarSuggestion,
+    config.meeting?.calendar?.policy,
+    liveMeeting,
+    markCurrentAsMeeting,
+    view,
+  ]);
+
+  useEffect(() => {
+    if (
+      view !== 'live' ||
+      !liveMeeting ||
+      !configuredMeetingRoute ||
+      observerActiveRef.current ||
+      liveMeeting.status === 'failed' ||
+      liveMeeting.session.observerRunIds.length >= liveMeeting.session.maxObserverRuns ||
+      (config.meeting?.mode ?? liveMeeting.mode) === 'post-session'
+    ) return;
+    const minimum = config.meeting?.observerMinSegments ?? 3;
+    if (liveRecord.transcript.length - liveMeeting.session.cursor < minimum) return;
+    observerActiveRef.current = true;
+    saveTranscriptRecord(libraryRoot, liveRecord);
+    void enrichMeeting(libraryRoot, liveRecord.id, {
+      route: configuredMeetingRoute,
+      mode: 'streaming',
+      minimumNewSegments: minimum,
+      maximumNewSegments: config.meeting?.observerMaxSegments,
+      maxObserverRuns: config.meeting?.maxObserverRuns,
+    }).then((artifact) => {
+      const configuredMode = config.meeting?.mode ?? liveMeeting.mode;
+      const updated = configuredMode === artifact.mode
+        ? artifact
+        : { ...artifact, mode: configuredMode };
+      saveMeetingArtifact(libraryRoot, updated);
+      liveMeetingRef.current = updated;
+      setLiveMeeting(updated);
+      refreshLibrary();
+    }).catch((observerError) => {
+      const failed = loadMeetingArtifact(libraryRoot, liveRecord.id);
+      if (failed) {
+        liveMeetingRef.current = failed;
+        setLiveMeeting(failed);
+      }
+      setNotice(`Meeting observer paused: ${
+        observerError instanceof Error ? observerError.message : String(observerError)
+      }`);
+    }).finally(() => {
+      observerActiveRef.current = false;
+    });
+  }, [
+    config.meeting,
+    configuredMeetingRoute,
+    libraryRoot,
+    liveMeeting,
+    liveRecord,
+    refreshLibrary,
+    view,
+  ]);
+
+  const auxiliaryMeetingLines = useMemo(() => (
+    currentMeeting && meetingView !== 'transcript'
+      ? meetingViewLines(currentMeeting, meetingView)
+      : []
+  ), [currentMeeting, meetingView]);
+  const visibleAuxiliaryMeetingLines = auxiliaryMeetingLines.slice(
+    transcriptScroll,
+    transcriptScroll + layout.visibleTranscriptRows,
+  );
+  const scrollItemCount = currentMeeting && meetingView !== 'transcript'
+    ? auxiliaryMeetingLines.length
+    : displaySegments.length;
+  const scrollVisibleRows = currentMeeting && meetingView !== 'transcript'
+    ? layout.visibleTranscriptRows
+    : visibleRows;
 
   const copyCurrentTranscript = useCallback(() => {
     if (!currentRecord) return;
@@ -541,11 +803,37 @@ export default function App(props: { libraryDir?: string } = {}) {
     liveRecordRef.current = next;
     liveSessionStartedAt.current = Date.now();
     setLiveRecord(next);
+    liveMeetingRef.current = null;
+    setLiveMeeting(null);
+    setMeetingView('transcript');
     setTranscriptScroll(0);
     setNotice('Started a fresh live transcript.');
   }, []);
 
   useInput((input, key) => {
+    if (chatInputState) {
+      if (key.escape) {
+        setChatInputState(null);
+        return;
+      }
+      if (key.return) {
+        const question = chatInputState.input.trim();
+        setChatInputState(null);
+        if (question) submitMeetingQuestion(question);
+        return;
+      }
+      if (key.backspace || key.delete) {
+        setChatInputState((current) => current
+          ? { input: current.input.slice(0, -1) }
+          : null);
+        return;
+      }
+      if (input && !key.ctrl && !key.meta) {
+        setChatInputState((current) => current ? { input: current.input + input } : null);
+      }
+      return;
+    }
+
     if (renameState) {
       if (key.escape) {
         setRenameState(null);
@@ -619,6 +907,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         try {
           trashTranscriptRecord(libraryRoot, confirmTrashId);
           setSelectedRecord(null);
+          setSelectedMeeting(null);
           setView('live');
           setSelectionIndex(0);
           refreshLibrary();
@@ -675,6 +964,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
     if (input === 'l') {
       setView('live');
+      setMeetingView('transcript');
       setHistoryOpen(false);
       setSelectionIndex(0);
       setTranscriptScroll(0);
@@ -682,6 +972,31 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
     if (input === 'f' || input === 'F') {
       pickMedia(input === 'F');
+      return;
+    }
+    if (input === 'm') {
+      markCurrentAsMeeting(view === 'live' ? calendarSuggestion ?? undefined : undefined);
+      return;
+    }
+    if (input === 'g' && currentMeeting) {
+      runCurrentMeetingEnrichment();
+      return;
+    }
+    if (input === 'a' && currentMeeting) {
+      if (!configuredMeetingRoute) {
+        setError('Configure meeting.backend and meeting.model before using meeting chat.');
+      } else {
+        setMeetingView('chat');
+        setChatInputState({ input: '' });
+      }
+      return;
+    }
+    if (currentMeeting && input >= '1' && input <= '4') {
+      const views: MeetingView[] = ['notes', 'transcript', 'analysis', 'chat'];
+      setMeetingView(views[Number(input) - 1]!);
+      setTranscriptScroll(0);
+      setError(null);
+      setNotice(null);
       return;
     }
     if (input === 't') {
@@ -738,8 +1053,8 @@ export default function App(props: { libraryDir?: string } = {}) {
         setTranscriptScroll((scroll) => moveTranscriptScroll(
           scroll,
           -1,
-          displaySegments.length,
-          visibleRows,
+          scrollItemCount,
+          scrollVisibleRows,
         ));
       }
       return;
@@ -753,8 +1068,8 @@ export default function App(props: { libraryDir?: string } = {}) {
         setTranscriptScroll((scroll) => moveTranscriptScroll(
           scroll,
           1,
-          displaySegments.length,
-          visibleRows,
+          scrollItemCount,
+          scrollVisibleRows,
         ));
       }
       return;
@@ -772,9 +1087,9 @@ export default function App(props: { libraryDir?: string } = {}) {
       }
       setTranscriptScroll((scroll) => moveTranscriptScroll(
         scroll,
-        -visibleRows,
-        displaySegments.length,
-        visibleRows,
+        -scrollVisibleRows,
+        scrollItemCount,
+        scrollVisibleRows,
       ));
       return;
     }
@@ -791,9 +1106,9 @@ export default function App(props: { libraryDir?: string } = {}) {
       }
       setTranscriptScroll((scroll) => moveTranscriptScroll(
         scroll,
-        visibleRows,
-        displaySegments.length,
-        visibleRows,
+        scrollVisibleRows,
+        scrollItemCount,
+        scrollVisibleRows,
       ));
       return;
     }
@@ -819,6 +1134,10 @@ export default function App(props: { libraryDir?: string } = {}) {
     ? terminal.columns < 56
       ? '[↑↓] Browse  [↵] Open  [ESC] Close'
       : '[↑↓] Browse  [ENTER] Open  [/] Search  [H/ESC] Close'
+    : currentMeeting
+      ? view === 'live'
+        ? `[SPACE] ${paused ? 'Resume' : 'Pause'}  [A] Ask  [G] Finish  [H] History  [?] Help  [Q] Quit`
+        : '[A] Ask  [G] Enrich  [H] History  [T/S] Display  [?] Help  [Q] Quit'
     : view === 'live'
       ? terminal.columns < 56
         ? `[SPC] ${paused ? 'Resume' : 'Pause'}  [H] History  [Q] Quit`
@@ -830,7 +1149,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         : terminal.columns < 72
           ? '[L] Live  [H] History  [T/S] View  [?] Help  [Q] Quit'
           : '[L] Live  [H] History  [T/S] Display  [?] Help  [Q] Quit';
-  const plainTranscript = currentRecord && !showTimestamps && !showSpeakers
+  const plainTranscript = currentRecord && meetingView === 'transcript' && !showTimestamps && !showSpeakers
     ? renderText({ ...currentRecord, transcript: visibleSegments })
     : '';
 
@@ -896,7 +1215,21 @@ export default function App(props: { libraryDir?: string } = {}) {
       overflow="hidden"
       aria-label="Transcript reader"
     >
-      {visibleSegments.length === 0 ? (
+      {currentMeeting && meetingView !== 'transcript' ? (
+        <Box flexDirection="column">
+          {visibleAuxiliaryMeetingLines.map((line, index) => (
+            <Box key={`${meetingView}-${index}`} flexShrink={0}>
+              <Text
+                bold={line.length > 0 && !line.startsWith('-') && !line.includes(':') && line.length < 28}
+                dimColor={line === ''}
+                wrap="wrap"
+              >
+                {line || ' '}
+              </Text>
+            </Box>
+          ))}
+        </Box>
+      ) : visibleSegments.length === 0 ? (
         <Text dimColor>{view === 'live' ? 'Start speaking - always listening' : 'No transcript text'}</Text>
       ) : plainTranscript ? (
         <Text wrap="wrap">{plainTranscript}</Text>
@@ -911,7 +1244,7 @@ export default function App(props: { libraryDir?: string } = {}) {
               : undefined;
             return (
               <Text key={`${segment.start}-${segment.end}-${index}`} wrap="wrap">
-                {showTimestamps && <Text dimColor>[{formatClock(segment.start)}] </Text>}
+                {showTimestamps && <Text dimColor>[{formatTuiClock(segment.start)}] </Text>}
                 {label && (
                   <Text
                     color={speakerColor}
@@ -955,7 +1288,9 @@ export default function App(props: { libraryDir?: string } = {}) {
             ◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}
           </Text>
         ) : view === 'record' ? (
-          <Text color="cyan" wrap="truncate-end">◆ {truncate(title, Math.max(12, terminal.columns - 6))}</Text>
+          <Text color="cyan" wrap="truncate-end">
+            {currentMeeting ? 'Meeting · ' : ''}{truncate(title, Math.max(12, terminal.columns - 6))}
+          </Text>
         ) : paused ? (
           <Text dimColor>⏸ Paused</Text>
         ) : (
@@ -972,13 +1307,32 @@ export default function App(props: { libraryDir?: string } = {}) {
         )}
       </Box>
 
+      {currentMeeting && !drawerOnly && (
+        <Box marginBottom={1} flexShrink={0}>
+          {([
+            ['notes', '1 Notes'],
+            ['transcript', '2 Transcript'],
+            ['analysis', '3 Analysis'],
+            ['chat', '4 Chat'],
+          ] as Array<[MeetingView, string]>).map(([candidate, label], index) => (
+            <React.Fragment key={candidate}>
+              {index > 0 && <Text dimColor>  </Text>}
+              <Text inverse={meetingView === candidate}>{` ${label} `}</Text>
+            </React.Fragment>
+          ))}
+          <Text dimColor>  {currentMeeting.status[0]!.toUpperCase() + currentMeeting.status.slice(1)}</Text>
+        </Box>
+      )}
+
       <Box flexDirection="row" flexGrow={1} overflow="hidden">
         {historyOpen && historyDrawer}
         {!drawerOnly && transcriptPane}
       </Box>
 
       <Box flexDirection="column" marginTop={1} flexShrink={0}>
-        {renameState ? (
+        {chatInputState ? (
+          <Text color="yellow">Ask: {chatInputState.input}█  [Enter send · Esc cancel]</Text>
+        ) : renameState ? (
           <Text color="yellow">Rename {renameState.speakerId}: {renameState.input}█  [Enter save · Esc cancel]</Text>
         ) : searchMode ? (
           <Text color="yellow">Search: {searchQuery}█  [Enter apply · Esc cancel]</Text>
@@ -992,9 +1346,18 @@ export default function App(props: { libraryDir?: string } = {}) {
             <Text dimColor>F import · ⇧F import + speakers · T timestamps · S speaker labels</Text>
             <Text dimColor>C copy · E export · O folder · D trash · DEL clear live</Text>
             <Text dimColor>[/] choose speaker · R rename · ↑↓ scroll · L live · Q quit</Text>
+            <Text dimColor>M mark meeting · 1-4 meeting views · G enrich/finalize · A ask</Text>
           </>
         ) : !historyOpen && currentRecord?.transcript.length ? (
-          <Text dimColor>{renderText(currentRecord).length} chars</Text>
+          <Text dimColor>
+            {currentMeeting && meetingView === 'analysis'
+              ? `${currentMeeting.analysis?.claims.length ?? currentMeeting.provisionalClaims.length} insights`
+              : currentMeeting && meetingView === 'notes'
+                ? `${currentMeeting.attendees.length} attendees`
+                : currentMeeting && meetingView === 'chat'
+                  ? `${Math.floor(currentMeeting.chat.length / 2)} exchanges`
+                  : `${renderText(currentRecord).length} chars`}
+          </Text>
         ) : null}
       </Box>
     </Box>

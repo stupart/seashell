@@ -1,0 +1,136 @@
+import { spawnSync } from 'child_process';
+import type { MeetingCalendarEvent } from './meeting-artifact.ts';
+
+export type MeetingCapturePolicy = 'off' | 'ask' | 'selected-calendars' | 'all';
+
+export interface CalendarSuggestionOptions {
+  policy: MeetingCapturePolicy;
+  selectedCalendars?: string[];
+  leadMinutes?: number;
+  graceMinutes?: number;
+  now?: Date;
+}
+
+function parseCalendarEvent(value: unknown, index: number): MeetingCalendarEvent {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Calendar event ${index} is invalid`);
+  }
+  const event = value as Record<string, unknown>;
+  const required = ['provider', 'eventId', 'title', 'startAt', 'endAt'] as const;
+  for (const field of required) {
+    if (typeof event[field] !== 'string' || !(event[field] as string).trim()) {
+      throw new Error(`Calendar event ${index} ${field} is invalid`);
+    }
+  }
+  const attendees = Array.isArray(event.attendees) ? event.attendees : [];
+  return {
+    provider: event.provider as string,
+    eventId: event.eventId as string,
+    ...(typeof event.calendar === 'string' ? { calendar: event.calendar } : {}),
+    title: event.title as string,
+    startAt: event.startAt as string,
+    endAt: event.endAt as string,
+    ...(typeof event.location === 'string' && event.location
+      ? { location: event.location }
+      : {}),
+    ...(typeof event.joinUrl === 'string' && event.joinUrl
+      ? { joinUrl: event.joinUrl }
+      : {}),
+    attendees: attendees.flatMap((raw) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+      const attendee = raw as Record<string, unknown>;
+      if (typeof attendee.name !== 'string' || !attendee.name.trim()) return [];
+      return [{
+        name: attendee.name.trim(),
+        ...(typeof attendee.email === 'string' ? { email: attendee.email } : {}),
+        ...(typeof attendee.response === 'string' ? { response: attendee.response } : {}),
+      }];
+    }),
+  };
+}
+
+export function parseCalendarEvents(value: unknown): MeetingCalendarEvent[] {
+  if (!Array.isArray(value)) throw new Error('Calendar provider must return an array');
+  return value.map(parseCalendarEvent);
+}
+
+export function suggestCalendarMeeting(
+  events: MeetingCalendarEvent[],
+  options: CalendarSuggestionOptions,
+): MeetingCalendarEvent | undefined {
+  if (options.policy === 'off') return undefined;
+  const now = (options.now ?? new Date()).getTime();
+  const lead = Math.max(0, options.leadMinutes ?? 5) * 60_000;
+  const grace = Math.max(0, options.graceMinutes ?? 10) * 60_000;
+  const selected = new Set((options.selectedCalendars ?? []).map((name) => name.toLocaleLowerCase()));
+  return events
+    .filter((event) => {
+      const start = Date.parse(event.startAt);
+      const end = Date.parse(event.endAt);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
+      if (start > now + lead || end < now - grace) return false;
+      if (options.policy !== 'selected-calendars') return true;
+      return event.calendar !== undefined && selected.has(event.calendar.toLocaleLowerCase());
+    })
+    .toSorted((a, b) => Math.abs(Date.parse(a.startAt) - now) - Math.abs(Date.parse(b.startAt) - now))[0];
+}
+
+/**
+ * Read a small time window from macOS Calendar. The adapter is opt-in because
+ * the first call can trigger the system Calendar permission prompt.
+ */
+export function readMacCalendarEvents(
+  options: { leadMinutes?: number; lookbackMinutes?: number } = {},
+): MeetingCalendarEvent[] {
+  const leadMinutes = Math.max(5, options.leadMinutes ?? 15);
+  const lookbackMinutes = Math.max(0, options.lookbackMinutes ?? 10);
+  const script = `
+    ObjC.import('Foundation');
+    const app = Application('Calendar');
+    const now = new Date();
+    const from = new Date(now.getTime() - ${lookbackMinutes} * 60000);
+    const to = new Date(now.getTime() + ${leadMinutes} * 60000);
+    const rows = [];
+    for (const calendar of app.calendars()) {
+      const calendarName = calendar.name();
+      for (const event of calendar.events.whose({
+        _and: [
+          { startDate: { _lessThanEquals: to } },
+          { endDate: { _greaterThanEquals: from } }
+        ]
+      })()) {
+        let url = '';
+        try { url = event.url() || ''; } catch (_) {}
+        let location = '';
+        try { location = event.location() || ''; } catch (_) {}
+        rows.push({
+          provider: 'macos-calendar',
+          eventId: String(event.uid()),
+          calendar: String(calendarName),
+          title: String(event.summary() || 'Meeting'),
+          startAt: event.startDate().toISOString(),
+          endAt: event.endDate().toISOString(),
+          location: String(location),
+          joinUrl: String(url),
+          attendees: []
+        });
+      }
+    }
+    JSON.stringify(rows);
+  `;
+  const result = spawnSync('osascript', ['-l', 'JavaScript', '-e', script], {
+    encoding: 'utf8',
+    timeout: 8_000,
+    maxBuffer: 1_000_000,
+  });
+  if (result.error || result.status !== 0) {
+    const detail = result.stderr?.trim() || result.error?.message || `exit ${result.status}`;
+    throw new Error(`Could not read macOS Calendar: ${detail}`);
+  }
+  try {
+    return parseCalendarEvents(JSON.parse(result.stdout));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not parse macOS Calendar events: ${message}`);
+  }
+}

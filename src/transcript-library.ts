@@ -23,6 +23,7 @@ export interface TranscriptLibraryEntry {
   sourceFilename: string;
   speakerCount: number;
   segmentCount: number;
+  kind: 'transcript' | 'meeting';
   directory: string;
 }
 
@@ -70,12 +71,16 @@ function transcriptJsonPaths(directory: string): string[] {
   if (!existsSync(directory)) return [];
   const paths: string[] = [];
   const visit = (current: string) => {
-    for (const entry of readdirSync(current, { withFileTypes: true })) {
+    const entries = readdirSync(current, { withFileTypes: true });
+    const canonical = entries.find((entry) => entry.isFile() && entry.name === 'transcript.json');
+    if (canonical) {
+      paths.push(join(current, canonical.name));
+      return;
+    }
+    for (const entry of entries) {
       const path = join(current, entry.name);
       if (entry.isDirectory()) {
         if (entry.name !== '_Trash') visit(path);
-      } else if (entry.isFile() && entry.name === 'transcript.json') {
-        paths.push(path);
       }
     }
   };
@@ -111,6 +116,7 @@ export function parseTranscriptRecord(value: unknown, path = 'transcript.json'):
     segment.start >= 0 &&
     segment.end >= segment.start &&
     typeof segment.text === 'string' &&
+    (segment.id === undefined || (typeof segment.id === 'string' && segment.id.length > 0)) &&
     (segment.speaker === undefined || typeof segment.speaker === 'string')
   ));
   const validSpeakers = record.speakers.every((speaker) => (
@@ -167,6 +173,7 @@ export function saveTranscriptRecord(
 }
 
 function toEntry(path: string, record: TranscriptRecord): TranscriptLibraryEntry {
+  const directory = dirname(path);
   return {
     id: record.id,
     title: record.title,
@@ -176,7 +183,8 @@ function toEntry(path: string, record: TranscriptRecord): TranscriptLibraryEntry
     sourceFilename: record.source.filename,
     speakerCount: record.speakers.length,
     segmentCount: record.transcript.length,
-    directory: dirname(path),
+    kind: existsSync(join(directory, 'meeting.json')) ? 'meeting' : 'transcript',
+    directory,
   };
 }
 

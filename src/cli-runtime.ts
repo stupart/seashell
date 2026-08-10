@@ -6,9 +6,17 @@ import { fileURLToPath } from 'url';
 import type {
   CliCommand,
   LibraryCommand,
+  MeetingCommand,
   TranscribeCommandOptions,
 } from './cli-args.ts';
-import { loadConfig, resolveLibraryDir, resolveSaveByDefault } from './config.ts';
+import {
+  defaultConfigPath,
+  loadConfig,
+  resolveLibraryDir,
+  resolveSaveByDefault,
+  updateMeetingConfig,
+} from './config.ts';
+import { parseCalendarEvents, readMacCalendarEvents } from './calendar.ts';
 import {
   findTranscriptRecord,
   listTranscriptRecords,
@@ -21,6 +29,12 @@ import {
 import { renderTranscript } from './transcript-renderer.ts';
 import { formatSelfUpdateResult, updateRepository } from './self-update.ts';
 import { parseSpeakerLabelingEvidence } from './speaker-labeling.ts';
+import {
+  createMeetingArtifact,
+  loadMeetingArtifact,
+  saveMeetingArtifact,
+} from './meeting-artifact.ts';
+import { chatWithMeeting, enrichMeeting } from './meeting-enrichment.ts';
 import { transcribeMedia } from './transcription-service.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -289,6 +303,146 @@ function executeUpdate(check: boolean, json: boolean): number {
   }
 }
 
+function readJsonFile(path: string, label: string): unknown {
+  const absolutePath = resolve(path);
+  try {
+    return JSON.parse(readFileSync(absolutePath, 'utf8'));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not read ${label} ${absolutePath}: ${message}`);
+  }
+}
+
+function meetingRoute(
+  command: Extract<MeetingCommand['action'], { kind: 'enrich' | 'chat' }>,
+  config: ReturnType<typeof loadConfig>,
+) {
+  const backend = command.backend ?? config.meeting?.backend;
+  const model = command.model ?? config.meeting?.model;
+  if (!backend || !model) {
+    throw new Error(
+      'Meeting intelligence requires an exact route. Pass --backend and --model or set meeting.backend and meeting.model in config.json.',
+    );
+  }
+  return {
+    backend,
+    model,
+    ...(config.meeting?.maxOutputTokens === undefined
+      ? {}
+      : { maxOutputTokens: config.meeting.maxOutputTokens }),
+    ...(config.meeting?.maxBudgetMicrousd === undefined
+      ? {}
+      : { maxBudgetMicrousd: config.meeting.maxBudgetMicrousd }),
+    ...(config.meeting?.maxCostMicrousd === undefined
+      ? {}
+      : { maxCostMicrousd: config.meeting.maxCostMicrousd }),
+  };
+}
+
+async function executeMeeting(command: MeetingCommand): Promise<number> {
+  const config = loadConfig();
+  const libraryDir = resolveLibraryDir(command.libraryDir, process.env, config);
+  switch (command.action.kind) {
+    case 'setup': {
+      const updated = updateMeetingConfig({
+        ...(command.action.mode === undefined ? {} : { mode: command.action.mode }),
+        ...(command.action.backend === undefined ? {} : { backend: command.action.backend }),
+        ...(command.action.model === undefined ? {} : { model: command.action.model }),
+        ...(command.action.calendarPolicy === undefined
+          ? {}
+          : {
+              calendar: {
+                enabled: command.action.calendarPolicy !== 'off',
+                policy: command.action.calendarPolicy,
+              },
+            }),
+      });
+      print(command.json
+        ? JSON.stringify({ path: defaultConfigPath(), config: updated }, null, 2)
+        : `Saved meeting settings to ${defaultConfigPath()}`);
+      return 0;
+    }
+    case 'create': {
+      const { record } = findTranscriptRecord(libraryDir, command.action.id);
+      const calendar = command.action.eventJsonPath
+        ? parseCalendarEvents([readJsonFile(command.action.eventJsonPath, 'calendar event')])[0]
+        : undefined;
+      const existing = loadMeetingArtifact(libraryDir, record.id);
+      const artifact = existing ?? createMeetingArtifact(record, {
+        ...(calendar ? { calendar } : {}),
+        mode: command.action.mode ?? config.meeting?.mode,
+        maxObserverRuns: config.meeting?.maxObserverRuns,
+      });
+      const directory = saveMeetingArtifact(libraryDir, artifact);
+      print(command.json
+        ? JSON.stringify({ directory, meeting: artifact }, null, 2)
+        : `Created meeting artifact in ${directory}`);
+      return 0;
+    }
+    case 'show': {
+      const artifact = loadMeetingArtifact(libraryDir, command.action.id);
+      if (!artifact) throw new Error(`Meeting artifact not found: ${command.action.id}`);
+      if (command.json) {
+        print(JSON.stringify(artifact, null, 2));
+      } else {
+        const claimCount = artifact.analysis?.claims.length ?? artifact.provisionalClaims.length;
+        print([
+          artifact.title,
+          `Status: ${artifact.status} · mode ${artifact.mode}`,
+          `Attendees: ${artifact.attendees.map((attendee) => attendee.name).join(', ') || 'none'}`,
+          `Claims: ${claimCount}`,
+          artifact.analysis?.summary ?? 'No analysis yet.',
+        ].join('\n'));
+      }
+      return 0;
+    }
+    case 'enrich': {
+      const route = meetingRoute(command.action, config);
+      const context = command.action.contextPath
+        ? readJsonFile(command.action.contextPath, 'meeting context')
+        : undefined;
+      const artifact = await enrichMeeting(libraryDir, command.action.id, {
+        route,
+        mode: command.action.mode ?? config.meeting?.mode,
+        ...(context === undefined ? {} : { context }),
+        minimumNewSegments: config.meeting?.observerMinSegments,
+        maximumNewSegments: config.meeting?.observerMaxSegments,
+        maxObserverRuns: config.meeting?.maxObserverRuns,
+        onStatus: (message) => process.stderr.write(`${message}\n`),
+      });
+      print(command.json
+        ? JSON.stringify(artifact, null, 2)
+        : `Meeting enrichment ready: ${artifact.title}`);
+      return 0;
+    }
+    case 'chat': {
+      const artifact = await chatWithMeeting(
+        libraryDir,
+        command.action.id,
+        command.action.question,
+        meetingRoute(command.action, config),
+        (message) => process.stderr.write(`${message}\n`),
+      );
+      const answer = artifact.chat.at(-1);
+      print(command.json ? JSON.stringify(answer, null, 2) : answer?.text ?? '');
+      return 0;
+    }
+    case 'calendar': {
+      const events = readMacCalendarEvents({
+        leadMinutes: config.meeting?.calendar?.leadMinutes,
+      });
+      if (command.json) {
+        print(JSON.stringify(events, null, 2));
+      } else if (events.length === 0) {
+        print('No current or upcoming calendar meetings found.');
+      } else {
+        print(events.map((event) => `${event.startAt}  ${event.title}  ${event.calendar ?? ''}`).join('\n'));
+      }
+      return 0;
+    }
+  }
+}
+
 export async function executeCliCommand(command: Exclude<CliCommand, { kind: 'tui' | 'help' }>): Promise<number> {
   switch (command.kind) {
     case 'transcribe':
@@ -299,5 +453,7 @@ export async function executeCliCommand(command: Exclude<CliCommand, { kind: 'tu
       return executeDoctor(command.json);
     case 'update':
       return executeUpdate(command.check, command.json);
+    case 'meeting':
+      return executeMeeting(command);
   }
 }

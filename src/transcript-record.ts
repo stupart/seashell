@@ -49,7 +49,10 @@ export function createTranscriptRecord(
         : { audioStreamIndex: options.source.audioStreamIndex }),
       ...(options.source?.channels === undefined ? {} : { channels: options.source.channels }),
     },
-    transcript: document.transcript.map((segment) => ({ ...segment })),
+    transcript: document.transcript.map((segment, index) => ({
+      ...segment,
+      id: segment.id?.trim() || `s${String(index + 1).padStart(6, '0')}`,
+    })),
     speakers: document.speakers.map((speaker) => ({ ...speaker })),
     ...(document.summary === undefined ? {} : { summary: document.summary }),
     ...(document.decisions === undefined ? {} : { decisions: [...document.decisions] }),

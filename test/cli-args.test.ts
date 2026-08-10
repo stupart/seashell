@@ -93,6 +93,78 @@ describe('update CLI parsing', () => {
   });
 });
 
+describe('meeting CLI parsing', () => {
+  test('parses meeting creation and exact enrichment routes', () => {
+    expect(parseCliArgs([
+      'meeting',
+      'create',
+      'meeting-1',
+      '--event-json',
+      'event.json',
+      '--mode',
+      'hybrid',
+    ])).toMatchObject({
+      kind: 'meeting',
+      action: {
+        kind: 'create',
+        id: 'meeting-1',
+        eventJsonPath: 'event.json',
+        mode: 'hybrid',
+      },
+    });
+    expect(parseCliArgs([
+      'meeting',
+      'enrich',
+      'meeting-1',
+      '--backend',
+      'openrouter',
+      '--model',
+      'google/gemma-3-4b-it',
+      '--json',
+    ])).toMatchObject({
+      kind: 'meeting',
+      json: true,
+      action: {
+        kind: 'enrich',
+        backend: 'openrouter',
+        model: 'google/gemma-3-4b-it',
+      },
+    });
+  });
+
+  test('keeps chat questions together and rejects misplaced options', () => {
+    expect(parseCliArgs(['meeting', 'chat', 'meeting-1', 'What', 'did', 'we', 'decide?']))
+      .toMatchObject({ action: { kind: 'chat', question: 'What did we decide?' } });
+    expect(() => parseCliArgs(['meeting', 'show', 'meeting-1', '--model', 'x']))
+      .toThrow('do not apply');
+  });
+
+  test('parses persistent meeting route setup without storing a secret', () => {
+    expect(parseCliArgs([
+      'meeting',
+      'setup',
+      '--backend',
+      'codex',
+      '--model',
+      'gpt-5-mini',
+      '--mode',
+      'hybrid',
+      '--calendar',
+      'ask',
+    ])).toMatchObject({
+      action: {
+        kind: 'setup',
+        backend: 'codex',
+        model: 'gpt-5-mini',
+        mode: 'hybrid',
+        calendarPolicy: 'ask',
+      },
+    });
+    expect(() => parseCliArgs(['meeting', 'setup', '--backend', 'codex']))
+      .toThrow('together');
+  });
+});
+
 describe('library CLI parsing', () => {
   test('parses JSON search and speaker renaming', () => {
     expect(parseCliArgs(['library', 'search', 'launch notes', '--json'])).toMatchObject({

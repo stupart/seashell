@@ -16,6 +16,8 @@ export interface DiarizationTurn {
 }
 
 export interface TranscriptSegment {
+  /** Stable evidence ID within one transcript record. */
+  id?: string;
   start: number;
   end: number;
   /** Stable diarization cluster ID. Human-readable names live in speakers. */

@@ -66,3 +66,15 @@ export function speakerColorIndex(speakerId: string): number {
   for (const character of speakerId) hash = ((hash * 31) + character.codePointAt(0)!) >>> 0;
   return hash % SPEAKER_COLORS.length;
 }
+
+/** Compact media-relative clock for the TUI; exports retain millisecond detail. */
+export function formatTuiClock(seconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(seconds));
+  const second = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const minute = totalMinutes % 60;
+  const hour = Math.floor(totalMinutes / 60);
+  return hour > 0
+    ? `${hour}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`
+    : `${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`;
+}
