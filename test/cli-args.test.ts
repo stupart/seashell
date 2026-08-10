@@ -34,6 +34,21 @@ describe('transcription CLI parsing', () => {
     });
   });
 
+  test('speaker evidence enables diarization and keeps its file path', () => {
+    expect(parseCliArgs([
+      'transcribe',
+      'meeting.mov',
+      '--speaker-evidence',
+      'meeting-speakers.json',
+    ])).toMatchObject({
+      kind: 'transcribe',
+      options: {
+        speakers: true,
+        speakerEvidencePath: 'meeting-speakers.json',
+      },
+    });
+  });
+
   test('keeps the legacy diarization invocation as JSON', () => {
     expect(parseCliArgs(['--diarize', 'meeting.m4a'])).toMatchObject({
       kind: 'transcribe',
@@ -60,6 +75,21 @@ describe('transcription CLI parsing', () => {
       '--min-speakers',
       '1',
     ])).toThrow('cannot be combined');
+  });
+});
+
+describe('update CLI parsing', () => {
+  test('supports human and machine-readable update checks', () => {
+    expect(parseCliArgs(['update'])).toEqual({ kind: 'update', check: false, json: false });
+    expect(parseCliArgs(['update', '--check', '--json'])).toEqual({
+      kind: 'update',
+      check: true,
+      json: true,
+    });
+  });
+
+  test('rejects unknown updater options', () => {
+    expect(() => parseCliArgs(['update', '--force'])).toThrow('Unknown update option');
   });
 });
 

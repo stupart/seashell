@@ -10,7 +10,7 @@ import {
 } from './process-lifecycle.ts';
 import {
   applySpeakerLabels,
-  StubMeetSpeakerLabeler,
+  EvidenceSpeakerLabeler,
   type SpeakerLabeler,
   type SpeakerLabelingEvidence,
 } from './speaker-labeling.ts';
@@ -322,7 +322,7 @@ export async function diarizePreparedMedia(
 
     document = await applySpeakerLabels(
       document,
-      options.speakerLabeler ?? new StubMeetSpeakerLabeler(),
+      options.speakerLabeler ?? new EvidenceSpeakerLabeler(),
       options.labelingEvidence ?? { screenshots: [], attendees: [] },
     );
 

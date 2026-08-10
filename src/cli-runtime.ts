@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { spawnSync } from 'child_process';
-import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import type {
@@ -19,6 +19,8 @@ import {
   writeTranscriptExport,
 } from './transcript-library.ts';
 import { renderTranscript } from './transcript-renderer.ts';
+import { formatSelfUpdateResult, updateRepository } from './self-update.ts';
+import { parseSpeakerLabelingEvidence } from './speaker-labeling.ts';
 import { transcribeMedia } from './transcription-service.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -71,6 +73,16 @@ function progressCallbacks(options: TranscribeCommandOptions) {
   };
 }
 
+function loadSpeakerEvidence(path: string) {
+  const absolutePath = resolve(path);
+  try {
+    return parseSpeakerLabelingEvidence(JSON.parse(readFileSync(absolutePath, 'utf8')));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Could not load speaker evidence ${absolutePath}: ${message}`);
+  }
+}
+
 async function executeTranscription(
   files: string[],
   options: TranscribeCommandOptions,
@@ -79,12 +91,16 @@ async function executeTranscription(
   const libraryDir = resolveLibraryDir(options.libraryDir, process.env, config);
   const shouldSave = options.save ?? resolveSaveByDefault(config);
   const rendered: string[] = [];
+  const labelingEvidence = options.speakerEvidencePath
+    ? loadSpeakerEvidence(options.speakerEvidencePath)
+    : options.labelingEvidence;
 
   for (const file of files) {
     const progress = progressCallbacks(options);
     try {
       const record = await transcribeMedia(file, {
         ...options,
+        labelingEvidence,
         onStatus: progress.onStatus,
         onWhisperProgress: progress.onWhisperProgress,
         onWhisperFallback: progress.onStatus,
@@ -260,6 +276,19 @@ function executeDoctor(json: boolean): number {
   return checks.every((check) => !check.required || check.ok) ? 0 : 1;
 }
 
+function executeUpdate(check: boolean, json: boolean): number {
+  try {
+    const result = updateRepository({ projectRoot: PROJECT_ROOT, check });
+    print(json ? JSON.stringify({ ok: true, ...result }, null, 2) : formatSelfUpdateResult(result));
+    return 0;
+  } catch (error) {
+    if (!json) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${JSON.stringify({ ok: false, error: message }, null, 2)}\n`);
+    return 1;
+  }
+}
+
 export async function executeCliCommand(command: Exclude<CliCommand, { kind: 'tui' | 'help' }>): Promise<number> {
   switch (command.kind) {
     case 'transcribe':
@@ -268,5 +297,7 @@ export async function executeCliCommand(command: Exclude<CliCommand, { kind: 'tu
       return executeLibrary(command);
     case 'doctor':
       return executeDoctor(command.json);
+    case 'update':
+      return executeUpdate(command.check, command.json);
   }
 }

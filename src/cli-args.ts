@@ -9,6 +9,7 @@ export interface TranscribeCommandOptions extends DiarizeFileOptions {
   save?: boolean;
   libraryDir?: string;
   title?: string;
+  speakerEvidencePath?: string;
   quiet: boolean;
 }
 
@@ -36,6 +37,7 @@ export type CliCommand =
   | { kind: 'help' }
   | { kind: 'tui'; libraryDir?: string }
   | { kind: 'doctor'; json: boolean }
+  | { kind: 'update'; check: boolean; json: boolean }
   | { kind: 'transcribe'; files: string[]; options: TranscribeCommandOptions }
   | LibraryCommand;
 
@@ -155,6 +157,10 @@ function parseTranscribe(rawArgs: string[], explicitCommand: boolean): CliComman
         break;
       case '--python':
         options.pythonPath = next();
+        options.speakers = true;
+        break;
+      case '--speaker-evidence':
+        options.speakerEvidencePath = next();
         options.speakers = true;
         break;
       case '--quiet':
@@ -291,6 +297,11 @@ export function parseCliArgs(args: string[]): CliCommand {
     if (unknown.length) throw new Error(`Unknown doctor option: ${unknown[0]}`);
     return { kind: 'doctor', json: args.includes('--json') };
   }
+  if (args[0] === 'update') {
+    const unknown = args.slice(1).filter((arg) => arg !== '--check' && arg !== '--json');
+    if (unknown.length) throw new Error(`Unknown update option: ${unknown[0]}`);
+    return { kind: 'update', check: args.includes('--check'), json: args.includes('--json') };
+  }
   if (args[0] === 'library') return parseLibrary(args);
   return parseTranscribe(args, args[0] === 'transcribe');
 }
@@ -303,6 +314,7 @@ Usage:
   seashell transcribe <file> [options]      Transcribe audio or video
   seashell library <action> [options]       Browse and manage saved transcripts
   seashell doctor [--json]                  Check dependencies and models
+  seashell update [--check] [--json]        Safely update this Git checkout
 
 Transcription options:
   --timestamps                 Include aligned timestamps in text output
@@ -322,6 +334,7 @@ Speaker options:
   --max-speakers <n>           Maximum speaker count
   --diarization-model <id>     Override the pyannote model
   --python <path>              Override the diarization Python executable
+  --speaker-evidence <json>    Roster + timestamped active-speaker evidence
   --diarize                    Legacy alias for --speakers --format json
 
 Library actions:
@@ -337,6 +350,6 @@ Configuration precedence:
   CLI flag > SEASHELL_LIBRARY_DIR > config.json > ~/Documents/Sea Shell/Transcripts
 
 Machine use:
-  stdout contains results only; progress and errors use stderr. Library and doctor
-  commands support JSON. Non-interactive commands never prompt.
+  stdout contains results only; progress and errors use stderr. Library, doctor,
+  and update commands support JSON. Non-interactive commands never prompt.
 `;

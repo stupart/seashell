@@ -21,6 +21,8 @@ download; inference remains local afterward.
 - Saves successful file and live transcripts to a readable local folder.
 - Lets you rename anonymous diarization clusters such as `SPEAKER_00` to human
   names without retranscribing.
+- Can conservatively identify clusters from meeting rosters, timestamped
+  active-speaker observations, self-introductions, and explicit handoffs.
 - Keeps the terminal UI transcript-first, with an on-demand history drawer for
   saved recordings, search, speaker labels, timestamps, and exports.
 - Keeps command output clean for shell pipelines and AI agents.
@@ -55,6 +57,21 @@ seashell doctor
 The installer builds whisper.cpp with Metal, downloads the Whisper
 large-v3-turbo and Silero VAD models, installs Bun dependencies, and creates a
 global `seashell` command.
+
+### Updating
+
+Git-based installations can update in place; no uninstall is needed:
+
+```bash
+seashell update --check
+seashell update
+```
+
+The updater fetches the current branch's configured remote, permits only a
+clean fast-forward, and then runs `bun install --frozen-lockfile`. It never
+merges divergent history or discards tracked changes. `--json` makes either
+command machine-readable. A branch must exist on the remote before it can be
+updated this way.
 
 ## Quick start
 
@@ -269,6 +286,51 @@ The legacy command remains valid and defaults to JSON:
 seashell --diarize meeting.m4a
 ```
 
+### Speaker identification evidence
+
+Diarization discovers consistent recording-local voices such as `SPEAKER_00`;
+identity is a separate pass. Sea Shell can conservatively match those voices
+to a meeting roster using timestamped active-speaker observations,
+self-identification (for example, “I'm Ada”), and explicit handoffs (for
+example, “Grace, what do you think?”).
+
+Supply a JSON sidecar when transcribing:
+
+```bash
+seashell transcribe meeting.mp4 \
+  --speakers \
+  --speaker-evidence meeting-speakers.json \
+  --timestamps
+```
+
+```json
+{
+  "attendees": [
+    { "name": "Ada Lovelace", "email": "ada@example.com" },
+    { "name": "Grace Hopper", "email": "grace@example.com" }
+  ],
+  "activeSpeakers": [
+    { "capturedAt": 12.4, "name": "Ada Lovelace", "source": "google-meet" },
+    { "capturedAt": 18.7, "name": "Grace Hopper", "source": "google-meet" }
+  ]
+}
+```
+
+`capturedAt` is seconds from the beginning of the selected recording audio—the
+same clock used by transcript timestamps. A browser or screen adapter must
+currently produce these observations; the built-in pass does not inspect raw
+screenshot pixels. First-name aliases are accepted only when unique in the
+roster. Conflicting evidence leaves the diarization ID unchanged, and an
+existing human label is never overwritten.
+
+The default identity pass is local and deterministic. The `SpeakerLabeler`
+interface is the opt-in seam for a future local or hosted LLM. A safe LLM
+implementation should receive short timestamped context windows and the known
+roster, return structured candidate/evidence/confidence fields, be forbidden
+from inventing names outside that roster, and preserve “unknown” below a high
+confidence threshold. Raw audio and screenshots do not need to be sent to the
+model.
+
 ### Known channel roles
 
 For a verified two-channel mic/system recording:
@@ -329,6 +391,7 @@ Example agent workflow:
 
 ```bash
 seashell doctor --json
+seashell update --check --json
 seashell transcribe input.mp4 --format json --no-save --quiet > transcript.json
 seashell library list --json
 seashell library show <id> --format json
@@ -337,6 +400,7 @@ seashell library show <id> --format json
 ## Privacy
 
 - Audio, video, transcripts, and speaker inference stay local.
+- Roster and active-speaker evidence stays local in the built-in identity pass.
 - Source media is not copied into the transcript library.
 - Core transcription needs no cloud account or API key.
 - Speaker diarization contacts Hugging Face only when model files must be

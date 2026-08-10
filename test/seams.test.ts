@@ -1,6 +1,8 @@
 import { expect, test } from 'bun:test';
 import {
   applySpeakerLabels,
+  EvidenceSpeakerLabeler,
+  parseSpeakerLabelingEvidence,
   type SpeakerLabeler,
 } from '../src/speaker-labeling.ts';
 import {
@@ -58,6 +60,91 @@ test('partial speaker labels preserve every transcript-referenced ID', async () 
     { id: 'SPEAKER_00', label: 'Ada' },
     { id: 'SPEAKER_01', label: 'SPEAKER_01' },
   ]);
+});
+
+test('screen active-speaker evidence names the cluster speaking at that time', async () => {
+  const document: StructuredTranscript = {
+    transcript: [
+      { start: 0, end: 3, speaker: 'SPEAKER_00', text: 'Welcome.' },
+      { start: 3, end: 6, speaker: 'SPEAKER_01', text: 'Thank you.' },
+    ],
+    speakers: [
+      { id: 'SPEAKER_00', label: 'SPEAKER_00' },
+      { id: 'SPEAKER_01', label: 'SPEAKER_01' },
+    ],
+  };
+  const labeled = await applySpeakerLabels(document, new EvidenceSpeakerLabeler(), {
+    attendees: [{ name: 'Ada Lovelace' }, { name: 'Grace Hopper' }],
+    screenshots: [],
+    activeSpeakers: [{ capturedAt: 4, name: 'Grace Hopper', source: 'google-meet' }],
+  });
+
+  expect(labeled.speakers).toEqual([
+    { id: 'SPEAKER_00', label: 'SPEAKER_00' },
+    { id: 'SPEAKER_01', label: 'Grace Hopper' },
+  ]);
+});
+
+test('self-identification and peer handoffs resolve only roster names', async () => {
+  const document: StructuredTranscript = {
+    transcript: [
+      { start: 0, end: 2, speaker: 'SPEAKER_00', text: "Hi, I'm Ada Lovelace." },
+      { start: 2, end: 4, speaker: 'SPEAKER_00', text: 'Grace, what do you think?' },
+      { start: 4, end: 7, speaker: 'SPEAKER_01', text: 'I agree with that.' },
+    ],
+    speakers: [
+      { id: 'SPEAKER_00', label: 'SPEAKER_00' },
+      { id: 'SPEAKER_01', label: 'SPEAKER_01' },
+    ],
+  };
+  const labeled = await applySpeakerLabels(document, new EvidenceSpeakerLabeler(), {
+    attendees: [{ name: 'Ada Lovelace' }, { name: 'Grace Hopper' }],
+    screenshots: [],
+  });
+
+  expect(labeled.speakers).toEqual([
+    { id: 'SPEAKER_00', label: 'Ada Lovelace' },
+    { id: 'SPEAKER_01', label: 'Grace Hopper' },
+  ]);
+});
+
+test('ambiguous roster aliases and conflicting evidence stay anonymous', async () => {
+  const document: StructuredTranscript = {
+    transcript: [
+      { start: 0, end: 3, speaker: 'SPEAKER_00', text: "I'm Alex." },
+      { start: 3, end: 6, speaker: 'SPEAKER_01', text: "I'm Ada." },
+    ],
+    speakers: [
+      { id: 'SPEAKER_00', label: 'SPEAKER_00' },
+      { id: 'SPEAKER_01', label: 'SPEAKER_01' },
+    ],
+  };
+  const labeled = await applySpeakerLabels(document, new EvidenceSpeakerLabeler(), {
+    attendees: [
+      { name: 'Alex Kim' },
+      { name: 'Alex Smith' },
+      { name: 'Ada Lovelace' },
+      { name: 'Grace Hopper' },
+    ],
+    screenshots: [],
+    activeSpeakers: [{ capturedAt: 4, name: 'Grace Hopper' }],
+  });
+
+  expect(labeled.speakers).toEqual(document.speakers);
+});
+
+test('speaker evidence JSON is normalized and validated', () => {
+  expect(parseSpeakerLabelingEvidence({
+    attendees: [{ name: ' Ada ', email: 'ada@example.com' }],
+    activeSpeakers: [{ capturedAt: 1.25, name: ' Ada ', source: 'meet' }],
+  })).toEqual({
+    attendees: [{ name: 'Ada', email: 'ada@example.com' }],
+    screenshots: [],
+    activeSpeakers: [{ capturedAt: 1.25, name: 'Ada', source: 'meet' }],
+  });
+  expect(() => parseSpeakerLabelingEvidence({
+    activeSpeakers: [{ capturedAt: -1, name: 'Ada' }],
+  })).toThrow('observation 0 is invalid');
 });
 
 test('provider-neutral enrichment seam adds optional structured insights', async () => {
