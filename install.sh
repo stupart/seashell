@@ -26,8 +26,25 @@ check_command "ffmpeg" "Install FFmpeg: brew install ffmpeg"
 check_command "ffprobe" "Install FFmpeg (includes ffprobe): brew install ffmpeg"
 check_command "cmake" "Install cmake: brew install cmake"
 check_command "git" "Install git: xcode-select --install"
+check_command "xcrun" "Install the Xcode Command Line Tools: xcode-select --install"
 
 echo "All dependencies found."
+echo ""
+
+# Build the native macOS 14.2+ system-audio helper used by live meeting capture.
+SYSTEM_AUDIO_SOURCE="native/macos-system-audio.swift"
+SYSTEM_AUDIO_BINARY="native/bin/seashell-system-audio"
+mkdir -p native/bin
+if [ ! -x "$SYSTEM_AUDIO_BINARY" ] || [ "$SYSTEM_AUDIO_SOURCE" -nt "$SYSTEM_AUDIO_BINARY" ]; then
+    echo "Building native system-audio capture helper..."
+    xcrun swiftc "$SYSTEM_AUDIO_SOURCE" -O \
+        -framework AVFoundation \
+        -framework AudioToolbox \
+        -framework CoreAudio \
+        -o "$SYSTEM_AUDIO_BINARY"
+fi
+
+echo "System-audio helper built successfully."
 echo ""
 
 # Clone and build whisper.cpp

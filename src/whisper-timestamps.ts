@@ -8,6 +8,10 @@ import {
   trackChildProcess,
   trackTempDirectory,
 } from './process-lifecycle.ts';
+import {
+  DEFAULT_VAD_MODEL_FILENAME,
+  DEFAULT_WHISPER_MODEL_FILENAME,
+} from './model-config.ts';
 import type { TimedTranscriptUnit } from './transcript-types.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -15,7 +19,8 @@ const __dirname = dirname(__filename);
 
 const PROJECT_ROOT = join(__dirname, '..');
 const WHISPER_CLI = join(PROJECT_ROOT, 'whisper.cpp/build/bin/whisper-cli');
-const MODEL_PATH = join(PROJECT_ROOT, 'models/ggml-large-v3-turbo-q5_0.bin');
+const MODEL_PATH = join(PROJECT_ROOT, 'models', DEFAULT_WHISPER_MODEL_FILENAME);
+const VAD_MODEL_PATH = join(PROJECT_ROOT, 'whisper.cpp/models', DEFAULT_VAD_MODEL_FILENAME);
 
 interface WhisperJsonToken {
   text?: unknown;
@@ -217,6 +222,7 @@ export async function transcribeWithTimestamps(
       const proc = spawn(WHISPER_CLI, [
         ...(disableGpu ? ['-ng'] : []),
         '-m', MODEL_PATH,
+        ...(existsSync(VAD_MODEL_PATH) ? ['-vm', VAD_MODEL_PATH, '--vad'] : []),
         '-f', filePath,
         '-l', 'en',
         '-t', '6',

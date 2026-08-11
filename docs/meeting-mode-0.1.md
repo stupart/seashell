@@ -2,11 +2,14 @@
 
 ## Product boundary
 
-Sea Shell owns capture, media preparation, ASR, diarization, stable transcript
-segments, the transcript library, exports, and the terminal experience. Humain
-owns model execution, route identity, policy, durable run evidence, usage, and
-cost provenance. The meeting controller is intentionally narrow and lives in
-Sea Shell until Humain's generic durable Loop and Workflow runtime exists.
+Humain owns reusable capture/transcription protocol semantics, capability
+discovery, model execution, route identity, policy, durable run evidence,
+usage, and cost provenance. Sea Shell implements the first local macOS capture
+and transcription provider and owns transcript presentation, library, exports,
+and terminal experience. Sea Shell keeps running independently; the
+implementation remains local until another consumer proves an extraction
+boundary. The meeting controller is intentionally narrow and lives in Sea Shell
+until Humain's generic durable Loop and Workflow runtime exists.
 
 The base transcript is always authoritative and independently usable. Meeting
 intelligence is a companion `meeting.json` manifest plus versioned overlays and
@@ -19,6 +22,12 @@ mark or calendar-associate transcript
   -> save canonical transcript
   -> initialize meeting cursor, overlap, run budget, and artifact manifest
 
+for every microphone or system-audio packet
+  -> map it onto the shared live-session clock
+  -> atomically commit an independently decodable WAV chunk
+  -> fsync an append-only journal event before live ASR
+  -> update independent source health and transcript projections
+
 while meeting is active and enough new segments exist
   -> freeze new segment range plus bounded overlap
   -> send approved context + compact provisional claims to a cheap observer
@@ -27,7 +36,10 @@ while meeting is active and enough new segments exist
   -> durably advance cursor
 
 when the meeting ends (hybrid/post-session)
-  -> freeze complete transcript
+  -> stop both sources and wait for committed work
+  -> assemble each durable track and run final ASR
+  -> reconcile playback echo and freeze the complete transcript
+  -> attach the raw capture bundle beside the transcript
   -> reconcile provisional claims with later corrections and complete context
   -> publish final overlay
   -> derive notes, decisions, actions, resources, and enriched exports
@@ -48,8 +60,16 @@ chat
   transcript.
 - Calendar suggestions are read-only and opt-in. `ask` is the default policy
   when the connector is enabled.
-- The TUI never silently chooses a model. Backend and exact model must be saved
-  with `seashell meeting setup` or provided to the CLI invocation.
+- The TUI never silently chooses a model. Sea Shell selects separate exact
+  observer, reconciliation, and chat routes from settings; Humain pins them in
+  compiled runs and receipts. A shared backend/model remains the fallback.
+- “Works with,” “detects,” and “integrates with” Google Meet are separate
+  capabilities. Local mic + system capture now satisfies the first beta
+  checkpoint; detection and participant/active-speaker integration remain
+  unimplemented.
+- Capture persistence is inference-independent: each source commits local audio
+  first, so a model crash cannot erase the already recorded session. `Q` saves
+  and attaches it; `G` additionally performs final-track ASR and enrichment.
 
 ## Failure and trust rules
 

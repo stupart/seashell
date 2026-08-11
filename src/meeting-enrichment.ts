@@ -30,7 +30,12 @@ interface HumainEnrichmentOutput {
 
 export interface MeetingEnrichmentOptions {
   mode?: MeetingEnrichmentMode;
-  route: HumainMeetingRoute;
+  /** Shared fallback retained for embedded clients built against meeting mode 0.1. */
+  route?: HumainMeetingRoute;
+  routes?: {
+    observer?: HumainMeetingRoute;
+    reconciliation?: HumainMeetingRoute;
+  };
   context?: unknown;
   minimumNewSegments?: number;
   maximumNewSegments?: number;
@@ -39,6 +44,15 @@ export interface MeetingEnrichmentOptions {
   onStatus?: (message: string) => void;
   /** Deterministic seam for tests and embedded hosts. */
   runner?: typeof runHumainMeeting;
+}
+
+function enrichmentRoute(
+  options: MeetingEnrichmentOptions,
+  role: 'observer' | 'reconciliation',
+): HumainMeetingRoute {
+  const route = options.routes?.[role] ?? options.route;
+  if (!route) throw new Error(`Meeting enrichment requires an exact ${role} route`);
+  return route;
 }
 
 function stableKey(parts: unknown[]): string {
@@ -153,6 +167,7 @@ export async function enrichMeeting(
 
   try {
     if (mode === 'streaming' || mode === 'hybrid') {
+      const observerRoute = enrichmentRoute(options, 'observer');
       artifact = { ...artifact, status: 'observing', mode };
       saveMeetingArtifact(libraryDir, artifact);
       let cursor = artifact.session.cursor;
@@ -177,14 +192,14 @@ export async function enrichMeeting(
           'observe',
           window.fromCursor,
           window.toCursor,
-          options.route,
+          observerRoute,
           approvedContext,
           artifact.provisionalClaims,
         ]);
         const runId = runSafeId(`meeting-${transcriptId}-observe-${window.fromCursor}-${window.toCursor}`);
         const result = await runner('observe', {
           meetingId: artifact.meetingId,
-          ...humainRouteRequest(options.route),
+          ...humainRouteRequest(observerRoute),
           segments: window.segments,
           priorClaims: artifact.provisionalClaims,
           context: approvedContext,
@@ -222,6 +237,7 @@ export async function enrichMeeting(
     }
 
     if (mode === 'post-session' || mode === 'hybrid') {
+      const reconciliationRoute = enrichmentRoute(options, 'reconciliation');
       artifact = { ...artifact, status: 'reconciling', mode };
       saveMeetingArtifact(libraryDir, artifact);
       options.onStatus?.('Reconciling complete meeting…');
@@ -234,13 +250,13 @@ export async function enrichMeeting(
         'reconcile',
         segments,
         artifact.provisionalClaims,
-        options.route,
+        reconciliationRoute,
         approvedContext,
       ]);
       const runId = runSafeId(`meeting-${transcriptId}-reconcile-${idempotencyKey.slice(0, 10)}`);
       const result = await runner('reconcile', {
         meetingId: artifact.meetingId,
-        ...humainRouteRequest(options.route),
+        ...humainRouteRequest(reconciliationRoute),
         segments,
         provisionalClaims: artifact.provisionalClaims,
         context: approvedContext,

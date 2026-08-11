@@ -93,6 +93,41 @@ describe('update CLI parsing', () => {
   });
 });
 
+describe('capability discovery CLI parsing', () => {
+  test('exposes a stable machine-readable capability surface', () => {
+    expect(parseCliArgs(['capabilities', '--json'])).toEqual({
+      kind: 'capabilities',
+      json: true,
+    });
+    expect(() => parseCliArgs(['capabilities', '--unknown']))
+      .toThrow('Unknown capabilities option');
+  });
+});
+
+describe('recoverable capture CLI parsing', () => {
+  test('lists, shows, and finalizes durable live sessions', () => {
+    expect(parseCliArgs(['capture', 'list', '--json'])).toEqual({
+      kind: 'capture', action: { kind: 'list' }, json: true,
+    });
+    expect(parseCliArgs(['capture', 'test', '--seconds', '8'])).toEqual({
+      kind: 'capture', action: { kind: 'test', seconds: 8 }, json: false,
+    });
+    expect(parseCliArgs(['capture', 'record', '--seconds', '60', '--json'])).toEqual({
+      kind: 'capture', action: { kind: 'record', seconds: 60 }, json: true,
+    });
+    expect(parseCliArgs(['capture', 'show', 'session-1'])).toEqual({
+      kind: 'capture', action: { kind: 'show', id: 'session-1' }, json: false,
+    });
+    expect(parseCliArgs(['capture', 'finalize', 'session-1', '--library-dir', '/tmp/library']))
+      .toEqual({
+        kind: 'capture',
+        action: { kind: 'finalize', id: 'session-1' },
+        libraryDir: '/tmp/library',
+        json: false,
+      });
+  });
+});
+
 describe('meeting CLI parsing', () => {
   test('parses meeting creation and exact enrichment routes', () => {
     expect(parseCliArgs([
@@ -162,6 +197,31 @@ describe('meeting CLI parsing', () => {
     });
     expect(() => parseCliArgs(['meeting', 'setup', '--backend', 'codex']))
       .toThrow('together');
+  });
+
+  test('parses independent observer, reconciliation, and chat routes', () => {
+    expect(parseCliArgs([
+      'meeting',
+      'setup',
+      '--observer-backend', 'openrouter',
+      '--observer-model', 'vendor/cheap',
+      '--reconciliation-backend', 'codex',
+      '--reconciliation-model', 'gpt-strong',
+      '--chat-backend', 'claude-code',
+      '--chat-model', 'claude-balanced',
+    ])).toMatchObject({
+      action: {
+        kind: 'setup',
+        routes: {
+          observer: { backend: 'openrouter', model: 'vendor/cheap' },
+          reconciliation: { backend: 'codex', model: 'gpt-strong' },
+          chat: { backend: 'claude-code', model: 'claude-balanced' },
+        },
+      },
+    });
+    expect(() => parseCliArgs([
+      'meeting', 'setup', '--observer-backend', 'openrouter',
+    ])).toThrow('--observer-backend and --observer-model together');
   });
 });
 

@@ -122,6 +122,67 @@ describe('meeting artifact bundle', () => {
       .toContain('decision-final');
   });
 
+  test('hybrid mode sends each product job to its selected exact route', async () => {
+    const { root, record } = fixture();
+    const calls: Array<{ action: string; backend?: string; model?: string }> = [];
+    await enrichMeeting(root, record.id, {
+      mode: 'hybrid',
+      routes: {
+        observer: { backend: 'openrouter', model: 'vendor/cheap' },
+        reconciliation: { backend: 'codex', model: 'gpt-strong' },
+      },
+      minimumNewSegments: 4,
+      runner: async (action, request) => {
+        const route = request as { backend?: string; model?: string };
+        calls.push({ action, backend: route.backend, model: route.model });
+        return {
+          runId: `${action}-route`,
+          compiledRunId: `${action}-compiled`,
+          status: 'succeeded',
+          output: { summary: 'Done.', claims: [] },
+          receipt: {},
+        };
+      },
+    });
+    expect(calls).toEqual([
+      { action: 'observe', backend: 'openrouter', model: 'vendor/cheap' },
+      { action: 'reconcile', backend: 'codex', model: 'gpt-strong' },
+    ]);
+  });
+
+  test('streaming and post-session modes require only the route they execute', async () => {
+    const streaming = fixture();
+    const streamingCalls: string[] = [];
+    await enrichMeeting(streaming.root, streaming.record.id, {
+      mode: 'streaming',
+      routes: { observer: { backend: 'openrouter', model: 'vendor/cheap' } },
+      minimumNewSegments: 4,
+      runner: async (action) => {
+        streamingCalls.push(action);
+        return {
+          runId: 'observe-only', compiledRunId: 'compiled-observe', status: 'succeeded',
+          output: { summary: 'Live only.', claims: [] }, receipt: {},
+        };
+      },
+    });
+    expect(streamingCalls).toEqual(['observe']);
+
+    const post = fixture();
+    const postCalls: string[] = [];
+    await enrichMeeting(post.root, post.record.id, {
+      mode: 'post-session',
+      routes: { reconciliation: { backend: 'codex', model: 'gpt-strong' } },
+      runner: async (action) => {
+        postCalls.push(action);
+        return {
+          runId: 'reconcile-only', compiledRunId: 'compiled-reconcile', status: 'succeeded',
+          output: { summary: 'Final only.', claims: [] }, receipt: {},
+        };
+      },
+    });
+    expect(postCalls).toEqual(['reconcile']);
+  });
+
   test('a successful retry clears failed session state and returns persisted metadata', async () => {
     const { root, record } = fixture();
     const route = { backend: 'openrouter' as const, model: 'test/cheap' };

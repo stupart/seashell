@@ -41,6 +41,11 @@ export type MeetingCommand = {
         mode?: MeetingEnrichmentMode;
         backend?: HumainBackend;
         model?: string;
+        routes?: {
+          observer?: { backend: HumainBackend; model: string };
+          reconciliation?: { backend: HumainBackend; model: string };
+          chat?: { backend: HumainBackend; model: string };
+        };
         calendarPolicy?: MeetingCapturePolicy;
       }
     | { kind: 'calendar' };
@@ -68,12 +73,26 @@ export interface LibraryCommand {
   libraryDir?: string;
 }
 
+export interface CaptureCommand {
+  kind: 'capture';
+  action:
+    | { kind: 'list' }
+    | { kind: 'show'; id: string }
+    | { kind: 'finalize'; id: string }
+    | { kind: 'test'; seconds: number }
+    | { kind: 'record'; seconds: number };
+  libraryDir?: string;
+  json: boolean;
+}
+
 export type CliCommand =
   | { kind: 'help' }
   | { kind: 'tui'; libraryDir?: string }
+  | { kind: 'capabilities'; json: boolean }
   | { kind: 'doctor'; json: boolean }
   | { kind: 'update'; check: boolean; json: boolean }
   | { kind: 'transcribe'; files: string[]; options: TranscribeCommandOptions }
+  | CaptureCommand
   | MeetingCommand
   | LibraryCommand;
 
@@ -337,6 +356,12 @@ function parseMeeting(args: string[]): MeetingCommand {
   let mode: MeetingEnrichmentMode | undefined;
   let backend: HumainBackend | undefined;
   let model: string | undefined;
+  let observerBackend: HumainBackend | undefined;
+  let observerModel: string | undefined;
+  let reconciliationBackend: HumainBackend | undefined;
+  let reconciliationModel: string | undefined;
+  let chatBackend: HumainBackend | undefined;
+  let chatModel: string | undefined;
   let calendarPolicy: MeetingCapturePolicy | undefined;
 
   for (let index = 2; index < args.length; index += 1) {
@@ -354,6 +379,12 @@ function parseMeeting(args: string[]): MeetingCommand {
       case '--mode': mode = meetingMode(next()); break;
       case '--backend': backend = meetingBackend(next()); break;
       case '--model': model = next(); break;
+      case '--observer-backend': observerBackend = meetingBackend(next()); break;
+      case '--observer-model': observerModel = next(); break;
+      case '--reconciliation-backend': reconciliationBackend = meetingBackend(next()); break;
+      case '--reconciliation-model': reconciliationModel = next(); break;
+      case '--chat-backend': chatBackend = meetingBackend(next()); break;
+      case '--chat-model': chatModel = next(); break;
       case '--calendar': {
         const value = next();
         if (value !== 'off' && value !== 'ask' && value !== 'selected-calendars' && value !== 'all') {
@@ -366,6 +397,13 @@ function parseMeeting(args: string[]): MeetingCommand {
         if (arg.startsWith('-')) throw new Error(`Unknown meeting option: ${arg}`);
         positional.push(arg);
     }
+  }
+
+  if (
+    (actionName === 'enrich' || actionName === 'chat') &&
+    (backend === undefined) !== (model === undefined)
+  ) {
+    throw new Error(`meeting ${actionName} requires --backend and --model together`);
   }
 
   let action: MeetingCommand['action'];
@@ -402,7 +440,27 @@ function parseMeeting(args: string[]): MeetingCommand {
       if ((backend === undefined) !== (model === undefined)) {
         throw new Error('meeting setup requires --backend and --model together');
       }
-      if (!backend && !model && !mode && !calendarPolicy) {
+      for (const [role, roleBackend, roleModel] of [
+        ['observer', observerBackend, observerModel],
+        ['reconciliation', reconciliationBackend, reconciliationModel],
+        ['chat', chatBackend, chatModel],
+      ] as const) {
+        if ((roleBackend === undefined) !== (roleModel === undefined)) {
+          throw new Error(`meeting setup requires --${role}-backend and --${role}-model together`);
+        }
+      }
+      const routes = {
+        ...(observerBackend && observerModel
+          ? { observer: { backend: observerBackend, model: observerModel } }
+          : {}),
+        ...(reconciliationBackend && reconciliationModel
+          ? { reconciliation: { backend: reconciliationBackend, model: reconciliationModel } }
+          : {}),
+        ...(chatBackend && chatModel
+          ? { chat: { backend: chatBackend, model: chatModel } }
+          : {}),
+      };
+      if (!backend && !model && Object.keys(routes).length === 0 && !mode && !calendarPolicy) {
         throw new Error('meeting setup requires a route, mode, or calendar policy');
       }
       action = {
@@ -410,6 +468,7 @@ function parseMeeting(args: string[]): MeetingCommand {
         ...(mode ? { mode } : {}),
         ...(backend ? { backend } : {}),
         ...(model ? { model } : {}),
+        ...(Object.keys(routes).length === 0 ? {} : { routes }),
         ...(calendarPolicy ? { calendarPolicy } : {}),
       };
       break;
@@ -433,16 +492,87 @@ function parseMeeting(args: string[]): MeetingCommand {
       throw new Error(`Unknown meeting action: ${actionName}`);
   }
   const validForAction = action.kind === 'create'
-    ? !backend && !model && !contextPath && !calendarPolicy
-    : action.kind === 'enrich'
-      ? !eventJsonPath && !calendarPolicy
+      ? !backend && !model && !contextPath && !calendarPolicy &&
+        !observerBackend && !observerModel && !reconciliationBackend && !reconciliationModel &&
+        !chatBackend && !chatModel
+      : action.kind === 'enrich'
+      ? !eventJsonPath && !calendarPolicy &&
+        !observerBackend && !observerModel && !reconciliationBackend && !reconciliationModel &&
+        !chatBackend && !chatModel
       : action.kind === 'chat'
-        ? !eventJsonPath && !contextPath && !mode && !calendarPolicy
+        ? !eventJsonPath && !contextPath && !mode && !calendarPolicy &&
+          !observerBackend && !observerModel && !reconciliationBackend && !reconciliationModel &&
+          !chatBackend && !chatModel
         : action.kind === 'setup'
           ? !eventJsonPath && !contextPath
-          : !eventJsonPath && !contextPath && !mode && !backend && !model && !calendarPolicy;
+          : !eventJsonPath && !contextPath && !mode && !backend && !model && !calendarPolicy &&
+            !observerBackend && !observerModel && !reconciliationBackend && !reconciliationModel &&
+            !chatBackend && !chatModel;
   if (!validForAction) throw new Error(`One or more options do not apply to meeting ${action.kind}`);
   return { kind: 'meeting', action, ...(libraryDir ? { libraryDir } : {}), json };
+}
+
+function parseCapture(args: string[]): CaptureCommand {
+  const actionName = args[1] ?? 'list';
+  const positional: string[] = [];
+  let libraryDir: string | undefined;
+  let json = false;
+  let seconds = 5;
+  let secondsProvided = false;
+  for (let index = 2; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === '--json') {
+      json = true;
+    } else if (arg === '--library-dir') {
+      const [value, consumedIndex] = takeValue(args, index, arg);
+      libraryDir = value;
+      index = consumedIndex;
+    } else if (arg === '--seconds') {
+      const [value, consumedIndex] = takeValue(args, index, arg);
+      seconds = positiveInteger(arg, value);
+      secondsProvided = true;
+      index = consumedIndex;
+    } else if (arg.startsWith('-')) {
+      throw new Error(`Unknown capture option: ${arg}`);
+    } else {
+      positional.push(arg);
+    }
+  }
+  if (actionName === 'list') {
+    if (positional.length > 0) throw new Error('capture list accepts no session ID');
+    if (secondsProvided) throw new Error('--seconds only applies to capture test or record');
+    return { kind: 'capture', action: { kind: 'list' }, ...(libraryDir ? { libraryDir } : {}), json };
+  }
+  if (actionName === 'test') {
+    if (positional.length > 0) throw new Error('capture test accepts no session ID');
+    if (seconds < 2 || seconds > 30) throw new Error('--seconds must be from 2 to 30');
+    return {
+      kind: 'capture', action: { kind: 'test', seconds },
+      ...(libraryDir ? { libraryDir } : {}), json,
+    };
+  }
+  if (actionName === 'record') {
+    if (positional.length > 0) throw new Error('capture record accepts no session ID');
+    if (!secondsProvided) throw new Error('capture record requires --seconds');
+    if (seconds < 2 || seconds > 14_400) throw new Error('--seconds must be from 2 to 14400');
+    return {
+      kind: 'capture', action: { kind: 'record', seconds },
+      ...(libraryDir ? { libraryDir } : {}), json,
+    };
+  }
+  if (actionName !== 'show' && actionName !== 'finalize') {
+    throw new Error(`Unknown capture action: ${actionName}`);
+  }
+  if (secondsProvided) throw new Error('--seconds only applies to capture test or record');
+  if (!positional[0] || positional.length !== 1) {
+    throw new Error(`capture ${actionName} requires one session ID`);
+  }
+  return {
+    kind: 'capture',
+    action: { kind: actionName, id: positional[0] },
+    ...(libraryDir ? { libraryDir } : {}),
+    json,
+  };
 }
 
 export function parseCliArgs(args: string[]): CliCommand {
@@ -462,11 +592,17 @@ export function parseCliArgs(args: string[]): CliCommand {
     if (unknown.length) throw new Error(`Unknown doctor option: ${unknown[0]}`);
     return { kind: 'doctor', json: args.includes('--json') };
   }
+  if (args[0] === 'capabilities') {
+    const unknown = args.slice(1).filter((arg) => arg !== '--json');
+    if (unknown.length) throw new Error(`Unknown capabilities option: ${unknown[0]}`);
+    return { kind: 'capabilities', json: args.includes('--json') };
+  }
   if (args[0] === 'update') {
     const unknown = args.slice(1).filter((arg) => arg !== '--check' && arg !== '--json');
     if (unknown.length) throw new Error(`Unknown update option: ${unknown[0]}`);
     return { kind: 'update', check: args.includes('--check'), json: args.includes('--json') };
   }
+  if (args[0] === 'capture') return parseCapture(args);
   if (args[0] === 'meeting') return parseMeeting(args);
   if (args[0] === 'library') return parseLibrary(args);
   return parseTranscribe(args, args[0] === 'transcribe');
@@ -479,8 +615,10 @@ Usage:
   seashell <file> ...                       Backward-compatible plain-text transcription
   seashell transcribe <file> [options]      Transcribe audio or video
   seashell library <action> [options]       Browse and manage saved transcripts
+  seashell capture <action> [options]       Inspect or finalize recoverable live capture
   seashell meeting <action> [options]       Create, enrich, browse, or chat with meetings
   seashell doctor [--json]                  Check dependencies and models
+  seashell capabilities [--json]            Describe optional engine capabilities
   seashell update [--check] [--json]        Safely update this Git checkout
 
 Transcription options:
@@ -501,7 +639,7 @@ Speaker options:
   --max-speakers <n>           Maximum speaker count
   --diarization-model <id>     Override the pyannote model
   --python <path>              Override the diarization Python executable
-  --speaker-evidence <json>    Roster + timestamped active-speaker evidence
+  --speaker-evidence <json>    External roster + timestamped active-speaker evidence
   --diarize                    Legacy alias for --speakers --format json
 
 Library actions:
@@ -513,9 +651,19 @@ Library actions:
   library open [id]
   library trash <id> --confirm
 
+Capture actions:
+  capture test [--seconds 5] [--json]       Prove mic + system signal, then discard test audio
+  capture record --seconds <n> [--json]     Run a bounded durable provider capture
+  capture list [--json]
+  capture show <session-id> [--json]
+  capture finalize <session-id> [--json]
+
 Meeting actions:
   meeting setup --backend <backend> --model <exact-model> [--mode <mode>]
                 [--calendar off|ask|selected-calendars|all]
+                [--observer-backend <backend> --observer-model <model>]
+                [--reconciliation-backend <backend> --reconciliation-model <model>]
+                [--chat-backend <backend> --chat-model <model>]
   meeting create <id> [--event-json <path>] [--mode streaming|post-session|hybrid]
   meeting enrich <id> [--mode <mode>] [--backend <backend>] [--model <exact-model>]
                       [--context <json>]

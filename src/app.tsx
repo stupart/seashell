@@ -8,7 +8,12 @@ import {
   readMacCalendarEvents,
   suggestCalendarMeeting,
 } from './calendar.ts';
-import { loadConfig, resolveLibraryDir, resolveSaveByDefault } from './config.ts';
+import {
+  loadConfig,
+  resolveLibraryDir,
+  resolveMeetingRoute,
+  resolveSaveByDefault,
+} from './config.ts';
 import {
   findTranscriptRecord,
   listTranscriptRecords,
@@ -38,6 +43,23 @@ import {
 import type { TranscriptFormat, TranscriptRecord } from './transcript-types.ts';
 import { transcribeMedia } from './transcription-service.ts';
 import {
+  startSystemAudioCapture,
+  type PcmSignalLevel,
+  type SystemAudioCaptureHandle,
+  type SystemAudioCaptureState,
+} from './live-system-audio.ts';
+import {
+  startMicrophoneCapture,
+  type MicrophoneCaptureHandle,
+} from './live-microphone.ts';
+import { CaptureSessionStore, listRecoverableCaptureSessions } from './capture-session.ts';
+import { finalizeCaptureTranscript } from './capture-finalizer.ts';
+import { reconcileLiveEcho } from './live-echo.ts';
+import {
+  DEFAULT_VAD_MODEL_FILENAME,
+  DEFAULT_WHISPER_MODEL_FILENAME,
+} from './model-config.ts';
+import {
   moveSelection,
   moveTranscriptScroll,
   formatTuiClock,
@@ -49,10 +71,8 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const PROJECT_ROOT = join(dirname(__filename), '..');
 const WHISPER_CLI = join(PROJECT_ROOT, 'whisper.cpp/build/bin/whisper-cli');
-const MODEL_PATH = join(PROJECT_ROOT, 'models/ggml-large-v3-turbo-q5_0.bin');
-const VAD_MODEL_PATH = join(PROJECT_ROOT, 'whisper.cpp/models/ggml-silero-v6.2.0.bin');
-const MAX_RECORDING_DURATION = 30_000;
-
+const MODEL_PATH = join(PROJECT_ROOT, 'models', DEFAULT_WHISPER_MODEL_FILENAME);
+const VAD_MODEL_PATH = join(PROJECT_ROOT, 'whisper.cpp/models', DEFAULT_VAD_MODEL_FILENAME);
 type ListenerState = 'listening' | 'recording';
 type View = 'live' | 'record';
 
@@ -98,15 +118,25 @@ function liveTitle(now = new Date()): string {
 }
 
 function createLiveRecord(): TranscriptRecord {
-  return createTranscriptRecord({ transcript: [], speakers: [] }, {
+  return createTranscriptRecord({
+    transcript: [],
+    speakers: [{ id: 'LOCAL', label: 'Microphone' }],
+  }, {
     title: liveTitle(),
-    source: { filename: 'Live microphone session' },
+    source: { filename: 'Live capture session' },
   });
 }
 
 function truncate(value: string, width: number): string {
   if (width <= 1) return value.slice(0, Math.max(0, width));
   return value.length <= width ? value : `${value.slice(0, width - 1)}…`;
+}
+
+function levelMeter(level: PcmSignalLevel | null, width = 8): string {
+  const dbfs = level?.rmsDbfs ?? Number.NEGATIVE_INFINITY;
+  const ratio = Number.isFinite(dbfs) ? Math.max(0, Math.min(1, (dbfs + 60) / 54)) : 0;
+  const active = Math.round(ratio * width);
+  return `${'▮'.repeat(active)}${'·'.repeat(width - active)}`;
 }
 
 function useTerminalSize(): { columns: number; rows: number } {
@@ -134,6 +164,8 @@ export default function App(props: { libraryDir?: string } = {}) {
   );
   const saveByDefault = useMemo(() => resolveSaveByDefault(config), [config]);
   const listenerDisabled = process.env.SEASHELL_DISABLE_LISTENER === '1';
+  const systemAudioDisabled = listenerDisabled ||
+    process.env.SEASHELL_DISABLE_SYSTEM_AUDIO === '1';
   const terminal = useTerminalSize();
   const layout = useMemo(
     () => tuiLayout(terminal.columns, terminal.rows),
@@ -141,6 +173,15 @@ export default function App(props: { libraryDir?: string } = {}) {
   );
 
   const [listenerState, setListenerState] = useState<ListenerState>('listening');
+  const [systemAudioState, setSystemAudioState] = useState<SystemAudioCaptureState>(
+    systemAudioDisabled ? 'unavailable' : 'starting',
+  );
+  const [microphoneState, setMicrophoneState] = useState<SystemAudioCaptureState>(
+    listenerDisabled ? 'unavailable' : 'starting',
+  );
+  const [microphoneLevel, setMicrophoneLevel] = useState<PcmSignalLevel | null>(null);
+  const [systemAudioLevel, setSystemAudioLevel] = useState<PcmSignalLevel | null>(null);
+  const [captureChunkCount, setCaptureChunkCount] = useState(0);
   const [transcribingCount, setTranscribingCount] = useState(0);
   const [paused, setPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -169,13 +210,14 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [confirmTrashId, setConfirmTrashId] = useState<string | null>(null);
   const [liveRecord, setLiveRecord] = useState<TranscriptRecord>(() => createLiveRecord());
 
-  const listenerProcess = useRef<ChildProcess | null>(null);
-  const fileCounter = useRef(0);
+  const microphoneCapture = useRef<MicrophoneCaptureHandle | null>(null);
+  const systemAudioCapture = useRef<SystemAudioCaptureHandle | null>(null);
+  const captureSessionStore = useRef<CaptureSessionStore | null>(null);
+  const liveTranscriptionProcesses = useRef<Set<ChildProcess>>(new Set());
+  const liveSessionGeneration = useRef(0);
   const isExiting = useRef(false);
+  const exitInProgress = useRef(false);
   const pausedRef = useRef(false);
-  const checkInterval = useRef<NodeJS.Timeout | null>(null);
-  const maxDurationTimeout = useRef<NodeJS.Timeout | null>(null);
-  const immediateStartRef = useRef(false);
   const liveRecordRef = useRef(liveRecord);
   const liveMeetingRef = useRef<MeetingArtifact | null>(null);
   const observerActiveRef = useRef(false);
@@ -187,6 +229,10 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   useEffect(() => {
     refreshLibrary();
+    const recoverable = listRecoverableCaptureSessions(libraryRoot);
+    if (recoverable.length > 0) {
+      setNotice(`${recoverable.length} recoverable live capture${recoverable.length === 1 ? '' : 's'} found · run seashell capture list`);
+    }
   }, [refreshLibrary]);
 
   const visibleEntries = useMemo(
@@ -195,23 +241,23 @@ export default function App(props: { libraryDir?: string } = {}) {
       : libraryEntries,
     [libraryEntries, libraryRoot, searchQuery],
   );
+  const liveCaptureLabel = systemAudioState === 'active'
+    ? 'mic + system'
+    : systemAudioState === 'starting'
+      ? 'mic + system starting'
+      : 'mic only';
   const navigationItems: NavigationItem[] = useMemo(() => [
-    { kind: 'live', label: '● Live transcription' },
+    { kind: 'live', label: `● Live transcription · ${liveCaptureLabel}` },
     ...visibleEntries.map((entry) => ({
       kind: 'record' as const,
       label: entry.kind === 'meeting' ? `M · ${entry.title}` : entry.title,
       entry,
     })),
-  ], [visibleEntries]);
+  ], [liveCaptureLabel, visibleEntries]);
 
   useEffect(() => {
     setSelectionIndex((current) => moveSelection(current, 0, navigationItems.length));
   }, [navigationItems.length]);
-
-  const getTempFile = useCallback(() => {
-    fileCounter.current += 1;
-    return `/tmp/seashell-live-${process.pid}-${fileCounter.current}.wav`;
-  }, []);
 
   const cleanupFile = useCallback((path: string) => {
     try {
@@ -221,11 +267,26 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   const appendLiveSegment = useCallback((segment: TranscriptRecord['transcript'][number]) => {
     const current = liveRecordRef.current;
+    const nextSpeakers = segment.speaker && !current.speakers.some(
+      (speaker) => speaker.id === segment.speaker,
+    )
+      ? [
+          ...current.speakers,
+          {
+            id: segment.speaker,
+            label: segment.speaker === 'LOCAL'
+              ? 'Microphone'
+              : segment.speaker === 'SYSTEM'
+                ? 'System audio'
+                : segment.speaker,
+          },
+        ]
+      : current.speakers;
     const next: TranscriptRecord = {
       ...current,
       updatedAt: new Date().toISOString(),
-      transcript: [...current.transcript, segment]
-        .toSorted((a, b) => a.start - b.start || a.end - b.end),
+      speakers: nextSpeakers,
+      transcript: [...reconcileLiveEcho(current.transcript, segment)],
     };
     liveRecordRef.current = next;
     setLiveRecord(next);
@@ -243,11 +304,14 @@ export default function App(props: { libraryDir?: string } = {}) {
     audioFile: string,
     start: number,
     end: number,
+    speaker: 'LOCAL' | 'SYSTEM',
+    sessionGeneration = liveSessionGeneration.current,
+    cleanupAfter = true,
   ) => {
     if (!existsSync(audioFile)) return;
     try {
       if (statSync(audioFile).size < 1000) {
-        cleanupFile(audioFile);
+        if (cleanupAfter) cleanupFile(audioFile);
         return;
       }
     } catch {
@@ -259,10 +323,10 @@ export default function App(props: { libraryDir?: string } = {}) {
     const finish = (text: string, failure?: string) => {
       if (finished) return;
       finished = true;
-      cleanupFile(audioFile);
+      if (cleanupAfter) cleanupFile(audioFile);
       setTranscribingCount((count) => Math.max(0, count - 1));
-      if (text) {
-        appendLiveSegment({ start, end: Math.max(start, end), text });
+      if (text && sessionGeneration === liveSessionGeneration.current) {
+        appendLiveSegment({ start, end: Math.max(start, end), text, speaker });
       } else if (failure) {
         setError(`Live transcription failed: ${failure}`);
       }
@@ -281,12 +345,18 @@ export default function App(props: { libraryDir?: string } = {}) {
         '-np',
         '-mc', '0',
       ], { stdio: ['ignore', 'pipe', 'pipe'] });
+      liveTranscriptionProcesses.current.add(process);
 
       let output = '';
       let stderr = '';
       process.stdout?.on('data', (data) => { output += data.toString(); });
       process.stderr?.on('data', (data) => { stderr = (stderr + data.toString()).slice(-2000); });
       process.on('close', (code, signal) => {
+        liveTranscriptionProcesses.current.delete(process);
+        if (isExiting.current) {
+          finish('');
+          return;
+        }
         if (!disableGpu && (Boolean(signal) || code === 139)) {
           setNotice('Metal unavailable; using CPU transcription fallback.');
           runAttempt(true);
@@ -296,117 +366,173 @@ export default function App(props: { libraryDir?: string } = {}) {
         const reason = signal ? `signal ${signal}` : stderr.trim().slice(-120) || `exit ${code}`;
         finish(text, code === 0 ? undefined : reason);
       });
-      process.on('error', (processError) => finish('', processError.message));
+      process.on('error', (processError) => {
+        liveTranscriptionProcesses.current.delete(process);
+        finish('', processError.message);
+      });
     };
 
     runAttempt(process.env.SEASHELL_DISABLE_GPU === '1');
   }, [appendLiveSegment, cleanupFile]);
 
+  const ensureCaptureStore = useCallback((generation: number) => {
+    if (generation !== liveSessionGeneration.current) return null;
+    if (
+      !captureSessionStore.current ||
+      captureSessionStore.current.manifest.sessionId !== liveRecordRef.current.id
+    ) {
+      captureSessionStore.current = new CaptureSessionStore({
+        libraryDir: libraryRoot,
+        sessionId: liveRecordRef.current.id,
+        startedAtUnixMs: liveSessionStartedAt.current,
+        createdAt: liveRecordRef.current.createdAt,
+      });
+      setCaptureChunkCount(captureSessionStore.current.manifest.chunks.length);
+    }
+    return captureSessionStore.current;
+  }, [libraryRoot]);
+
+  const persistLiveChunk = useCallback((options: {
+    path: string;
+    source: 'microphone' | 'system-audio';
+    startSeconds: number;
+    endSeconds: number;
+    audible: boolean;
+    generation: number;
+  }) => {
+    const store = ensureCaptureStore(options.generation);
+    if (!store) {
+      cleanupFile(options.path);
+      return null;
+    }
+    try {
+      const chunk = store.commitChunk({
+        sourcePath: options.path,
+        trackId: options.source,
+        startSeconds: options.startSeconds,
+        endSeconds: options.endSeconds,
+        audible: options.audible,
+      });
+      setCaptureChunkCount(store.manifest.chunks.length);
+      return chunk;
+    } catch (captureError) {
+      cleanupFile(options.path);
+      setError(`Could not preserve live audio: ${
+        captureError instanceof Error ? captureError.message : String(captureError)
+      }`);
+      return null;
+    }
+  }, [cleanupFile, ensureCaptureStore]);
+
+  const startSystemListener = useCallback(() => {
+    if (systemAudioDisabled || isExiting.current || pausedRef.current) return;
+    systemAudioCapture.current?.stop();
+    const generation = liveSessionGeneration.current;
+    const capture = startSystemAudioCapture({
+      sessionStartedAtUnixMs: liveSessionStartedAt.current,
+      onChunk: (chunk) => {
+        const committed = persistLiveChunk({ ...chunk, generation });
+        if (committed && chunk.audible) {
+          transcribeLiveChunk(
+            committed.path,
+            chunk.startSeconds,
+            chunk.endSeconds,
+            'SYSTEM',
+            generation,
+            false,
+          );
+        }
+      },
+      onLevel: setSystemAudioLevel,
+      onState: (update) => {
+        if (generation !== liveSessionGeneration.current) return;
+        setSystemAudioState(update.state);
+        if (update.state === 'unavailable' && update.message) {
+          setNotice(`System audio unavailable; continuing with microphone only. ${update.message}`);
+        }
+      },
+    });
+    systemAudioCapture.current = capture;
+  }, [persistLiveChunk, systemAudioDisabled, transcribeLiveChunk]);
+
   const startListener = useCallback(() => {
     if (listenerDisabled || isExiting.current || pausedRef.current) return;
-    if (listenerProcess.current) {
-      listenerProcess.current.kill('SIGTERM');
-      listenerProcess.current = null;
-    }
-    if (checkInterval.current) clearInterval(checkInterval.current);
-
-    const audioFile = getTempFile();
-    const immediate = immediateStartRef.current;
-    immediateStartRef.current = false;
-    let recordingStartedAt = immediate
-      ? (Date.now() - liveSessionStartedAt.current) / 1000
-      : undefined;
-    setListenerState(immediate ? 'recording' : 'listening');
-
-    const soxArgs = immediate
-      ? ['-d', '-r', '16000', '-c', '1', '-b', '16', audioFile,
-        'silence', '1', '0', '0%', '1', '2.0', '1.5%']
-      : ['-d', '-r', '16000', '-c', '1', '-b', '16', audioFile,
-        'silence', '1', '0.05', '1.5%', '1', '2.0', '1.5%'];
-    const process = spawn('sox', soxArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
-
-    checkInterval.current = setInterval(() => {
-      try {
-        if (existsSync(audioFile) && statSync(audioFile).size > 1000) {
-          if (recordingStartedAt === undefined) {
-            recordingStartedAt = (Date.now() - liveSessionStartedAt.current) / 1000;
-          }
-          setListenerState('recording');
-          if (!maxDurationTimeout.current) {
-            maxDurationTimeout.current = setTimeout(() => {
-              maxDurationTimeout.current = null;
-              if (listenerProcess.current && !pausedRef.current && !isExiting.current) {
-                immediateStartRef.current = true;
-                listenerProcess.current.kill('SIGTERM');
-              }
-            }, MAX_RECORDING_DURATION);
-          }
+    microphoneCapture.current?.stop();
+    const sessionGeneration = liveSessionGeneration.current;
+    const capture = startMicrophoneCapture({
+      sessionStartedAtUnixMs: liveSessionStartedAt.current,
+      onChunk: (chunk) => {
+        const committed = persistLiveChunk({ ...chunk, generation: sessionGeneration });
+        if (committed && chunk.audible) {
+          transcribeLiveChunk(
+            committed.path,
+            chunk.startSeconds,
+            chunk.endSeconds,
+            'LOCAL',
+            sessionGeneration,
+            false,
+          );
         }
-      } catch {}
-    }, 100);
-
-    process.on('error', (processError) => {
-      if (checkInterval.current) clearInterval(checkInterval.current);
-      if (maxDurationTimeout.current) clearTimeout(maxDurationTimeout.current);
-      checkInterval.current = null;
-      maxDurationTimeout.current = null;
-      listenerProcess.current = null;
-      setError(`Recording failed: ${processError.message}`);
-      if (!isExiting.current && !pausedRef.current) setTimeout(startListener, 1000);
+      },
+      onLevel: (level) => {
+        setMicrophoneLevel(level);
+        setListenerState(level.rmsDbfs >= -55 ? 'recording' : 'listening');
+      },
+      onState: (update) => {
+        if (sessionGeneration !== liveSessionGeneration.current) return;
+        setMicrophoneState(update.state);
+        if (update.state === 'unavailable' && update.message) {
+          setError(`Microphone unavailable: ${update.message}`);
+        }
+      },
     });
-
-    process.on('close', () => {
-      if (checkInterval.current) clearInterval(checkInterval.current);
-      if (maxDurationTimeout.current) clearTimeout(maxDurationTimeout.current);
-      checkInterval.current = null;
-      maxDurationTimeout.current = null;
-      listenerProcess.current = null;
-      if (isExiting.current) return;
-
-      let hasAudio = false;
-      try {
-        hasAudio = existsSync(audioFile) && statSync(audioFile).size > 1000;
-      } catch {}
-      if (hasAudio) {
-        const end = (Date.now() - liveSessionStartedAt.current) / 1000;
-        transcribeLiveChunk(audioFile, recordingStartedAt ?? Math.max(0, end - 0.1), end);
-      } else {
-        cleanupFile(audioFile);
-      }
-
-      if (!pausedRef.current) {
-        if (immediateStartRef.current || hasAudio) startListener();
-        else setTimeout(startListener, 100);
-      }
-    });
-    listenerProcess.current = process;
-  }, [cleanupFile, getTempFile, listenerDisabled, transcribeLiveChunk]);
+    microphoneCapture.current = capture;
+  }, [listenerDisabled, persistLiveChunk, transcribeLiveChunk]);
 
   useEffect(() => {
     if (listenerDisabled) return;
     startListener();
     return () => {
       isExiting.current = true;
-      if (checkInterval.current) clearInterval(checkInterval.current);
-      if (maxDurationTimeout.current) clearTimeout(maxDurationTimeout.current);
-      listenerProcess.current?.kill('SIGTERM');
+      microphoneCapture.current?.stop();
+      for (const process of liveTranscriptionProcesses.current) process.kill('SIGTERM');
+      liveTranscriptionProcesses.current.clear();
     };
   }, [listenerDisabled, startListener]);
+
+  useEffect(() => {
+    if (systemAudioDisabled) return;
+    startSystemListener();
+    return () => {
+      systemAudioCapture.current?.stop();
+      systemAudioCapture.current = null;
+    };
+  }, [startSystemListener, systemAudioDisabled]);
 
   const setListeningPaused = useCallback((nextPaused: boolean) => {
     pausedRef.current = nextPaused;
     setPaused(nextPaused);
     if (nextPaused) {
-      listenerProcess.current?.kill('SIGTERM');
-      if (checkInterval.current) clearInterval(checkInterval.current);
-      if (maxDurationTimeout.current) clearTimeout(maxDurationTimeout.current);
-      checkInterval.current = null;
-      maxDurationTimeout.current = null;
+      const captureHandles = [microphoneCapture.current, systemAudioCapture.current]
+        .filter((handle): handle is MicrophoneCaptureHandle | SystemAudioCaptureHandle => Boolean(handle));
+      microphoneCapture.current?.stop();
+      microphoneCapture.current = null;
       setListenerState('listening');
-    } else if (!listenerProcess.current) {
+      systemAudioCapture.current?.stop();
+      systemAudioCapture.current = null;
+      setMicrophoneState('stopped');
+      if (!systemAudioDisabled) setSystemAudioState('stopped');
+      void Promise.all(captureHandles.map((handle) => handle.done)).then(() => {
+        if (pausedRef.current) captureSessionStore.current?.setStatus('paused');
+      });
+    } else if (!microphoneCapture.current) {
+      captureSessionStore.current?.setStatus('recording');
       startListener();
+      startSystemListener();
+    } else if (!systemAudioCapture.current) {
+      startSystemListener();
     }
-  }, [startListener]);
+  }, [startListener, startSystemListener, systemAudioDisabled]);
 
   const importMedia = useCallback((filePath: string, withSpeakers: boolean) => {
     if (processing) return;
@@ -527,22 +653,11 @@ export default function App(props: { libraryDir?: string } = {}) {
     transcriptScroll + visibleRows,
   );
   const selectedSpeaker = currentRecord?.speakers[speakerSelection];
-  const configuredMeetingRoute = useMemo(() => {
-    if (!config.meeting?.backend || !config.meeting.model) return null;
-    return {
-      backend: config.meeting.backend,
-      model: config.meeting.model,
-      ...(config.meeting.maxOutputTokens === undefined
-        ? {}
-        : { maxOutputTokens: config.meeting.maxOutputTokens }),
-      ...(config.meeting.maxBudgetMicrousd === undefined
-        ? {}
-        : { maxBudgetMicrousd: config.meeting.maxBudgetMicrousd }),
-      ...(config.meeting.maxCostMicrousd === undefined
-        ? {}
-        : { maxCostMicrousd: config.meeting.maxCostMicrousd }),
-    };
-  }, [config.meeting]);
+  const configuredMeetingRoutes = useMemo(() => ({
+    observer: resolveMeetingRoute(config.meeting, 'observer'),
+    reconciliation: resolveMeetingRoute(config.meeting, 'reconciliation'),
+    chat: resolveMeetingRoute(config.meeting, 'chat'),
+  }), [config.meeting]);
 
   const commitMeetingState = useCallback((artifact: MeetingArtifact) => {
     if (view === 'live') {
@@ -576,45 +691,128 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
   }, [commitMeetingState, config.meeting, currentRecord, libraryRoot, refreshLibrary]);
 
-  const runCurrentMeetingEnrichment = useCallback(() => {
+  const completeCaptureSession = useCallback((reason: string) => {
+    const store = captureSessionStore.current;
+    if (!store) return;
+    try {
+      const current = liveRecordRef.current;
+      const duration = Math.max(0, ...store.manifest.chunks.map((chunk) => chunk.endMs)) / 1_000;
+      const record: TranscriptRecord = {
+        ...current,
+        updatedAt: new Date().toISOString(),
+        source: {
+          ...current.source,
+          duration,
+          format: 'capture-session/0.1',
+        },
+      };
+      liveRecordRef.current = record;
+      setLiveRecord(record);
+      if (saveByDefault || liveMeetingRef.current || record.transcript.length > 0) {
+        const saved = saveTranscriptRecord(libraryRoot, record);
+        store.setStatus('completed', reason);
+        store.attachTo(saved.directory);
+        refreshLibrary();
+      } else {
+        store.setStatus('interrupted', 'capture-retained-without-published-transcript');
+      }
+    } catch (captureError) {
+      try { store.setStatus('interrupted', 'finalization-failed'); } catch {}
+      setError(`Capture remains recoverable: ${
+        captureError instanceof Error ? captureError.message : String(captureError)
+      }`);
+    } finally {
+      captureSessionStore.current = null;
+      setCaptureChunkCount(0);
+    }
+  }, [libraryRoot, refreshLibrary, saveByDefault]);
+
+  const runCurrentMeetingEnrichment = useCallback((finishLive = false) => {
     if (!currentRecord || !currentMeeting || processing) return;
     if (observerActiveRef.current) {
       setNotice('The live meeting observer is finishing its current window. Try again in a moment.');
       return;
     }
-    if (!configuredMeetingRoute) {
-      setError('Configure meeting.backend and meeting.model before running meeting intelligence.');
+    const mode = config.meeting?.mode ?? currentMeeting.mode;
+    const missingObserver = mode !== 'post-session' && !configuredMeetingRoutes.observer;
+    const missingReconciliation = mode !== 'streaming' && !configuredMeetingRoutes.reconciliation;
+    if ((missingObserver || missingReconciliation) && !finishLive) {
+      setError(`Configure the ${missingObserver ? 'observer' : 'reconciliation'} route before running ${mode} meeting intelligence.`);
       return;
     }
     const wasListening = view === 'live' && !pausedRef.current;
+    const captureHandles = [microphoneCapture.current, systemAudioCapture.current]
+      .filter((handle): handle is MicrophoneCaptureHandle | SystemAudioCaptureHandle => Boolean(handle));
     if (wasListening) setListeningPaused(true);
-    saveTranscriptRecord(libraryRoot, currentRecord);
     setError(null);
-    setProcessing({ label: 'Preparing meeting enrichment…' });
-    void enrichMeeting(libraryRoot, currentRecord.id, {
-      route: configuredMeetingRoute,
-      mode: config.meeting?.mode ?? currentMeeting.mode,
-      minimumNewSegments: config.meeting?.observerMinSegments,
-      maximumNewSegments: config.meeting?.observerMaxSegments,
-      maxObserverRuns: config.meeting?.maxObserverRuns,
-      onStatus: (label) => setProcessing({ label }),
-    }).then((artifact) => {
-      commitMeetingState(artifact);
-      refreshLibrary();
-      setMeetingView('notes');
-      setNotice('Meeting notes and analysis are ready.');
-    }).catch((meetingError) => {
-      setError(meetingError instanceof Error ? meetingError.message : String(meetingError));
-      const failed = loadMeetingArtifact(libraryRoot, currentRecord.id);
-      if (failed) commitMeetingState(failed);
-    }).finally(() => {
-      setProcessing(null);
-      if (wasListening) setListeningPaused(false);
-    });
+    setProcessing({ label: finishLive ? 'Finishing capture…' : 'Preparing meeting enrichment…' });
+    void (async () => {
+      try {
+        if (finishLive) {
+          await Promise.all(captureHandles.map((handle) => handle.done));
+          const deadline = Date.now() + 10 * 60_000;
+          while (liveTranscriptionProcesses.current.size > 0) {
+            if (Date.now() > deadline) throw new Error('Timed out waiting for live transcription');
+            setProcessing({
+              label: `Finishing ${liveTranscriptionProcesses.current.size} live transcription job${
+                liveTranscriptionProcesses.current.size === 1 ? '' : 's'
+              }…`,
+            });
+            await new Promise((resolve) => setTimeout(resolve, 200));
+          }
+          const store = captureSessionStore.current;
+          if (store?.manifest.chunks.length) {
+            const finalized = await finalizeCaptureTranscript(store.manifestPath, {
+              title: liveRecordRef.current.title,
+              onStatus: (label) => setProcessing({ label }),
+            });
+            liveRecordRef.current = finalized;
+            setLiveRecord(finalized);
+          }
+          completeCaptureSession('meeting-finished');
+        }
+        const record = view === 'live' ? liveRecordRef.current : currentRecord;
+        saveTranscriptRecord(libraryRoot, record);
+        if (missingObserver || missingReconciliation) {
+          refreshLibrary();
+          setNotice('Meeting capture and final transcript are saved. Configure Humain later for notes and analysis.');
+          return;
+        }
+        const artifact = await enrichMeeting(libraryRoot, record.id, {
+          routes: {
+            ...(configuredMeetingRoutes.observer === undefined
+              ? {}
+              : { observer: configuredMeetingRoutes.observer }),
+            ...(configuredMeetingRoutes.reconciliation === undefined
+              ? {}
+              : { reconciliation: configuredMeetingRoutes.reconciliation }),
+          },
+          mode,
+          minimumNewSegments: config.meeting?.observerMinSegments,
+          maximumNewSegments: config.meeting?.observerMaxSegments,
+          maxObserverRuns: config.meeting?.maxObserverRuns,
+          onStatus: (label) => setProcessing({ label }),
+        });
+        commitMeetingState(artifact);
+        refreshLibrary();
+        setMeetingView('notes');
+        setNotice(finishLive
+          ? 'Meeting capture, final transcript, notes, and analysis are ready.'
+          : 'Meeting notes and analysis are ready.');
+      } catch (meetingError) {
+        setError(meetingError instanceof Error ? meetingError.message : String(meetingError));
+        const failed = loadMeetingArtifact(libraryRoot, currentRecord.id);
+        if (failed) commitMeetingState(failed);
+      } finally {
+        setProcessing(null);
+        if (wasListening && !finishLive) setListeningPaused(false);
+      }
+    })();
   }, [
     commitMeetingState,
     config.meeting,
-    configuredMeetingRoute,
+    configuredMeetingRoutes,
+    completeCaptureSession,
     currentMeeting,
     currentRecord,
     libraryRoot,
@@ -625,14 +823,14 @@ export default function App(props: { libraryDir?: string } = {}) {
   ]);
 
   const submitMeetingQuestion = useCallback((question: string) => {
-    if (!currentRecord || !currentMeeting || !configuredMeetingRoute || processing) return;
+    if (!currentRecord || !currentMeeting || !configuredMeetingRoutes.chat || processing) return;
     setProcessing({ label: 'Reading the meeting…' });
     setError(null);
     void chatWithMeeting(
       libraryRoot,
       currentRecord.id,
       question,
-      configuredMeetingRoute,
+      configuredMeetingRoutes.chat,
       (label) => setProcessing({ label }),
     ).then((artifact) => {
       commitMeetingState(artifact);
@@ -642,7 +840,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     }).finally(() => setProcessing(null));
   }, [
     commitMeetingState,
-    configuredMeetingRoute,
+    configuredMeetingRoutes,
     currentMeeting,
     currentRecord,
     libraryRoot,
@@ -696,7 +894,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     if (
       view !== 'live' ||
       !liveMeeting ||
-      !configuredMeetingRoute ||
+      !configuredMeetingRoutes.observer ||
       observerActiveRef.current ||
       liveMeeting.status === 'failed' ||
       liveMeeting.session.observerRunIds.length >= liveMeeting.session.maxObserverRuns ||
@@ -707,7 +905,9 @@ export default function App(props: { libraryDir?: string } = {}) {
     observerActiveRef.current = true;
     saveTranscriptRecord(libraryRoot, liveRecord);
     void enrichMeeting(libraryRoot, liveRecord.id, {
-      route: configuredMeetingRoute,
+      routes: {
+        observer: configuredMeetingRoutes.observer,
+      },
       mode: 'streaming',
       minimumNewSegments: minimum,
       maximumNewSegments: config.meeting?.observerMaxSegments,
@@ -735,7 +935,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     });
   }, [
     config.meeting,
-    configuredMeetingRoute,
+    configuredMeetingRoutes,
     libraryRoot,
     liveMeeting,
     liveRecord,
@@ -799,6 +999,13 @@ export default function App(props: { libraryDir?: string } = {}) {
   }, [currentRecord, libraryRoot]);
 
   const resetLiveSession = useCallback(() => {
+    const resumeCapture = !pausedRef.current;
+    microphoneCapture.current?.stop();
+    microphoneCapture.current = null;
+    systemAudioCapture.current?.stop();
+    systemAudioCapture.current = null;
+    completeCaptureSession('new-live-session');
+    liveSessionGeneration.current += 1;
     const next = createLiveRecord();
     liveRecordRef.current = next;
     liveSessionStartedAt.current = Date.now();
@@ -808,7 +1015,50 @@ export default function App(props: { libraryDir?: string } = {}) {
     setMeetingView('transcript');
     setTranscriptScroll(0);
     setNotice('Started a fresh live transcript.');
-  }, []);
+    setMicrophoneLevel(null);
+    setSystemAudioLevel(null);
+    if (resumeCapture) {
+      setTimeout(startListener, 0);
+      setTimeout(startSystemListener, 0);
+    }
+  }, [completeCaptureSession, startListener, startSystemListener]);
+
+  const gracefulExit = useCallback(() => {
+    if (exitInProgress.current) return;
+    exitInProgress.current = true;
+    pausedRef.current = true;
+    setPaused(true);
+    setProcessing({ label: 'Finishing live transcript…' });
+    const captureHandles = [microphoneCapture.current, systemAudioCapture.current]
+      .filter((handle): handle is MicrophoneCaptureHandle | SystemAudioCaptureHandle => Boolean(handle));
+    microphoneCapture.current?.stop();
+    systemAudioCapture.current?.stop();
+    microphoneCapture.current = null;
+    systemAudioCapture.current = null;
+    void (async () => {
+      try {
+        await Promise.all(captureHandles.map((handle) => handle.done));
+        const deadline = Date.now() + 10 * 60_000;
+        while (liveTranscriptionProcesses.current.size > 0) {
+          if (Date.now() > deadline) throw new Error('Timed out waiting for live transcription');
+          setProcessing({
+            label: `Finishing ${liveTranscriptionProcesses.current.size} transcription job${
+              liveTranscriptionProcesses.current.size === 1 ? '' : 's'
+            }…`,
+          });
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        completeCaptureSession('application-exit');
+      } catch {
+        try { captureSessionStore.current?.setStatus('interrupted', 'graceful-exit-failed'); } catch {}
+      } finally {
+        isExiting.current = true;
+        for (const process of liveTranscriptionProcesses.current) process.kill('SIGTERM');
+        liveTranscriptionProcesses.current.clear();
+        exit();
+      }
+    })();
+  }, [completeCaptureSession, exit]);
 
   useInput((input, key) => {
     if (chatInputState) {
@@ -926,9 +1176,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       if (input === '?' || key.escape) {
         setHelpMode(false);
       } else if (input === 'q') {
-        isExiting.current = true;
-        listenerProcess.current?.kill('SIGTERM');
-        exit();
+        gracefulExit();
       }
       return;
     }
@@ -948,9 +1196,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
     if (key.escape || input === 'q') {
-      isExiting.current = true;
-      listenerProcess.current?.kill('SIGTERM');
-      exit();
+      gracefulExit();
       return;
     }
     if (key.tab || input === '\t' || input === 'h') {
@@ -979,12 +1225,12 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
     if (input === 'g' && currentMeeting) {
-      runCurrentMeetingEnrichment();
+      runCurrentMeetingEnrichment(view === 'live');
       return;
     }
     if (input === 'a' && currentMeeting) {
-      if (!configuredMeetingRoute) {
-        setError('Configure meeting.backend and meeting.model before using meeting chat.');
+      if (!configuredMeetingRoutes.chat) {
+        setError('Configure the meeting chat route before using meeting chat.');
       } else {
         setMeetingView('chat');
         setChatInputState({ input: '' });
@@ -1230,7 +1476,9 @@ export default function App(props: { libraryDir?: string } = {}) {
           ))}
         </Box>
       ) : visibleSegments.length === 0 ? (
-        <Text dimColor>{view === 'live' ? 'Start speaking - always listening' : 'No transcript text'}</Text>
+        <Text dimColor>{view === 'live'
+          ? `Play or speak to transcribe locally · ${liveCaptureLabel}`
+          : 'No transcript text'}</Text>
       ) : plainTranscript ? (
         <Text wrap="wrap">{plainTranscript}</Text>
       ) : (
@@ -1296,7 +1544,13 @@ export default function App(props: { libraryDir?: string } = {}) {
         ) : (
           <Text>
             <Text color={listenerState === 'recording' ? 'red' : 'green'}>
-              {listenerState === 'recording' ? '● Recording' : '◉ Listening'}
+              {systemAudioState === 'active'
+                ? '◉ Capturing · mic + system'
+                : systemAudioState === 'starting'
+                  ? '◌ Listening · system audio starting'
+                  : listenerState === 'recording'
+                    ? '● Recording · mic only'
+                    : '◉ Listening · mic only'}
             </Text>
             {transcribingCount > 0 && (
               <Text color="yellow">
@@ -1306,6 +1560,20 @@ export default function App(props: { libraryDir?: string } = {}) {
           </Text>
         )}
       </Box>
+
+      {view === 'live' && !paused && (
+        <Box marginBottom={1} flexShrink={0}>
+          <Text dimColor>Mic </Text>
+          <Text color={microphoneState === 'active' ? 'green' : 'yellow'}>
+            {levelMeter(microphoneLevel)}
+          </Text>
+          <Text dimColor>  System </Text>
+          <Text color={systemAudioState === 'active' ? 'cyan' : 'yellow'}>
+            {levelMeter(systemAudioLevel)}
+          </Text>
+          <Text dimColor>{`  ${captureChunkCount} safe chunks`}</Text>
+        </Box>
+      )}
 
       {currentMeeting && !drawerOnly && (
         <Box marginBottom={1} flexShrink={0}>

@@ -1,7 +1,8 @@
 # Sea Shell
 
-Local-first speech-to-text for audio, video, live microphone sessions, speaker
-diarization, subtitles, and a durable transcript library on macOS.
+Local-first speech-to-text for audio, video, live microphone + system-audio
+sessions, speaker diarization, subtitles, and a durable transcript library on
+macOS.
 
 Sea Shell uses [whisper.cpp](https://github.com/ggerganov/whisper.cpp) with
 Metal acceleration. File and live transcription stay on your machine. Optional
@@ -28,10 +29,16 @@ download; inference remains local afterward.
 - Keeps the terminal UI transcript-first, with an on-demand history drawer for
   saved recordings, search, speaker labels, timestamps, and exports.
 - Keeps command output clean for shell pipelines and AI agents.
+- Advertises its local batch transcription through a versioned capability
+  manifest so an installed Humain engine can discover and invoke it without
+  making either product depend on the other.
+- Captures microphone and macOS system audio concurrently for live calls,
+  labels the sources separately, skips silent chunks, and suppresses strong
+  time-overlapping speaker-playback duplicates from the microphone transcript.
 
 ## Requirements
 
-- macOS; Apple Silicon is recommended
+- macOS; Apple Silicon is recommended. Live system audio requires macOS 14.2+
 - [Bun](https://bun.sh)
 - FFmpeg and ffprobe for media inspection and audio extraction
 - SoX for live microphone capture
@@ -115,8 +122,41 @@ seashell meeting show <transcript-id>
 seashell meeting chat <transcript-id> "What did we decide?"
 ```
 
+Inspect what Sea Shell can contribute to Humain or another compatible host:
+
+```bash
+seashell capabilities --json
+```
+
 Progress and save locations are written to stderr. Transcript content is the
 only data written to stdout, so piping remains reliable.
+
+### Google Meet today
+
+Sea Shell now works with Google Meet in local live-capture mode: the TUI records
+the microphone and macOS system output concurrently, transcribes both, and
+shows `Microphone` and `System audio` on one session timeline. It was verified
+end to end by playing known speech through macOS output and recovering it from
+the native system track in the live TUI.
+
+This is capture support, not a Google Meet account integration. Sea Shell does
+not yet detect an active Meet, read its participant list, or consume its
+active-speaker state. Those remain separate opt-in evidence adapters. Live mic
+and system chunks are atomically committed as separate local tracks before
+inference, with an append-only journal and recoverable manifest. Use headphones
+when possible, and review the transcript when laptop-speaker echo or people in
+the same physical room make source attribution ambiguous.
+
+Before the meeting, prove both inputs with a disposable five-second check while
+speaking and playing computer audio:
+
+```bash
+seashell capture test --seconds 5
+```
+
+The test reports microphone and system signal independently and deletes only
+its own test recording. During capture, the footer shows both meters and the
+number of safely committed chunks.
 
 ## Terminal UI
 
@@ -139,12 +179,12 @@ until it is closed.
 | `Esc` | Close history, a prompt, or help; otherwise quit |
 | `/` | Open history and search saved titles, source names, speaker names, and transcript text |
 | `L` | Return to live transcription |
-| `Space` | Pause/resume live microphone capture |
+| `Space` | Pause/resume live microphone + system-audio capture |
 | `F` | Import audio or video |
 | `Shift+F` | Import and run speaker diarization |
 | `M` | Mark the current transcript as a meeting; attach a pending calendar suggestion |
 | `1`–`4` | Open meeting Notes, Transcript, Analysis, or Chat |
-| `G` | Run/finalize the configured meeting enrichment workflow |
+| `G` | Finish a live meeting: stop capture, run final ASR, save raw tracks, then run configured enrichment |
 | `A` | Ask an evidence-cited question about the current meeting |
 | `T` | Toggle timestamp presentation |
 | `S` | Toggle speaker presentation |
@@ -161,8 +201,8 @@ until it is closed.
 The main shortcut row stays intentionally small; press `?` for the complete key
 map.
 
-Drag-and-drop also accepts absolute audio or video paths. The microphone pauses
-while an import runs and resumes afterward.
+Drag-and-drop also accepts absolute audio or video paths. Live microphone and
+system capture pause while an import runs and resume afterward.
 
 ## Transcript library
 
@@ -215,8 +255,10 @@ transcript creates `meeting.json` beside the authoritative `transcript.json`.
 The normal Sea Shell screen remains unchanged for ordinary recordings. Meeting
 tabs appear only when the selected history item has a meeting artifact.
 
-Configure one exact Humain route. This stores model selection and workflow
-preferences, never an API key:
+Sea Shell chooses the model route for each product job; Humain pins and executes
+that exact instruction. A shared route remains the simplest setup and is used
+for observer, reconciliation, and chat unless a role-specific route overrides
+it. Settings store model selection and workflow preferences, never an API key:
 
 ```bash
 # ChatGPT subscription through the local Codex harness
@@ -231,12 +273,49 @@ seashell meeting setup \
   --backend openrouter \
   --model <callable-openrouter-model-id> \
   --mode hybrid
+
+# Or use a cheap observer and stronger final/chat models
+seashell meeting setup \
+  --observer-backend openrouter \
+  --observer-model <cheap-fast-model> \
+  --reconciliation-backend codex \
+  --reconciliation-model <strong-exact-model> \
+  --chat-backend codex \
+  --chat-model <balanced-exact-model> \
+  --mode hybrid
 ```
 
 Humain must be installed as `humain`, or `HUMAIN_CLI` can point to its built
 `dist/cli.js`. Codex and Claude Code routes use Humain's verified subscription
 adapters. OpenRouter uses the API key configured in Humain and keeps exact
 model, token, and cost provenance in its private run store.
+
+Humain is optional in both directions. Sea Shell without Humain still records,
+transcribes, diarizes, saves, and exports locally. Humain without Sea Shell
+continues to run its other capabilities. When both are installed,
+`humain setup` discovers `transcription.seashell.local`, and Humain users can
+run local audio/video transcription through the engine's SDK or CLI.
+
+### Google Meet status
+
+The current build imports Meet recordings and captures live microphone plus
+macOS system audio. It does not detect an active Google Meet or read Meet
+participant/active-speaker state.
+
+The planned stages are deliberately separate:
+
+- **Works with Meet:** shipped as local mic/system capture on one durable
+  session clock, with independently recoverable raw tracks and a full-track
+  final transcription pass.
+- **Detects Meet:** process/audio/calendar signals suggest recording and require
+  consent; they never start recording silently.
+- **Integrates with Meet:** an optional browser adapter contributes timestamped
+  participant/active-speaker evidence. It is fallible enrichment, not a capture
+  dependency.
+
+Calendar attendees, deterministic mic=`You`, diarization clusters,
+self-identification, corrections, and optional voice profiles provide identity
+evidence. Weak or conflicting evidence keeps the stable anonymous speaker ID.
 
 The three enrichment modes share one artifact contract:
 
@@ -251,6 +330,25 @@ Every model claim must cite stable transcript segment IDs. Invalid citations
 are rejected. Observer runs are bounded by a durable cursor and maximum run
 count, so a growing transcript is not resent in full on every iteration.
 Failures leave the base transcript and exports intact.
+
+### Interrupted-capture recovery
+
+Every live chunk is committed before transcription. A crash or forced quit can
+therefore lose only an uncommitted in-memory buffer, not the already recorded
+meeting. On the next launch Sea Shell reports recoverable sessions. Inspect and
+finalize one with:
+
+```bash
+seashell capture list
+seashell capture show <session-id> --json
+seashell capture finalize <session-id>
+```
+
+Normal `Q` saves the current transcript and attaches the raw-track bundle. For
+a meeting, press `M` near the beginning and `G` at the end; `G` stops both
+inputs, waits for queued work, rebuilds the transcript from the complete tracks,
+attaches the raw bundle, and then asks Humain for notes and analysis. If Humain
+is missing or unconfigured, the capture and final transcript still save.
 
 The full artifact bundle is readable without Sea Shell:
 
@@ -377,6 +475,12 @@ Later runs use the Hugging Face cache. `HF_HUB_OFFLINE=1` enforces cached-only
 operation, and `PYANNOTE_METRICS_ENABLED=0` disables pyannote telemetry. The
 experimental `SEASHELL_DIARIZATION_DEVICE=mps` setting requests MPS; CPU is the
 documented macOS default.
+
+When this local capability is ready, the live-meeting finalizer automatically
+separates the completed system-audio track into stable `REMOTE_*` speaker
+clusters. Without it, tomorrow-safe capture still uses the honest source labels
+`Microphone` and `System audio`; recording, timestamps, recovery, and Humain
+notes do not depend on pyannote.
 
 Speaker count hints remain available:
 
@@ -505,7 +609,8 @@ seashell meeting show <id> --json
 
 ## Privacy
 
-- Audio, video, transcripts, and speaker inference stay local.
+- Audio, video, durable live-capture chunks, transcripts, and speaker
+  inference stay local.
 - Roster and active-speaker evidence stays local in the built-in identity pass.
 - Meeting enrichment sends only the selected transcript and explicitly supplied
   context to the configured Humain route. Codex/Claude Code subscription and
@@ -538,6 +643,10 @@ seashell doctor
   packages, accept the model terms, and provide `HF_TOKEN` for the first run.
 - **Aggregate channel mismatch:** verify the channel count and physical routing
   before using `--channel-roles`.
+- **System audio unavailable:** run `seashell doctor`; allow your terminal or
+  Sea Shell in System Settings → Privacy & Security → Screen & System Audio
+  Recording, then fully reopen the app. Set `SEASHELL_DISABLE_SYSTEM_AUDIO=1`
+  for an explicit microphone-only session.
 - **Malformed config:** validate the JSON at the config path printed above.
 
 ## Development

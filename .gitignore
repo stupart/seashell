@@ -18,6 +18,7 @@ temp/
 # output
 out
 dist
+native/bin/
 *.tgz
 
 # code coverage

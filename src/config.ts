@@ -10,7 +10,7 @@ import {
 import { homedir } from 'os';
 import { dirname, isAbsolute, join, resolve } from 'path';
 import type { MeetingCapturePolicy } from './calendar.ts';
-import type { HumainBackend } from './humain-client.ts';
+import type { HumainBackend, HumainMeetingRoute } from './humain-client.ts';
 import type { MeetingEnrichmentMode } from './meeting-artifact.ts';
 
 export interface SeashellMeetingConfig {
@@ -23,11 +23,47 @@ export interface SeashellMeetingConfig {
   observerMinSegments?: number;
   observerMaxSegments?: number;
   maxObserverRuns?: number;
+  /** Per-job model routes. Legacy backend/model remain the shared fallback. */
+  routes?: {
+    observer?: HumainMeetingRoute;
+    reconciliation?: HumainMeetingRoute;
+    chat?: HumainMeetingRoute;
+  };
   calendar?: {
     enabled?: boolean;
     policy?: MeetingCapturePolicy;
     selectedCalendars?: string[];
     leadMinutes?: number;
+  };
+}
+
+export type MeetingRouteRole = 'observer' | 'reconciliation' | 'chat';
+
+function parseRoute(value: unknown, label: string): HumainMeetingRoute | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`Sea Shell config ${label} must be an object`);
+  }
+  const route = value as Record<string, unknown>;
+  const backends: HumainBackend[] = ['codex', 'claude-code', 'openrouter'];
+  if (!backends.includes(route.backend as HumainBackend)) {
+    throw new Error(`Sea Shell config ${label}.backend is invalid`);
+  }
+  if (typeof route.model !== 'string' || !route.model.trim()) {
+    throw new Error(`Sea Shell config ${label}.model must be a non-empty string`);
+  }
+  return {
+    backend: route.backend as HumainBackend,
+    model: route.model.trim(),
+    ...(optionalPositiveInteger(route.maxOutputTokens, `${label}.maxOutputTokens`) === undefined
+      ? {}
+      : { maxOutputTokens: route.maxOutputTokens as number }),
+    ...(optionalPositiveInteger(route.maxBudgetMicrousd, `${label}.maxBudgetMicrousd`) === undefined
+      ? {}
+      : { maxBudgetMicrousd: route.maxBudgetMicrousd as number }),
+    ...(optionalPositiveInteger(route.maxCostMicrousd, `${label}.maxCostMicrousd`) === undefined
+      ? {}
+      : { maxCostMicrousd: route.maxCostMicrousd as number }),
   };
 }
 
@@ -63,6 +99,25 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
     throw new Error('Sea Shell config meeting.model must be a non-empty string');
   }
   let calendar: SeashellMeetingConfig['calendar'];
+  let routes: SeashellMeetingConfig['routes'];
+  if (meeting.routes !== undefined) {
+    if (!meeting.routes || typeof meeting.routes !== 'object' || Array.isArray(meeting.routes)) {
+      throw new Error('Sea Shell config meeting.routes must be an object');
+    }
+    const candidate = meeting.routes as Record<string, unknown>;
+    const unknown = Object.keys(candidate).find(
+      (key) => key !== 'observer' && key !== 'reconciliation' && key !== 'chat',
+    );
+    if (unknown) throw new Error(`Sea Shell config meeting.routes.${unknown} is not supported`);
+    const observer = parseRoute(candidate.observer, 'meeting.routes.observer');
+    const reconciliation = parseRoute(candidate.reconciliation, 'meeting.routes.reconciliation');
+    const chat = parseRoute(candidate.chat, 'meeting.routes.chat');
+    routes = {
+      ...(observer === undefined ? {} : { observer }),
+      ...(reconciliation === undefined ? {} : { reconciliation }),
+      ...(chat === undefined ? {} : { chat }),
+    };
+  }
   if (meeting.calendar !== undefined) {
     if (!meeting.calendar || typeof meeting.calendar !== 'object' || Array.isArray(meeting.calendar)) {
       throw new Error('Sea Shell config meeting.calendar must be an object');
@@ -118,6 +173,7 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
       ? {}
       : { maxObserverRuns: meeting.maxObserverRuns as number }),
     ...(calendar === undefined ? {} : { calendar }),
+    ...(routes === undefined ? {} : { routes }),
   };
 }
 
@@ -216,6 +272,16 @@ export function updateMeetingConfig(
               ...patch.calendar,
             },
           }),
+      ...(patch.routes === undefined
+        ? {}
+        : {
+            routes: {
+              ...(currentMeeting.routes && typeof currentMeeting.routes === 'object'
+                ? currentMeeting.routes as Record<string, unknown>
+                : {}),
+              ...patch.routes,
+            },
+          }),
     },
   };
   mkdirSync(dirname(path), { recursive: true });
@@ -232,4 +298,40 @@ export function updateMeetingConfig(
     throw error;
   }
   return loadConfig(path);
+}
+
+/** Resolve a job-specific route without ever inventing or silently changing a model. */
+export function resolveMeetingRoute(
+  config: SeashellMeetingConfig | undefined,
+  role: MeetingRouteRole,
+  override?: Partial<Pick<HumainMeetingRoute, 'backend' | 'model'>>,
+): HumainMeetingRoute | undefined {
+  const exact = config?.routes?.[role];
+  if ((override?.backend === undefined) !== (override?.model === undefined)) {
+    throw new Error(`Meeting ${role} route requires both backend and model`);
+  }
+  const selected = override?.backend && override.model
+    ? { backend: override.backend, model: override.model }
+    : exact ?? (config?.backend && config.model
+      ? { backend: config.backend, model: config.model }
+      : undefined);
+  const backend = selected?.backend;
+  const model = selected?.model;
+  if ((config?.backend === undefined) !== (config?.model === undefined)) {
+    throw new Error('Shared meeting route requires both backend and model');
+  }
+  if (!backend || !model) return undefined;
+  return {
+    backend,
+    model,
+    ...(exact?.maxOutputTokens ?? config?.maxOutputTokens) === undefined
+      ? {}
+      : { maxOutputTokens: exact?.maxOutputTokens ?? config?.maxOutputTokens },
+    ...(exact?.maxBudgetMicrousd ?? config?.maxBudgetMicrousd) === undefined
+      ? {}
+      : { maxBudgetMicrousd: exact?.maxBudgetMicrousd ?? config?.maxBudgetMicrousd },
+    ...(exact?.maxCostMicrousd ?? config?.maxCostMicrousd) === undefined
+      ? {}
+      : { maxCostMicrousd: exact?.maxCostMicrousd ?? config?.maxCostMicrousd },
+  };
 }

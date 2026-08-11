@@ -13,6 +13,7 @@ import {
   defaultConfigPath,
   loadConfig,
   resolveLibraryDir,
+  resolveMeetingRoute,
   resolveSaveByDefault,
   updateMeetingConfig,
 } from './config.ts';
@@ -36,6 +37,20 @@ import {
 } from './meeting-artifact.ts';
 import { chatWithMeeting, enrichMeeting } from './meeting-enrichment.ts';
 import { transcribeMedia } from './transcription-service.ts';
+import { renderCapabilityManifest, seashellCapabilityManifest } from './capabilities.ts';
+import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
+import {
+  parseNativeSystemAudioEvent,
+  SYSTEM_AUDIO_HELPER,
+} from './live-system-audio.ts';
+import {
+  CaptureSessionStore,
+  captureManifestPath,
+  listRecoverableCaptureSessions,
+  loadCaptureSession,
+} from './capture-session.ts';
+import { finalizeCaptureTranscript } from './capture-finalizer.ts';
+import { recordBoundedCapture, runCaptureSignalTest } from './capture-test.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const PROJECT_ROOT = join(dirname(__filename), '..');
@@ -250,6 +265,39 @@ export function doctorChecks(): DoctorCheck[] {
     required: boolean,
     help: string,
   ): DoctorCheck => ({ name, path, ok: existsSync(path), required, help });
+  const systemAudioPermissionCheck = (): DoctorCheck => {
+    if (!existsSync(SYSTEM_AUDIO_HELPER)) {
+      return {
+        name: 'system-audio-access',
+        ok: false,
+        required: false,
+        help: 'Run ./install.sh before testing live system audio',
+      };
+    }
+    const result = spawnSync(SYSTEM_AUDIO_HELPER, ['--probe-ms', '500'], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      maxBuffer: 256 * 1024,
+    });
+    const events = (result.stderr ?? '').split('\n').flatMap((line) => {
+      if (!line.trim()) return [];
+      try { return [parseNativeSystemAudioEvent(line)]; } catch { return []; }
+    });
+    const ready = result.status === 0 && events.some((event) => event.type === 'first-buffer');
+    const failure = events.find((event) => event.type === 'error');
+    return {
+      name: 'system-audio-access',
+      ok: ready,
+      required: false,
+      ...(ready
+        ? { path: 'Screen & System Audio Recording allowed' }
+        : {
+            help: failure?.type === 'error'
+              ? failure.message
+              : 'Allow your terminal in System Settings → Privacy & Security → Screen & System Audio Recording',
+          }),
+    };
+  };
 
   return [
     commandCheck('bun', true, 'Install Bun from https://bun.sh'),
@@ -264,7 +312,7 @@ export function doctorChecks(): DoctorCheck[] {
     ),
     fileCheck(
       'whisper-model',
-      join(PROJECT_ROOT, 'models/ggml-large-v3-turbo-q5_0.bin'),
+      join(PROJECT_ROOT, 'models', DEFAULT_WHISPER_MODEL_FILENAME),
       true,
       'Run ./install.sh',
     ),
@@ -274,6 +322,13 @@ export function doctorChecks(): DoctorCheck[] {
       false,
       'See README speaker diarization setup',
     ),
+    fileCheck(
+      'system-audio-helper',
+      SYSTEM_AUDIO_HELPER,
+      false,
+      'Run ./install.sh; live system audio requires macOS 14.2+',
+    ),
+    systemAudioPermissionCheck(),
   ];
 }
 
@@ -316,27 +371,18 @@ function readJsonFile(path: string, label: string): unknown {
 function meetingRoute(
   command: Extract<MeetingCommand['action'], { kind: 'enrich' | 'chat' }>,
   config: ReturnType<typeof loadConfig>,
+  role: 'observer' | 'reconciliation' | 'chat',
 ) {
-  const backend = command.backend ?? config.meeting?.backend;
-  const model = command.model ?? config.meeting?.model;
-  if (!backend || !model) {
+  const route = resolveMeetingRoute(config.meeting, role, {
+    ...(command.backend === undefined ? {} : { backend: command.backend }),
+    ...(command.model === undefined ? {} : { model: command.model }),
+  });
+  if (!route) {
     throw new Error(
-      'Meeting intelligence requires an exact route. Pass --backend and --model or set meeting.backend and meeting.model in config.json.',
+      `Meeting ${role} intelligence requires an exact route. Pass --backend and --model or configure meeting.routes.${role}.`,
     );
   }
-  return {
-    backend,
-    model,
-    ...(config.meeting?.maxOutputTokens === undefined
-      ? {}
-      : { maxOutputTokens: config.meeting.maxOutputTokens }),
-    ...(config.meeting?.maxBudgetMicrousd === undefined
-      ? {}
-      : { maxBudgetMicrousd: config.meeting.maxBudgetMicrousd }),
-    ...(config.meeting?.maxCostMicrousd === undefined
-      ? {}
-      : { maxCostMicrousd: config.meeting.maxCostMicrousd }),
-  };
+  return route;
 }
 
 async function executeMeeting(command: MeetingCommand): Promise<number> {
@@ -348,6 +394,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
         ...(command.action.mode === undefined ? {} : { mode: command.action.mode }),
         ...(command.action.backend === undefined ? {} : { backend: command.action.backend }),
         ...(command.action.model === undefined ? {} : { model: command.action.model }),
+        ...(command.action.routes === undefined ? {} : { routes: command.action.routes }),
         ...(command.action.calendarPolicy === undefined
           ? {}
           : {
@@ -397,13 +444,22 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       return 0;
     }
     case 'enrich': {
-      const route = meetingRoute(command.action, config);
+      const mode = command.action.mode ?? config.meeting?.mode ?? 'hybrid';
+      const observerRoute = mode === 'post-session'
+        ? undefined
+        : meetingRoute(command.action, config, 'observer');
+      const reconciliationRoute = mode === 'streaming'
+        ? undefined
+        : meetingRoute(command.action, config, 'reconciliation');
       const context = command.action.contextPath
         ? readJsonFile(command.action.contextPath, 'meeting context')
         : undefined;
       const artifact = await enrichMeeting(libraryDir, command.action.id, {
-        route,
-        mode: command.action.mode ?? config.meeting?.mode,
+        routes: {
+          ...(observerRoute === undefined ? {} : { observer: observerRoute }),
+          ...(reconciliationRoute === undefined ? {} : { reconciliation: reconciliationRoute }),
+        },
+        mode,
         ...(context === undefined ? {} : { context }),
         minimumNewSegments: config.meeting?.observerMinSegments,
         maximumNewSegments: config.meeting?.observerMaxSegments,
@@ -420,7 +476,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
         libraryDir,
         command.action.id,
         command.action.question,
-        meetingRoute(command.action, config),
+        meetingRoute(command.action, config, 'chat'),
         (message) => process.stderr.write(`${message}\n`),
       );
       const answer = artifact.chat.at(-1);
@@ -443,10 +499,91 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
   }
 }
 
+async function executeCapture(
+  command: Extract<Exclude<CliCommand, { kind: 'tui' | 'help' }>, { kind: 'capture' }>,
+): Promise<number> {
+  const config = loadConfig();
+  const libraryDir = resolveLibraryDir(command.libraryDir, process.env, config);
+  if (command.action.kind === 'test') {
+    process.stderr.write(`Speak and play meeting audio for ${command.action.seconds} seconds…\n`);
+    const result = await runCaptureSignalTest(libraryDir, command.action.seconds);
+    print(command.json ? JSON.stringify(result, null, 2) : [
+      result.ready ? '✓ Microphone + system audio are ready' : '○ Capture needs attention',
+      `  microphone: ${result.microphone.audibleChunks > 0 ? 'signal detected' : 'no speech detected'} (${result.microphone.chunks} chunks)`,
+      `  system audio: ${result.systemAudio.audibleChunks > 0 ? 'signal detected' : 'no speech detected'} (${result.systemAudio.chunks} chunks)`,
+      ...result.guidance.map((line) => `  next: ${line}`),
+      '  test audio discarded',
+    ].join('\n'));
+    return result.ready ? 0 : 2;
+  }
+  if (command.action.kind === 'record') {
+    process.stderr.write(`Capturing microphone + system audio for ${command.action.seconds} seconds…\n`);
+    const result = await recordBoundedCapture(libraryDir, command.action.seconds);
+    print(command.json ? JSON.stringify(result, null, 2) : [
+      `Captured ${result.session.sessionId}`,
+      result.manifestPath,
+      `Finalize: seashell capture finalize ${result.session.sessionId}`,
+    ].join('\n'));
+    return 0;
+  }
+  if (command.action.kind === 'list') {
+    const sessions = listRecoverableCaptureSessions(libraryDir).map((manifest) => ({
+      id: manifest.sessionId,
+      status: manifest.status,
+      createdAt: manifest.createdAt,
+      updatedAt: manifest.updatedAt,
+      durationMs: Math.max(0, ...manifest.chunks.map((chunk) => chunk.endMs)),
+      chunks: manifest.chunks.length,
+      audibleChunks: manifest.chunks.filter((chunk) => chunk.audible).length,
+    }));
+    print(command.json ? JSON.stringify(sessions, null, 2) : (
+      sessions.length === 0
+        ? 'No recoverable live captures.'
+        : sessions.map((session) => (
+            `${session.id}  ${session.status}  ${session.chunks} chunks  ${session.createdAt}`
+          )).join('\n')
+    ));
+    return 0;
+  }
+  const manifestPath = captureManifestPath(libraryDir, command.action.id);
+  if (command.action.kind === 'show') {
+    const manifest = loadCaptureSession(manifestPath);
+    print(command.json ? JSON.stringify(manifest, null, 2) : [
+      `${manifest.sessionId} · ${manifest.status}`,
+      `${manifest.chunks.length} durable chunks`,
+      `Started ${manifest.createdAt}`,
+      manifestPath,
+    ].join('\n'));
+    return 0;
+  }
+  const record = await finalizeCaptureTranscript(manifestPath, {
+    onStatus: (message) => process.stderr.write(`${message}\n`),
+  });
+  const saved = saveTranscriptRecord(libraryDir, record);
+  const store = new CaptureSessionStore({
+    libraryDir,
+    sessionId: command.action.id,
+    startedAtUnixMs: loadCaptureSession(manifestPath).startedAtUnixMs,
+  });
+  store.setStatus('completed', 'final-transcript-published');
+  store.attachTo(saved.directory);
+  print(command.json ? JSON.stringify(record, null, 2) : (
+    `Recovered ${record.title}\n${saved.directory}`
+  ));
+  return 0;
+}
+
 export async function executeCliCommand(command: Exclude<CliCommand, { kind: 'tui' | 'help' }>): Promise<number> {
   switch (command.kind) {
+    case 'capabilities':
+      print(command.json
+        ? JSON.stringify(seashellCapabilityManifest(), null, 2)
+        : renderCapabilityManifest());
+      return 0;
     case 'transcribe':
       return executeTranscription(command.files, command.options);
+    case 'capture':
+      return executeCapture(command);
     case 'library':
       return executeLibrary(command);
     case 'doctor':
