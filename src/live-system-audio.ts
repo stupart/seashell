@@ -17,6 +17,21 @@ export const LIVE_CAPTURE_CHUNK_MILLISECONDS = 10_000;
 
 export type SystemAudioCaptureState = 'starting' | 'active' | 'unavailable' | 'stopped';
 
+export interface LiveCaptureClock {
+  readonly kind: 'device-sample-clock' | 'process-start-estimate';
+  readonly originUnixMs: number;
+  readonly sampleRate: 16_000;
+  readonly uncertaintyMs: number;
+  readonly hostTime?: string;
+  readonly sampleTime?: number;
+}
+
+export interface LiveCaptureDiscontinuity {
+  readonly atFrame: number;
+  readonly durationFrames: number;
+  readonly reason: 'capture-overrun' | 'device-reset' | 'clock-reset';
+}
+
 export interface SystemAudioChunk {
   readonly path: string;
   readonly startSeconds: number;
@@ -25,6 +40,7 @@ export interface SystemAudioChunk {
   readonly source: 'system-audio';
   readonly audible: boolean;
   readonly level: PcmSignalLevel;
+  readonly clock: LiveCaptureClock;
 }
 
 export interface SystemAudioStateUpdate {
@@ -43,8 +59,17 @@ export type NativeSystemAudioEvent =
   | {
       readonly type: 'first-buffer';
       readonly capturedAtUnixMs: number;
+      readonly bufferStartUnixMs?: number;
+      readonly sourceSampleRate?: number;
       readonly hostTime?: string;
       readonly sampleTime?: number;
+      readonly bufferFrames?: number;
+    }
+  | {
+      readonly type: 'discontinuity';
+      readonly droppedFrames: number;
+      readonly outputFrames: number;
+      readonly reason: 'capture-overrun';
     }
   | {
       readonly type: 'error';
@@ -99,10 +124,30 @@ export function parseNativeSystemAudioEvent(line: string): NativeSystemAudioEven
     return Object.freeze({
       type: 'first-buffer' as const,
       capturedAtUnixMs: integer(value.capturedAtUnixMs, 'System-audio first-buffer time'),
+      ...(value.bufferStartUnixMs === undefined
+        ? {}
+        : { bufferStartUnixMs: integer(value.bufferStartUnixMs, 'System-audio buffer start time') }),
+      ...(value.sourceSampleRate === undefined
+        ? {}
+        : { sourceSampleRate: integer(value.sourceSampleRate, 'System-audio source sample rate', 1) }),
       ...(value.hostTime === undefined ? {} : { hostTime: text(value.hostTime, 'System-audio host time') }),
       ...(value.sampleTime === undefined
         ? {}
         : { sampleTime: finiteNumber(value.sampleTime, 'System-audio sample time') }),
+      ...(value.bufferFrames === undefined
+        ? {}
+        : { bufferFrames: integer(value.bufferFrames, 'System-audio first-buffer frame count', 1) }),
+    });
+  }
+  if (value.type === 'discontinuity') {
+    if (value.reason !== 'capture-overrun') {
+      throw new Error('System-audio discontinuity reason is invalid');
+    }
+    return Object.freeze({
+      type: 'discontinuity' as const,
+      droppedFrames: integer(value.droppedFrames, 'System-audio dropped frame count', 1),
+      outputFrames: integer(value.outputFrames, 'System-audio discontinuity output frame', 0),
+      reason: 'capture-overrun' as const,
     });
   }
   if (value.type === 'error') {
@@ -270,6 +315,7 @@ export interface StartSystemAudioOptions {
   readonly onChunk: (chunk: SystemAudioChunk) => void;
   readonly onState: (update: SystemAudioStateUpdate) => void;
   readonly onLevel?: (level: PcmSignalLevel) => void;
+  readonly onDiscontinuity?: (event: LiveCaptureDiscontinuity) => void;
 }
 
 export interface SystemAudioCaptureHandle {
@@ -294,6 +340,8 @@ export function startSystemAudioCapture(
   const minimumChunkMilliseconds = options.minimumChunkMilliseconds ?? 500;
   const chunker = new PcmS16leChunker(LIVE_CAPTURE_SAMPLE_RATE, chunkMilliseconds);
   let firstBufferAtUnixMs: number | undefined;
+  let clock: LiveCaptureClock | undefined;
+  const pendingDiscontinuities: Extract<NativeSystemAudioEvent, { type: 'discontinuity' }>[] = [];
   let requestedStop = false;
   let nativeError: Extract<NativeSystemAudioEvent, { type: 'error' }> | undefined;
   let stderr = '';
@@ -303,7 +351,7 @@ export function startSystemAudioCapture(
   const done = new Promise<void>((resolve) => { resolveDone = resolve; });
 
   const publish = (chunk: PcmChunk) => {
-    if (firstBufferAtUnixMs === undefined) {
+    if (firstBufferAtUnixMs === undefined || clock === undefined) {
       waiting.push(chunk);
       return;
     }
@@ -325,6 +373,7 @@ export function startSystemAudioCapture(
         source: 'system-audio' as const,
         audible,
         level,
+        clock,
       }));
     } catch (error) {
       try { unlinkSync(path); } catch {}
@@ -356,14 +405,58 @@ export function startSystemAudioCapture(
     }
   });
 
+  const publishDiscontinuity = (
+    event: Extract<NativeSystemAudioEvent, { type: 'discontinuity' }>,
+  ) => {
+    if (firstBufferAtUnixMs === undefined) {
+      pendingDiscontinuities.push(event);
+      return;
+    }
+    const originOffsetFrames = Math.max(
+      0,
+      Math.round((firstBufferAtUnixMs - options.sessionStartedAtUnixMs) *
+        LIVE_CAPTURE_SAMPLE_RATE / 1_000),
+    );
+    options.onDiscontinuity?.({
+      atFrame: originOffsetFrames + event.outputFrames,
+      durationFrames: event.droppedFrames,
+      reason: event.reason,
+    });
+  };
+
   const consumeEventLine = (line: string) => {
     if (!line.trim()) return;
     try {
       const event = parseNativeSystemAudioEvent(line);
       if (event.type === 'first-buffer') {
-        firstBufferAtUnixMs = event.capturedAtUnixMs;
+        const firstBufferDurationMs = (event.bufferFrames ?? 0) * 1_000 /
+          (event.sourceSampleRate ?? LIVE_CAPTURE_SAMPLE_RATE);
+        const precedingGapMs = pendingDiscontinuities.reduce(
+          (total, gap) => total + gap.droppedFrames * 1_000 / LIVE_CAPTURE_SAMPLE_RATE,
+          0,
+        );
+        firstBufferAtUnixMs = Math.max(
+          options.sessionStartedAtUnixMs,
+          Math.round(
+            (event.bufferStartUnixMs ?? event.capturedAtUnixMs - firstBufferDurationMs) -
+            precedingGapMs,
+          ),
+        );
+        clock = Object.freeze({
+          kind: 'device-sample-clock' as const,
+          originUnixMs: firstBufferAtUnixMs,
+          sampleRate: LIVE_CAPTURE_SAMPLE_RATE,
+          uncertaintyMs: event.bufferStartUnixMs === undefined
+            ? Math.max(1, firstBufferDurationMs)
+            : 2,
+          ...(event.hostTime === undefined ? {} : { hostTime: event.hostTime }),
+          ...(event.sampleTime === undefined ? {} : { sampleTime: event.sampleTime }),
+        });
         options.onState({ state: 'active', message: 'Microphone + system audio' });
+        for (const gap of pendingDiscontinuities.splice(0)) publishDiscontinuity(gap);
         for (const chunk of waiting.splice(0)) publish(chunk);
+      } else if (event.type === 'discontinuity') {
+        publishDiscontinuity(event);
       } else if (event.type === 'error') {
         nativeError = event;
       }

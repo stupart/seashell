@@ -61,3 +61,36 @@ test('meeting setup preserves unrelated config and stores route metadata without
   expect(raw).toContain('futureSetting');
   expect(raw).not.toContain('apiKey');
 });
+
+test('transcription routing config requires an exact consent-bearing cloud route', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'seashell-transcription-config-'));
+  const path = join(directory, 'config.json');
+  writeFileSync(path, JSON.stringify({
+    transcription: {
+      mode: 'adaptive',
+      canonicalFinal: 'local',
+      adaptiveCloudQueueDepth: 3,
+      cloud: {
+        model: 'openai/whisper-large-v3-turbo',
+        upstreamProvider: 'groq',
+        maxCostMicrousd: 100000,
+        uploadConsent: true,
+      },
+    },
+  }));
+  expect(loadConfig(path).transcription).toEqual({
+    mode: 'adaptive',
+    canonicalFinal: 'local',
+    adaptiveCloudQueueDepth: 3,
+    cloud: {
+      model: 'openai/whisper-large-v3-turbo',
+      upstreamProvider: 'groq',
+      maxCostMicrousd: 100000,
+      uploadConsent: true,
+    },
+  });
+  writeFileSync(path, JSON.stringify({
+    transcription: { mode: 'cloud', cloud: { model: 'model', uploadConsent: 'yes' } },
+  }));
+  expect(() => loadConfig(path)).toThrow('uploadConsent must be a boolean');
+});

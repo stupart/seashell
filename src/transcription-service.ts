@@ -6,11 +6,22 @@ import type {
   TranscriptRecord,
 } from './transcript-types.ts';
 import { transcribeWithTimestamps } from './whisper-timestamps.ts';
+import { randomUUID } from 'crypto';
+import { join } from 'path';
+import { homedir } from 'os';
+import { runHumainTranscription } from './humain-client.ts';
+import {
+  DEFAULT_TRANSCRIPTION_ROUTING,
+  selectDraftTranscriptionRoute,
+  type TranscriptionRoutingConfig,
+} from './transcription-routing.ts';
 
 export interface TranscribeMediaOptions extends DiarizeFileOptions {
   speakers?: boolean;
   title?: string;
   onStatus?: (message: string) => void;
+  routing?: TranscriptionRoutingConfig;
+  humainStoreDir?: string;
 }
 
 /**
@@ -32,8 +43,36 @@ export async function transcribeMedia(
     options.onStatus?.(options.speakers ? 'Identifying speakers…' : 'Transcribing…');
     let document: StructuredTranscript;
 
+    const routing = options.routing ?? DEFAULT_TRANSCRIPTION_ROUTING;
+    const route = selectDraftTranscriptionRoute(routing, 0);
+    if (options.speakers && route === 'cloud') {
+      throw new Error('Cloud transcription does not provide speaker diarization; choose local mode.');
+    }
     if (options.speakers) {
       document = await diarizePreparedMedia(media, options);
+    } else if (route === 'cloud') {
+      const cloud = routing.cloud;
+      if (!cloud?.uploadConsent) throw new Error('Cloud transcription requires upload consent');
+      options.onStatus?.(`Uploading to ${cloud.model} through Humain…`);
+      const result = await runHumainTranscription(media.path, {
+        model: cloud.model,
+        ...(cloud.upstreamProvider === undefined ? {} : { upstreamProvider: cloud.upstreamProvider }),
+        ...(cloud.maxCostMicrousd === undefined ? {} : { maxCostMicrousd: cloud.maxCostMicrousd }),
+        uploadConsent: true,
+      }, {
+        storeDir: options.humainStoreDir ?? join(
+          homedir(), 'Library', 'Application Support', 'Sea Shell', 'Humain',
+        ),
+        runId: `file-${randomUUID()}`,
+      });
+      document = {
+        transcript: result.output.segments.map((segment) => ({
+          start: segment.startMs / 1_000,
+          end: segment.endMs / 1_000,
+          text: segment.text,
+        })),
+        speakers: [],
+      };
     } else {
       const units = await transcribeWithTimestamps(media.path, {
         onProgress: options.onWhisperProgress,

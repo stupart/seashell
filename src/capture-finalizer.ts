@@ -30,6 +30,10 @@ import type {
 } from './transcript-types.ts';
 import { transcribeMedia } from './transcription-service.ts';
 import { transcribeWithTimestamps } from './whisper-timestamps.ts';
+import {
+  runHumainTranscription,
+  type HumainTranscriptionRoute,
+} from './humain-client.ts';
 
 const SAMPLE_RATE = 16_000;
 const BYTES_PER_FRAME = 2;
@@ -169,6 +173,38 @@ export interface FinalizeCaptureOptions {
   readonly diarizeSystemAudio?: boolean;
   /** Test/provider seam; output timing must use the supplied track's clock. */
   readonly systemDiarizer?: (path: string) => Promise<StructuredTranscript>;
+  /** Explicit pinned remote canonical route. Omit to keep the final fully local. */
+  readonly remoteRoute?: HumainTranscriptionRoute;
+  /** Test/provider seam. Production defaults to the Humain CLI boundary. */
+  readonly remoteTranscriber?: typeof runHumainTranscription;
+}
+
+async function remoteTrackSegments(
+  manifestPath: string,
+  manifest: CaptureSessionManifest,
+  trackId: CaptureTrackId,
+  speaker: 'LOCAL' | 'SYSTEM',
+  route: HumainTranscriptionRoute,
+  transcriber: typeof runHumainTranscription,
+  onStatus?: (message: string) => void,
+): Promise<TranscriptSegment[]> {
+  const chunks = manifest.chunks.filter((chunk) => chunk.trackId === trackId && chunk.audible)
+    .toSorted((left, right) => left.startMs - right.startMs || left.sequence - right.sequence);
+  const segments: TranscriptSegment[] = [];
+  for (const [index, chunk] of chunks.entries()) {
+    onStatus?.(`Cloud final ${trackId} ${index + 1}/${chunks.length}…`);
+    const result = await transcriber(captureChunkPath(manifestPath, chunk), route, {
+      storeDir: join(dirname(manifestPath), 'humain-runs'),
+      runId: `final-${manifest.sessionId}-${trackId}-${chunk.sequence}-${randomUUID().slice(0, 8)}`,
+    });
+    segments.push(...result.output.segments.map((segment) => ({
+      start: (chunk.startMs + segment.startMs) / 1_000,
+      end: (chunk.startMs + segment.endMs) / 1_000,
+      text: segment.text,
+      speaker,
+    })));
+  }
+  return coalesceTranscriptSegments({ transcript: segments, speakers: [] });
 }
 
 /** Re-run ASR over each complete source track and publish one canonical record. */
@@ -180,22 +216,41 @@ export async function finalizeCaptureTranscript(
   const manifest = loadCaptureSession(absoluteManifest);
   const temporaryTracks: string[] = [];
   try {
-    options.onStatus?.('Assembling microphone track…');
-    const microphone = assembleCaptureTrack(absoluteManifest, manifest, 'microphone');
-    if (microphone) temporaryTracks.push(microphone);
-    options.onStatus?.('Assembling system-audio track…');
-    const system = assembleCaptureTrack(absoluteManifest, manifest, 'system-audio');
-    if (system) temporaryTracks.push(system);
-    if (!microphone && !system) throw new Error('Capture session has no audio chunks');
+    const hasMicrophone = manifest.chunks.some((chunk) => chunk.trackId === 'microphone');
+    const hasSystem = manifest.chunks.some((chunk) => chunk.trackId === 'system-audio');
+    const audibleMicrophone = manifest.chunks.some((chunk) =>
+      chunk.trackId === 'microphone' && chunk.audible);
+    const audibleSystem = manifest.chunks.some((chunk) =>
+      chunk.trackId === 'system-audio' && chunk.audible);
+    if (!hasMicrophone && !hasSystem) throw new Error('Capture session has no audio chunks');
+
+    let microphone: string | undefined;
+    let system: string | undefined;
+    if (!options.remoteRoute) {
+      options.onStatus?.('Assembling microphone track…');
+      microphone = assembleCaptureTrack(absoluteManifest, manifest, 'microphone');
+      if (microphone) temporaryTracks.push(microphone);
+      options.onStatus?.('Assembling system-audio track…');
+      system = assembleCaptureTrack(absoluteManifest, manifest, 'system-audio');
+      if (system) temporaryTracks.push(system);
+    }
 
     const segments: TranscriptSegment[] = [];
-    if (microphone && manifest.chunks.some((chunk) => chunk.trackId === 'microphone' && chunk.audible)) {
-      options.onStatus?.('Final microphone transcription…');
-      segments.push(...trackSegments(await transcribeWithTimestamps(microphone), 'LOCAL'));
+    if (audibleMicrophone) {
+      if (options.remoteRoute) {
+        segments.push(...await remoteTrackSegments(
+          absoluteManifest, manifest, 'microphone', 'LOCAL', options.remoteRoute,
+          options.remoteTranscriber ?? runHumainTranscription, options.onStatus,
+        ));
+      } else if (microphone) {
+        options.onStatus?.('Final microphone transcription…');
+        segments.push(...trackSegments(await transcribeWithTimestamps(microphone), 'LOCAL'));
+      }
     }
-    if (system && manifest.chunks.some((chunk) => chunk.trackId === 'system-audio' && chunk.audible)) {
-      const useDiarization = options.diarizeSystemAudio ?? diarizationReady();
-      if (useDiarization) {
+    if (audibleSystem) {
+      const useDiarization = options.remoteRoute === undefined &&
+        (options.diarizeSystemAudio ?? diarizationReady());
+      if (useDiarization && system) {
         options.onStatus?.('Separating remote speakers…');
         const document = options.systemDiarizer
           ? await options.systemDiarizer(system)
@@ -212,7 +267,12 @@ export async function finalizeCaptureTranscript(
           ...segment,
           speaker: speakerIds.get(segment.speaker ?? '') ?? remoteSpeakerId('UNKNOWN'),
         })));
-      } else {
+      } else if (options.remoteRoute) {
+        segments.push(...await remoteTrackSegments(
+          absoluteManifest, manifest, 'system-audio', 'SYSTEM', options.remoteRoute,
+          options.remoteTranscriber ?? runHumainTranscription, options.onStatus,
+        ));
+      } else if (system) {
         options.onStatus?.('Final system-audio transcription…');
         segments.push(...trackSegments(await transcribeWithTimestamps(system), 'SYSTEM'));
       }
@@ -228,10 +288,10 @@ export async function finalizeCaptureTranscript(
     return createTranscriptRecord({
       transcript: [...reconciled],
       speakers: [
-        ...(manifest.chunks.some((chunk) => chunk.trackId === 'microphone')
+        ...(hasMicrophone
           ? [{ id: 'LOCAL', label: 'Microphone' }]
           : []),
-        ...(manifest.chunks.some((chunk) => chunk.trackId === 'system-audio')
+        ...(hasSystem
           ? remoteSpeakerIds.length > 0
             ? remoteSpeakerIds.map((id, index) => ({ id, label: `Remote speaker ${index + 1}` }))
             : [{ id: 'SYSTEM', label: 'System audio' }]

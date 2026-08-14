@@ -15,19 +15,121 @@ struct CaptureConfig {
 }
 
 @available(macOS 14.2, *)
+private final class AudioPacketSlot {
+    enum State { case empty, ready, reading }
+    let buffer: AVAudioPCMBuffer
+    var state: State = .empty
+    var time = AudioTimeStamp()
+
+    init(format: AVAudioFormat, capacity: AVAudioFrameCount) {
+        self.buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity)!
+    }
+}
+
+/** Preallocated bounded handoff; the audio callback never waits or allocates. */
+@available(macOS 14.2, *)
+private final class AudioPacketRing {
+    private let lock = NSLock()
+    private let slots: [AudioPacketSlot]
+    private let bytesPerFrame: Int
+    private var writeIndex = 0
+    private var readIndex = 0
+    private let droppedFrames: OpaquePointer
+
+    init(format: AVAudioFormat, slotCount: Int = 64, frameCapacity: AVAudioFrameCount = 16_384) {
+        self.slots = (0..<slotCount).map { _ in
+            AudioPacketSlot(format: format, capacity: frameCapacity)
+        }
+        self.bytesPerFrame = max(Int(format.streamDescription.pointee.mBytesPerFrame), 1)
+        guard let counter = seashell_atomic_u64_create() else {
+            fatalError("Could not allocate capture overrun counter")
+        }
+        self.droppedFrames = counter
+    }
+
+    deinit { seashell_atomic_u64_destroy(droppedFrames) }
+
+    private func frameCount(_ inputData: UnsafePointer<AudioBufferList>) -> AVAudioFrameCount {
+        let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
+        guard let first = buffers.first else { return 0 }
+        return AVAudioFrameCount(Int(first.mDataByteSize) / bytesPerFrame)
+    }
+
+    func enqueue(_ inputData: UnsafePointer<AudioBufferList>, time: AudioTimeStamp) {
+        let frames = frameCount(inputData)
+        guard frames > 0 else { return }
+        guard lock.try() else {
+            seashell_atomic_u64_add(droppedFrames, UInt64(frames))
+            return
+        }
+        defer { lock.unlock() }
+        let slot = slots[writeIndex]
+        guard slot.state == .empty, frames <= slot.buffer.frameCapacity else {
+            seashell_atomic_u64_add(droppedFrames, UInt64(frames))
+            return
+        }
+        let source = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
+        let destination = UnsafeMutableAudioBufferListPointer(slot.buffer.mutableAudioBufferList)
+        guard source.count == destination.count else {
+            seashell_atomic_u64_add(droppedFrames, UInt64(frames))
+            return
+        }
+        for index in 0..<source.count {
+            let byteCount = Int(source[index].mDataByteSize)
+            guard let sourceData = source[index].mData,
+                  let destinationData = destination[index].mData,
+                  byteCount <= Int(slot.buffer.frameCapacity) * bytesPerFrame else {
+                seashell_atomic_u64_add(droppedFrames, UInt64(frames))
+                return
+            }
+            memcpy(destinationData, sourceData, byteCount)
+            destination[index].mDataByteSize = UInt32(byteCount)
+        }
+        slot.buffer.frameLength = frames
+        slot.time = time
+        slot.state = .ready
+        writeIndex = (writeIndex + 1) % slots.count
+    }
+
+    func dequeue() -> AudioPacketSlot? {
+        lock.lock()
+        defer { lock.unlock() }
+        let slot = slots[readIndex]
+        guard slot.state == .ready else { return nil }
+        slot.state = .reading
+        readIndex = (readIndex + 1) % slots.count
+        return slot
+    }
+
+    func release(_ slot: AudioPacketSlot) {
+        lock.lock()
+        slot.state = .empty
+        lock.unlock()
+    }
+
+    func takeDroppedFrames() -> UInt64 {
+        seashell_atomic_u64_exchange_zero(droppedFrames)
+    }
+}
+
+@available(macOS 14.2, *)
 final class SystemAudioCapture {
     private let config: CaptureConfig
     private let targetFormat: AVAudioFormat
     private let outputChunkBytes: Int
     private let ioQueue = DispatchQueue(label: "com.seashell.system-audio")
+    private let consumerQueue = DispatchQueue(label: "com.seashell.system-audio.consumer")
     private var tapID: AudioObjectID = 0
     private var aggregateDeviceID: AudioObjectID = 0
     private var ioProcID: AudioDeviceIOProcID?
     private var converter: AVAudioConverter?
     private var sourceFormat: AVAudioFormat?
+    private var packetRing: AudioPacketRing?
+    private var consumerTimer: DispatchSourceTimer?
     private var pendingPCM = Data()
     private var firstBufferSeen = false
     private var stopping = false
+    private var outputFramesProduced: UInt64 = 0
 
     init(config: CaptureConfig) {
         self.config = config
@@ -60,15 +162,19 @@ final class SystemAudioCapture {
         tapID = newTapID
 
         let tapUID = try readTapUID()
-        try createAggregateDevice(tapUID: tapUID)
+        let clockDeviceUID = try readDefaultSystemOutputUID()
+        try createAggregateDevice(tapUID: tapUID, clockDeviceUID: clockDeviceUID)
         try waitForAggregateDevice()
         try configureConverter()
+        guard let sourceFormat else {
+            throw captureError("System-audio source format is unavailable", nil, "source_format")
+        }
+        packetRing = AudioPacketRing(format: sourceFormat)
+        startConsumer()
         try registerIOProc()
 
-        ioQueue.suspend()
         status = AudioDeviceStart(aggregateDeviceID, ioProcID)
         guard status == noErr else {
-            ioQueue.resume()
             throw captureError("Could not start system-audio capture", status, "start_device")
         }
         emit([
@@ -77,7 +183,6 @@ final class SystemAudioCapture {
             "channels": 1,
             "bitsPerChannel": 16,
         ])
-        ioQueue.resume()
     }
 
     func stop() {
@@ -86,6 +191,9 @@ final class SystemAudioCapture {
         if aggregateDeviceID != 0 {
             AudioDeviceStop(aggregateDeviceID, ioProcID)
         }
+        consumerTimer?.cancel()
+        consumerTimer = nil
+        consumerQueue.sync { drainPackets() }
         if let ioProcID {
             AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
             self.ioProcID = nil
@@ -102,13 +210,21 @@ final class SystemAudioCapture {
         emit(["type": "stop"])
     }
 
-    private func createAggregateDevice(tapUID: String) throws {
+    private func createAggregateDevice(tapUID: String, clockDeviceUID: String) throws {
         let description: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Sea Shell System Audio",
             kAudioAggregateDeviceUIDKey: "com.seashell.system-audio.\(UUID().uuidString)",
-            kAudioAggregateDeviceSubDeviceListKey: [],
-            kAudioAggregateDeviceTapListKey: [[kAudioSubTapUIDKey: tapUID]],
-            kAudioAggregateDeviceTapAutoStartKey: false,
+            // A process tap is not a hardware clock. Pin the current system output
+            // as the aggregate's clock source, matching AudioCap and Recap.
+            kAudioAggregateDeviceMainSubDeviceKey: clockDeviceUID,
+            kAudioAggregateDeviceSubDeviceListKey: [[
+                kAudioSubDeviceUIDKey: clockDeviceUID,
+            ]],
+            kAudioAggregateDeviceTapListKey: [[
+                kAudioSubTapUIDKey: tapUID,
+                kAudioSubTapDriftCompensationKey: true,
+            ]],
+            kAudioAggregateDeviceTapAutoStartKey: true,
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceIsStackedKey: false,
         ]
@@ -118,6 +234,49 @@ final class SystemAudioCapture {
             throw captureError("Could not create the private aggregate device", status, "create_aggregate_device")
         }
         aggregateDeviceID = deviceID
+    }
+
+    private func readDefaultSystemOutputUID() throws -> String {
+        var deviceID = AudioDeviceID()
+        var deviceSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var deviceAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultSystemOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &deviceAddress,
+            0,
+            nil,
+            &deviceSize,
+            &deviceID
+        )
+        guard status == noErr, deviceID != kAudioObjectUnknown else {
+            throw captureError("Could not read the system output device", status, "get_clock_device")
+        }
+
+        var uid = "" as CFString
+        var uidSize = UInt32(MemoryLayout<CFString>.size)
+        var uidAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        status = withUnsafeMutablePointer(to: &uid) { pointer in
+            AudioObjectGetPropertyData(
+                deviceID,
+                &uidAddress,
+                0,
+                nil,
+                &uidSize,
+                pointer
+            )
+        }
+        guard status == noErr, !String(uid).isEmpty else {
+            throw captureError("Could not read the system output identity", status, "get_clock_device_uid")
+        }
+        return uid as String
     }
 
     private func waitForAggregateDevice() throws {
@@ -166,8 +325,8 @@ final class SystemAudioCapture {
     }
 
     private func registerIOProc() throws {
-        guard let sourceFormat, let converter else {
-            throw captureError("System-audio converter is unavailable", nil, "register_ioproc")
+        guard packetRing != nil else {
+            throw captureError("System-audio packet ring is unavailable", nil, "register_ioproc")
         }
         var processID: AudioDeviceIOProcID?
         let status = AudioDeviceCreateIOProcIDWithBlock(
@@ -176,12 +335,7 @@ final class SystemAudioCapture {
             ioQueue
         ) { [weak self] _, inputData, inputTime, _, _ in
             guard let self, !self.stopping else { return }
-            self.consume(
-                inputData,
-                inputTime: inputTime.pointee,
-                sourceFormat: sourceFormat,
-                converter: converter
-            )
+            self.packetRing?.enqueue(inputData, time: inputTime.pointee)
         }
         guard status == noErr, let processID else {
             throw captureError("Could not register the system-audio callback", status, "create_ioproc")
@@ -189,17 +343,78 @@ final class SystemAudioCapture {
         ioProcID = processID
     }
 
+    private func startConsumer() {
+        let timer = DispatchSource.makeTimerSource(queue: consumerQueue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(2), leeway: .milliseconds(1))
+        timer.setEventHandler { [weak self] in self?.drainPackets() }
+        timer.resume()
+        consumerTimer = timer
+    }
+
+    private func drainPackets() {
+        guard let packetRing, let sourceFormat, let converter else { return }
+        while let slot = packetRing.dequeue() {
+            let dropped = packetRing.takeDroppedFrames()
+            if dropped > 0 {
+                appendDiscontinuity(droppedSourceFrames: dropped, sourceFormat: sourceFormat)
+            }
+            consume(slot.buffer, inputTime: slot.time, sourceFormat: sourceFormat, converter: converter)
+            packetRing.release(slot)
+        }
+        let trailingDropped = packetRing.takeDroppedFrames()
+        if trailingDropped > 0 {
+            appendDiscontinuity(droppedSourceFrames: trailingDropped, sourceFormat: sourceFormat)
+        }
+    }
+
+    private func appendDiscontinuity(droppedSourceFrames: UInt64, sourceFormat: AVAudioFormat) {
+        let outputFrames = UInt64(round(
+            Double(droppedSourceFrames) * targetFormat.sampleRate / max(sourceFormat.sampleRate, 1)
+        ))
+        guard outputFrames > 0 else { return }
+        emit([
+            "type": "discontinuity",
+            "reason": "capture-overrun",
+            "droppedFrames": Int(outputFrames),
+            "outputFrames": Int(outputFramesProduced),
+        ])
+        var remaining = outputFrames
+        let zeroBlock = Data(repeating: 0, count: min(outputChunkBytes, 32_000))
+        while remaining > 0 {
+            let frames = min(remaining, UInt64(zeroBlock.count / 2))
+            pendingPCM.append(zeroBlock.prefix(Int(frames * 2)))
+            remaining -= frames
+        }
+        outputFramesProduced += outputFrames
+        flushFullChunks()
+    }
+
     private func consume(
-        _ inputData: UnsafePointer<AudioBufferList>,
+        _ sourceBuffer: AVAudioPCMBuffer,
         inputTime: AudioTimeStamp,
         sourceFormat: AVAudioFormat,
         converter: AVAudioConverter
     ) {
         if !firstBufferSeen {
             firstBufferSeen = true
+            let observedAtUnixMs = Int(Date().timeIntervalSince1970 * 1_000)
+            let bufferDurationMs = Double(sourceBuffer.frameLength) * 1_000 /
+                max(sourceFormat.sampleRate, 1)
+            var bufferStartUnixMs = observedAtUnixMs - Int(round(bufferDurationMs))
+            if inputTime.mFlags.contains(.hostTimeValid) {
+                let currentHostTime = AudioGetCurrentHostTime()
+                if currentHostTime >= inputTime.mHostTime {
+                    let elapsedNanos = AudioConvertHostTimeToNanos(
+                        currentHostTime - inputTime.mHostTime
+                    )
+                    bufferStartUnixMs = observedAtUnixMs - Int(elapsedNanos / 1_000_000)
+                }
+            }
             var event: [String: Any] = [
                 "type": "first-buffer",
-                "capturedAtUnixMs": Int(Date().timeIntervalSince1970 * 1_000),
+                "capturedAtUnixMs": observedAtUnixMs,
+                "bufferStartUnixMs": bufferStartUnixMs,
+                "sourceSampleRate": Int(sourceFormat.sampleRate),
             ]
             if inputTime.mFlags.contains(.hostTimeValid) {
                 event["hostTime"] = String(inputTime.mHostTime)
@@ -207,16 +422,10 @@ final class SystemAudioCapture {
             if inputTime.mFlags.contains(.sampleTimeValid) {
                 event["sampleTime"] = inputTime.mSampleTime
             }
+            event["bufferFrames"] = Int(sourceBuffer.frameLength)
             emit(event)
         }
         if config.probeMilliseconds != nil { return }
-
-        let inputList = UnsafeMutablePointer(mutating: inputData)
-        guard let sourceBuffer = AVAudioPCMBuffer(
-            pcmFormat: sourceFormat,
-            bufferListNoCopy: inputList,
-            deallocator: nil
-        ) else { return }
 
         let sourceRate = max(sourceFormat.sampleRate, 1)
         let capacity = AVAudioFrameCount(
@@ -252,6 +461,7 @@ final class SystemAudioCapture {
         let audio = outputBuffer.audioBufferList.pointee.mBuffers
         guard let data = audio.mData, audio.mDataByteSize > 0 else { return }
         pendingPCM.append(data.assumingMemoryBound(to: UInt8.self), count: Int(audio.mDataByteSize))
+        outputFramesProduced += UInt64(audio.mDataByteSize / 2)
         flushFullChunks()
     }
 

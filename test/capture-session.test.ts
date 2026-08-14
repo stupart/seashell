@@ -68,3 +68,42 @@ test('capture recovery replays a committed journal entry missing from a stale pr
   writeFileSync(store.manifestPath, staleProjection);
   expect(loadCaptureSession(store.manifestPath).chunks).toHaveLength(1);
 });
+
+test('async capture commits serialize journal order and preserve clock/gap evidence', async () => {
+  const libraryDir = mkdtempSync(join(tmpdir(), 'seashell-capture-async-'));
+  const sourceDir = mkdtempSync(join(tmpdir(), 'seashell-source-async-'));
+  const store = new CaptureSessionStore({ libraryDir, sessionId: 'async', startedAtUnixMs: 100 });
+  const [first, second] = await Promise.all([
+    store.commitChunkAsync({
+      sourcePath: fixtureWav(sourceDir, 'one.wav'),
+      trackId: 'microphone',
+      startSeconds: 0,
+      endSeconds: 1,
+      audible: true,
+      clock: {
+        kind: 'process-start-estimate', originUnixMs: 100, sampleRate: 16_000, uncertaintyMs: 4,
+      },
+    }),
+    store.commitChunkAsync({
+      sourcePath: fixtureWav(sourceDir, 'two.wav'),
+      trackId: 'microphone',
+      startSeconds: 1,
+      endSeconds: 2,
+      audible: true,
+      clock: {
+        kind: 'process-start-estimate', originUnixMs: 100, sampleRate: 16_000, uncertaintyMs: 4,
+      },
+    }),
+  ]);
+  await store.recordDiscontinuityAsync({
+    trackId: 'system-audio',
+    atSeconds: 1.5,
+    durationSeconds: 0.02,
+    reason: 'capture-overrun',
+  });
+  await store.drainCommits();
+  expect([first.sequence, second.sequence]).toEqual([1, 2]);
+  const loaded = loadCaptureSession(store.manifestPath);
+  expect(loaded.chunks[0]?.clock?.uncertaintyMs).toBe(4);
+  expect(loaded.discontinuities[0]).toMatchObject({ atMs: 1500, durationMs: 20 });
+});

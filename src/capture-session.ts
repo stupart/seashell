@@ -16,6 +16,19 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'fs';
+import {
+  appendFile,
+  chmod,
+  copyFile,
+  mkdir,
+  open,
+  readFile,
+  rename,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from 'fs/promises';
 import { basename, dirname, join, resolve } from 'path';
 
 export const CAPTURE_SESSION_SCHEMA_VERSION = '0.1' as const;
@@ -42,7 +55,26 @@ export interface CaptureChunk {
   readonly bytes: number;
   readonly sha256: string;
   readonly audible: boolean;
+  readonly clock?: CaptureClockEvidence;
   readonly committedAt: string;
+}
+
+export interface CaptureClockEvidence {
+  readonly kind: 'device-sample-clock' | 'process-start-estimate';
+  readonly originUnixMs: number;
+  readonly sampleRate: 16_000;
+  readonly uncertaintyMs: number;
+  readonly hostTime?: string;
+  readonly sampleTime?: number;
+}
+
+export interface CaptureDiscontinuity {
+  readonly id: string;
+  readonly trackId: CaptureTrackId;
+  readonly atMs: number;
+  readonly durationMs: number;
+  readonly reason: 'capture-overrun' | 'device-reset' | 'clock-reset';
+  readonly recordedAt: string;
 }
 
 export interface CaptureSessionManifest {
@@ -65,11 +97,13 @@ export interface CaptureSessionManifest {
   };
   readonly tracks: readonly CaptureTrack[];
   readonly chunks: readonly CaptureChunk[];
+  readonly discontinuities: readonly CaptureDiscontinuity[];
 }
 
 type CaptureSessionEvent =
   | { readonly type: 'session.started'; readonly at: string; readonly manifest: CaptureSessionManifest }
   | { readonly type: 'chunk.committed'; readonly at: string; readonly chunk: CaptureChunk }
+  | { readonly type: 'capture.discontinuity'; readonly at: string; readonly discontinuity: CaptureDiscontinuity }
   | {
       readonly type: 'session.status';
       readonly at: string;
@@ -109,6 +143,35 @@ function appendDurably(path: string, event: CaptureSessionEvent): void {
 
 function sha256(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
+}
+
+async function sha256Async(path: string): Promise<string> {
+  return createHash('sha256').update(await readFile(path)).digest('hex');
+}
+
+async function atomicWriteAsync(path: string, contents: string): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, contents, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    const descriptor = await open(temporary, 'r');
+    try { await descriptor.sync(); } finally { await descriptor.close(); }
+    await rename(temporary, path);
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
+}
+
+async function appendDurablyAsync(path: string, event: CaptureSessionEvent): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const descriptor = await open(path, 'a', 0o600);
+  try {
+    await appendFile(descriptor, `${JSON.stringify(event)}\n`, { encoding: 'utf8' });
+    await descriptor.sync();
+  } finally {
+    await descriptor.close();
+  }
 }
 
 function captureRoot(libraryDir: string): string {
@@ -158,6 +221,12 @@ function assertChunk(chunk: CaptureChunk, root: string): void {
     typeof chunk.audible !== 'boolean' ||
     typeof chunk.committedAt !== 'string'
   ) throw new Error('Capture manifest contains an invalid chunk');
+  if (chunk.clock !== undefined && (
+    (chunk.clock.kind !== 'device-sample-clock' && chunk.clock.kind !== 'process-start-estimate') ||
+    !Number.isSafeInteger(chunk.clock.originUnixMs) ||
+    chunk.clock.sampleRate !== 16_000 ||
+    !Number.isFinite(chunk.clock.uncertaintyMs) || chunk.clock.uncertaintyMs < 0
+  )) throw new Error('Capture manifest contains invalid chunk clock evidence');
   const absolute = resolve(root, chunk.relativePath);
   if (!absolute.startsWith(`${resolve(root)}/`)) {
     throw new Error('Capture chunk path escapes its session');
@@ -168,7 +237,10 @@ export function parseCaptureSessionManifest(value: unknown, root: string): Captu
   if (!plainRecord(value) || value.schemaVersion !== CAPTURE_SESSION_SCHEMA_VERSION) {
     throw new Error('Capture session manifest schemaVersion must be 0.1');
   }
-  const manifest = value as unknown as CaptureSessionManifest;
+  const rawManifest = value as unknown as CaptureSessionManifest;
+  const manifest: CaptureSessionManifest = rawManifest.discontinuities === undefined
+    ? { ...rawManifest, discontinuities: [] }
+    : rawManifest;
   if (
     typeof manifest.sessionId !== 'string' ||
     !['recording', 'paused', 'captured', 'completed', 'interrupted'].includes(manifest.status) ||
@@ -182,15 +254,27 @@ export function parseCaptureSessionManifest(value: unknown, root: string): Captu
     manifest.provider.capability !== 'capture.seashell.macos.live' ||
     manifest.provider.boundary !== 'local' ||
     !Array.isArray(manifest.tracks) ||
-    !Array.isArray(manifest.chunks)
+    !Array.isArray(manifest.chunks) ||
+    !Array.isArray(manifest.discontinuities)
   ) throw new Error('Capture session manifest is invalid');
   for (const chunk of manifest.chunks) assertChunk(chunk, root);
+  for (const discontinuity of manifest.discontinuities) {
+    if (
+      !discontinuity.id ||
+      (discontinuity.trackId !== 'microphone' && discontinuity.trackId !== 'system-audio') ||
+      !Number.isSafeInteger(discontinuity.atMs) || discontinuity.atMs < 0 ||
+      !Number.isSafeInteger(discontinuity.durationMs) || discontinuity.durationMs < 1 ||
+      !['capture-overrun', 'device-reset', 'clock-reset'].includes(discontinuity.reason) ||
+      typeof discontinuity.recordedAt !== 'string'
+    ) throw new Error('Capture manifest contains an invalid discontinuity');
+  }
   const ids = manifest.chunks.map((chunk) => chunk.id);
   if (new Set(ids).size !== ids.length) throw new Error('Capture manifest has duplicate chunk IDs');
   return Object.freeze({
     ...manifest,
     tracks: Object.freeze(manifest.tracks.map((entry) => Object.freeze({ ...entry }))),
     chunks: Object.freeze(manifest.chunks.map((entry) => Object.freeze({ ...entry }))),
+    discontinuities: Object.freeze(manifest.discontinuities.map((entry) => Object.freeze({ ...entry }))),
   });
 }
 
@@ -207,6 +291,13 @@ export function loadCaptureSession(path: string): CaptureSessionManifest {
     if (event.type === 'chunk.committed' && !manifest.chunks.some((chunk) => chunk.id === event.chunk.id)) {
       assertChunk(event.chunk, root);
       manifest = { ...manifest, updatedAt: event.at, chunks: [...manifest.chunks, event.chunk] };
+    } else if (event.type === 'capture.discontinuity' &&
+        !manifest.discontinuities.some((entry) => entry.id === event.discontinuity.id)) {
+      manifest = {
+        ...manifest,
+        updatedAt: event.at,
+        discontinuities: [...manifest.discontinuities, event.discontinuity],
+      };
     } else if (event.type === 'session.status') {
       manifest = {
         ...manifest,
@@ -240,6 +331,7 @@ export class CaptureSessionStore {
   readonly manifestPath: string;
   readonly journalPath: string;
   private manifestValue: CaptureSessionManifest;
+  private commitTail: Promise<void> = Promise.resolve();
 
   constructor(options: {
     readonly libraryDir: string;
@@ -276,6 +368,7 @@ export class CaptureSessionStore {
       }),
       tracks: Object.freeze([track('microphone'), track('system-audio')]),
       chunks: Object.freeze([]),
+      discontinuities: Object.freeze([]),
     });
     atomicWrite(this.manifestPath, `${JSON.stringify(this.manifestValue, null, 2)}\n`);
     appendDurably(this.journalPath, {
@@ -295,6 +388,7 @@ export class CaptureSessionStore {
     readonly startSeconds: number;
     readonly endSeconds: number;
     readonly audible: boolean;
+    readonly clock?: CaptureClockEvidence;
   }): CommittedCaptureChunk {
     if (!existsSync(options.sourcePath)) throw new Error(`Capture chunk is missing: ${options.sourcePath}`);
     if (!Number.isFinite(options.startSeconds) || options.startSeconds < 0 ||
@@ -324,6 +418,7 @@ export class CaptureSessionStore {
       bytes: statSync(destination).size,
       sha256: sha256(destination),
       audible: options.audible,
+      ...(options.clock === undefined ? {} : { clock: Object.freeze({ ...options.clock }) }),
       committedAt,
     });
     appendDurably(this.journalPath, { type: 'chunk.committed', at: committedAt, chunk });
@@ -335,6 +430,143 @@ export class CaptureSessionStore {
     });
     this.project();
     return Object.freeze({ ...chunk, path: destination });
+  }
+
+  /**
+   * Serialize durable commits while keeping copy/hash/fsync work off the UI turn.
+   * The journal is still synced before the atomic manifest projection is replaced.
+   */
+  commitChunkAsync(options: {
+    readonly sourcePath: string;
+    readonly trackId: CaptureTrackId;
+    readonly startSeconds: number;
+    readonly endSeconds: number;
+    readonly audible: boolean;
+    readonly clock?: CaptureClockEvidence;
+  }): Promise<CommittedCaptureChunk> {
+    const task = this.commitTail.then(async () => {
+      if (!Number.isFinite(options.startSeconds) || options.startSeconds < 0 ||
+          !Number.isFinite(options.endSeconds) || options.endSeconds < options.startSeconds) {
+        throw new Error('Capture chunk has invalid timing');
+      }
+      const sequence = this.manifestValue.chunks.filter(
+        (chunk) => chunk.trackId === options.trackId,
+      ).length + 1;
+      const relativePath = join('tracks', options.trackId, `${String(sequence).padStart(6, '0')}.wav`);
+      const destination = join(this.root, relativePath);
+      const temporary = `${destination}.partial`;
+      try {
+        await copyFile(options.sourcePath, temporary);
+        await chmod(temporary, 0o600);
+        const descriptor = await open(temporary, 'r');
+        try { await descriptor.sync(); } finally { await descriptor.close(); }
+        await rename(temporary, destination);
+      } catch (error) {
+        await rm(temporary, { force: true });
+        throw error;
+      }
+      await unlink(options.sourcePath).catch(() => {});
+      const committedAt = new Date().toISOString();
+      const details = await stat(destination);
+      const chunk = Object.freeze({
+        id: `${options.trackId}.${String(sequence).padStart(6, '0')}`,
+        trackId: options.trackId,
+        sequence,
+        startMs: Math.max(0, Math.round(options.startSeconds * 1_000)),
+        endMs: Math.max(0, Math.round(options.endSeconds * 1_000)),
+        relativePath,
+        bytes: details.size,
+        sha256: await sha256Async(destination),
+        audible: options.audible,
+        ...(options.clock === undefined ? {} : { clock: Object.freeze({ ...options.clock }) }),
+        committedAt,
+      });
+      await appendDurablyAsync(this.journalPath, { type: 'chunk.committed', at: committedAt, chunk });
+      this.manifestValue = Object.freeze({
+        ...this.manifestValue,
+        status: 'recording',
+        updatedAt: committedAt,
+        chunks: Object.freeze([...this.manifestValue.chunks, chunk]),
+      });
+      await atomicWriteAsync(this.manifestPath, `${JSON.stringify(this.manifestValue, null, 2)}\n`);
+      return Object.freeze({ ...chunk, path: destination });
+    });
+    this.commitTail = task.then(() => {}, () => {});
+    return task;
+  }
+
+  async drainCommits(): Promise<void> {
+    await this.commitTail;
+  }
+
+  recordDiscontinuity(options: {
+    readonly trackId: CaptureTrackId;
+    readonly atSeconds: number;
+    readonly durationSeconds: number;
+    readonly reason: CaptureDiscontinuity['reason'];
+  }): CaptureDiscontinuity {
+    if (!Number.isFinite(options.atSeconds) || options.atSeconds < 0 ||
+        !Number.isFinite(options.durationSeconds) || options.durationSeconds <= 0) {
+      throw new Error('Capture discontinuity has invalid timing');
+    }
+    const recordedAt = new Date().toISOString();
+    const discontinuity = Object.freeze({
+      id: `${options.trackId}.gap.${String(this.manifestValue.discontinuities.length + 1).padStart(6, '0')}`,
+      trackId: options.trackId,
+      atMs: Math.round(options.atSeconds * 1_000),
+      durationMs: Math.max(1, Math.round(options.durationSeconds * 1_000)),
+      reason: options.reason,
+      recordedAt,
+    });
+    appendDurably(this.journalPath, {
+      type: 'capture.discontinuity',
+      at: recordedAt,
+      discontinuity,
+    });
+    this.manifestValue = Object.freeze({
+      ...this.manifestValue,
+      updatedAt: recordedAt,
+      discontinuities: Object.freeze([...this.manifestValue.discontinuities, discontinuity]),
+    });
+    this.project();
+    return discontinuity;
+  }
+
+  recordDiscontinuityAsync(options: {
+    readonly trackId: CaptureTrackId;
+    readonly atSeconds: number;
+    readonly durationSeconds: number;
+    readonly reason: CaptureDiscontinuity['reason'];
+  }): Promise<CaptureDiscontinuity> {
+    const task = this.commitTail.then(async () => {
+      if (!Number.isFinite(options.atSeconds) || options.atSeconds < 0 ||
+          !Number.isFinite(options.durationSeconds) || options.durationSeconds <= 0) {
+        throw new Error('Capture discontinuity has invalid timing');
+      }
+      const recordedAt = new Date().toISOString();
+      const discontinuity = Object.freeze({
+        id: `${options.trackId}.gap.${String(this.manifestValue.discontinuities.length + 1).padStart(6, '0')}`,
+        trackId: options.trackId,
+        atMs: Math.round(options.atSeconds * 1_000),
+        durationMs: Math.max(1, Math.round(options.durationSeconds * 1_000)),
+        reason: options.reason,
+        recordedAt,
+      });
+      await appendDurablyAsync(this.journalPath, {
+        type: 'capture.discontinuity',
+        at: recordedAt,
+        discontinuity,
+      });
+      this.manifestValue = Object.freeze({
+        ...this.manifestValue,
+        updatedAt: recordedAt,
+        discontinuities: Object.freeze([...this.manifestValue.discontinuities, discontinuity]),
+      });
+      await atomicWriteAsync(this.manifestPath, `${JSON.stringify(this.manifestValue, null, 2)}\n`);
+      return discontinuity;
+    });
+    this.commitTail = task.then(() => {}, () => {});
+    return task;
   }
 
   setStatus(status: CaptureSessionStatus, reason?: string): CaptureSessionManifest {

@@ -12,6 +12,12 @@ import { dirname, isAbsolute, join, resolve } from 'path';
 import type { MeetingCapturePolicy } from './calendar.ts';
 import type { HumainBackend, HumainMeetingRoute } from './humain-client.ts';
 import type { MeetingEnrichmentMode } from './meeting-artifact.ts';
+import {
+  DEFAULT_TRANSCRIPTION_ROUTING,
+  type TranscriptionMode,
+  type TranscriptionRoute,
+  type TranscriptionRoutingConfig,
+} from './transcription-routing.ts';
 
 export interface SeashellMeetingConfig {
   mode?: MeetingEnrichmentMode;
@@ -71,6 +77,7 @@ export interface SeashellConfig {
   libraryDir?: string;
   saveByDefault?: boolean;
   meeting?: SeashellMeetingConfig;
+  transcription?: TranscriptionRoutingConfig;
 }
 
 function optionalPositiveInteger(value: unknown, label: string): number | undefined {
@@ -177,6 +184,64 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
   };
 }
 
+function parseTranscriptionConfig(value: unknown): TranscriptionRoutingConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Sea Shell config transcription must be an object');
+  }
+  const candidate = value as Record<string, unknown>;
+  const unknown = Object.keys(candidate).find((key) =>
+    !['mode', 'canonicalFinal', 'adaptiveCloudQueueDepth', 'cloud'].includes(key));
+  if (unknown) throw new Error(`Sea Shell config transcription.${unknown} is not supported`);
+  const modes: TranscriptionMode[] = ['local', 'cloud', 'adaptive'];
+  const routes: TranscriptionRoute[] = ['local', 'cloud'];
+  const mode = candidate.mode ?? DEFAULT_TRANSCRIPTION_ROUTING.mode;
+  const canonicalFinal = candidate.canonicalFinal ?? DEFAULT_TRANSCRIPTION_ROUTING.canonicalFinal;
+  if (!modes.includes(mode as TranscriptionMode)) {
+    throw new Error('Sea Shell config transcription.mode is invalid');
+  }
+  if (!routes.includes(canonicalFinal as TranscriptionRoute)) {
+    throw new Error('Sea Shell config transcription.canonicalFinal is invalid');
+  }
+  const adaptiveCloudQueueDepth = candidate.adaptiveCloudQueueDepth === undefined
+    ? DEFAULT_TRANSCRIPTION_ROUTING.adaptiveCloudQueueDepth
+    : optionalPositiveInteger(candidate.adaptiveCloudQueueDepth, 'transcription.adaptiveCloudQueueDepth') as number;
+  let cloud: TranscriptionRoutingConfig['cloud'];
+  if (candidate.cloud !== undefined) {
+    if (!candidate.cloud || typeof candidate.cloud !== 'object' || Array.isArray(candidate.cloud)) {
+      throw new Error('Sea Shell config transcription.cloud must be an object');
+    }
+    const raw = candidate.cloud as Record<string, unknown>;
+    const unknownCloud = Object.keys(raw).find((key) =>
+      !['model', 'upstreamProvider', 'maxCostMicrousd', 'uploadConsent'].includes(key));
+    if (unknownCloud) throw new Error(`Sea Shell config transcription.cloud.${unknownCloud} is not supported`);
+    if (typeof raw.model !== 'string' || !raw.model.trim()) {
+      throw new Error('Sea Shell config transcription.cloud.model must be an exact model ID');
+    }
+    if (raw.upstreamProvider !== undefined &&
+        (typeof raw.upstreamProvider !== 'string' || !raw.upstreamProvider.trim())) {
+      throw new Error('Sea Shell config transcription.cloud.upstreamProvider must be a string');
+    }
+    if (typeof raw.uploadConsent !== 'boolean') {
+      throw new Error('Sea Shell config transcription.cloud.uploadConsent must be a boolean');
+    }
+    cloud = {
+      model: raw.model.trim(),
+      ...(raw.upstreamProvider === undefined ? {} : { upstreamProvider: raw.upstreamProvider.trim() }),
+      ...(optionalPositiveInteger(raw.maxCostMicrousd, 'transcription.cloud.maxCostMicrousd') === undefined
+        ? {}
+        : { maxCostMicrousd: raw.maxCostMicrousd as number }),
+      uploadConsent: raw.uploadConsent,
+    };
+  }
+  return {
+    mode: mode as TranscriptionMode,
+    canonicalFinal: canonicalFinal as TranscriptionRoute,
+    adaptiveCloudQueueDepth,
+    ...(cloud === undefined ? {} : { cloud }),
+  };
+}
+
 export function defaultConfigPath(env: NodeJS.ProcessEnv = process.env): string {
   return env.SEASHELL_CONFIG || join(
     homedir(),
@@ -214,6 +279,9 @@ export function loadConfig(path = defaultConfigPath()): SeashellConfig {
     ...(parseMeetingConfig(candidate.meeting) === undefined
       ? {}
       : { meeting: parseMeetingConfig(candidate.meeting) as SeashellMeetingConfig }),
+    ...(parseTranscriptionConfig(candidate.transcription) === undefined
+      ? {}
+      : { transcription: parseTranscriptionConfig(candidate.transcription) as TranscriptionRoutingConfig }),
   };
 }
 

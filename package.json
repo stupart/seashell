@@ -11,7 +11,8 @@
     "start": "bun run src/cli.tsx",
     "dev": "bun --watch src/cli.tsx",
     "test": "bun test ./test && python3 -m unittest discover -s test -p '*_test.py'",
-    "typecheck": "bunx tsc --noEmit"
+    "typecheck": "bunx tsc --noEmit",
+    "benchmark:live-asr": "bun run scripts/benchmark-live-asr.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

@@ -33,15 +33,23 @@ echo ""
 
 # Build the native macOS 14.2+ system-audio helper used by live meeting capture.
 SYSTEM_AUDIO_SOURCE="native/macos-system-audio.swift"
+SYSTEM_AUDIO_ATOMIC_SOURCE="native/seashell-atomic.c"
+SYSTEM_AUDIO_ATOMIC_HEADER="native/seashell-atomic.h"
 SYSTEM_AUDIO_BINARY="native/bin/seashell-system-audio"
 mkdir -p native/bin
-if [ ! -x "$SYSTEM_AUDIO_BINARY" ] || [ "$SYSTEM_AUDIO_SOURCE" -nt "$SYSTEM_AUDIO_BINARY" ]; then
+if [ ! -x "$SYSTEM_AUDIO_BINARY" ] || [ "$SYSTEM_AUDIO_SOURCE" -nt "$SYSTEM_AUDIO_BINARY" ] || \
+   [ "$SYSTEM_AUDIO_ATOMIC_SOURCE" -nt "$SYSTEM_AUDIO_BINARY" ] || \
+   [ "$SYSTEM_AUDIO_ATOMIC_HEADER" -nt "$SYSTEM_AUDIO_BINARY" ]; then
     echo "Building native system-audio capture helper..."
-    xcrun swiftc "$SYSTEM_AUDIO_SOURCE" -O \
+    ATOMIC_OBJECT="native/bin/seashell-atomic.o"
+    xcrun clang -std=c11 -O2 -c "$SYSTEM_AUDIO_ATOMIC_SOURCE" -o "$ATOMIC_OBJECT"
+    xcrun swiftc "$SYSTEM_AUDIO_SOURCE" "$ATOMIC_OBJECT" -O \
+        -import-objc-header "$SYSTEM_AUDIO_ATOMIC_HEADER" \
         -framework AVFoundation \
         -framework AudioToolbox \
         -framework CoreAudio \
         -o "$SYSTEM_AUDIO_BINARY"
+    rm -f "$ATOMIC_OBJECT"
 fi
 
 echo "System-audio helper built successfully."

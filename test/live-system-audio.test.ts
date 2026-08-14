@@ -13,10 +13,17 @@ test('native system-audio events are strict and preserve first-buffer clock evid
   }))).toEqual({ type: 'start', sampleRate: 16000, channels: 1, bitsPerChannel: 16 });
   expect(parseNativeSystemAudioEvent(JSON.stringify({
     type: 'first-buffer', capturedAtUnixMs: 1_786_400_000_000,
-    hostTime: '19351966390170', sampleTime: 0,
+    bufferStartUnixMs: 1_786_399_999_990, sourceSampleRate: 48000,
+    hostTime: '19351966390170', sampleTime: 0, bufferFrames: 480,
   }))).toEqual({
     type: 'first-buffer', capturedAtUnixMs: 1_786_400_000_000,
-    hostTime: '19351966390170', sampleTime: 0,
+    bufferStartUnixMs: 1_786_399_999_990, sourceSampleRate: 48000,
+    hostTime: '19351966390170', sampleTime: 0, bufferFrames: 480,
+  });
+  expect(parseNativeSystemAudioEvent(JSON.stringify({
+    type: 'discontinuity', reason: 'capture-overrun', droppedFrames: 320, outputFrames: 640,
+  }))).toEqual({
+    type: 'discontinuity', reason: 'capture-overrun', droppedFrames: 320, outputFrames: 640,
   });
   expect(() => parseNativeSystemAudioEvent('{bad')).toThrow('malformed JSON');
   expect(() => parseNativeSystemAudioEvent('{"type":"mystery"}')).toThrow('Unknown');

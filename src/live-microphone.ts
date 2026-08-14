@@ -7,6 +7,7 @@ import {
   pcmS16leSignalLevel,
   writeLivePcmChunk,
   type PcmSignalLevel,
+  type LiveCaptureClock,
   type SystemAudioCaptureState,
   type SystemAudioStateUpdate,
 } from './live-system-audio.ts';
@@ -19,6 +20,7 @@ export interface MicrophoneChunk {
   readonly source: 'microphone';
   readonly audible: boolean;
   readonly level: PcmSignalLevel;
+  readonly clock: LiveCaptureClock;
 }
 
 export interface StartMicrophoneOptions {
@@ -49,7 +51,8 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
     options.chunkMilliseconds ?? LIVE_CAPTURE_CHUNK_MILLISECONDS,
   );
   const minimumChunkMilliseconds = options.minimumChunkMilliseconds ?? 500;
-  let firstBufferAtUnixMs: number | undefined;
+  const captureStartedAtUnixMs = Date.now();
+  let clock: LiveCaptureClock | undefined;
   let requestedStop = false;
   let lastLevelUpdate = 0;
   let failure: string | undefined;
@@ -57,11 +60,11 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
   const done = new Promise<void>((resolve) => { resolveDone = resolve; });
 
   const publish = (chunk: ReturnType<PcmS16leChunker['flush']>) => {
-    if (!chunk || firstBufferAtUnixMs === undefined) return;
+    if (!chunk || clock === undefined) return;
     const durationMilliseconds = (chunk.endFrame - chunk.startFrame) * 1_000 /
       LIVE_CAPTURE_SAMPLE_RATE;
     if (durationMilliseconds < minimumChunkMilliseconds) return;
-    const originOffset = Math.max(0, firstBufferAtUnixMs - options.sessionStartedAtUnixMs);
+    const originOffset = Math.max(0, clock.originUnixMs - options.sessionStartedAtUnixMs);
     const startSeconds = (originOffset + chunk.startFrame * 1_000 / LIVE_CAPTURE_SAMPLE_RATE) / 1_000;
     const endSeconds = (originOffset + chunk.endFrame * 1_000 / LIVE_CAPTURE_SAMPLE_RATE) / 1_000;
     const level = pcmS16leSignalLevel(chunk.pcm);
@@ -75,6 +78,7 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
         source: 'microphone' as const,
         audible: hasAudiblePcmSignal(chunk.pcm),
         level,
+        clock,
       }));
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
@@ -100,8 +104,14 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
   let stderr = '';
   child.stderr?.on('data', (data: Buffer) => { stderr = (stderr + data.toString()).slice(-2_000); });
   child.stdout?.on('data', (data: Buffer) => {
-    if (firstBufferAtUnixMs === undefined) {
-      firstBufferAtUnixMs = Date.now();
+    if (clock === undefined) {
+      const firstDataAtUnixMs = Date.now();
+      clock = Object.freeze({
+        kind: 'process-start-estimate' as const,
+        originUnixMs: captureStartedAtUnixMs,
+        sampleRate: LIVE_CAPTURE_SAMPLE_RATE,
+        uncertaintyMs: Math.max(1, firstDataAtUnixMs - captureStartedAtUnixMs),
+      });
       options.onState({ state: 'active', message: 'Microphone active' });
     }
     const now = Date.now();
@@ -135,7 +145,11 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
     stop() {
       if (requestedStop) return;
       requestedStop = true;
-      child.kill('SIGTERM');
+      child.kill('SIGINT');
+      const terminate = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+      }, 1_500);
+      terminate.unref();
     },
   };
 }

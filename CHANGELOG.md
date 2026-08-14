@@ -16,6 +16,11 @@
   cited meeting chat, durable Humain receipts, and generated documents.
 - `seashell meeting setup|create|enrich|show|chat|calendar` machine-readable CLI
   surface.
+- Capture clock evidence and durable overrun discontinuities.
+- A preallocated CoreAudio packet ring, async chunk commit queue, bounded local
+  ASR scheduler, owned warm Whisper server, and local benchmark/profile command.
+- Consented Local/Cloud/Adaptive transcription routing through Humain's
+  exact-model OpenRouter STT capability, with a separately pinned final route.
 
 ### Changed
 
@@ -28,12 +33,21 @@
   prior durable run.
 - Successful retries clear prior failure state and return the same updated
   metadata written to disk.
+- The macOS aggregate device now uses the current system output as its explicit
+  hardware clock source; audio conversion and pipe I/O no longer run inside the
+  real-time CoreAudio callback.
+- Remote canonical finalization transcribes durable chunks directly instead of
+  assembling unused meeting-length tracks.
 
 ### Verified
 
-- Full suite: 68 Bun tests, 3 Python tests, and strict TypeScript checking.
+- Full suite: 97 Bun tests, 3 Python tests, and strict TypeScript checking.
 - Actual terminal captures covered the transcript-first meeting view and the
   responsive on-demand history drawer.
 - A live Sea Shell -> Humain -> OpenRouter retry completed through DeepInfra on
   `google/gemma-3-4b-it`, producing evidence-linked output and an exact receipt
   with 369 input tokens, 121 output tokens, and `$0.00003055` reported cost.
+- Local ASR benchmark: 3.7518 seconds of audio, four-thread median 2.030
+  seconds, real-time factor `0.5411`, using the exact installed quantized model.
+- Live OpenRouter STT canary: exact `openai/whisper-large-v3-turbo` route pinned
+  to Groq, segment timestamps preserved, `$0.00011111111111111112` provider cost.

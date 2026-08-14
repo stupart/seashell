@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text, useApp, useInput } from 'ink';
-import { execFileSync, spawn, spawnSync, type ChildProcess } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
+import { randomUUID } from 'crypto';
 import { existsSync, statSync, unlinkSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -47,6 +48,7 @@ import {
   type PcmSignalLevel,
   type SystemAudioCaptureHandle,
   type SystemAudioCaptureState,
+  type LiveCaptureClock,
 } from './live-system-audio.ts';
 import {
   startMicrophoneCapture,
@@ -56,7 +58,19 @@ import { CaptureSessionStore, listRecoverableCaptureSessions } from './capture-s
 import { finalizeCaptureTranscript } from './capture-finalizer.ts';
 import { reconcileLiveEcho } from './live-echo.ts';
 import {
-  DEFAULT_VAD_MODEL_FILENAME,
+  LiveAsrScheduler,
+  OwnedWhisperServer,
+  type LocalAsrProfile,
+} from './local-asr-scheduler.ts';
+import { loadLocalAsrProfile } from './local-asr-profile.ts';
+import {
+  DEFAULT_TRANSCRIPTION_ROUTING,
+  selectDraftTranscriptionRoute,
+  selectCanonicalTranscriptionRoute,
+  type TranscriptionRoute,
+} from './transcription-routing.ts';
+import { runHumainTranscription } from './humain-client.ts';
+import {
   DEFAULT_WHISPER_MODEL_FILENAME,
 } from './model-config.ts';
 import {
@@ -70,9 +84,8 @@ import {
 
 const __filename = fileURLToPath(import.meta.url);
 const PROJECT_ROOT = join(dirname(__filename), '..');
-const WHISPER_CLI = join(PROJECT_ROOT, 'whisper.cpp/build/bin/whisper-cli');
+const WHISPER_SERVER = join(PROJECT_ROOT, 'whisper.cpp/build/bin/whisper-server');
 const MODEL_PATH = join(PROJECT_ROOT, 'models', DEFAULT_WHISPER_MODEL_FILENAME);
-const VAD_MODEL_PATH = join(PROJECT_ROOT, 'whisper.cpp/models', DEFAULT_VAD_MODEL_FILENAME);
 type ListenerState = 'listening' | 'recording';
 type View = 'live' | 'record';
 
@@ -183,6 +196,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [systemAudioLevel, setSystemAudioLevel] = useState<PcmSignalLevel | null>(null);
   const [captureChunkCount, setCaptureChunkCount] = useState(0);
   const [transcribingCount, setTranscribingCount] = useState(0);
+  const [draftTranscriptionRoute, setDraftTranscriptionRoute] = useState<TranscriptionRoute>('local');
   const [paused, setPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -213,7 +227,9 @@ export default function App(props: { libraryDir?: string } = {}) {
   const microphoneCapture = useRef<MicrophoneCaptureHandle | null>(null);
   const systemAudioCapture = useRef<SystemAudioCaptureHandle | null>(null);
   const captureSessionStore = useRef<CaptureSessionStore | null>(null);
-  const liveTranscriptionProcesses = useRef<Set<ChildProcess>>(new Set());
+  const localAsrServer = useRef<OwnedWhisperServer | null>(null);
+  const localAsrScheduler = useRef<LiveAsrScheduler | null>(null);
+  const cloudAsrScheduler = useRef<LiveAsrScheduler | null>(null);
   const liveSessionGeneration = useRef(0);
   const isExiting = useRef(false);
   const exitInProgress = useRef(false);
@@ -318,62 +334,89 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
 
-    setTranscribingCount((count) => count + 1);
-    let finished = false;
-    const finish = (text: string, failure?: string) => {
-      if (finished) return;
-      finished = true;
-      if (cleanupAfter) cleanupFile(audioFile);
-      setTranscribingCount((count) => Math.max(0, count - 1));
-      if (text && sessionGeneration === liveSessionGeneration.current) {
-        appendLiveSegment({ start, end: Math.max(start, end), text, speaker });
-      } else if (failure) {
-        setError(`Live transcription failed: ${failure}`);
+    const updateDepth = () => setTranscribingCount(
+      (localAsrScheduler.current?.depth ?? 0) + (cloudAsrScheduler.current?.depth ?? 0),
+    );
+    const routing = config.transcription ?? DEFAULT_TRANSCRIPTION_ROUTING;
+    let selectedRoute: TranscriptionRoute;
+    try {
+      selectedRoute = selectDraftTranscriptionRoute(
+        routing,
+        localAsrScheduler.current?.depth ?? 0,
+      );
+    } catch (routeError) {
+      setError(routeError instanceof Error ? routeError.message : String(routeError));
+      selectedRoute = 'local';
+    }
+    setDraftTranscriptionRoute(selectedRoute);
+    if (selectedRoute === 'local' && !localAsrServer.current) {
+      const selected = loadLocalAsrProfile(MODEL_PATH);
+      const profile: LocalAsrProfile = {
+        id: selected.id,
+        modelPath: selected.modelPath,
+        threads: selected.threads,
+        requestTimeoutMs: 120_000,
+        idleTimeoutMs: 60_000,
+        disableGpu: process.env.SEASHELL_DISABLE_GPU === '1',
+      };
+      localAsrServer.current = new OwnedWhisperServer(WHISPER_SERVER, profile);
+    }
+    if (selectedRoute === 'local' && !localAsrScheduler.current) {
+      localAsrScheduler.current = new LiveAsrScheduler({
+        maxPending: 4,
+        transcribe: async (path, signal) => await localAsrServer.current!.transcribe(path, signal),
+        onDepth: updateDepth,
+      });
+    }
+    if (selectedRoute === 'cloud' && !cloudAsrScheduler.current) {
+      const cloud = routing.cloud;
+      if (!cloud?.uploadConsent) {
+        setError('Cloud draft routing requires explicit upload consent.');
+        return;
       }
-    };
-
-    const runAttempt = (disableGpu: boolean) => {
-      const process = spawn(WHISPER_CLI, [
-        ...(disableGpu ? ['-ng'] : []),
-        '-m', MODEL_PATH,
-        '-vm', VAD_MODEL_PATH,
-        '--vad',
-        '-f', audioFile,
-        '-l', 'en',
-        '-t', '6',
-        '-nt',
-        '-np',
-        '-mc', '0',
-      ], { stdio: ['ignore', 'pipe', 'pipe'] });
-      liveTranscriptionProcesses.current.add(process);
-
-      let output = '';
-      let stderr = '';
-      process.stdout?.on('data', (data) => { output += data.toString(); });
-      process.stderr?.on('data', (data) => { stderr = (stderr + data.toString()).slice(-2000); });
-      process.on('close', (code, signal) => {
-        liveTranscriptionProcesses.current.delete(process);
-        if (isExiting.current) {
-          finish('');
-          return;
-        }
-        if (!disableGpu && (Boolean(signal) || code === 139)) {
-          setNotice('Metal unavailable; using CPU transcription fallback.');
-          runAttempt(true);
-          return;
-        }
-        const text = output.replace(/\[.*?\]/gu, '').replace(/\s+/gu, ' ').trim();
-        const reason = signal ? `signal ${signal}` : stderr.trim().slice(-120) || `exit ${code}`;
-        finish(text, code === 0 ? undefined : reason);
+      cloudAsrScheduler.current = new LiveAsrScheduler({
+        maxPending: 8,
+        maxConcurrent: 2,
+        transcribe: async (path, signal) => {
+          const result = await runHumainTranscription(path, {
+            model: cloud.model,
+            ...(cloud.upstreamProvider === undefined ? {} : { upstreamProvider: cloud.upstreamProvider }),
+            ...(cloud.maxCostMicrousd === undefined ? {} : { maxCostMicrousd: cloud.maxCostMicrousd }),
+            uploadConsent: true,
+          }, {
+            storeDir: join(libraryRoot, '_Humain'),
+            runId: `live-${liveRecordRef.current.id}-${randomUUID()}`,
+            signal,
+          });
+          return result.output.segments.map((segment) => segment.text).join(' ').trim();
+        },
+        onDepth: updateDepth,
       });
-      process.on('error', (processError) => {
-        liveTranscriptionProcesses.current.delete(process);
-        finish('', processError.message);
-      });
-    };
-
-    runAttempt(process.env.SEASHELL_DISABLE_GPU === '1');
-  }, [appendLiveSegment, cleanupFile]);
+    }
+    const scheduler = selectedRoute === 'cloud'
+      ? cloudAsrScheduler.current
+      : localAsrScheduler.current;
+    if (!scheduler) return;
+    void scheduler.enqueue({
+      id: `${sessionGeneration}:${speaker}:${start.toFixed(3)}:${end.toFixed(3)}`,
+      audioFile,
+      start,
+      end,
+      speaker,
+      sessionGeneration,
+    }).then((result) => {
+      if (result.status === 'completed' && result.text &&
+          sessionGeneration === liveSessionGeneration.current && !isExiting.current) {
+        appendLiveSegment({ start, end: Math.max(start, end), text: result.text, speaker });
+      }
+    }).catch((transcriptionError: unknown) => {
+      setError(`Live transcription failed: ${
+        transcriptionError instanceof Error ? transcriptionError.message : String(transcriptionError)
+      }`);
+    }).finally(() => {
+      if (cleanupAfter) cleanupFile(audioFile);
+    });
+  }, [appendLiveSegment, cleanupFile, config.transcription, libraryRoot]);
 
   const ensureCaptureStore = useCallback((generation: number) => {
     if (generation !== liveSessionGeneration.current) return null;
@@ -398,30 +441,31 @@ export default function App(props: { libraryDir?: string } = {}) {
     startSeconds: number;
     endSeconds: number;
     audible: boolean;
+    clock: LiveCaptureClock;
     generation: number;
-  }) => {
+  }): Promise<Awaited<ReturnType<CaptureSessionStore['commitChunkAsync']>> | null> => {
     const store = ensureCaptureStore(options.generation);
     if (!store) {
       cleanupFile(options.path);
-      return null;
+      return Promise.resolve(null);
     }
-    try {
-      const chunk = store.commitChunk({
+    return store.commitChunkAsync({
         sourcePath: options.path,
         trackId: options.source,
         startSeconds: options.startSeconds,
         endSeconds: options.endSeconds,
         audible: options.audible,
-      });
+        clock: options.clock,
+      }).then((chunk) => {
       setCaptureChunkCount(store.manifest.chunks.length);
       return chunk;
-    } catch (captureError) {
+    }).catch((captureError: unknown) => {
       cleanupFile(options.path);
       setError(`Could not preserve live audio: ${
         captureError instanceof Error ? captureError.message : String(captureError)
       }`);
       return null;
-    }
+    });
   }, [cleanupFile, ensureCaptureStore]);
 
   const startSystemListener = useCallback(() => {
@@ -431,8 +475,8 @@ export default function App(props: { libraryDir?: string } = {}) {
     const capture = startSystemAudioCapture({
       sessionStartedAtUnixMs: liveSessionStartedAt.current,
       onChunk: (chunk) => {
-        const committed = persistLiveChunk({ ...chunk, generation });
-        if (committed && chunk.audible) {
+        void persistLiveChunk({ ...chunk, generation }).then((committed) => {
+          if (!committed || !chunk.audible) return;
           transcribeLiveChunk(
             committed.path,
             chunk.startSeconds,
@@ -441,7 +485,21 @@ export default function App(props: { libraryDir?: string } = {}) {
             generation,
             false,
           );
-        }
+        });
+      },
+      onDiscontinuity: (event) => {
+        const store = ensureCaptureStore(generation);
+        if (!store) return;
+        void store.recordDiscontinuityAsync({
+          trackId: 'system-audio',
+          atSeconds: event.atFrame / 16_000,
+          durationSeconds: event.durationFrames / 16_000,
+          reason: event.reason,
+        }).catch((gapError: unknown) => {
+          setError(`Could not preserve a capture gap: ${
+            gapError instanceof Error ? gapError.message : String(gapError)
+          }`);
+        });
       },
       onLevel: setSystemAudioLevel,
       onState: (update) => {
@@ -453,7 +511,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       },
     });
     systemAudioCapture.current = capture;
-  }, [persistLiveChunk, systemAudioDisabled, transcribeLiveChunk]);
+  }, [ensureCaptureStore, persistLiveChunk, systemAudioDisabled, transcribeLiveChunk]);
 
   const startListener = useCallback(() => {
     if (listenerDisabled || isExiting.current || pausedRef.current) return;
@@ -462,8 +520,8 @@ export default function App(props: { libraryDir?: string } = {}) {
     const capture = startMicrophoneCapture({
       sessionStartedAtUnixMs: liveSessionStartedAt.current,
       onChunk: (chunk) => {
-        const committed = persistLiveChunk({ ...chunk, generation: sessionGeneration });
-        if (committed && chunk.audible) {
+        void persistLiveChunk({ ...chunk, generation: sessionGeneration }).then((committed) => {
+          if (!committed || !chunk.audible) return;
           transcribeLiveChunk(
             committed.path,
             chunk.startSeconds,
@@ -472,7 +530,7 @@ export default function App(props: { libraryDir?: string } = {}) {
             sessionGeneration,
             false,
           );
-        }
+        });
       },
       onLevel: (level) => {
         setMicrophoneLevel(level);
@@ -495,8 +553,9 @@ export default function App(props: { libraryDir?: string } = {}) {
     return () => {
       isExiting.current = true;
       microphoneCapture.current?.stop();
-      for (const process of liveTranscriptionProcesses.current) process.kill('SIGTERM');
-      liveTranscriptionProcesses.current.clear();
+      void localAsrScheduler.current?.stop();
+      void cloudAsrScheduler.current?.stop();
+      void localAsrServer.current?.stop();
     };
   }, [listenerDisabled, startListener]);
 
@@ -522,7 +581,8 @@ export default function App(props: { libraryDir?: string } = {}) {
       systemAudioCapture.current = null;
       setMicrophoneState('stopped');
       if (!systemAudioDisabled) setSystemAudioState('stopped');
-      void Promise.all(captureHandles.map((handle) => handle.done)).then(() => {
+      void Promise.all(captureHandles.map((handle) => handle.done)).then(async () => {
+        await captureSessionStore.current?.drainCommits();
         if (pausedRef.current) captureSessionStore.current?.setStatus('paused');
       });
     } else if (!microphoneCapture.current) {
@@ -546,6 +606,8 @@ export default function App(props: { libraryDir?: string } = {}) {
       try {
         const record = await transcribeMedia(filePath, {
           speakers: withSpeakers,
+          routing: config.transcription,
+          humainStoreDir: join(libraryRoot, '_Humain'),
           onStatus: (label) => setProcessing((current) => ({ ...current, label })),
           onWhisperProgress: (progress) => setProcessing({
             label: 'Transcribing…',
@@ -571,7 +633,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         if (wasListening) setListeningPaused(false);
       }
     })();
-  }, [libraryRoot, processing, refreshLibrary, setListeningPaused]);
+  }, [config.transcription, libraryRoot, processing, refreshLibrary, setListeningPaused]);
 
   const pickMedia = useCallback((withSpeakers: boolean) => {
     const script = `
@@ -691,10 +753,11 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
   }, [commitMeetingState, config.meeting, currentRecord, libraryRoot, refreshLibrary]);
 
-  const completeCaptureSession = useCallback((reason: string) => {
+  const completeCaptureSession = useCallback(async (reason: string) => {
     const store = captureSessionStore.current;
     if (!store) return;
     try {
+      await store.drainCommits();
       const current = liveRecordRef.current;
       const duration = Math.max(0, ...store.manifest.chunks.map((chunk) => chunk.endMs)) / 1_000;
       const record: TranscriptRecord = {
@@ -750,26 +813,38 @@ export default function App(props: { libraryDir?: string } = {}) {
       try {
         if (finishLive) {
           await Promise.all(captureHandles.map((handle) => handle.done));
-          const deadline = Date.now() + 10 * 60_000;
-          while (liveTranscriptionProcesses.current.size > 0) {
-            if (Date.now() > deadline) throw new Error('Timed out waiting for live transcription');
-            setProcessing({
-              label: `Finishing ${liveTranscriptionProcesses.current.size} live transcription job${
-                liveTranscriptionProcesses.current.size === 1 ? '' : 's'
-              }…`,
-            });
-            await new Promise((resolve) => setTimeout(resolve, 200));
-          }
           const store = captureSessionStore.current;
+          await store?.drainCommits();
+          localAsrScheduler.current?.cancelGeneration(liveSessionGeneration.current);
+          cloudAsrScheduler.current?.cancelGeneration(liveSessionGeneration.current);
+          await Promise.all([
+            localAsrScheduler.current?.drain(),
+            cloudAsrScheduler.current?.drain(),
+          ]);
           if (store?.manifest.chunks.length) {
+            const routing = config.transcription ?? DEFAULT_TRANSCRIPTION_ROUTING;
+            const canonicalRoute = selectCanonicalTranscriptionRoute(routing);
+            const cloud = routing.cloud;
             const finalized = await finalizeCaptureTranscript(store.manifestPath, {
               title: liveRecordRef.current.title,
               onStatus: (label) => setProcessing({ label }),
+              ...(canonicalRoute === 'cloud' && cloud?.uploadConsent ? {
+                remoteRoute: {
+                  model: cloud.model,
+                  ...(cloud.upstreamProvider === undefined
+                    ? {}
+                    : { upstreamProvider: cloud.upstreamProvider }),
+                  ...(cloud.maxCostMicrousd === undefined
+                    ? {}
+                    : { maxCostMicrousd: cloud.maxCostMicrousd }),
+                  uploadConsent: true as const,
+                },
+              } : {}),
             });
             liveRecordRef.current = finalized;
             setLiveRecord(finalized);
           }
-          completeCaptureSession('meeting-finished');
+          await completeCaptureSession('meeting-finished');
         }
         const record = view === 'live' ? liveRecordRef.current : currentRecord;
         saveTranscriptRecord(libraryRoot, record);
@@ -1000,27 +1075,41 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   const resetLiveSession = useCallback(() => {
     const resumeCapture = !pausedRef.current;
+    const generation = liveSessionGeneration.current;
+    const captureHandles = [microphoneCapture.current, systemAudioCapture.current]
+      .filter((handle): handle is MicrophoneCaptureHandle | SystemAudioCaptureHandle => Boolean(handle));
     microphoneCapture.current?.stop();
     microphoneCapture.current = null;
     systemAudioCapture.current?.stop();
     systemAudioCapture.current = null;
-    completeCaptureSession('new-live-session');
-    liveSessionGeneration.current += 1;
-    const next = createLiveRecord();
-    liveRecordRef.current = next;
-    liveSessionStartedAt.current = Date.now();
-    setLiveRecord(next);
-    liveMeetingRef.current = null;
-    setLiveMeeting(null);
-    setMeetingView('transcript');
-    setTranscriptScroll(0);
-    setNotice('Started a fresh live transcript.');
-    setMicrophoneLevel(null);
-    setSystemAudioLevel(null);
-    if (resumeCapture) {
-      setTimeout(startListener, 0);
-      setTimeout(startSystemListener, 0);
-    }
+    void (async () => {
+      await Promise.all(captureHandles.map((handle) => handle.done));
+      localAsrScheduler.current?.cancelGeneration(generation);
+      cloudAsrScheduler.current?.cancelGeneration(generation);
+      await Promise.all([
+        localAsrScheduler.current?.drain(),
+        cloudAsrScheduler.current?.drain(),
+      ]);
+      await completeCaptureSession('new-live-session');
+      liveSessionGeneration.current += 1;
+      const next = createLiveRecord();
+      liveRecordRef.current = next;
+      liveSessionStartedAt.current = Date.now();
+      setLiveRecord(next);
+      liveMeetingRef.current = null;
+      setLiveMeeting(null);
+      setMeetingView('transcript');
+      setTranscriptScroll(0);
+      setNotice('Started a fresh live transcript.');
+      setMicrophoneLevel(null);
+      setSystemAudioLevel(null);
+      if (resumeCapture) {
+        startListener();
+        startSystemListener();
+      }
+    })().catch((resetError: unknown) => {
+      setError(resetError instanceof Error ? resetError.message : String(resetError));
+    });
   }, [completeCaptureSession, startListener, startSystemListener]);
 
   const gracefulExit = useCallback(() => {
@@ -1038,23 +1127,17 @@ export default function App(props: { libraryDir?: string } = {}) {
     void (async () => {
       try {
         await Promise.all(captureHandles.map((handle) => handle.done));
-        const deadline = Date.now() + 10 * 60_000;
-        while (liveTranscriptionProcesses.current.size > 0) {
-          if (Date.now() > deadline) throw new Error('Timed out waiting for live transcription');
-          setProcessing({
-            label: `Finishing ${liveTranscriptionProcesses.current.size} transcription job${
-              liveTranscriptionProcesses.current.size === 1 ? '' : 's'
-            }…`,
-          });
-          await new Promise((resolve) => setTimeout(resolve, 200));
-        }
-        completeCaptureSession('application-exit');
+        await captureSessionStore.current?.drainCommits();
+        await Promise.all([
+          localAsrScheduler.current?.stop(),
+          cloudAsrScheduler.current?.stop(),
+        ]);
+        await localAsrServer.current?.stop();
+        await completeCaptureSession('application-exit');
       } catch {
         try { captureSessionStore.current?.setStatus('interrupted', 'graceful-exit-failed'); } catch {}
       } finally {
         isExiting.current = true;
-        for (const process of liveTranscriptionProcesses.current) process.kill('SIGTERM');
-        liveTranscriptionProcesses.current.clear();
         exit();
       }
     })();
@@ -1554,7 +1637,7 @@ export default function App(props: { libraryDir?: string } = {}) {
             </Text>
             {transcribingCount > 0 && (
               <Text color="yellow">
-                {' + '}◐ Transcribing{transcribingCount > 1 ? ` (${transcribingCount})` : ''}
+                {' + '}◐ Draft {draftTranscriptionRoute}{transcribingCount > 1 ? ` (${transcribingCount})` : ''}
               </Text>
             )}
           </Text>

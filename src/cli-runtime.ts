@@ -129,6 +129,8 @@ async function executeTranscription(
     try {
       const record = await transcribeMedia(file, {
         ...options,
+        routing: config.transcription,
+        humainStoreDir: join(libraryDir, '_Humain'),
         labelingEvidence,
         onStatus: progress.onStatus,
         onWhisperProgress: progress.onWhisperProgress,
@@ -268,7 +270,7 @@ export function doctorChecks(): DoctorCheck[] {
   const systemAudioPermissionCheck = (): DoctorCheck => {
     if (!existsSync(SYSTEM_AUDIO_HELPER)) {
       return {
-        name: 'system-audio-access',
+        name: 'system-audio-probe',
         ok: false,
         required: false,
         help: 'Run ./install.sh before testing live system audio',
@@ -283,18 +285,21 @@ export function doctorChecks(): DoctorCheck[] {
       if (!line.trim()) return [];
       try { return [parseNativeSystemAudioEvent(line)]; } catch { return []; }
     });
-    const ready = result.status === 0 && events.some((event) => event.type === 'first-buffer');
+    const started = result.status === 0 && events.some((event) => event.type === 'start');
+    const receivedBuffer = events.some((event) => event.type === 'first-buffer');
     const failure = events.find((event) => event.type === 'error');
     return {
-      name: 'system-audio-access',
-      ok: ready,
+      name: 'system-audio-probe',
+      ok: started,
       required: false,
-      ...(ready
-        ? { path: 'Screen & System Audio Recording allowed' }
+      ...(receivedBuffer
+        ? { path: 'Helper started and received a CoreAudio buffer' }
+        : started
+          ? { path: 'Helper started; run `seashell capture test` while computer audio is playing' }
         : {
             help: failure?.type === 'error'
               ? failure.message
-              : 'Allow your terminal in System Settings → Privacy & Security → Screen & System Audio Recording',
+              : 'Allow Screen & System Audio Recording, then verify the active output device',
           }),
     };
   };

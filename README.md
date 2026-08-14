@@ -5,7 +5,8 @@ sessions, speaker diarization, subtitles, and a durable transcript library on
 macOS.
 
 Sea Shell uses [whisper.cpp](https://github.com/ggerganov/whisper.cpp) with
-Metal acceleration. File and live transcription stay on your machine. Optional
+Metal acceleration. File and live transcription stay on your machine by
+default; exact-model cloud drafts/finals require explicit upload consent. Optional
 speaker diarization needs a Hugging Face token for its first gated model
 download; inference remains local afterward.
 
@@ -35,6 +36,8 @@ download; inference remains local afterward.
 - Captures microphone and macOS system audio concurrently for live calls,
   labels the sources separately, skips silent chunks, and suppresses strong
   time-overlapping speaker-playback duplicates from the microphone transcript.
+- Keeps live ASR bounded: one owned warm local worker, a measured machine-local
+  profile, and optional consented cloud/adaptive routing through Humain.
 
 ## Requirements
 
@@ -157,6 +160,28 @@ seashell capture test --seconds 5
 The test reports microphone and system signal independently and deletes only
 its own test recording. During capture, the footer shows both meters and the
 number of safely committed chunks.
+
+### Live performance and routing
+
+Capture is durable before inference. CoreAudio writes only to a preallocated
+bounded handoff; conversion, disk durability, hashing, and transcription happen
+off its real-time callback. The local draft queue is bounded and uses one
+Sea Shell-owned warm Whisper server, which shuts down after idle time or quit.
+It never attaches to an unrelated server already running on the computer.
+
+Local is the default. Optional cloud and adaptive modes require Humain, an exact
+OpenRouter STT model, and explicit upload consent in the Sea Shell config. The
+canonical final route is pinned separately, so adaptive cloud drafts do not
+silently turn the saved transcript into a cloud result. See
+[`docs/live-performance-routing-0.1.md`](docs/live-performance-routing-0.1.md)
+for the config and clock contract.
+
+Benchmark the exact local model on this computer with a representative 16 kHz
+mono WAV:
+
+```bash
+bun run benchmark:live-asr -- ./sample.wav
+```
 
 ## Terminal UI
 
@@ -295,6 +320,15 @@ transcribes, diarizes, saves, and exports locally. Humain without Sea Shell
 continues to run its other capabilities. When both are installed,
 `humain setup` discovers `transcription.seashell.local`, and Humain users can
 run local audio/video transcription through the engine's SDK or CLI.
+
+For consented cloud transcription, add a `transcription` object to:
+
+```text
+~/Library/Application Support/Sea Shell/config.json
+```
+
+The complete Local/Cloud/Adaptive example is in
+[`docs/live-performance-routing-0.1.md`](docs/live-performance-routing-0.1.md).
 
 ### Google Meet status
 
@@ -647,6 +681,12 @@ seashell doctor
   Sea Shell in System Settings → Privacy & Security → Screen & System Audio
   Recording, then fully reopen the app. Set `SEASHELL_DISABLE_SYSTEM_AUDIO=1`
   for an explicit microphone-only session.
+- **Doctor says the helper started but no buffer was observed:** CoreAudio taps
+  may stay idle when nothing is playing. Run `seashell capture test --seconds 5`
+  while playing computer audio to verify the real signal path.
+- **System audio starts but receives no buffers:** verify the macOS output path
+  itself with `afplay /System/Library/Sounds/Glass.aiff`. If that also fails,
+  reconnect or change the output device before debugging Sea Shell.
 - **Malformed config:** validate the JSON at the config path printed above.
 
 ## Development

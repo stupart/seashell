@@ -27,6 +27,28 @@ export interface HumainMeetingResult {
   receipt: unknown;
 }
 
+export interface HumainTranscriptionRoute {
+  readonly model: string;
+  readonly upstreamProvider?: string;
+  readonly maxCostMicrousd?: number;
+  /** Explicit durable consent to upload audio through the configured route. */
+  readonly uploadConsent: true;
+}
+
+export interface HumainTranscriptSegment {
+  readonly id: string;
+  readonly startMs: number;
+  readonly endMs: number;
+  readonly text: string;
+}
+
+export interface HumainTranscriptionResult extends HumainMeetingResult {
+  readonly output: {
+    readonly segments: readonly HumainTranscriptSegment[];
+    readonly provider: { readonly boundary: 'remote'; readonly model: string };
+  };
+}
+
 interface HumainExecutable {
   command: string;
   prefix: string[];
@@ -84,6 +106,117 @@ function parseResult(stdout: string): HumainMeetingResult {
     }`);
   }
   return result as unknown as HumainMeetingResult;
+}
+
+function parseTranscriptionResult(stdout: string): HumainTranscriptionResult {
+  const result = parseResult(stdout);
+  const output = result.output;
+  if (!output || typeof output !== 'object' || Array.isArray(output)) {
+    throw new Error('Humain transcription returned no artifact');
+  }
+  const artifact = output as Record<string, unknown>;
+  if (!Array.isArray(artifact.segments) || !artifact.provider ||
+      typeof artifact.provider !== 'object' || Array.isArray(artifact.provider) ||
+      (artifact.provider as Record<string, unknown>).boundary !== 'remote') {
+    throw new Error('Humain transcription artifact is incompatible');
+  }
+  for (const [index, raw] of artifact.segments.entries()) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw new Error(`Humain transcription segment ${index} is invalid`);
+    }
+    const segment = raw as Record<string, unknown>;
+    if (typeof segment.text !== 'string' || !segment.text.trim() ||
+        !Number.isSafeInteger(segment.startMs) || !Number.isSafeInteger(segment.endMs) ||
+        Number(segment.startMs) < 0 || Number(segment.endMs) < Number(segment.startMs)) {
+      throw new Error(`Humain transcription segment ${index} is invalid`);
+    }
+  }
+  return result as HumainTranscriptionResult;
+}
+
+export async function runHumainTranscription(
+  audioFile: string,
+  route: HumainTranscriptionRoute,
+  options: {
+    readonly storeDir: string;
+    readonly runId: string;
+    readonly env?: NodeJS.ProcessEnv;
+    readonly signal?: AbortSignal;
+  },
+): Promise<HumainTranscriptionResult> {
+  const executable = resolveHumainExecutable(options.env);
+  if (options.signal?.aborted) throw new Error('Humain transcription was cancelled before start');
+  const endManagedSession = beginManagedProcessSession();
+  try {
+    return await new Promise((resolvePromise, reject) => {
+      const child = spawn(executable.command, [
+        ...executable.prefix,
+        'transcribe',
+        resolve(audioFile),
+        '--provider',
+        'openrouter',
+        '--model',
+        route.model,
+        ...(route.upstreamProvider === undefined
+          ? []
+          : ['--upstream-provider', route.upstreamProvider]),
+        ...(route.maxCostMicrousd === undefined
+          ? []
+          : ['--max-cost-microusd', String(route.maxCostMicrousd)]),
+        '--approve-upload',
+        '--store',
+        options.storeDir,
+        '--run-id',
+        options.runId,
+      ], {
+        ...(executable.cwd === undefined ? {} : { cwd: executable.cwd }),
+        env: { ...process.env, ...options.env },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      const stopTrackingChild = trackChildProcess(child);
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      let escalation: ReturnType<typeof setTimeout> | undefined;
+      const stop = () => {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        child.kill('SIGTERM');
+        escalation ??= setTimeout(() => {
+          if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+        }, 2_000);
+        escalation.unref();
+      };
+      const onAbort = () => stop();
+      options.signal?.addEventListener('abort', onAbort, { once: true });
+      child.stdout?.on('data', (data: Buffer) => { stdout = (stdout + data.toString()).slice(-32_000_000); });
+      child.stderr?.on('data', (data: Buffer) => { stderr = (stderr + data.toString()).slice(-32_000); });
+      child.once('error', (error) => {
+        if (settled) return;
+        settled = true;
+        stopTrackingChild();
+        options.signal?.removeEventListener('abort', onAbort);
+        reject(new Error(`Could not start Humain transcription: ${error.message}`));
+      });
+      child.once('close', (code, signal) => {
+        if (settled) return;
+        settled = true;
+        if (escalation) clearTimeout(escalation);
+        stopTrackingChild();
+        options.signal?.removeEventListener('abort', onAbort);
+        if (options.signal?.aborted) {
+          reject(new Error('Humain transcription was cancelled'));
+        } else if (code !== 0) {
+          reject(new Error(`Humain transcription failed: ${
+            stderr.trim() || stdout.trim() || (signal ? `signal ${signal}` : `exit ${code}`)
+          }`));
+        } else {
+          try { resolvePromise(parseTranscriptionResult(stdout)); } catch (error) { reject(error); }
+        }
+      });
+    });
+  } finally {
+    endManagedSession();
+  }
 }
 
 export async function runHumainMeeting(

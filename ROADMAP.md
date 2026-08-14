@@ -24,18 +24,25 @@
 - Independent mic/system meters plus a disposable signal test, graceful quit
   attachment, and an end-of-meeting `G` path that preserves the transcript even
   when optional Humain enrichment is unavailable.
+- Capture clock provenance and explicit overrun discontinuities, with a
+  preallocated real-time CoreAudio handoff and a hardware-clocked aggregate
+  device based on current AudioCap/Recap patterns.
+- Async serialized chunk durability, bounded draft scheduling, one private
+  lifecycle-owned warm Whisper server, and measured machine-local ASR profiles.
+- Exact-model OpenRouter STT through Humain plus consented Local/Cloud/Adaptive
+  draft routing and an independently pinned canonical final route.
 
 ## Next hardening checkpoints
 
 - Add hardware-clock drift measurement/correction, device-change recovery,
-  explicit route discontinuities, and microphone/system acoustic echo
+  automatic route restart, and microphone/system acoustic echo
   cancellation beyond conservative transcript deduplication.
 - Provisional live transcript revisions; capture,
   diarization, identity, cleanup, and rendering remain separate transforms.
 - Consent-first meeting detection from process/audio/calendar signals, followed
   later by an isolated optional Google Meet participant/active-speaker adapter.
-- Strict local/cloud transcription offer discovery with explicit timestamp,
-  diarization, language, format, size, privacy, and cost capability matching.
+- Expand the strict local/cloud offer catalog with diarization, language,
+  format, size, price-unit, and latency matching before automatic selection.
 - Real-meeting eval corpus covering reversals, ambiguous aliases, diarization
   errors, late evidence, disconnection, and abstention.
 - Native finalization trigger when a live meeting ends, with an explicit consent
