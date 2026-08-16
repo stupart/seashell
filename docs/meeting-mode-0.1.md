@@ -18,6 +18,13 @@ derived documents. No enrichment failure may overwrite or block the base.
 ## Session workflow
 
 ```text
+observe a supported process actively using audio input
+  -> require two confirming polls
+  -> calendar may strengthen/name the candidate but never creates one
+  -> dedicated meeting apps start automatically
+  -> browser/ambiguous audio follows the configured consent policy
+  -> acquire the one-watcher lock and start inference-free durable capture
+
 mark or calendar-associate transcript
   -> save canonical transcript
   -> initialize meeting cursor, overlap, run budget, and artifact manifest
@@ -36,7 +43,8 @@ while meeting is active and enough new segments exist
   -> durably advance cursor
 
 when the meeting ends (hybrid/post-session)
-  -> stop both sources and wait for committed work
+  -> tolerate short signal dropouts, then stop both sources after the grace period
+  -> wait for all committed work without blocking the next detection cycle
   -> assemble each durable track and run final ASR
   -> reconcile playback echo and freeze the complete transcript
   -> attach the raw capture bundle beside the transcript
@@ -60,13 +68,22 @@ chat
   transcript.
 - Calendar suggestions are read-only and opt-in. `ask` is the default policy
   when the connector is enabled.
+- Automatic meeting detection is on by default. Dedicated meeting apps and
+  calendar-corroborated browser calls auto-start; browser microphone use
+  without Calendar evidence asks by default. Calendar alone never records.
+- The background login watcher captures durably without running live ASR. The
+  visible TUI may still provide live draft ASR; both surfaces share one lock and
+  can never create duplicate capture sessions.
+- Ambiguous background browser detection posts a macOS notification. A private,
+  single-use `meeting consent approve|decline` command expires after two minutes
+  so approval cannot leak into a later call.
 - The TUI never silently chooses a model. Sea Shell selects separate exact
   observer, reconciliation, and chat routes from settings; Humain pins them in
   compiled runs and receipts. A shared backend/model remains the fallback.
 - “Works with,” “detects,” and “integrates with” Google Meet are separate
-  capabilities. Local mic + system capture now satisfies the first beta
-  checkpoint; detection and participant/active-speaker integration remain
-  unimplemented.
+  capabilities. Local mic + system capture and browser process detection are
+  implemented. Participant-tile and active-speaker inspection remain future,
+  opt-in evidence adapters.
 - Capture persistence is inference-independent: each source commits local audio
   first, so a model crash cannot erase the already recorded session. `Q` saves
   and attaches it; `G` additionally performs final-track ASR and enrichment.
@@ -82,3 +99,6 @@ chat
   readable.
 - The Humain run store is private product evidence; the friendly meeting folder
   is the user-facing artifact.
+- Explicit context files are bounded and allow-listed. Their content is routed
+  only when meeting intelligence runs; Sea Shell never recursively discovers
+  context on its own.

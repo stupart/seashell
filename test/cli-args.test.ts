@@ -197,6 +197,12 @@ describe('meeting CLI parsing', () => {
     });
     expect(() => parseCliArgs(['meeting', 'setup', '--backend', 'codex']))
       .toThrow('together');
+    expect(parseCliArgs(['meeting', 'setup', '--clear-context-files'])).toMatchObject({
+      action: { kind: 'setup', contextFiles: [] },
+    });
+    expect(() => parseCliArgs([
+      'meeting', 'setup', '--clear-context-files', '--context-file', 'notes.md',
+    ])).toThrow('cannot be combined');
   });
 
   test('parses independent observer, reconciliation, and chat routes', () => {
@@ -222,6 +228,38 @@ describe('meeting CLI parsing', () => {
     expect(() => parseCliArgs([
       'meeting', 'setup', '--observer-backend', 'openrouter',
     ])).toThrow('--observer-backend and --observer-model together');
+  });
+
+  test('parses automatic watcher, login-agent, and consent policy commands', () => {
+    expect(parseCliArgs(['meeting', 'watch', '--once', '--json'])).toMatchObject({
+      kind: 'meeting',
+      json: true,
+      action: { kind: 'watch', once: true },
+    });
+    expect(parseCliArgs(['meeting', 'autostart', 'status'])).toMatchObject({
+      action: { kind: 'autostart', operation: 'status' },
+    });
+    expect(parseCliArgs(['meeting', 'consent', 'approve'])).toMatchObject({
+      action: { kind: 'consent', decision: 'approve' },
+    });
+    expect(parseCliArgs([
+      'meeting', 'setup',
+      '--automation', 'automatic',
+      '--browser-without-calendar', 'ask',
+      '--context-file', './BLUEPRINT.md',
+      '--context-file', './project.md',
+    ])).toMatchObject({
+      action: {
+        kind: 'setup',
+        automationMode: 'automatic',
+        browserWithoutCalendar: 'ask',
+        contextFiles: ['./BLUEPRINT.md', './project.md'],
+      },
+    });
+    expect(() => parseCliArgs(['meeting', 'autostart', 'maybe']))
+      .toThrow('enable, disable, or status');
+    expect(() => parseCliArgs(['meeting', 'consent', 'maybe']))
+      .toThrow('approve or decline');
   });
 });
 

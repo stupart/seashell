@@ -21,6 +21,18 @@
   ASR scheduler, owned warm Whisper server, and local benchmark/profile command.
 - Consented Local/Cloud/Adaptive transcription routing through Humain's
   exact-model OpenRouter STT capability, with a separately pinned final route.
+- Automatic meeting lifecycle detection from macOS process-audio signals,
+  including confirmation polls, browser consent policy, dropout grace, maximum
+  duration, cooldown, and Calendar corroboration.
+- A low-resource background watcher that durably captures first, performs final
+  ASR/enrichment after the call, serializes finalizers, and shares a one-owner
+  lock with the TUI.
+- `seashell meeting watch` and `meeting autostart` commands, a private per-user
+  macOS LaunchAgent, native signal helper, doctor check, and capability offer.
+- Short-lived `meeting consent approve|decline` control for browser suggestions
+  raised by the headless watcher, with a macOS notification and one-use expiry.
+- Calendar attendee extraction for conservative post-diarization naming and
+  explicit bounded meeting context files for project/company grounding.
 
 ### Changed
 
@@ -38,10 +50,13 @@
   real-time CoreAudio callback.
 - Remote canonical finalization transcribes durable chunks directly instead of
   assembling unused meeting-length tracks.
+- The default TUI starts in an inexpensive meeting-watching state instead of
+  opening capture and Whisper immediately. New private artifacts use `0700`
+  directories and `0600` files.
 
 ### Verified
 
-- Full suite: 97 Bun tests, 3 Python tests, and strict TypeScript checking.
+- Full suite: 116 Bun tests, 3 Python tests, and strict TypeScript checking.
 - Actual terminal captures covered the transcript-first meeting view and the
   responsive on-demand history drawer.
 - A live Sea Shell -> Humain -> OpenRouter retry completed through DeepInfra on

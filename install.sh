@@ -36,6 +36,8 @@ SYSTEM_AUDIO_SOURCE="native/macos-system-audio.swift"
 SYSTEM_AUDIO_ATOMIC_SOURCE="native/seashell-atomic.c"
 SYSTEM_AUDIO_ATOMIC_HEADER="native/seashell-atomic.h"
 SYSTEM_AUDIO_BINARY="native/bin/seashell-system-audio"
+MEETING_SIGNALS_SOURCE="native/macos-meeting-signals.swift"
+MEETING_SIGNALS_BINARY="native/bin/seashell-meeting-signals"
 mkdir -p native/bin
 if [ ! -x "$SYSTEM_AUDIO_BINARY" ] || [ "$SYSTEM_AUDIO_SOURCE" -nt "$SYSTEM_AUDIO_BINARY" ] || \
    [ "$SYSTEM_AUDIO_ATOMIC_SOURCE" -nt "$SYSTEM_AUDIO_BINARY" ] || \
@@ -52,7 +54,15 @@ if [ ! -x "$SYSTEM_AUDIO_BINARY" ] || [ "$SYSTEM_AUDIO_SOURCE" -nt "$SYSTEM_AUDI
     rm -f "$ATOMIC_OBJECT"
 fi
 
-echo "System-audio helper built successfully."
+if [ ! -x "$MEETING_SIGNALS_BINARY" ] || [ "$MEETING_SIGNALS_SOURCE" -nt "$MEETING_SIGNALS_BINARY" ]; then
+    echo "Building native meeting-signal helper..."
+    xcrun swiftc "$MEETING_SIGNALS_SOURCE" -O \
+        -framework AppKit \
+        -framework CoreAudio \
+        -o "$MEETING_SIGNALS_BINARY"
+fi
+
+echo "Native capture and meeting-signal helpers built successfully."
 echo ""
 
 # Clone and build whisper.cpp

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readdirSync, rmSync } from 'fs';
+import { mkdtempSync, readdirSync, rmSync, statSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { resolveLibraryDir } from '../src/config.ts';
@@ -62,6 +62,9 @@ describe('transcript library', () => {
       'transcript.txt',
     ]);
     expect(readdirSync(saved.directory).some((name) => name.endsWith('.tmp'))).toBe(false);
+    expect(statSync(saved.directory).mode & 0o777).toBe(0o700);
+    expect(statSync(saved.jsonPath).mode & 0o777).toBe(0o600);
+    expect(statSync(saved.textPath).mode & 0o777).toBe(0o600);
   });
 
   test('rebuilds listings and search directly from transcript folders', () => {

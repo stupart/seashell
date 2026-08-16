@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join } from 'path';
 import { fileURLToPath } from 'url';
 import { DEFAULT_WHISPER_MODEL_ID } from './model-config.ts';
 import { SYSTEM_AUDIO_HELPER } from './live-system-audio.ts';
+import { MEETING_SIGNALS_HELPER } from './meeting-automation.ts';
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const PACKAGE_VERSION = (() => {
@@ -16,7 +17,10 @@ const PACKAGE_VERSION = (() => {
   return parsed.version.trim();
 })();
 
-export function seashellCapabilityManifest(options: { systemAudioReady?: boolean } = {}) {
+export function seashellCapabilityManifest(options: {
+  systemAudioReady?: boolean;
+  meetingSignalsReady?: boolean;
+} = {}) {
   const diarizationModel = process.env.SEASHELL_DIARIZATION_MODEL ||
     'pyannote/speaker-diarization-community-1';
   const hubRoot = process.env.HF_HUB_CACHE || join(
@@ -31,6 +35,9 @@ export function seashellCapabilityManifest(options: { systemAudioReady?: boolean
   const diarizationReady = diarizationDependencies && diarizationModelCached;
   const systemAudioReady = options.systemAudioReady ?? (
     process.platform === 'darwin' && existsSync(SYSTEM_AUDIO_HELPER)
+  );
+  const meetingSignalsReady = options.meetingSignalsReady ?? (
+    process.platform === 'darwin' && existsSync(MEETING_SIGNALS_HELPER)
   );
   return Object.freeze({
     schemaVersion: '0.1',
@@ -86,6 +93,27 @@ export function seashellCapabilityManifest(options: { systemAudioReady?: boolean
             ]),
             optionalFeatures: Object.freeze([]),
             engine: 'coreaudio+sox',
+            model: 'none',
+          })]
+        : []),
+      ...(meetingSignalsReady
+        ? [Object.freeze({
+            id: 'automation.seashell.macos.meeting-watch',
+            operation: 'meeting.capture.watch',
+            boundary: 'local',
+            modes: Object.freeze(['background']),
+            inputKinds: Object.freeze(['audio-input-process', 'calendar-event']),
+            languages: Object.freeze([]),
+            network: 'none',
+            supportsCancellation: true,
+            features: Object.freeze([
+              'automatic-start-stop',
+              'capture-hysteresis',
+              'single-watcher-lock',
+              'post-session-finalization',
+            ]),
+            optionalFeatures: Object.freeze([]),
+            engine: 'coreaudio+eventkit',
             model: 'none',
           })]
         : []),

@@ -53,13 +53,13 @@ function localDateKey(isoTimestamp: string): string {
 }
 
 function atomicWrite(path: string, contents: string): void {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporaryPath = join(
     dirname(path),
     `.${basename(path)}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`,
   );
   try {
-    writeFileSync(temporaryPath, contents, { encoding: 'utf8', flag: 'wx' });
+    writeFileSync(temporaryPath, contents, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     renameSync(temporaryPath, path);
   } catch (error) {
     rmSync(temporaryPath, { force: true });
@@ -274,7 +274,7 @@ export function trashTranscriptRecord(libraryDir: string, transcriptId: string):
   const { path } = findTranscriptRecord(libraryDir, transcriptId);
   const sourceDirectory = dirname(path);
   const trashDirectory = join(libraryDir, '_Trash');
-  mkdirSync(trashDirectory, { recursive: true });
+  mkdirSync(trashDirectory, { recursive: true, mode: 0o700 });
   const target = join(
     trashDirectory,
     `${basename(sourceDirectory)}--${Date.now()}`,

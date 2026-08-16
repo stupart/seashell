@@ -3,6 +3,10 @@ import type { TranscriptFormat } from './transcript-types.ts';
 import type { HumainBackend } from './humain-client.ts';
 import type { MeetingEnrichmentMode } from './meeting-artifact.ts';
 import type { MeetingCapturePolicy } from './calendar.ts';
+import type {
+  BrowserMeetingPolicy,
+  MeetingAutomationMode,
+} from './meeting-automation.ts';
 
 export interface TranscribeCommandOptions extends DiarizeFileOptions {
   format: TranscriptFormat;
@@ -47,8 +51,14 @@ export type MeetingCommand = {
           chat?: { backend: HumainBackend; model: string };
         };
         calendarPolicy?: MeetingCapturePolicy;
+        automationMode?: MeetingAutomationMode;
+        browserWithoutCalendar?: BrowserMeetingPolicy;
+        contextFiles?: string[];
       }
-    | { kind: 'calendar' };
+    | { kind: 'calendar' }
+    | { kind: 'watch'; once: boolean }
+    | { kind: 'consent'; decision: 'approve' | 'decline' }
+    | { kind: 'autostart'; operation: 'enable' | 'disable' | 'status' };
   libraryDir?: string;
   json: boolean;
 };
@@ -347,7 +357,9 @@ function meetingBackend(value: string): HumainBackend {
 
 function parseMeeting(args: string[]): MeetingCommand {
   const actionName = args[1];
-  if (!actionName) throw new Error('Meeting command requires setup, create, enrich, show, chat, or calendar');
+  if (!actionName) {
+    throw new Error('Meeting command requires setup, create, enrich, show, chat, calendar, watch, consent, or autostart');
+  }
   const positional: string[] = [];
   let libraryDir: string | undefined;
   let json = false;
@@ -363,6 +375,11 @@ function parseMeeting(args: string[]): MeetingCommand {
   let chatBackend: HumainBackend | undefined;
   let chatModel: string | undefined;
   let calendarPolicy: MeetingCapturePolicy | undefined;
+  let automationMode: MeetingAutomationMode | undefined;
+  let browserWithoutCalendar: BrowserMeetingPolicy | undefined;
+  const contextFiles: string[] = [];
+  let contextFilesSpecified = false;
+  let once = false;
 
   for (let index = 2; index < args.length; index += 1) {
     const arg = args[index]!;
@@ -393,6 +410,36 @@ function parseMeeting(args: string[]): MeetingCommand {
         calendarPolicy = value;
         break;
       }
+      case '--automation': {
+        const value = next();
+        if (value !== 'off' && value !== 'ask' && value !== 'automatic') {
+          throw new Error('--automation must be off, ask, or automatic');
+        }
+        automationMode = value;
+        break;
+      }
+      case '--browser-without-calendar': {
+        const value = next();
+        if (value !== 'off' && value !== 'ask' && value !== 'automatic') {
+          throw new Error('--browser-without-calendar must be off, ask, or automatic');
+        }
+        browserWithoutCalendar = value;
+        break;
+      }
+      case '--context-file':
+        if (contextFilesSpecified && contextFiles.length === 0) {
+          throw new Error('--context-file cannot be combined with --clear-context-files');
+        }
+        contextFilesSpecified = true;
+        contextFiles.push(next());
+        break;
+      case '--clear-context-files':
+        if (contextFilesSpecified) {
+          throw new Error('--clear-context-files cannot be combined with --context-file');
+        }
+        contextFilesSpecified = true;
+        break;
+      case '--once': once = true; break;
       default:
         if (arg.startsWith('-')) throw new Error(`Unknown meeting option: ${arg}`);
         positional.push(arg);
@@ -460,7 +507,8 @@ function parseMeeting(args: string[]): MeetingCommand {
           ? { chat: { backend: chatBackend, model: chatModel } }
           : {}),
       };
-      if (!backend && !model && Object.keys(routes).length === 0 && !mode && !calendarPolicy) {
+      if (!backend && !model && Object.keys(routes).length === 0 && !mode && !calendarPolicy &&
+          !automationMode && !browserWithoutCalendar && !contextFilesSpecified) {
         throw new Error('meeting setup requires a route, mode, or calendar policy');
       }
       action = {
@@ -470,6 +518,9 @@ function parseMeeting(args: string[]): MeetingCommand {
         ...(model ? { model } : {}),
         ...(Object.keys(routes).length === 0 ? {} : { routes }),
         ...(calendarPolicy ? { calendarPolicy } : {}),
+        ...(automationMode ? { automationMode } : {}),
+        ...(browserWithoutCalendar ? { browserWithoutCalendar } : {}),
+        ...(contextFilesSpecified ? { contextFiles } : {}),
       };
       break;
     case 'chat':
@@ -488,24 +539,52 @@ function parseMeeting(args: string[]): MeetingCommand {
       if (positional.length > 0) throw new Error('meeting calendar accepts no positional arguments');
       action = { kind: 'calendar' };
       break;
+    case 'watch':
+      if (positional.length > 0) throw new Error('meeting watch accepts no positional arguments');
+      action = { kind: 'watch', once };
+      break;
+    case 'consent': {
+      const decision = positional[0];
+      if (decision !== 'approve' && decision !== 'decline') {
+        throw new Error('meeting consent requires approve or decline');
+      }
+      if (positional.length !== 1) throw new Error('meeting consent accepts one decision');
+      action = { kind: 'consent', decision };
+      break;
+    }
+    case 'autostart': {
+      const operation = positional[0];
+      if (operation !== 'enable' && operation !== 'disable' && operation !== 'status') {
+        throw new Error('meeting autostart requires enable, disable, or status');
+      }
+      if (positional.length !== 1) throw new Error('meeting autostart accepts one operation');
+      action = { kind: 'autostart', operation };
+      break;
+    }
     default:
       throw new Error(`Unknown meeting action: ${actionName}`);
   }
   const validForAction = action.kind === 'create'
-      ? !backend && !model && !contextPath && !calendarPolicy &&
+      ? !backend && !model && !contextPath && !calendarPolicy && !automationMode && !browserWithoutCalendar && !once && !contextFilesSpecified &&
         !observerBackend && !observerModel && !reconciliationBackend && !reconciliationModel &&
         !chatBackend && !chatModel
       : action.kind === 'enrich'
-      ? !eventJsonPath && !calendarPolicy &&
+      ? !eventJsonPath && !calendarPolicy && !automationMode && !browserWithoutCalendar && !once && !contextFilesSpecified &&
         !observerBackend && !observerModel && !reconciliationBackend && !reconciliationModel &&
         !chatBackend && !chatModel
       : action.kind === 'chat'
-        ? !eventJsonPath && !contextPath && !mode && !calendarPolicy &&
+        ? !eventJsonPath && !contextPath && !mode && !calendarPolicy && !automationMode && !browserWithoutCalendar && !once && !contextFilesSpecified &&
           !observerBackend && !observerModel && !reconciliationBackend && !reconciliationModel &&
           !chatBackend && !chatModel
         : action.kind === 'setup'
-          ? !eventJsonPath && !contextPath
-          : !eventJsonPath && !contextPath && !mode && !backend && !model && !calendarPolicy &&
+          ? !eventJsonPath && !contextPath && !once
+          : action.kind === 'watch'
+            ? !eventJsonPath && !contextPath && !mode && !backend && !model && !calendarPolicy && !contextFilesSpecified &&
+              !automationMode && !browserWithoutCalendar &&
+              !observerBackend && !observerModel && !reconciliationBackend && !reconciliationModel &&
+              !chatBackend && !chatModel
+            : !eventJsonPath && !contextPath && !mode && !backend && !model && !calendarPolicy && !contextFilesSpecified &&
+            !automationMode && !browserWithoutCalendar && !once &&
             !observerBackend && !observerModel && !reconciliationBackend && !reconciliationModel &&
             !chatBackend && !chatModel;
   if (!validForAction) throw new Error(`One or more options do not apply to meeting ${action.kind}`);
@@ -661,6 +740,10 @@ Capture actions:
 Meeting actions:
   meeting setup --backend <backend> --model <exact-model> [--mode <mode>]
                 [--calendar off|ask|selected-calendars|all]
+                [--automation off|ask|automatic]
+                [--browser-without-calendar off|ask|automatic]
+                [--context-file <path>]...
+                [--clear-context-files]
                 [--observer-backend <backend> --observer-model <model>]
                 [--reconciliation-backend <backend> --reconciliation-model <model>]
                 [--chat-backend <backend> --chat-model <model>]
@@ -670,6 +753,9 @@ Meeting actions:
   meeting show <id> [--json]
   meeting chat <id> <question> [--backend <backend>] [--model <exact-model>]
   meeting calendar [--json]
+  meeting watch [--once] [--json]             Watch cheaply and record detected meetings
+  meeting consent approve|decline             Answer a background browser-capture request
+  meeting autostart enable|disable|status      Manage the macOS login agent
 
 Configuration precedence:
   CLI flag > SEASHELL_LIBRARY_DIR > config.json > ~/Documents/Sea Shell/Transcripts

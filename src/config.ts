@@ -10,6 +10,7 @@ import {
 import { homedir } from 'os';
 import { dirname, isAbsolute, join, resolve } from 'path';
 import type { MeetingCapturePolicy } from './calendar.ts';
+import type { MeetingAutomationConfig } from './meeting-automation.ts';
 import type { HumainBackend, HumainMeetingRoute } from './humain-client.ts';
 import type { MeetingEnrichmentMode } from './meeting-artifact.ts';
 import {
@@ -29,6 +30,8 @@ export interface SeashellMeetingConfig {
   observerMinSegments?: number;
   observerMaxSegments?: number;
   maxObserverRuns?: number;
+  /** Explicit files whose contents may be sent to the configured meeting-intelligence route. */
+  contextFiles?: string[];
   /** Per-job model routes. Legacy backend/model remain the shared fallback. */
   routes?: {
     observer?: HumainMeetingRoute;
@@ -41,6 +44,7 @@ export interface SeashellMeetingConfig {
     selectedCalendars?: string[];
     leadMinutes?: number;
   };
+  automation?: MeetingAutomationConfig;
 }
 
 export type MeetingRouteRole = 'observer' | 'reconciliation' | 'chat';
@@ -105,7 +109,15 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
   if (meeting.model !== undefined && (typeof meeting.model !== 'string' || !meeting.model.trim())) {
     throw new Error('Sea Shell config meeting.model must be a non-empty string');
   }
+  if (
+    meeting.contextFiles !== undefined &&
+    (!Array.isArray(meeting.contextFiles) ||
+      meeting.contextFiles.some((path) => typeof path !== 'string' || !path.trim()))
+  ) {
+    throw new Error('Sea Shell config meeting.contextFiles must be non-empty path strings');
+  }
   let calendar: SeashellMeetingConfig['calendar'];
+  let automation: SeashellMeetingConfig['automation'];
   let routes: SeashellMeetingConfig['routes'];
   if (meeting.routes !== undefined) {
     if (!meeting.routes || typeof meeting.routes !== 'object' || Array.isArray(meeting.routes)) {
@@ -157,6 +169,63 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
         : { leadMinutes: candidate.leadMinutes as number }),
     };
   }
+  if (meeting.automation !== undefined) {
+    if (!meeting.automation || typeof meeting.automation !== 'object' || Array.isArray(meeting.automation)) {
+      throw new Error('Sea Shell config meeting.automation must be an object');
+    }
+    const candidate = meeting.automation as Record<string, unknown>;
+    const allowed = new Set([
+      'enabled',
+      'mode',
+      'browserWithoutCalendar',
+      'confirmationPolls',
+      'pollSeconds',
+      'endGraceSeconds',
+      'cooldownSeconds',
+      'maxDurationMinutes',
+      'launchAtLogin',
+    ]);
+    const unknown = Object.keys(candidate).find((key) => !allowed.has(key));
+    if (unknown) throw new Error(`Sea Shell config meeting.automation.${unknown} is not supported`);
+    if (candidate.enabled !== undefined && typeof candidate.enabled !== 'boolean') {
+      throw new Error('Sea Shell config meeting.automation.enabled must be a boolean');
+    }
+    if (candidate.launchAtLogin !== undefined && typeof candidate.launchAtLogin !== 'boolean') {
+      throw new Error('Sea Shell config meeting.automation.launchAtLogin must be a boolean');
+    }
+    const modes = ['off', 'ask', 'automatic'];
+    if (candidate.mode !== undefined && !modes.includes(candidate.mode as string)) {
+      throw new Error('Sea Shell config meeting.automation.mode is invalid');
+    }
+    const browserPolicies = ['off', 'ask', 'automatic'];
+    if (candidate.browserWithoutCalendar !== undefined &&
+        !browserPolicies.includes(candidate.browserWithoutCalendar as string)) {
+      throw new Error('Sea Shell config meeting.automation.browserWithoutCalendar is invalid');
+    }
+    automation = {
+      ...(candidate.enabled === undefined ? {} : { enabled: candidate.enabled }),
+      ...(candidate.mode === undefined ? {} : { mode: candidate.mode as MeetingAutomationConfig['mode'] }),
+      ...(candidate.browserWithoutCalendar === undefined
+        ? {}
+        : { browserWithoutCalendar: candidate.browserWithoutCalendar as MeetingAutomationConfig['browserWithoutCalendar'] }),
+      ...(optionalPositiveInteger(candidate.confirmationPolls, 'meeting.automation.confirmationPolls') === undefined
+        ? {}
+        : { confirmationPolls: candidate.confirmationPolls as number }),
+      ...(optionalPositiveInteger(candidate.pollSeconds, 'meeting.automation.pollSeconds') === undefined
+        ? {}
+        : { pollSeconds: candidate.pollSeconds as number }),
+      ...(optionalPositiveInteger(candidate.endGraceSeconds, 'meeting.automation.endGraceSeconds') === undefined
+        ? {}
+        : { endGraceSeconds: candidate.endGraceSeconds as number }),
+      ...(optionalPositiveInteger(candidate.cooldownSeconds, 'meeting.automation.cooldownSeconds') === undefined
+        ? {}
+        : { cooldownSeconds: candidate.cooldownSeconds as number }),
+      ...(optionalPositiveInteger(candidate.maxDurationMinutes, 'meeting.automation.maxDurationMinutes') === undefined
+        ? {}
+        : { maxDurationMinutes: candidate.maxDurationMinutes as number }),
+      ...(candidate.launchAtLogin === undefined ? {} : { launchAtLogin: candidate.launchAtLogin }),
+    };
+  }
   return {
     ...(meeting.mode === undefined ? {} : { mode: meeting.mode as MeetingEnrichmentMode }),
     ...(meeting.backend === undefined ? {} : { backend: meeting.backend as HumainBackend }),
@@ -179,7 +248,11 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
     ...(optionalPositiveInteger(meeting.maxObserverRuns, 'meeting.maxObserverRuns') === undefined
       ? {}
       : { maxObserverRuns: meeting.maxObserverRuns as number }),
+    ...(meeting.contextFiles === undefined
+      ? {}
+      : { contextFiles: [...meeting.contextFiles] as string[] }),
     ...(calendar === undefined ? {} : { calendar }),
+    ...(automation === undefined ? {} : { automation }),
     ...(routes === undefined ? {} : { routes }),
   };
 }
@@ -350,9 +423,19 @@ export function updateMeetingConfig(
               ...patch.routes,
             },
           }),
+      ...(patch.automation === undefined
+        ? {}
+        : {
+            automation: {
+              ...(currentMeeting.automation && typeof currentMeeting.automation === 'object'
+                ? currentMeeting.automation as Record<string, unknown>
+                : {}),
+              ...patch.automation,
+            },
+          }),
     },
   };
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = join(dirname(path), `.config.${process.pid}.${randomUUID().slice(0, 8)}.tmp`);
   try {
     writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, {

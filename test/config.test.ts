@@ -49,17 +49,66 @@ test('meeting setup preserves unrelated config and stores route metadata without
     backend: 'openrouter',
     model: 'test/cheap',
     mode: 'hybrid',
+    contextFiles: ['/tmp/blueprint.md'],
     calendar: { enabled: true, policy: 'ask' },
+    automation: {
+      enabled: true,
+      mode: 'automatic',
+      browserWithoutCalendar: 'ask',
+      confirmationPolls: 2,
+      endGraceSeconds: 20,
+      launchAtLogin: false,
+    },
   }, path);
   expect(config.meeting).toMatchObject({
     backend: 'openrouter',
     model: 'test/cheap',
     mode: 'hybrid',
+    contextFiles: ['/tmp/blueprint.md'],
+    automation: {
+      enabled: true,
+      mode: 'automatic',
+      browserWithoutCalendar: 'ask',
+      confirmationPolls: 2,
+      endGraceSeconds: 20,
+      launchAtLogin: false,
+    },
   });
   expect(loadConfig(path).libraryDir).toBe('./library');
   const raw = readFileSync(path, 'utf8');
   expect(raw).toContain('futureSetting');
   expect(raw).not.toContain('apiKey');
+});
+
+test('meeting context files are an explicit strict allow-list', () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-context-config-'));
+  roots.push(root);
+  const path = join(root, 'config.json');
+  updateMeetingConfig({ contextFiles: ['/tmp/company.md'] }, path);
+  expect(loadConfig(path).meeting?.contextFiles).toEqual(['/tmp/company.md']);
+  writeFileSync(path, JSON.stringify({ meeting: { contextFiles: [''] } }));
+  expect(() => loadConfig(path)).toThrow('meeting.contextFiles');
+});
+
+test('meeting automation config is strict and preserves nested settings', () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-automation-config-'));
+  roots.push(root);
+  const path = join(root, 'config.json');
+  updateMeetingConfig({
+    automation: { enabled: true, mode: 'automatic', confirmationPolls: 2 },
+  }, path);
+  const config = updateMeetingConfig({
+    automation: { launchAtLogin: true, browserWithoutCalendar: 'ask' },
+  }, path);
+  expect(config.meeting?.automation).toEqual({
+    enabled: true,
+    mode: 'automatic',
+    browserWithoutCalendar: 'ask',
+    confirmationPolls: 2,
+    launchAtLogin: true,
+  });
+  writeFileSync(path, JSON.stringify({ meeting: { automation: { mode: 'surprise' } } }));
+  expect(() => loadConfig(path)).toThrow('meeting.automation.mode is invalid');
 });
 
 test('transcription routing config requires an exact consent-bearing cloud route', () => {

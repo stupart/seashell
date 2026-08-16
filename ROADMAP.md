@@ -31,6 +31,16 @@
   lifecycle-owned warm Whisper server, and measured machine-local ASR profiles.
 - Exact-model OpenRouter STT through Humain plus consented Local/Cloud/Adaptive
   draft routing and an independently pinned canonical final route.
+- Automatic macOS meeting detection from active process-audio signals with
+  confirmation hysteresis, dropout grace, maximum duration, and cooldown.
+- Low-resource background capture with no in-meeting inference, serialized
+  post-session finalization, a one-watcher lock shared with the TUI, and an
+  optional per-user launch-at-login agent.
+- Calendar-corroborated browser auto-capture, conservative browser consent,
+  attendee extraction for speaker evidence, and bounded allow-listed project
+  context for Humain enrichment.
+- Private per-user permissions for newly written transcript, meeting, capture,
+  config, and background-log data.
 
 ## Next hardening checkpoints
 
@@ -39,17 +49,21 @@
   cancellation beyond conservative transcript deduplication.
 - Provisional live transcript revisions; capture,
   diarization, identity, cleanup, and rendering remain separate transforms.
-- Consent-first meeting detection from process/audio/calendar signals, followed
-  later by an isolated optional Google Meet participant/active-speaker adapter.
+- Isolated optional Google Meet participant/active-speaker evidence adapter,
+  with explicit screen-data disclosure and a deterministic fallback.
 - Expand the strict local/cloud offer catalog with diarization, language,
   format, size, price-unit, and latency matching before automatic selection.
 - Real-meeting eval corpus covering reversals, ambiguous aliases, diarization
   errors, late evidence, disconnection, and abstention.
-- Native finalization trigger when a live meeting ends, with an explicit consent
-  and spend confirmation policy.
 - Human correction UI for claims, not only speaker labels.
-- Context connectors for Blueprint/Atlas/project docs with source-map display.
-- Calendar attendee extraction where the provider exposes it reliably.
+- Context connectors for Blueprint/Atlas/project docs with permission grants,
+  revision-aware source maps, and in-product visibility beyond the current
+  explicit file allow-list.
+- HIPAA-oriented deployment profile: organizational identity/RBAC, audit log,
+  retention/deletion policy, managed encryption, BAA-backed provider allow-list,
+  incident operations, and external risk/security validation.
+- Native macOS notifications and a one-click consent surface for ambiguous
+  meetings detected by the headless login watcher.
 - Packaging Humain and Sea Shell so the optional engine dependency installs and
   updates without a development checkout.
 - macOS app projection over the same transcript and meeting contracts after the

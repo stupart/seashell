@@ -17,7 +17,7 @@ import {
   resolveSaveByDefault,
   updateMeetingConfig,
 } from './config.ts';
-import { parseCalendarEvents, readMacCalendarEvents } from './calendar.ts';
+import { parseCalendarEvents, readMacCalendarEventsAsync } from './calendar.ts';
 import {
   findTranscriptRecord,
   listTranscriptRecords,
@@ -51,6 +51,15 @@ import {
 } from './capture-session.ts';
 import { finalizeCaptureTranscript } from './capture-finalizer.ts';
 import { recordBoundedCapture, runCaptureSignalTest } from './capture-test.ts';
+import { runAutomaticMeetingWatch } from './automatic-meeting-watch.ts';
+import {
+  disableMeetingLaunchAtLogin,
+  enableMeetingLaunchAtLogin,
+  meetingLaunchAtLoginStatus,
+} from './launch-at-login.ts';
+import { MEETING_SIGNALS_HELPER, readMeetingSignalSnapshot } from './meeting-automation.ts';
+import { loadMeetingContextFiles } from './meeting-context.ts';
+import { writeMeetingConsent } from './meeting-consent.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const PROJECT_ROOT = join(dirname(__filename), '..');
@@ -61,13 +70,13 @@ function print(value: string): void {
 
 function writeOutputAtomic(path: string, contents: string): void {
   const absolutePath = resolve(path);
-  mkdirSync(dirname(absolutePath), { recursive: true });
+  mkdirSync(dirname(absolutePath), { recursive: true, mode: 0o700 });
   const temporary = join(
     dirname(absolutePath),
     `.${absolutePath.split('/').at(-1)}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`,
   );
   try {
-    writeFileSync(temporary, contents, { encoding: 'utf8', flag: 'wx' });
+    writeFileSync(temporary, contents, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     renameSync(temporary, absolutePath);
   } catch (error) {
     rmSync(temporary, { force: true });
@@ -303,6 +312,34 @@ export function doctorChecks(): DoctorCheck[] {
           }),
     };
   };
+  const meetingSignalCheck = (): DoctorCheck => {
+    if (!existsSync(MEETING_SIGNALS_HELPER)) {
+      return {
+        name: 'meeting-signals',
+        ok: false,
+        required: false,
+        help: 'Run ./install.sh before enabling automatic meeting capture',
+      };
+    }
+    try {
+      const snapshot = readMeetingSignalSnapshot();
+      return {
+        name: 'meeting-signals',
+        ok: snapshot.supported,
+        required: false,
+        path: snapshot.supported
+          ? 'CoreAudio process detection is ready'
+          : 'This macOS version does not expose process audio signals',
+      };
+    } catch (error) {
+      return {
+        name: 'meeting-signals',
+        ok: false,
+        required: false,
+        help: error instanceof Error ? error.message : String(error),
+      };
+    }
+  };
 
   return [
     commandCheck('bun', true, 'Install Bun from https://bun.sh'),
@@ -334,6 +371,7 @@ export function doctorChecks(): DoctorCheck[] {
       'Run ./install.sh; live system audio requires macOS 14.2+',
     ),
     systemAudioPermissionCheck(),
+    meetingSignalCheck(),
   ];
 }
 
@@ -395,11 +433,16 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
   const libraryDir = resolveLibraryDir(command.libraryDir, process.env, config);
   switch (command.action.kind) {
     case 'setup': {
+      const contextFiles = command.action.contextFiles?.map((path) => resolve(path));
+      if (contextFiles) loadMeetingContextFiles(contextFiles);
       const updated = updateMeetingConfig({
         ...(command.action.mode === undefined ? {} : { mode: command.action.mode }),
         ...(command.action.backend === undefined ? {} : { backend: command.action.backend }),
         ...(command.action.model === undefined ? {} : { model: command.action.model }),
         ...(command.action.routes === undefined ? {} : { routes: command.action.routes }),
+        ...(contextFiles === undefined
+          ? {}
+          : { contextFiles }),
         ...(command.action.calendarPolicy === undefined
           ? {}
           : {
@@ -408,6 +451,22 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
                 policy: command.action.calendarPolicy,
               },
             }),
+        ...(
+          command.action.automationMode === undefined &&
+          command.action.browserWithoutCalendar === undefined
+            ? {}
+            : {
+                automation: {
+                  enabled: command.action.automationMode !== 'off',
+                  ...(command.action.automationMode === undefined
+                    ? {}
+                    : { mode: command.action.automationMode }),
+                  ...(command.action.browserWithoutCalendar === undefined
+                    ? {}
+                    : { browserWithoutCalendar: command.action.browserWithoutCalendar }),
+                },
+              }
+        ),
       });
       print(command.json
         ? JSON.stringify({ path: defaultConfigPath(), config: updated }, null, 2)
@@ -489,7 +548,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       return 0;
     }
     case 'calendar': {
-      const events = readMacCalendarEvents({
+      const events = await readMacCalendarEventsAsync({
         leadMinutes: config.meeting?.calendar?.leadMinutes,
       });
       if (command.json) {
@@ -499,6 +558,72 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       } else {
         print(events.map((event) => `${event.startAt}  ${event.title}  ${event.calendar ?? ''}`).join('\n'));
       }
+      return 0;
+    }
+    case 'watch': {
+      const once = command.action.once;
+      const controller = new AbortController();
+      const stop = () => controller.abort();
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      try {
+        await runAutomaticMeetingWatch({
+          config,
+          libraryDir,
+          signal: controller.signal,
+          once,
+          onEvent: (event) => {
+            if (command.json) {
+              print(JSON.stringify(event));
+              return;
+            }
+            if (event.type === 'watch.ready') print('Sea Shell is watching for meetings.');
+            else if (event.type === 'meeting.started') print(`Recording ${event.candidate.title}.`);
+            else if (event.type === 'meeting.capture-finished') print(`Captured ${event.candidate.title}; finalizing in the background.`);
+            else if (event.type === 'meeting.ready') print(`Meeting ready: ${event.directory}`);
+            else if (event.type === 'meeting.suggested') {
+              print(`Possible ${event.candidate.appName} meeting detected; run \`seashell meeting consent approve\` to record it.`);
+              if (!once) {
+                spawnSync('osascript', [
+                  '-e', 'on run argv',
+                  '-e', 'display notification (item 1 of argv) with title "Sea Shell"',
+                  '-e', 'end run',
+                  `Possible ${event.candidate.appName} meeting. Run seashell meeting consent approve to record.`,
+                ], { stdio: 'ignore' });
+              }
+            }
+            else process.stderr.write(`${event.type}: ${event.message}\n`);
+          },
+        });
+      } finally {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
+      }
+      return 0;
+    }
+    case 'consent': {
+      const path = writeMeetingConsent(command.action.decision);
+      print(command.json
+        ? JSON.stringify({ decision: command.action.decision, path }, null, 2)
+        : command.action.decision === 'approve'
+          ? 'Approved the current background meeting suggestion for the next two minutes.'
+          : 'Declined the current background meeting suggestion.');
+      return 0;
+    }
+    case 'autostart': {
+      const status = command.action.operation === 'enable'
+        ? enableMeetingLaunchAtLogin()
+        : command.action.operation === 'disable'
+          ? disableMeetingLaunchAtLogin()
+          : meetingLaunchAtLoginStatus();
+      if (command.action.operation !== 'status') {
+        updateMeetingConfig({ automation: { launchAtLogin: command.action.operation === 'enable' } });
+      }
+      print(command.json ? JSON.stringify(status, null, 2) : [
+        status.enabled ? '✓ Sea Shell meeting watch launches when you log into this Mac' : '○ Launch at login is disabled',
+        `  service: ${status.loaded ? 'running' : 'not running'}`,
+        `  config: ${status.plistPath}`,
+      ].join('\n'));
       return 0;
     }
   }

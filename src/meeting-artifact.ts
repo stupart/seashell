@@ -122,7 +122,7 @@ export interface CreateMeetingArtifactOptions {
 }
 
 function atomicWrite(path: string, contents: string): void {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = join(
     dirname(path),
     `.${basename(path)}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`,
@@ -453,7 +453,7 @@ export function appendProvisionalOverlay(
 ): string {
   const directory = dirname(findTranscriptRecord(libraryDir, transcriptId).path);
   const path = join(directory, 'overlays', 'provisional.jsonl');
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const descriptor = openSync(path, 'a', 0o600);
   try {
     writeSync(descriptor, `${JSON.stringify(overlay)}\n`, undefined, 'utf8');

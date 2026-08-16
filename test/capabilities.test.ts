@@ -3,7 +3,10 @@ import { readFileSync } from 'fs';
 import { renderCapabilityManifest, seashellCapabilityManifest } from '../src/capabilities.ts';
 
 test('capability manifest advertises executable behavior, not presentation formats', () => {
-  const manifest = seashellCapabilityManifest({ systemAudioReady: true });
+  const manifest = seashellCapabilityManifest({
+    systemAudioReady: true,
+    meetingSignalsReady: true,
+  });
   const offer = manifest.capabilities[0]!;
   const packageVersion = (JSON.parse(
     readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
@@ -23,4 +26,10 @@ test('capability manifest advertises executable behavior, not presentation forma
     network: 'none',
   });
   expect(capture?.features).toContain('shared-session-clock');
+  const watcher = manifest.capabilities.find((candidate) => candidate.operation === 'meeting.capture.watch');
+  expect(watcher).toMatchObject({
+    id: 'automation.seashell.macos.meeting-watch',
+    modes: ['background'],
+    network: 'none',
+  });
 });

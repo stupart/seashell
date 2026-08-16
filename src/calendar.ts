@@ -1,4 +1,4 @@
-import { spawnSync } from 'child_process';
+import { execFile, spawnSync } from 'child_process';
 import type { MeetingCalendarEvent } from './meeting-artifact.ts';
 
 export type MeetingCapturePolicy = 'off' | 'ask' | 'selected-calendars' | 'all';
@@ -133,4 +133,77 @@ export function readMacCalendarEvents(
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Could not parse macOS Calendar events: ${message}`);
   }
+}
+
+/** Non-blocking form for live UI and background watcher loops. */
+export function readMacCalendarEventsAsync(
+  options: { leadMinutes?: number; lookbackMinutes?: number; signal?: AbortSignal } = {},
+): Promise<MeetingCalendarEvent[]> {
+  const leadMinutes = Math.max(5, options.leadMinutes ?? 15);
+  const lookbackMinutes = Math.max(0, options.lookbackMinutes ?? 10);
+  const script = `
+    ObjC.import('Foundation');
+    const app = Application('Calendar');
+    const now = new Date();
+    const from = new Date(now.getTime() - ${lookbackMinutes} * 60000);
+    const to = new Date(now.getTime() + ${leadMinutes} * 60000);
+    const rows = [];
+    for (const calendar of app.calendars()) {
+      const calendarName = calendar.name();
+      for (const event of calendar.events.whose({
+        _and: [
+          { startDate: { _lessThanEquals: to } },
+          { endDate: { _greaterThanEquals: from } }
+        ]
+      })()) {
+        let url = '';
+        try { url = event.url() || ''; } catch (_) {}
+        let location = '';
+        try { location = event.location() || ''; } catch (_) {}
+        const attendees = [];
+        try {
+          for (const person of event.attendees()) {
+            let name = '';
+            let email = '';
+            let response = '';
+            try { name = person.displayName() || person.name() || ''; } catch (_) {}
+            try { email = person.email() || ''; } catch (_) {}
+            try { response = String(person.participationStatus() || ''); } catch (_) {}
+            if (name) attendees.push({ name: String(name), email: String(email), response });
+          }
+        } catch (_) {}
+        rows.push({
+          provider: 'macos-calendar',
+          eventId: String(event.uid()),
+          calendar: String(calendarName),
+          title: String(event.summary() || 'Meeting'),
+          startAt: event.startDate().toISOString(),
+          endAt: event.endDate().toISOString(),
+          location: String(location),
+          joinUrl: String(url),
+          attendees
+        });
+      }
+    }
+    JSON.stringify(rows);
+  `;
+  return new Promise((resolve, reject) => {
+    execFile('osascript', ['-l', 'JavaScript', '-e', script], {
+      encoding: 'utf8',
+      timeout: 8_000,
+      maxBuffer: 1_000_000,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(`Could not read macOS Calendar: ${stderr?.trim() || error.message}`));
+        return;
+      }
+      try {
+        resolve(parseCalendarEvents(JSON.parse(stdout)));
+      } catch (parseError) {
+        const message = parseError instanceof Error ? parseError.message : String(parseError);
+        reject(new Error(`Could not parse macOS Calendar events: ${message}`));
+      }
+    });
+  });
 }

@@ -6,7 +6,7 @@ import { existsSync, statSync, unlinkSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import {
-  readMacCalendarEvents,
+  readMacCalendarEventsAsync,
   suggestCalendarMeeting,
 } from './calendar.ts';
 import {
@@ -81,6 +81,17 @@ import {
   speakerColorIndex,
   tuiLayout,
 } from './tui-state.ts';
+import {
+  DEFAULT_MEETING_AUTOMATION,
+  MeetingAutomationController,
+  readMeetingSignalSnapshot,
+  resolveMeetingCandidate,
+  type MeetingAutomationPhase,
+  type MeetingCandidate,
+} from './meeting-automation.ts';
+import { acquireMeetingWatchLock, type MeetingWatchLock } from './watch-lock.ts';
+import { applySpeakerLabels, EvidenceSpeakerLabeler } from './speaker-labeling.ts';
+import { buildMeetingContext } from './meeting-context.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const PROJECT_ROOT = join(dirname(__filename), '..');
@@ -88,6 +99,7 @@ const WHISPER_SERVER = join(PROJECT_ROOT, 'whisper.cpp/build/bin/whisper-server'
 const MODEL_PATH = join(PROJECT_ROOT, 'models', DEFAULT_WHISPER_MODEL_FILENAME);
 type ListenerState = 'listening' | 'recording';
 type View = 'live' | 'record';
+type WatchOwnership = 'disabled' | 'checking' | 'owned' | 'external';
 
 interface ProcessingState {
   label: string;
@@ -176,6 +188,10 @@ export default function App(props: { libraryDir?: string } = {}) {
     [props.libraryDir, config],
   );
   const saveByDefault = useMemo(() => resolveSaveByDefault(config), [config]);
+  const meetingAutomation = config.meeting?.automation ?? DEFAULT_MEETING_AUTOMATION;
+  const automaticMeetingEnabled = meetingAutomation.enabled !== false &&
+    (meetingAutomation.mode ?? DEFAULT_MEETING_AUTOMATION.mode) !== 'off';
+  const initiallyPaused = automaticMeetingEnabled;
   const listenerDisabled = process.env.SEASHELL_DISABLE_LISTENER === '1';
   const systemAudioDisabled = listenerDisabled ||
     process.env.SEASHELL_DISABLE_SYSTEM_AUDIO === '1';
@@ -187,17 +203,17 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   const [listenerState, setListenerState] = useState<ListenerState>('listening');
   const [systemAudioState, setSystemAudioState] = useState<SystemAudioCaptureState>(
-    systemAudioDisabled ? 'unavailable' : 'starting',
+    systemAudioDisabled ? 'unavailable' : initiallyPaused ? 'stopped' : 'starting',
   );
   const [microphoneState, setMicrophoneState] = useState<SystemAudioCaptureState>(
-    listenerDisabled ? 'unavailable' : 'starting',
+    listenerDisabled ? 'unavailable' : initiallyPaused ? 'stopped' : 'starting',
   );
   const [microphoneLevel, setMicrophoneLevel] = useState<PcmSignalLevel | null>(null);
   const [systemAudioLevel, setSystemAudioLevel] = useState<PcmSignalLevel | null>(null);
   const [captureChunkCount, setCaptureChunkCount] = useState(0);
   const [transcribingCount, setTranscribingCount] = useState(0);
   const [draftTranscriptionRoute, setDraftTranscriptionRoute] = useState<TranscriptionRoute>('local');
-  const [paused, setPaused] = useState(false);
+  const [paused, setPaused] = useState(initiallyPaused);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -212,6 +228,12 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [meetingView, setMeetingView] = useState<MeetingView>('transcript');
   const [chatInputState, setChatInputState] = useState<ChatInputState | null>(null);
   const [calendarSuggestion, setCalendarSuggestion] = useState<MeetingCalendarEvent | null>(null);
+  const [automaticCandidate, setAutomaticCandidate] = useState<MeetingCandidate | null>(null);
+  const [automationPhase, setAutomationPhase] = useState<MeetingAutomationPhase>('watching');
+  const [automaticFinishRequested, setAutomaticFinishRequested] = useState(false);
+  const [watchOwnership, setWatchOwnership] = useState<WatchOwnership>(
+    automaticMeetingEnabled ? 'checking' : 'disabled',
+  );
   const [selectionIndex, setSelectionIndex] = useState(0);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [transcriptScroll, setTranscriptScroll] = useState(0);
@@ -233,11 +255,15 @@ export default function App(props: { libraryDir?: string } = {}) {
   const liveSessionGeneration = useRef(0);
   const isExiting = useRef(false);
   const exitInProgress = useRef(false);
-  const pausedRef = useRef(false);
+  const pausedRef = useRef(initiallyPaused);
   const liveRecordRef = useRef(liveRecord);
   const liveMeetingRef = useRef<MeetingArtifact | null>(null);
   const observerActiveRef = useRef(false);
   const liveSessionStartedAt = useRef(Date.now());
+  const calendarSuggestionRef = useRef<MeetingCalendarEvent | null>(null);
+  const meetingAutomationController = useRef(new MeetingAutomationController(meetingAutomation));
+  const meetingSignalFailure = useRef<string | null>(null);
+  const meetingWatchLock = useRef<MeetingWatchLock | null>(null);
 
   const refreshLibrary = useCallback(() => {
     setLibraryEntries(listTranscriptRecords(libraryRoot));
@@ -251,6 +277,26 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
   }, [refreshLibrary]);
 
+  useEffect(() => {
+    if (!automaticMeetingEnabled || listenerDisabled) {
+      setWatchOwnership('disabled');
+      return;
+    }
+    const lock = acquireMeetingWatchLock();
+    if (!lock) {
+      setWatchOwnership('external');
+      setNotice('Background meeting watch is active; this window is showing its transcript library.');
+      const interval = setInterval(refreshLibrary, 5_000);
+      return () => clearInterval(interval);
+    }
+    meetingWatchLock.current = lock;
+    setWatchOwnership('owned');
+    return () => {
+      lock.release();
+      meetingWatchLock.current = null;
+    };
+  }, [automaticMeetingEnabled, listenerDisabled, refreshLibrary]);
+
   const visibleEntries = useMemo(
     () => searchQuery.trim()
       ? searchTranscriptRecords(libraryRoot, searchQuery)
@@ -263,13 +309,18 @@ export default function App(props: { libraryDir?: string } = {}) {
       ? 'mic + system starting'
       : 'mic only';
   const navigationItems: NavigationItem[] = useMemo(() => [
-    { kind: 'live', label: `● Live transcription · ${liveCaptureLabel}` },
+    {
+      kind: 'live',
+      label: paused && automaticMeetingEnabled
+        ? '○ Watching for meetings'
+        : `● Live transcription · ${liveCaptureLabel}`,
+    },
     ...visibleEntries.map((entry) => ({
       kind: 'record' as const,
       label: entry.kind === 'meeting' ? `M · ${entry.title}` : entry.title,
       entry,
     })),
-  ], [liveCaptureLabel, visibleEntries]);
+  ], [automaticMeetingEnabled, liveCaptureLabel, paused, visibleEntries]);
 
   useEffect(() => {
     setSelectionIndex((current) => moveSelection(current, 0, navigationItems.length));
@@ -791,12 +842,14 @@ export default function App(props: { libraryDir?: string } = {}) {
   }, [libraryRoot, refreshLibrary, saveByDefault]);
 
   const runCurrentMeetingEnrichment = useCallback((finishLive = false) => {
-    if (!currentRecord || !currentMeeting || processing) return;
+    const targetRecord = finishLive ? liveRecordRef.current : currentRecord;
+    const targetMeeting = finishLive ? liveMeetingRef.current : currentMeeting;
+    if (!targetRecord || !targetMeeting || processing) return;
     if (observerActiveRef.current) {
       setNotice('The live meeting observer is finishing its current window. Try again in a moment.');
       return;
     }
-    const mode = config.meeting?.mode ?? currentMeeting.mode;
+    const mode = config.meeting?.mode ?? targetMeeting.mode;
     const missingObserver = mode !== 'post-session' && !configuredMeetingRoutes.observer;
     const missingReconciliation = mode !== 'streaming' && !configuredMeetingRoutes.reconciliation;
     if ((missingObserver || missingReconciliation) && !finishLive) {
@@ -841,12 +894,25 @@ export default function App(props: { libraryDir?: string } = {}) {
                 },
               } : {}),
             });
-            liveRecordRef.current = finalized;
-            setLiveRecord(finalized);
+            const attendeeEvidence = targetMeeting.attendees.length > 0
+              ? {
+                  attendees: targetMeeting.attendees.map((attendee) => ({
+                    name: attendee.name,
+                    ...(attendee.email === undefined ? {} : { email: attendee.email }),
+                  })),
+                  screenshots: [],
+                  activeSpeakers: [],
+                }
+              : undefined;
+            const labeled = attendeeEvidence
+              ? await applySpeakerLabels(finalized, new EvidenceSpeakerLabeler(), attendeeEvidence) as TranscriptRecord
+              : finalized;
+            liveRecordRef.current = labeled;
+            setLiveRecord(labeled);
           }
           await completeCaptureSession('meeting-finished');
         }
-        const record = view === 'live' ? liveRecordRef.current : currentRecord;
+        const record = finishLive ? liveRecordRef.current : targetRecord;
         saveTranscriptRecord(libraryRoot, record);
         if (missingObserver || missingReconciliation) {
           refreshLibrary();
@@ -866,9 +932,15 @@ export default function App(props: { libraryDir?: string } = {}) {
           minimumNewSegments: config.meeting?.observerMinSegments,
           maximumNewSegments: config.meeting?.observerMaxSegments,
           maxObserverRuns: config.meeting?.maxObserverRuns,
+          context: buildMeetingContext(config.meeting?.contextFiles, targetMeeting.calendar),
           onStatus: (label) => setProcessing({ label }),
         });
-        commitMeetingState(artifact);
+        if (finishLive) {
+          liveMeetingRef.current = artifact;
+          setLiveMeeting(artifact);
+        } else {
+          commitMeetingState(artifact);
+        }
         refreshLibrary();
         setMeetingView('notes');
         setNotice(finishLive
@@ -876,8 +948,15 @@ export default function App(props: { libraryDir?: string } = {}) {
           : 'Meeting notes and analysis are ready.');
       } catch (meetingError) {
         setError(meetingError instanceof Error ? meetingError.message : String(meetingError));
-        const failed = loadMeetingArtifact(libraryRoot, currentRecord.id);
-        if (failed) commitMeetingState(failed);
+        const failed = loadMeetingArtifact(libraryRoot, targetRecord.id);
+        if (failed) {
+          if (finishLive) {
+            liveMeetingRef.current = failed;
+            setLiveMeeting(failed);
+          } else {
+            commitMeetingState(failed);
+          }
+        }
       } finally {
         setProcessing(null);
         if (wasListening && !finishLive) setListeningPaused(false);
@@ -926,23 +1005,31 @@ export default function App(props: { libraryDir?: string } = {}) {
     const calendar = config.meeting?.calendar;
     if (!calendar?.enabled || (calendar.policy ?? 'ask') === 'off') return;
     let cancelled = false;
-    const poll = () => {
+    let polling = false;
+    const poll = async () => {
+      if (polling) return;
+      polling = true;
       try {
-        const events = readMacCalendarEvents({ leadMinutes: calendar.leadMinutes });
+        const events = await readMacCalendarEventsAsync({ leadMinutes: calendar.leadMinutes });
         const suggestion = suggestCalendarMeeting(events, {
           policy: calendar.policy ?? 'ask',
           selectedCalendars: calendar.selectedCalendars,
           leadMinutes: calendar.leadMinutes,
         });
-        if (!cancelled) setCalendarSuggestion(suggestion ?? null);
+        if (!cancelled) {
+          calendarSuggestionRef.current = suggestion ?? null;
+          setCalendarSuggestion(suggestion ?? null);
+        }
       } catch (calendarError) {
         if (!cancelled) {
           setNotice(calendarError instanceof Error ? calendarError.message : String(calendarError));
         }
+      } finally {
+        polling = false;
       }
     };
-    poll();
-    const interval = setInterval(poll, 60_000);
+    void poll();
+    const interval = setInterval(() => { void poll(); }, 60_000);
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -952,7 +1039,9 @@ export default function App(props: { libraryDir?: string } = {}) {
   useEffect(() => {
     if (!calendarSuggestion || liveMeeting || view !== 'live') return;
     const policy = config.meeting?.calendar?.policy ?? 'ask';
-    if (policy === 'all' || policy === 'selected-calendars') {
+    if (pausedRef.current) {
+      setNotice(`Upcoming: ${calendarSuggestion.title} · waiting for meeting audio.`);
+    } else if (policy === 'all' || policy === 'selected-calendars') {
       markCurrentAsMeeting(calendarSuggestion);
     } else if (policy === 'ask') {
       setNotice(`Meeting starting: ${calendarSuggestion.title}. Press M to attach it.`);
@@ -987,6 +1076,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       minimumNewSegments: minimum,
       maximumNewSegments: config.meeting?.observerMaxSegments,
       maxObserverRuns: config.meeting?.maxObserverRuns,
+      context: buildMeetingContext(config.meeting?.contextFiles, liveMeeting.calendar),
     }).then((artifact) => {
       const configuredMode = config.meeting?.mode ?? liveMeeting.mode;
       const updated = configuredMode === artifact.mode
@@ -1073,7 +1163,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
   }, [currentRecord, libraryRoot]);
 
-  const resetLiveSession = useCallback(() => {
+  const resetLiveSession = useCallback(async () => {
     const resumeCapture = !pausedRef.current;
     const generation = liveSessionGeneration.current;
     const captureHandles = [microphoneCapture.current, systemAudioCapture.current]
@@ -1082,7 +1172,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     microphoneCapture.current = null;
     systemAudioCapture.current?.stop();
     systemAudioCapture.current = null;
-    void (async () => {
+    try {
       await Promise.all(captureHandles.map((handle) => handle.done));
       localAsrScheduler.current?.cancelGeneration(generation);
       cloudAsrScheduler.current?.cancelGeneration(generation);
@@ -1107,10 +1197,109 @@ export default function App(props: { libraryDir?: string } = {}) {
         startListener();
         startSystemListener();
       }
-    })().catch((resetError: unknown) => {
+    } catch (resetError) {
       setError(resetError instanceof Error ? resetError.message : String(resetError));
-    });
+    }
   }, [completeCaptureSession, startListener, startSystemListener]);
+
+  const beginAutomaticMeeting = useCallback(async (candidate: MeetingCandidate) => {
+    const needsFreshSession = pausedRef.current && (
+      liveRecordRef.current.transcript.length > 0 ||
+      liveMeetingRef.current !== null ||
+      captureSessionStore.current !== null
+    );
+    if (needsFreshSession) await resetLiveSession();
+    const base = liveRecordRef.current;
+    const record: TranscriptRecord = {
+      ...base,
+      title: candidate.title,
+      updatedAt: new Date().toISOString(),
+    };
+    liveRecordRef.current = record;
+    setLiveRecord(record);
+    saveTranscriptRecord(libraryRoot, record);
+    const existing = loadMeetingArtifact(libraryRoot, record.id);
+    const artifact = existing ?? createMeetingArtifact(record, {
+      mode: config.meeting?.mode ?? 'hybrid',
+      ...(candidate.calendar === undefined ? {} : { calendar: candidate.calendar }),
+      maxObserverRuns: config.meeting?.maxObserverRuns,
+    });
+    saveMeetingArtifact(libraryRoot, artifact);
+    liveMeetingRef.current = artifact;
+    setLiveMeeting(artifact);
+    setView('live');
+    setMeetingView('transcript');
+    setHistoryOpen(false);
+    setAutomaticCandidate(null);
+    setError(null);
+    setNotice(`Recording ${candidate.title} automatically.`);
+    refreshLibrary();
+    if (pausedRef.current) setListeningPaused(false);
+  }, [
+    config.meeting,
+    libraryRoot,
+    refreshLibrary,
+    resetLiveSession,
+    setListeningPaused,
+  ]);
+
+  useEffect(() => {
+    if (!automaticMeetingEnabled || listenerDisabled || watchOwnership !== 'owned') return;
+    let cancelled = false;
+    const poll = () => {
+      if (cancelled || isExiting.current) return;
+      try {
+        const snapshot = readMeetingSignalSnapshot();
+        const candidate = resolveMeetingCandidate(
+          snapshot,
+          calendarSuggestionRef.current ?? undefined,
+          meetingAutomation,
+        );
+        const action = meetingAutomationController.current.step(candidate, snapshot.capturedAtUnixMs);
+        setAutomationPhase(meetingAutomationController.current.state.phase);
+        meetingSignalFailure.current = null;
+        if (action.kind === 'suggest') {
+          setAutomaticCandidate(action.candidate);
+          setNotice(`Possible ${action.candidate.appName} meeting · press M to record or X to ignore.`);
+        } else if (action.kind === 'start') {
+          void beginAutomaticMeeting(action.candidate).catch((automationError: unknown) => {
+            setError(automationError instanceof Error ? automationError.message : String(automationError));
+          });
+        } else if (action.kind === 'finish') {
+          setAutomaticFinishRequested(true);
+          setNotice(`Meeting audio ended · finishing ${action.candidate.title}.`);
+        }
+      } catch (signalError) {
+        const message = signalError instanceof Error ? signalError.message : String(signalError);
+        if (meetingSignalFailure.current !== message) {
+          meetingSignalFailure.current = message;
+          setNotice(`${message} Manual recording is still available.`);
+        }
+      }
+    };
+    poll();
+    const interval = setInterval(
+      poll,
+      (meetingAutomation.pollSeconds ?? DEFAULT_MEETING_AUTOMATION.pollSeconds) * 1_000,
+    );
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [
+    automaticMeetingEnabled,
+    beginAutomaticMeeting,
+    listenerDisabled,
+    meetingAutomation,
+    watchOwnership,
+  ]);
+
+  useEffect(() => {
+    if (!automaticFinishRequested || processing || observerActiveRef.current) return;
+    setAutomaticFinishRequested(false);
+    if (!liveMeetingRef.current) return;
+    runCurrentMeetingEnrichment(true);
+  }, [automaticFinishRequested, processing, runCurrentMeetingEnrichment]);
 
   const gracefulExit = useCallback(() => {
     if (exitInProgress.current) return;
@@ -1304,7 +1493,25 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
     if (input === 'm') {
-      markCurrentAsMeeting(view === 'live' ? calendarSuggestion ?? undefined : undefined);
+      if (automaticCandidate) {
+        const approved = meetingAutomationController.current.approve();
+        setAutomationPhase(meetingAutomationController.current.state.phase);
+        setAutomaticCandidate(null);
+        if (approved) {
+          void beginAutomaticMeeting(approved).catch((automationError: unknown) => {
+            setError(automationError instanceof Error ? automationError.message : String(automationError));
+          });
+        }
+      } else {
+        markCurrentAsMeeting(view === 'live' ? calendarSuggestion ?? undefined : undefined);
+      }
+      return;
+    }
+    if (input === 'x' && automaticCandidate) {
+      meetingAutomationController.current.decline();
+      setAutomationPhase(meetingAutomationController.current.state.phase);
+      setAutomaticCandidate(null);
+      setNotice(`Ignored ${automaticCandidate.appName} for this detection window.`);
       return;
     }
     if (input === 'g' && currentMeeting) {
@@ -1369,6 +1576,15 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
     if ((input === ' ' || key.return) && view === 'live' && !historyOpen) {
+      if (pausedRef.current && watchOwnership === 'external') {
+        setNotice('Background watch owns capture. Run seashell meeting autostart disable before recording here.');
+        return;
+      }
+      if (pausedRef.current && automaticCandidate) {
+        meetingAutomationController.current.decline();
+        setAutomationPhase(meetingAutomationController.current.state.phase);
+        setAutomaticCandidate(null);
+      }
       setListeningPaused(!pausedRef.current);
       return;
     }
@@ -1465,14 +1681,14 @@ export default function App(props: { libraryDir?: string } = {}) {
       : '[↑↓] Browse  [ENTER] Open  [/] Search  [H/ESC] Close'
     : currentMeeting
       ? view === 'live'
-        ? `[SPACE] ${paused ? 'Resume' : 'Pause'}  [A] Ask  [G] Finish  [H] History  [?] Help  [Q] Quit`
+        ? `[SPACE] ${paused ? 'Record' : 'Pause'}  [A] Ask  [G] Finish  [H] History  [?] Help  [Q] Quit`
         : '[A] Ask  [G] Enrich  [H] History  [T/S] Display  [?] Help  [Q] Quit'
     : view === 'live'
       ? terminal.columns < 56
-        ? `[SPC] ${paused ? 'Resume' : 'Pause'}  [H] History  [Q] Quit`
+        ? `[SPC] ${paused ? 'Record' : 'Pause'}  [H] History  [Q] Quit`
         : terminal.columns < 80
-          ? `[SPC] ${paused ? 'Resume' : 'Pause'}  [F] File  [H] History  [?] Help  [Q] Quit`
-          : `[SPACE] ${paused ? 'Resume' : 'Pause'}  [F] File  [H] History  [T/S] Display  [?] Help  [Q] Quit`
+          ? `[SPC] ${paused ? 'Record now' : 'Pause'}  [F] File  [H] History  [?] Help  [Q] Quit`
+          : `[SPACE] ${paused ? 'Record now' : 'Pause'}  [F] File  [H] History  [T/S] Display  [?] Help  [Q] Quit`
       : terminal.columns < 56
         ? '[L] Live  [H] History  [Q] Quit'
         : terminal.columns < 72
@@ -1560,7 +1776,9 @@ export default function App(props: { libraryDir?: string } = {}) {
         </Box>
       ) : visibleSegments.length === 0 ? (
         <Text dimColor>{view === 'live'
-          ? `Play or speak to transcribe locally · ${liveCaptureLabel}`
+          ? paused && automaticMeetingEnabled
+            ? 'Waiting for meeting audio · Space records now'
+            : `Play or speak to transcribe locally · ${liveCaptureLabel}`
           : 'No transcript text'}</Text>
       ) : plainTranscript ? (
         <Text wrap="wrap">{plainTranscript}</Text>
@@ -1623,7 +1841,13 @@ export default function App(props: { libraryDir?: string } = {}) {
             {currentMeeting ? 'Meeting · ' : ''}{truncate(title, Math.max(12, terminal.columns - 6))}
           </Text>
         ) : paused ? (
-          <Text dimColor>⏸ Paused</Text>
+          <Text dimColor>{automaticMeetingEnabled
+            ? watchOwnership === 'external'
+              ? '○ Background meeting watch active'
+              : watchOwnership === 'checking'
+                ? '○ Starting meeting watch…'
+                : `○ Watching for meetings${automationPhase === 'confirming' ? ' · checking signal' : ''}`
+            : '⏸ Paused'}</Text>
         ) : (
           <Text>
             <Text color={listenerState === 'recording' ? 'red' : 'green'}>
@@ -1698,6 +1922,7 @@ export default function App(props: { libraryDir?: string } = {}) {
             <Text dimColor>C copy · E export · O folder · D trash · DEL clear live</Text>
             <Text dimColor>[/] choose speaker · R rename · ↑↓ scroll · L live · Q quit</Text>
             <Text dimColor>M mark meeting · 1-4 meeting views · G enrich/finalize · A ask</Text>
+            <Text dimColor>Automatic meeting prompt: M record · X ignore</Text>
           </>
         ) : !historyOpen && currentRecord?.transcript.length ? (
           <Text dimColor>

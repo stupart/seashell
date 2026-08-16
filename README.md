@@ -38,6 +38,9 @@ download; inference remains local afterward.
   time-overlapping speaker-playback duplicates from the microphone transcript.
 - Keeps live ASR bounded: one owned warm local worker, a measured machine-local
   profile, and optional consented cloud/adaptive routing through Humain.
+- Can watch low-cost macOS process-audio signals in the background, start and
+  stop durable meeting capture automatically, and defer expensive inference
+  until the meeting ends.
 
 ## Requirements
 
@@ -125,6 +128,19 @@ seashell meeting show <transcript-id>
 seashell meeting chat <transcript-id> "What did we decide?"
 ```
 
+Turn on automatic meeting capture at Mac login:
+
+```bash
+seashell meeting setup --automation automatic --calendar ask \
+  --browser-without-calendar ask
+seashell meeting autostart enable
+seashell meeting autostart status
+```
+
+This installs a per-user macOS LaunchAgent for the Sea Shell watcher; Humain is
+not a daemon and is invoked only when optional meeting intelligence is
+configured. Use `seashell meeting autostart disable` to remove it.
+
 Inspect what Sea Shell can contribute to Humain or another compatible host:
 
 ```bash
@@ -134,21 +150,35 @@ seashell capabilities --json
 Progress and save locations are written to stderr. Transcript content is the
 only data written to stdout, so piping remains reliable.
 
-### Google Meet today
+### Automatic meetings and Google Meet
 
-Sea Shell now works with Google Meet in local live-capture mode: the TUI records
-the microphone and macOS system output concurrently, transcribes both, and
-shows `Microphone` and `System audio` on one session timeline. It was verified
-end to end by playing known speech through macOS output and recovering it from
-the native system track in the live TUI.
+Sea Shell detects which macOS process is actively using audio input. A
+dedicated meeting app such as Zoom, Teams, Webex, or FaceTime starts
+automatically after two confirming polls. Browser audio from Chrome, Safari,
+Arc, Edge, Brave, or Firefox also starts automatically when a current Calendar
+event corroborates it. Browser audio without a matching event asks by default
+because it could be a voice form, recording site, or another non-meeting use.
+The TUI accepts `M`/`X`; the background watcher posts a notification and accepts
+`seashell meeting consent approve|decline`. Calendar data alone never starts
+recording.
 
-This is capture support, not a Google Meet account integration. Sea Shell does
-not yet detect an active Meet, read its participant list, or consume its
-active-speaker state. Those remain separate opt-in evidence adapters. Live mic
-and system chunks are atomically committed as separate local tracks before
-inference, with an append-only journal and recoverable manifest. Use headphones
-when possible, and review the transcript when laptop-speaker echo or people in
-the same physical room make source attribution ambiguous.
+Once started, Sea Shell atomically commits microphone and system-audio WAV
+chunks on one session clock. The background watcher deliberately keeps Whisper
+and diarization unloaded during the call. After 20 seconds without the meeting
+signal, it stops capture quickly and queues final transcription, optional local
+diarization and attendee-backed speaker labeling, and optional Humain notes.
+The watcher can re-arm while prior post-processing finishes. If system audio
+permission fails, useful microphone-only capture continues; a model failure
+cannot delete already committed audio.
+
+The TUI and background watcher share one per-user lock. Opening Sea Shell while
+the login watcher owns capture gives a live library view without starting a
+second recorder. Logs live under `~/Library/Application Support/Sea Shell/Logs`.
+Google Meet participant tiles and active-speaker state are not inspected yet;
+Calendar attendees, self-identification, explicit handoffs, and supplied
+timestamp evidence are the current identity sources. Use headphones when
+possible, and review attribution when laptop-speaker echo or people in the same
+physical room make sources ambiguous.
 
 Before the meeting, prove both inputs with a disposable five-second check while
 speaking and playing computer audio:
@@ -160,6 +190,12 @@ seashell capture test --seconds 5
 The test reports microphone and system signal independently and deletes only
 its own test recording. During capture, the footer shows both meters and the
 number of safely committed chunks.
+
+Run one cheap detection probe without recording a full meeting:
+
+```bash
+seashell meeting watch --once --json
+```
 
 ### Live performance and routing
 
@@ -332,17 +368,20 @@ The complete Local/Cloud/Adaptive example is in
 
 ### Google Meet status
 
-The current build imports Meet recordings and captures live microphone plus
-macOS system audio. It does not detect an active Google Meet or read Meet
-participant/active-speaker state.
+The current build imports Meet recordings, captures live microphone plus macOS
+system audio, and detects a browser that is actively using audio input. A
+current Calendar event can corroborate that browser signal and supply the title
+and attendee roster. It does not yet read Meet participant tiles or
+active-speaker state.
 
 The planned stages are deliberately separate:
 
 - **Works with Meet:** shipped as local mic/system capture on one durable
   session clock, with independently recoverable raw tracks and a full-track
   final transcription pass.
-- **Detects Meet:** process/audio/calendar signals suggest recording and require
-  consent; they never start recording silently.
+- **Detects Meet:** shipped process-audio detection. A calendar-corroborated
+  browser call starts automatically by default; browser audio without that
+  evidence asks unless the user explicitly changes its policy.
 - **Integrates with Meet:** an optional browser adapter contributes timestamped
   participant/active-speaker evidence. It is fallible enrichment, not a capture
   dependency.
@@ -378,11 +417,13 @@ seashell capture show <session-id> --json
 seashell capture finalize <session-id>
 ```
 
-Normal `Q` saves the current transcript and attaches the raw-track bundle. For
-a meeting, press `M` near the beginning and `G` at the end; `G` stops both
-inputs, waits for queued work, rebuilds the transcript from the complete tracks,
-attaches the raw bundle, and then asks Humain for notes and analysis. If Humain
-is missing or unconfigured, the capture and final transcript still save.
+Normal `Q` saves the current transcript and attaches the raw-track bundle.
+Automatic meetings stop and finalize after the configured grace period. The
+manual fallback remains: press `M` to mark/approve a meeting and `G` to finish
+it. Finalization waits for queued work, rebuilds the transcript from complete
+tracks, attaches the raw bundle, and then asks Humain for notes and analysis if
+routes are configured. If Humain is missing or unconfigured, the capture and
+final transcript still save.
 
 The full artifact bundle is readable without Sea Shell:
 
@@ -413,12 +454,12 @@ The full artifact bundle is readable without Sea Shell:
 
 ### Calendar suggestions
 
-Calendar access is read-only and opt-in. `--calendar ask` suggests the current
-or next macOS Calendar event in the TUI. `all` attaches matching events
-automatically; `off` disables the connector. The first enabled read can trigger
-the normal macOS Calendar permission prompt. Calendar context never grants
-recording consent, and automatic model use still requires an exact configured
-route.
+Calendar access is read-only and opt-in. `--calendar ask` surfaces the current
+or next macOS Calendar event and may corroborate a browser audio signal. `all`
+attaches matching events automatically; `off` disables the connector. The first
+enabled read can trigger the normal macOS Calendar permission prompt. Calendar
+alone never starts recording, and automatic model use still requires an exact
+configured route.
 
 Inspect the read-only event window without opening the TUI:
 
@@ -613,6 +654,18 @@ Override that path with `SEASHELL_CONFIG`. Example:
 }
 ```
 
+Meeting intelligence can include an explicit, bounded allow-list of project
+files. Each file is limited to 512 KiB and the total to 2 MiB; Sea Shell does
+not scan the containing folder. Their contents may be sent to the configured
+Humain route, so add only material appropriate for that provider:
+
+```bash
+seashell meeting setup \
+  --context-file /absolute/path/to/BLUEPRINT.md \
+  --context-file /absolute/path/to/project-notes.md
+seashell meeting setup --clear-context-files
+```
+
 ## CLI reference for scripts and AI agents
 
 Run `seashell --help` for the complete command summary and `seashell doctor
@@ -650,12 +703,19 @@ seashell meeting show <id> --json
   context to the configured Humain route. Codex/Claude Code subscription and
   OpenRouter routes are remote; use meeting mode only when that data sharing is
   appropriate.
+- Newly written transcript, meeting, capture, config, and LaunchAgent log
+  folders use private per-user permissions (`0700` directories and `0600`
+  files), subject to the security of the macOS account and disk.
 - Source media is not copied into the transcript library.
 - Core transcription needs no cloud account or API key.
 - Speaker diarization contacts Hugging Face only when model files must be
   downloaded, unless offline mode is enforced.
 - Saved JSON contains the original source path by default; use `--no-save` when
   path retention is undesirable.
+
+Sea Shell is not represented as HIPAA compliant or certified. See
+[`docs/privacy-and-hipaa.md`](docs/privacy-and-hipaa.md) for the current data
+boundaries and the controls still required for a HIPAA-regulated deployment.
 
 ## Troubleshooting
 
