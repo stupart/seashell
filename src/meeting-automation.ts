@@ -1,4 +1,4 @@
-import { spawnSync } from 'child_process';
+import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import type { MeetingCalendarEvent } from './meeting-artifact.ts';
@@ -193,7 +193,9 @@ export function readMeetingSignalSnapshot(
 ): MeetingSignalSnapshot {
   const result = spawnSync(helperPath, [], {
     encoding: 'utf8',
-    timeout: 2_000,
+    // CoreAudio's first process-list query can take several seconds on a busy Mac.
+    // Long-running consumers use MeetingSignalMonitor and pay this cost only once.
+    timeout: 15_000,
     maxBuffer: 256_000,
   });
   if (result.error || result.status !== 0) {
@@ -205,6 +207,142 @@ export function readMeetingSignalSnapshot(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Could not parse meeting signals: ${message}`);
+  }
+}
+
+type SnapshotListener = (snapshot: MeetingSignalSnapshot) => void;
+type ErrorListener = (error: Error) => void;
+
+/**
+ * Keep one native CoreAudio process alive and consume its JSONL heartbeat.
+ * Re-spawning the helper for every poll repeatedly initializes CoreAudio and can
+ * cause both false timeouts and avoidable CPU/audio pressure.
+ */
+export class MeetingSignalMonitor {
+  readonly #helperPath: string;
+  readonly #intervalMs: number;
+  #child?: ChildProcess;
+  #buffer = '';
+  #latest?: MeetingSignalSnapshot;
+  #listeners = new Set<SnapshotListener>();
+  #errorListeners = new Set<ErrorListener>();
+  #failure?: Error;
+  #restartTimer?: ReturnType<typeof setTimeout>;
+  #stopped = true;
+
+  constructor(helperPath = MEETING_SIGNALS_HELPER, intervalMs = 3_000) {
+    this.#helperPath = helperPath;
+    this.#intervalMs = Math.max(250, Math.min(60_000, Math.round(intervalMs)));
+  }
+
+  start(): void {
+    if (this.#child) return;
+    this.#stopped = false;
+    this.#failure = undefined;
+    this.#latest = undefined;
+    const child = spawn(this.#helperPath, [
+      '--watch',
+      '--interval-ms',
+      String(this.#intervalMs),
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    this.#child = child;
+    child.stdout!.setEncoding('utf8');
+    child.stderr!.setEncoding('utf8');
+    child.stdout!.on('data', (chunk: string) => this.consume(chunk));
+    child.stderr!.on('data', (chunk: string) => {
+      const message = chunk.trim();
+      if (message) this.fail(new Error(`Meeting signal detector: ${message}`));
+    });
+    child.on('error', (error) => {
+      if (this.#child !== child) return;
+      this.#child = undefined;
+      this.fail(new Error(`Could not start meeting signal detector: ${error.message}`));
+      this.scheduleRestart();
+    });
+    child.on('exit', (code, signal) => {
+      if (this.#child !== child) return;
+      this.#child = undefined;
+      this.fail(new Error(`Meeting signal detector stopped (${signal ?? `exit ${code}`})`));
+      this.scheduleRestart();
+    });
+  }
+
+  latest(): MeetingSignalSnapshot {
+    if (this.#failure) throw this.#failure;
+    if (this.#latest) return this.#latest;
+    throw new Error('Meeting signal detector is still starting');
+  }
+
+  async waitForSnapshot(timeoutMs = 15_000): Promise<MeetingSignalSnapshot> {
+    this.start();
+    if (this.#failure) throw this.#failure;
+    if (this.#latest) return this.#latest;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        removeSnapshot();
+        removeError();
+        callback();
+      };
+      const removeSnapshot = this.subscribe((snapshot) => finish(() => resolve(snapshot)));
+      const removeError = this.onError((error) => finish(() => reject(error)));
+      const timeout = setTimeout(() => finish(() => reject(new Error(
+        `Meeting signal detector did not become ready within ${Math.ceil(timeoutMs / 1_000)} seconds`,
+      ))), timeoutMs);
+    });
+  }
+
+  subscribe(listener: SnapshotListener): () => void {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  }
+
+  onError(listener: ErrorListener): () => void {
+    this.#errorListeners.add(listener);
+    return () => this.#errorListeners.delete(listener);
+  }
+
+  stop(): void {
+    this.#stopped = true;
+    if (this.#restartTimer) clearTimeout(this.#restartTimer);
+    this.#restartTimer = undefined;
+    const child = this.#child;
+    this.#child = undefined;
+    if (child && !child.killed) child.kill('SIGTERM');
+  }
+
+  private consume(chunk: string): void {
+    this.#buffer += chunk;
+    const lines = this.#buffer.split('\n');
+    this.#buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const snapshot = parseMeetingSignalSnapshot(JSON.parse(line));
+        this.#latest = snapshot;
+        this.#failure = undefined;
+        for (const listener of this.#listeners) listener(snapshot);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.fail(new Error(`Could not parse meeting signals: ${message}`));
+      }
+    }
+  }
+
+  private fail(error: Error): void {
+    this.#failure = error;
+    for (const listener of this.#errorListeners) listener(error);
+  }
+
+  private scheduleRestart(): void {
+    if (this.#stopped || this.#restartTimer) return;
+    this.#restartTimer = setTimeout(() => {
+      this.#restartTimer = undefined;
+      if (!this.#stopped) this.start();
+    }, 1_000);
   }
 }
 

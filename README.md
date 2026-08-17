@@ -50,7 +50,8 @@ download; inference remains local afterward.
 - SoX for live microphone capture
 - CMake and Git for building whisper.cpp
 
-Install the system dependencies with Homebrew:
+Sea Shell's installer can add the Homebrew packages it needs. To install them
+yourself instead:
 
 ```bash
 brew install ffmpeg sox cmake git
@@ -64,17 +65,29 @@ transcription, diarization, history, and exports do not require it.
 
 ## Installation
 
+On a Mac with Homebrew, this is the complete first-install command:
+
 ```bash
-git clone https://github.com/stupart/seashell.git
-cd seashell
-chmod +x install.sh
-./install.sh
-seashell doctor
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/stupart/seashell/main/bootstrap.sh)"
 ```
 
-The installer builds whisper.cpp with Metal, downloads the Whisper
-large-v3-turbo and Silero VAD models, installs Bun dependencies, and creates a
-global `seashell` command.
+The bootstrap clones Sea Shell into `~/.local/share/seashell` and runs the
+installer. The installer adds missing Bun/Homebrew dependencies, builds
+whisper.cpp with Metal, downloads the Whisper large-v3-turbo and Silero VAD
+models, and creates a global `seashell` command.
+
+There is no separate setup step. On a true first install, Sea Shell writes
+local-only defaults, saves transcripts in `~/Documents/Sea Shell/Transcripts`,
+and starts its lightweight meeting watcher whenever you log into your Mac.
+Reinstalling or updating preserves the existing config and launch-at-login
+choice byte-for-byte. Set `SEASHELL_SKIP_AUTOSTART=1` on the install command if
+you prefer to launch Sea Shell manually; `SEASHELL_SKIP_FIRST_RUN=1` suppresses
+all automatic first-run configuration.
+
+macOS itself still asks for Microphone, Screen & System Audio Recording, and
+optional Calendar access when each capability is first used. Sea Shell cannot
+and should not bypass those system dialogs. Local file/live transcription does
+not require an API key, Humain, or a cloud account.
 
 ### Updating
 
@@ -128,18 +141,19 @@ seashell meeting show <transcript-id>
 seashell meeting chat <transcript-id> "What did we decide?"
 ```
 
-Turn on automatic meeting capture at Mac login:
+Automatic meeting capture is already on after a normal first install. Inspect,
+disable, or re-enable it with:
 
 ```bash
-seashell meeting setup --automation automatic --calendar ask \
-  --browser-without-calendar ask
-seashell meeting autostart enable
 seashell meeting autostart status
+seashell meeting autostart disable
+seashell meeting autostart enable
 ```
 
 This installs a per-user macOS LaunchAgent for the Sea Shell watcher; Humain is
 not a daemon and is invoked only when optional meeting intelligence is
-configured. Use `seashell meeting autostart disable` to remove it.
+configured. Advanced policies remain configurable through `seashell meeting
+setup`; ordinary users do not need to run it.
 
 Inspect what Sea Shell can contribute to Humain or another compatible host:
 

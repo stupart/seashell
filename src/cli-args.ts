@@ -100,6 +100,7 @@ export type CliCommand =
   | { kind: 'tui'; libraryDir?: string }
   | { kind: 'capabilities'; json: boolean }
   | { kind: 'doctor'; json: boolean }
+  | { kind: 'setup'; autostart: boolean; json: boolean }
   | { kind: 'update'; check: boolean; json: boolean }
   | { kind: 'transcribe'; files: string[]; options: TranscribeCommandOptions }
   | CaptureCommand
@@ -671,6 +672,15 @@ export function parseCliArgs(args: string[]): CliCommand {
     if (unknown.length) throw new Error(`Unknown doctor option: ${unknown[0]}`);
     return { kind: 'doctor', json: args.includes('--json') };
   }
+  if (args[0] === 'setup') {
+    const unknown = args.slice(1).filter((arg) => arg !== '--no-autostart' && arg !== '--json');
+    if (unknown.length) throw new Error(`Unknown setup option: ${unknown[0]}`);
+    return {
+      kind: 'setup',
+      autostart: !args.includes('--no-autostart'),
+      json: args.includes('--json'),
+    };
+  }
   if (args[0] === 'capabilities') {
     const unknown = args.slice(1).filter((arg) => arg !== '--json');
     if (unknown.length) throw new Error(`Unknown capabilities option: ${unknown[0]}`);
@@ -696,6 +706,7 @@ Usage:
   seashell library <action> [options]       Browse and manage saved transcripts
   seashell capture <action> [options]       Inspect or finalize recoverable live capture
   seashell meeting <action> [options]       Create, enrich, browse, or chat with meetings
+  seashell setup [--no-autostart] [--json]  Apply safe defaults on a true first install
   seashell doctor [--json]                  Check dependencies and models
   seashell capabilities [--json]            Describe optional engine capabilities
   seashell update [--check] [--json]        Safely update this Git checkout

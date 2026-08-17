@@ -60,6 +60,7 @@ import {
 import { MEETING_SIGNALS_HELPER, readMeetingSignalSnapshot } from './meeting-automation.ts';
 import { loadMeetingContextFiles } from './meeting-context.ts';
 import { writeMeetingConsent } from './meeting-consent.ts';
+import { initializeFirstInstall } from './first-install.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const PROJECT_ROOT = join(dirname(__filename), '..');
@@ -718,6 +719,23 @@ export async function executeCliCommand(command: Exclude<CliCommand, { kind: 'tu
       return executeLibrary(command);
     case 'doctor':
       return executeDoctor(command.json);
+    case 'setup': {
+      const result = initializeFirstInstall({ enableAutostart: command.autostart });
+      if (command.json) {
+        print(JSON.stringify(result, null, 2));
+      } else if (!result.initialized) {
+        print(`Existing Sea Shell settings preserved at ${result.configPath}`);
+      } else {
+        print([
+          `Sea Shell is ready. Settings saved to ${result.configPath}`,
+          'Automatic capture: on for dedicated meeting apps and calendar-backed browser meetings',
+          'Browser without Calendar: asks before recording',
+          `Launch at login: ${result.launchAtLogin}`,
+          ...(result.warning ? [`Note: ${result.warning}`, 'Enable later with: seashell meeting autostart enable'] : []),
+        ].join('\n'));
+      }
+      return 0;
+    }
     case 'update':
       return executeUpdate(command.check, command.json);
     case 'meeting':

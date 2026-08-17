@@ -97,26 +97,50 @@ private func audioInputProcesses() -> [InputProcess] {
     }
 }
 
-private let supported: Bool
-if #available(macOS 14.2, *) {
-    supported = true
-} else {
-    supported = false
+private func currentSnapshot() -> SignalSnapshot {
+    let supported: Bool
+    if #available(macOS 14.2, *) {
+        supported = true
+    } else {
+        supported = false
+    }
+    return SignalSnapshot(
+        schemaVersion: 1,
+        capturedAtUnixMs: Int64(Date().timeIntervalSince1970 * 1_000),
+        supported: supported,
+        frontmostBundleId: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
+        inputProcesses: audioInputProcesses()
+    )
 }
-private let snapshot = SignalSnapshot(
-    schemaVersion: 1,
-    capturedAtUnixMs: Int64(Date().timeIntervalSince1970 * 1_000),
-    supported: supported,
-    frontmostBundleId: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-    inputProcesses: audioInputProcesses()
-)
+
+private func writeSnapshot(_ encoder: JSONEncoder) {
+    do {
+        let data = try encoder.encode(currentSnapshot())
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data([0x0A]))
+    } catch {
+        FileHandle.standardError.write(Data("Could not encode meeting signals: \(error)\n".utf8))
+        exit(1)
+    }
+}
+
+private let arguments = Array(CommandLine.arguments.dropFirst())
+private let watch = arguments.contains("--watch")
+private let intervalMilliseconds: UInt64 = {
+    guard let flag = arguments.firstIndex(of: "--interval-ms"),
+          arguments.indices.contains(flag + 1),
+          let value = UInt64(arguments[flag + 1]),
+          value >= 250 else {
+        return 3_000
+    }
+    return min(value, 60_000)
+}()
 private let encoder = JSONEncoder()
 encoder.outputFormatting = [.sortedKeys]
-do {
-    let data = try encoder.encode(snapshot)
-    FileHandle.standardOutput.write(data)
-    FileHandle.standardOutput.write(Data([0x0A]))
-} catch {
-    FileHandle.standardError.write(Data("Could not encode meeting signals: \(error)\n".utf8))
-    exit(1)
-}
+
+repeat {
+    writeSnapshot(encoder)
+    if watch {
+        Thread.sleep(forTimeInterval: Double(intervalMilliseconds) / 1_000)
+    }
+} while watch

@@ -84,10 +84,11 @@ import {
 import {
   DEFAULT_MEETING_AUTOMATION,
   MeetingAutomationController,
-  readMeetingSignalSnapshot,
+  MeetingSignalMonitor,
   resolveMeetingCandidate,
   type MeetingAutomationPhase,
   type MeetingCandidate,
+  type MeetingSignalSnapshot,
 } from './meeting-automation.ts';
 import { acquireMeetingWatchLock, type MeetingWatchLock } from './watch-lock.ts';
 import { applySpeakerLabels, EvidenceSpeakerLabeler } from './speaker-labeling.ts';
@@ -1006,22 +1007,29 @@ export default function App(props: { libraryDir?: string } = {}) {
     if (!calendar?.enabled || (calendar.policy ?? 'ask') === 'off') return;
     let cancelled = false;
     let polling = false;
+    let retryAtUnixMs = 0;
+    const calendarAbort = new AbortController();
     const poll = async () => {
-      if (polling) return;
+      if (polling || Date.now() < retryAtUnixMs) return;
       polling = true;
       try {
-        const events = await readMacCalendarEventsAsync({ leadMinutes: calendar.leadMinutes });
+        const events = await readMacCalendarEventsAsync({
+          leadMinutes: calendar.leadMinutes,
+          signal: calendarAbort.signal,
+        });
         const suggestion = suggestCalendarMeeting(events, {
           policy: calendar.policy ?? 'ask',
           selectedCalendars: calendar.selectedCalendars,
           leadMinutes: calendar.leadMinutes,
         });
         if (!cancelled) {
+          retryAtUnixMs = 0;
           calendarSuggestionRef.current = suggestion ?? null;
           setCalendarSuggestion(suggestion ?? null);
         }
       } catch (calendarError) {
         if (!cancelled) {
+          retryAtUnixMs = Date.now() + 5 * 60_000;
           setNotice(calendarError instanceof Error ? calendarError.message : String(calendarError));
         }
       } finally {
@@ -1032,6 +1040,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     const interval = setInterval(() => { void poll(); }, 60_000);
     return () => {
       cancelled = true;
+      calendarAbort.abort();
       clearInterval(interval);
     };
   }, [config.meeting?.calendar]);
@@ -1246,10 +1255,9 @@ export default function App(props: { libraryDir?: string } = {}) {
   useEffect(() => {
     if (!automaticMeetingEnabled || listenerDisabled || watchOwnership !== 'owned') return;
     let cancelled = false;
-    const poll = () => {
+    const poll = (snapshot: MeetingSignalSnapshot) => {
       if (cancelled || isExiting.current) return;
       try {
-        const snapshot = readMeetingSignalSnapshot();
         const candidate = resolveMeetingCandidate(
           snapshot,
           calendarSuggestionRef.current ?? undefined,
@@ -1277,14 +1285,22 @@ export default function App(props: { libraryDir?: string } = {}) {
         }
       }
     };
-    poll();
-    const interval = setInterval(
-      poll,
+    const monitor = new MeetingSignalMonitor(
+      undefined,
       (meetingAutomation.pollSeconds ?? DEFAULT_MEETING_AUTOMATION.pollSeconds) * 1_000,
     );
+    const unsubscribe = monitor.subscribe(poll);
+    const unsubscribeError = monitor.onError((signalError) => {
+      if (cancelled || meetingSignalFailure.current === signalError.message) return;
+      meetingSignalFailure.current = signalError.message;
+      setNotice(`${signalError.message} Manual recording is still available.`);
+    });
+    monitor.start();
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      unsubscribe();
+      unsubscribeError();
+      monitor.stop();
     };
   }, [
     automaticMeetingEnabled,

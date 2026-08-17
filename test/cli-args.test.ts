@@ -93,6 +93,18 @@ describe('update CLI parsing', () => {
   });
 });
 
+describe('first-install CLI parsing', () => {
+  test('defaults to automatic launch and supports an explicit opt-out', () => {
+    expect(parseCliArgs(['setup'])).toEqual({
+      kind: 'setup', autostart: true, json: false,
+    });
+    expect(parseCliArgs(['setup', '--no-autostart', '--json'])).toEqual({
+      kind: 'setup', autostart: false, json: true,
+    });
+    expect(() => parseCliArgs(['setup', '--force'])).toThrow('Unknown setup option');
+  });
+});
+
 describe('capability discovery CLI parsing', () => {
   test('exposes a stable machine-readable capability surface', () => {
     expect(parseCliArgs(['capabilities', '--json'])).toEqual({

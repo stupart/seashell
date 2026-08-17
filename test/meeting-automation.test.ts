@@ -1,5 +1,9 @@
-import { describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import {
+  MeetingSignalMonitor,
   MeetingAutomationController,
   parseMeetingSignalSnapshot,
   resolveMeetingCandidate,
@@ -27,7 +31,43 @@ const zoom: MeetingCandidate = {
   requiresConsent: false,
 };
 
+const temporaryRoots: string[] = [];
+afterEach(() => {
+  for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
 describe('meeting signal parsing and candidate resolution', () => {
+  test('one persistent helper streams multiple snapshots without being respawned', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'seashell-signal-monitor-'));
+    temporaryRoots.push(root);
+    const helper = join(root, 'signal-helper');
+    writeFileSync(helper, `#!/bin/sh
+printf '%s\\n' '{"schemaVersion":1,"capturedAtUnixMs":1000,"supported":true,"inputProcesses":[]}'
+sleep 0.05
+printf '%s\\n' '{"schemaVersion":1,"capturedAtUnixMs":2000,"supported":true,"inputProcesses":[]}'
+sleep 0.05
+`, { mode: 0o700 });
+    chmodSync(helper, 0o700);
+    const monitor = new MeetingSignalMonitor(helper, 250);
+    const seen: number[] = [];
+    const unsubscribe = monitor.subscribe((snapshot) => seen.push(snapshot.capturedAtUnixMs));
+    const secondSnapshot = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('second streamed snapshot timed out')), 1_000);
+      const remove = monitor.subscribe((snapshot) => {
+        if (snapshot.capturedAtUnixMs !== 2_000) return;
+        clearTimeout(timeout);
+        remove();
+        resolve();
+      });
+    });
+    expect((await monitor.waitForSnapshot(1_000)).capturedAtUnixMs).toBe(1_000);
+    await secondSnapshot;
+    expect(seen).toEqual([1_000, 2_000]);
+    expect(monitor.latest().capturedAtUnixMs).toBe(2_000);
+    unsubscribe();
+    monitor.stop();
+  });
+
   test('requires a real audio-input owner; calendar alone never starts recording', () => {
     const snapshot = parseMeetingSignalSnapshot({
       schemaVersion: 1,

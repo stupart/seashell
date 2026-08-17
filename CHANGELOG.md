@@ -33,6 +33,8 @@
   raised by the headless watcher, with a macOS notification and one-use expiry.
 - Calendar attendee extraction for conservative post-diarization naming and
   explicit bounded meeting context files for project/company grounding.
+- One-command bootstrap and idempotent first-install configuration: local-only
+  defaults, automatic login launch, and environment-variable opt-outs.
 
 ### Changed
 
@@ -53,10 +55,14 @@
 - The default TUI starts in an inexpensive meeting-watching state instead of
   opening capture and Whisper immediately. New private artifacts use `0700`
   directories and `0600` files.
+- The macOS meeting-signal helper now stays alive and streams snapshots, avoiding
+  repeated CoreAudio startup work; Calendar failures use concise permission
+  guidance and a retry cooldown instead of dumping AppleScript commands.
 
 ### Verified
 
-- Full suite: 116 Bun tests, 3 Python tests, and strict TypeScript checking.
+- Full suite: 121 Bun tests, 3 Python tests, strict TypeScript checking, and
+  shell syntax/static analysis.
 - Actual terminal captures covered the transcript-first meeting view and the
   responsive on-demand history drawer.
 - A live Sea Shell -> Humain -> OpenRouter retry completed through DeepInfra on

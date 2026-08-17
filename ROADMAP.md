@@ -41,6 +41,11 @@
   context for Humain enrichment.
 - Private per-user permissions for newly written transcript, meeting, capture,
   config, and background-log data.
+- One-command source bootstrap with idempotent first-install defaults, automatic
+  launch-at-login, explicit opt-outs, and byte-preserving reinstall behavior.
+- A persistent native meeting-signal stream that pays CoreAudio initialization
+  once instead of spawning a new detector every poll, plus bounded Calendar
+  retry and concise permission recovery guidance.
 
 ## Next hardening checkpoints
 

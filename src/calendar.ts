@@ -11,6 +11,30 @@ export interface CalendarSuggestionOptions {
   now?: Date;
 }
 
+interface CalendarProcessError extends Error {
+  readonly code?: string | number | null;
+  readonly killed?: boolean;
+}
+
+function calendarReadFailure(error: CalendarProcessError, stderr = ''): Error {
+  const detail = stderr.trim().split('\n').find((line) => line.trim());
+  const normalized = `${error.code ?? ''} ${error.message} ${detail ?? ''}`.toLocaleLowerCase();
+  if (error.code === 'ETIMEDOUT' || error.killed || normalized.includes('timed out')) {
+    return new Error(
+      'Calendar did not respond. Open Calendar once, then allow the app running Sea Shell in System Settings → Privacy & Security → Calendars. Audio-based meeting detection still works without Calendar.',
+    );
+  }
+  if (normalized.includes('not authorized') || normalized.includes('not permitted') ||
+      normalized.includes('denied') || normalized.includes('-1743')) {
+    return new Error(
+      'Calendar access is off. Allow the app running Sea Shell in System Settings → Privacy & Security → Calendars, or keep using audio-only meeting detection.',
+    );
+  }
+  return new Error(
+    `Could not read macOS Calendar${detail ? `: ${detail.slice(0, 240)}` : ''}. Audio-based meeting detection is still available.`,
+  );
+}
+
 function parseCalendarEvent(value: unknown, index: number): MeetingCalendarEvent {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`Calendar event ${index} is invalid`);
@@ -124,8 +148,10 @@ export function readMacCalendarEvents(
     maxBuffer: 1_000_000,
   });
   if (result.error || result.status !== 0) {
-    const detail = result.stderr?.trim() || result.error?.message || `exit ${result.status}`;
-    throw new Error(`Could not read macOS Calendar: ${detail}`);
+    throw calendarReadFailure(
+      result.error ?? Object.assign(new Error(`exit ${result.status}`), { code: result.status }),
+      result.stderr ?? '',
+    );
   }
   try {
     return parseCalendarEvents(JSON.parse(result.stdout));
@@ -195,7 +221,7 @@ export function readMacCalendarEventsAsync(
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     }, (error, stdout, stderr) => {
       if (error) {
-        reject(new Error(`Could not read macOS Calendar: ${stderr?.trim() || error.message}`));
+        reject(calendarReadFailure(error, stderr));
         return;
       }
       try {

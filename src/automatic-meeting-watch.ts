@@ -13,8 +13,8 @@ import {
 } from './durable-live-capture.ts';
 import {
   DEFAULT_MEETING_AUTOMATION,
+  MeetingSignalMonitor,
   MeetingAutomationController,
-  readMeetingSignalSnapshot,
   resolveMeetingCandidate,
   type MeetingAutomationAction,
   type MeetingCandidate,
@@ -47,7 +47,7 @@ export type AutomaticMeetingWatchEvent =
 
 export interface AutomaticMeetingWatchDependencies {
   readonly now?: () => Date;
-  readonly readSignals?: () => MeetingSignalSnapshot;
+  readonly readSignals?: () => MeetingSignalSnapshot | Promise<MeetingSignalSnapshot>;
   readonly readCalendar?: typeof readMacCalendarEventsAsync;
   readonly startCapture?: typeof startDurableLiveCapture;
   readonly finalizeCapture?: typeof finalizeCaptureTranscript;
@@ -78,10 +78,12 @@ export class AutomaticMeetingWatchService {
   readonly #controller: MeetingAutomationController;
   readonly #onEvent?: (event: AutomaticMeetingWatchEvent) => void;
   readonly #dependencies: Required<AutomaticMeetingWatchDependencies>;
+  readonly #signalMonitor?: MeetingSignalMonitor;
   #active?: { candidate: MeetingCandidate; capture: DurableLiveCaptureHandle };
   #finalizationTail: Promise<void> = Promise.resolve();
   #calendarCache?: { readAtUnixMs: number; events: Awaited<ReturnType<typeof readMacCalendarEventsAsync>> };
   #calendarRead?: Promise<void>;
+  #calendarRetryAtUnixMs = 0;
   #calendarAbort = new AbortController();
   #shuttingDown = false;
 
@@ -90,9 +92,14 @@ export class AutomaticMeetingWatchService {
     this.#libraryDir = resolveLibraryDir(options.libraryDir, process.env, this.#config);
     this.#controller = new MeetingAutomationController(this.#config.meeting?.automation);
     this.#onEvent = options.onEvent;
+    const pollMs = (this.#config.meeting?.automation?.pollSeconds ??
+      DEFAULT_MEETING_AUTOMATION.pollSeconds) * 1_000;
+    this.#signalMonitor = options.dependencies?.readSignals
+      ? undefined
+      : new MeetingSignalMonitor(undefined, pollMs);
     this.#dependencies = {
       now: options.dependencies?.now ?? (() => new Date()),
-      readSignals: options.dependencies?.readSignals ?? readMeetingSignalSnapshot,
+      readSignals: options.dependencies?.readSignals ?? (() => this.#signalMonitor!.waitForSnapshot()),
       readCalendar: options.dependencies?.readCalendar ?? readMacCalendarEventsAsync,
       startCapture: options.dependencies?.startCapture ?? startDurableLiveCapture,
       finalizeCapture: options.dependencies?.finalizeCapture ?? finalizeCaptureTranscript,
@@ -109,7 +116,7 @@ export class AutomaticMeetingWatchService {
     const now = this.#dependencies.now();
     let snapshot: MeetingSignalSnapshot;
     try {
-      snapshot = this.#dependencies.readSignals();
+      snapshot = await this.#dependencies.readSignals();
     } catch (error) {
       this.emit({ type: 'watch.warning', at: now.toISOString(), message: errorMessage(error) });
       return { kind: 'none' };
@@ -148,6 +155,7 @@ export class AutomaticMeetingWatchService {
 
   async shutdown(): Promise<void> {
     this.#shuttingDown = true;
+    this.#signalMonitor?.stop();
     this.#calendarAbort.abort();
     if (this.#active) await this.finish(this.#active.candidate, 'watch-stopped');
     await this.#calendarRead?.catch(() => {});
@@ -158,7 +166,8 @@ export class AutomaticMeetingWatchService {
     const calendar = this.#config.meeting?.calendar;
     if (!calendar?.enabled || (calendar.policy ?? 'ask') === 'off') return undefined;
     try {
-      if ((!this.#calendarCache || now.getTime() - this.#calendarCache.readAtUnixMs >= 30_000) &&
+      if (now.getTime() >= this.#calendarRetryAtUnixMs &&
+          (!this.#calendarCache || now.getTime() - this.#calendarCache.readAtUnixMs >= 30_000) &&
           !this.#calendarRead) {
         this.#calendarRead = this.#dependencies.readCalendar({
           leadMinutes: calendar.leadMinutes,
@@ -166,9 +175,11 @@ export class AutomaticMeetingWatchService {
         })
           .then((events) => {
             this.#calendarCache = { readAtUnixMs: this.#dependencies.now().getTime(), events };
+            this.#calendarRetryAtUnixMs = 0;
           })
           .catch((error: unknown) => {
             if (this.#shuttingDown) return;
+            this.#calendarRetryAtUnixMs = this.#dependencies.now().getTime() + 5 * 60_000;
             this.emit({
               type: 'watch.warning',
               at: this.#dependencies.now().toISOString(),
