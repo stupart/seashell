@@ -25,6 +25,7 @@ export interface SelfUpdateResult {
 
 export interface SelfUpdateOptions {
   projectRoot: string;
+  managedBy?: 'homebrew';
   check?: boolean;
   runner?: UpdateCommandRunner;
 }
@@ -73,6 +74,9 @@ function tryRun(
  * along with native helpers and models after the new revision is checked out.
  */
 export function updateRepository(options: SelfUpdateOptions): SelfUpdateResult {
+  if (options.managedBy === 'homebrew') {
+    throw new Error('Sea Shell is managed by Homebrew. Run: brew update && brew upgrade stupart/tap/seashell');
+  }
   const runner = options.runner ?? defaultRunner;
   const repositoryRoot = run(
     runner,

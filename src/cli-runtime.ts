@@ -391,7 +391,9 @@ function executeDoctor(json: boolean): number {
 
 function executeUpdate(check: boolean, json: boolean): number {
   try {
-    const result = updateRepository({ projectRoot: PROJECT_ROOT, check });
+    const result = updateRepository({ projectRoot: PROJECT_ROOT, check,
+      ...(process.env.SEASHELL_MANAGED_BY === 'homebrew' ? { managedBy: 'homebrew' as const } : {}),
+    });
     print(json ? JSON.stringify({ ok: true, ...result }, null, 2) : formatSelfUpdateResult(result));
     return 0;
   } catch (error) {
