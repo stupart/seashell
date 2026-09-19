@@ -70,7 +70,7 @@ function tryRun(
 /**
  * Update a Git-based Sea Shell installation without replacing local history.
  * Only a clean, fast-forward update is allowed; dependencies are refreshed
- * from the committed lockfile after the new revision is checked out.
+ * along with native helpers and models after the new revision is checked out.
  */
 export function updateRepository(options: SelfUpdateOptions): SelfUpdateResult {
   const runner = options.runner ?? defaultRunner;
@@ -135,7 +135,17 @@ export function updateRepository(options: SelfUpdateOptions): SelfUpdateResult {
   );
 
   const common = { branch, upstream, previousSha, latestSha };
-  if (previousSha === latestSha) return { status: 'up-to-date', ...common };
+  const repair = () => run(
+    runner,
+    repositoryRoot,
+    'bash',
+    ['install.sh', '--repair'],
+    'Sea Shell runtime repair failed; rerun seashell update to retry',
+  );
+  if (previousSha === latestSha) {
+    if (!options.check) repair();
+    return { status: 'up-to-date', ...common };
+  }
 
   const canFastForward = tryRun(
     runner,
@@ -175,13 +185,7 @@ export function updateRepository(options: SelfUpdateOptions): SelfUpdateResult {
     ['merge', '--ff-only', upstream],
     `Could not fast-forward ${branch}`,
   );
-  run(
-    runner,
-    repositoryRoot,
-    'bun',
-    ['install', '--frozen-lockfile'],
-    'Sea Shell updated, but dependency installation failed; run bun install --frozen-lockfile',
-  );
+  repair();
 
   return { status: 'updated', ...common };
 }

@@ -99,10 +99,19 @@ seashell update
 ```
 
 The updater fetches the current branch's configured remote, permits only a
-clean fast-forward, and then runs `bun install --frozen-lockfile`. It never
+clean fast-forward, and repairs native helpers, the pinned Whisper backend,
+checksum-verified models, and locked Bun dependencies. A failed repair can be
+retried with the same `seashell update` command even after Git has advanced. It never
 merges divergent history or discards tracked changes. `--json` makes either
 command machine-readable. A branch must exist on the remote before it can be
 updated this way.
+
+Downloads are verified before replacing installed models; interrupted downloads
+are retried on the next install. Installation pins whisper.cpp v1.9.4 and builds
+both the batch CLI and the live server. Updates preserve configuration and
+launch-at-login choices. For an isolated install, set `SEASHELL_INSTALL_DIR`,
+`SEASHELL_BIN_DIR`, and `SEASHELL_CONFIG` to disposable paths and set
+`SEASHELL_SKIP_AUTOSTART=1`.
 
 ## Quick start
 
