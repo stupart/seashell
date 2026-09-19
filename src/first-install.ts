@@ -59,7 +59,9 @@ export function initializeFirstInstall(
   }
 
   try {
-    const launchStatus = (options.enableLaunch ?? enableMeetingLaunchAtLogin)();
+    const launchStatus = (options.enableLaunch ?? enableMeetingLaunchAtLogin)({
+      environment: { ...process.env, SEASHELL_CONFIG: configPath },
+    });
     return Object.freeze({
       initialized: true,
       configPath,

@@ -4,6 +4,7 @@ import { existsSync, renameSync, unlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { basename, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { terminateManagedChild } from './process-lifecycle.ts';
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const SYSTEM_AUDIO_HELPER = join(
@@ -509,7 +510,7 @@ export function startSystemAudioCapture(
     stop() {
       if (requestedStop) return;
       requestedStop = true;
-      child.kill('SIGTERM');
+      void terminateManagedChild(child);
     },
   };
 }

@@ -119,6 +119,12 @@ export class AutomaticMeetingWatchService {
       snapshot = await this.#dependencies.readSignals();
     } catch (error) {
       this.emit({ type: 'watch.warning', at: now.toISOString(), message: errorMessage(error) });
+      // A broken detector is lost evidence, not permission to record indefinitely.
+      const action = this.#controller.step(undefined, now.getTime());
+      if (action.kind === 'finish') await this.finish(action.candidate, action.reason);
+      return action;
+    }
+    if (this.#shuttingDown) {
       return { kind: 'none' };
     }
     const calendar = this.currentCalendar(now);
@@ -127,7 +133,7 @@ export class AutomaticMeetingWatchService {
     if (action.kind === 'suggest') {
       this.emit({ type: 'meeting.suggested', at: now.toISOString(), candidate: action.candidate });
     } else if (action.kind === 'start') {
-      this.start(action.candidate, now);
+      if (!this.start(action.candidate, now)) return { kind: 'none' };
     } else if (action.kind === 'finish') {
       await this.finish(action.candidate, action.reason);
     }
@@ -145,7 +151,7 @@ export class AutomaticMeetingWatchService {
   approveSuggestion(): MeetingCandidate | undefined {
     const now = this.#dependencies.now();
     const candidate = this.#controller.approve(now.getTime());
-    if (candidate) this.start(candidate, now);
+    if (candidate && !this.start(candidate, now)) return undefined;
     return candidate;
   }
 
@@ -198,9 +204,11 @@ export class AutomaticMeetingWatchService {
     } catch { return undefined; }
   }
 
-  private start(candidate: MeetingCandidate, now: Date): void {
-    if (this.#active) return;
-    const capture = this.#dependencies.startCapture({
+  private start(candidate: MeetingCandidate, now: Date): boolean {
+    if (this.#active) return false;
+    let capture: DurableLiveCaptureHandle;
+    try {
+      capture = this.#dependencies.startCapture({
       libraryDir: this.#libraryDir,
       startedAt: now,
       onError: (error) => this.emit({
@@ -208,7 +216,12 @@ export class AutomaticMeetingWatchService {
         at: this.#dependencies.now().toISOString(),
         message: error.message,
       }),
-    });
+      });
+    } catch (error) {
+      this.#controller.reset();
+      this.emit({ type: 'watch.error', at: now.toISOString(), message: `Could not start capture: ${errorMessage(error)}` });
+      return false;
+    }
     this.#active = { candidate, capture };
     this.emit({
       type: 'meeting.started',
@@ -216,6 +229,7 @@ export class AutomaticMeetingWatchService {
       candidate,
       sessionId: capture.sessionId,
     });
+    return true;
   }
 
   private async finish(candidate: MeetingCandidate, reason: string): Promise<void> {
@@ -322,8 +336,9 @@ export class AutomaticMeetingWatchService {
 export async function runAutomaticMeetingWatch(options: AutomaticMeetingWatchOptions = {}): Promise<void> {
   const lock = acquireMeetingWatchLock();
   if (!lock) throw new Error('Another Sea Shell meeting watcher is already running');
-  const service = new AutomaticMeetingWatchService(options);
+  let service: AutomaticMeetingWatchService | undefined;
   try {
+    service = new AutomaticMeetingWatchService(options);
     options.onEvent?.(event({ type: 'watch.ready', at: new Date().toISOString() }));
     if (options.once) {
       await service.pollOnce();
@@ -336,7 +351,6 @@ export async function runAutomaticMeetingWatch(options: AutomaticMeetingWatchOpt
       await sleep(pollSeconds * 1_000, undefined, { signal: options.signal }).catch(() => {});
     }
   } finally {
-    await service.shutdown();
-    lock.release();
+    try { await service?.shutdown(); } finally { lock.release(); }
   }
 }
