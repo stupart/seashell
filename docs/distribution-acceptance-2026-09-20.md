@@ -90,8 +90,10 @@ installation, configuration, doctor, real transcription, and linkage after the
 Intel CPU/Metal corrections. The formula test step took 3 minutes 33 seconds on
 Apple Silicon and 9 minutes 8 seconds on Intel, including setup and diagnostics.
 The workflow gives full-model acceptance ten minutes, keeps a twenty-minute
-job limit, and separately records timed first-launch diagnostics. RC3 adds the
-MIT license and bundled notices to the same runtime; its package CI is rerunning.
+job limit, and separately records timed first-launch diagnostics.
+[The exact MIT-licensed RC3 candidate also passed both architectures](https://github.com/stupart/homebrew-tap/actions/runs/35451288965):
+the test steps took 4 minutes 4 seconds on Apple Silicon and 9 minutes 5 seconds
+on Intel. Installation, timed doctor, formula assertions, and linkage all passed.
 
 The installed local preview is available as `/opt/homebrew/bin/seashell`.
 Test config and transcript libraries are isolated under
@@ -156,6 +158,10 @@ Intel benchmark should compare thread counts and model sizes before claiming a
 smooth live experience. The current file path requests six Whisper threads even
 on a four-vCPU runner; the sampled thread barriers make this worth measuring,
 but they do not establish how much latency a different thread count would save.
+An [immediately preceding CPU-only Intel run](https://github.com/stupart/homebrew-tap/actions/runs/35451094346)
+hit the ten-minute test deadline with the same runtime. The successful RC3 run
+therefore does not establish consistent hosted latency; the narrow test margin
+and thread-count/model benchmark remain explicit follow-ups.
 
 Before advertising the final public install command, merge the reviewed Seashell
 stack and tap PR, select the release revision, and move the formula from
