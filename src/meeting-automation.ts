@@ -191,12 +191,14 @@ export function parseMeetingSignalSnapshot(value: unknown): MeetingSignalSnapsho
 
 export function readMeetingSignalSnapshot(
   helperPath = MEETING_SIGNALS_HELPER,
+  timeoutMs = 15_000,
 ): MeetingSignalSnapshot {
   const result = spawnSync(helperPath, [], {
     encoding: 'utf8',
     // CoreAudio's first process-list query can take several seconds on a busy Mac.
     // Long-running consumers use MeetingSignalMonitor and pay this cost only once.
-    timeout: 15_000,
+    timeout: timeoutMs,
+    killSignal: 'SIGKILL',
     maxBuffer: 256_000,
   });
   if (result.error || result.status !== 0) {
