@@ -65,6 +65,14 @@ transcription, diarization, history, and exports do not require it.
 
 ## Installation
 
+The Homebrew release candidate is being tested in
+[stupart/homebrew-tap#1](https://github.com/stupart/homebrew-tap/pull/1).
+It includes a private Bun runtime, native helpers, and local transcription
+models. It is not on the tap's default branch yet. See the
+[distribution acceptance report](docs/distribution-acceptance-2026-09-20.md)
+for tested install paths and release status. The npm package named `seashell`
+belongs to a different project; it does not install this app.
+
 On a Mac with Homebrew, this is the complete first-install command:
 
 ```bash
@@ -785,7 +793,7 @@ tests generate tiny local fixtures when FFmpeg is available.
 
 ## License
 
-MIT. Optional Community-1 model weights are downloaded separately under CC BY
+[MIT](LICENSE). Optional Community-1 model weights are downloaded separately under CC BY
 4.0 and are not bundled with Sea Shell.
 
 ---
