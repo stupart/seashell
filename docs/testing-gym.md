@@ -13,6 +13,7 @@ brew install ffmpeg
 bun run gym
 bun run gym -- --rounds 3 --native
 bun run gym -- --capture-soak
+bun run gym -- --meeting-soak
 ```
 
 The gym requires FFmpeg instead of silently counting missing media tests as
@@ -37,7 +38,7 @@ The regression suite includes:
 - Login-agent configuration, private logs, and failed shutdown reporting.
 
 The macOS GitHub Actions workflow runs the default gym plus native compilation
-and the accelerated capture-storage exercise for each PR and keeps evidence for
+and the accelerated capture-storage and repeated-meeting exercises for each PR and keeps evidence for
 14 days. It requires no private Humain repo,
 model download, microphone, Calendar permission, or cloud credentials.
 
@@ -50,6 +51,18 @@ CPU time, event-loop delay, and assembly time. Successful runs delete generated
 audio and retain metrics; failed runs retain the fixture for diagnosis. This
 tests storage and recovery under volume, not native devices or ASR throughput
 over 90 minutes of elapsed time.
+
+`--meeting-soak` runs 100 meeting lifecycles with two real child audio streams
+per meeting. It exercises confirmation, a brief detector dropout, stop grace,
+final half-chunk flushing, checksums, finalization, and saved meeting artifacts.
+Every meeting must retain all four chunks and both 1.5-second transcript tracks,
+with no surviving capture children or added signal listeners. After ten warmup
+cycles it samples forced-GC retained heap and RSS every ten meetings; growth
+budgets are 16 MiB and 128 MiB respectively. These are coarse regression limits,
+not a proof of zero leaks. Detector time and transcription text are fixtures;
+this run opens no microphone and calls no network provider. Use `--asr` and the
+physical-device checks separately. Metrics remain in `meeting-soak/metrics.json`;
+successful runs delete synthetic audio, while failed runs retain it.
 
 ## Real local ASR and Humain compatibility
 
