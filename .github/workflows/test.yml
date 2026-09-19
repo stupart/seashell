@@ -1,0 +1,33 @@
+name: Reliability gym
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.0'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Media dependencies
+        run: brew install ffmpeg
+      - run: bun install --frozen-lockfile
+      - name: Typecheck, regression suite, media integration, native compilation
+        run: bun run gym -- --native
+      - name: Preserve test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seashell-gym-${{ github.run_id }}
+          path: .gym-results/
+          include-hidden-files: true
+          retention-days: 14

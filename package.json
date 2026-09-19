@@ -12,6 +12,7 @@
     "dev": "bun --watch src/cli.tsx",
     "test": "bun test ./test && python3 -m unittest discover -s test -p '*_test.py'",
     "typecheck": "bunx tsc --noEmit",
+    "gym": "bun run scripts/gym.ts",
     "benchmark:live-asr": "bun run scripts/benchmark-live-asr.ts"
   },
   "devDependencies": {

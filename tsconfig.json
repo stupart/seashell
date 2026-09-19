@@ -26,6 +26,6 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts"],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "scripts/**/*.ts"],
   "exclude": ["node_modules", "whisper.cpp"]
 }
