@@ -77,10 +77,11 @@ test('cancellation drains a running transcription child and rejects its result',
   const pending = runHumainTranscription('audio.wav', route, {
     ...f.options, signal: controller.signal, env: { ...f.options.env, FIXTURE_HANG: '1' },
   });
-  const rejected = expect(pending).rejects.toThrow('cancelled');
-  while (!existsSync(f.argsPath)) await Bun.sleep(5);
+  const deadline = Date.now() + 1_000;
+  while (!existsSync(f.argsPath) && Date.now() < deadline) await Bun.sleep(5);
   controller.abort();
-  await rejected;
+  await expect(pending).rejects.toThrow('cancelled');
+  expect(existsSync(f.argsPath)).toBe(true);
 }, 5_000);
 
 test('an already cancelled call never launches the provider', async () => {
