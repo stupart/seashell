@@ -1,11 +1,11 @@
 import { randomUUID } from 'crypto';
+import { dlopen } from 'bun:ffi';
 import {
   closeSync,
-  existsSync,
+  ftruncateSync,
   mkdirSync,
   openSync,
   readFileSync,
-  rmSync,
   writeFileSync,
 } from 'fs';
 import { homedir } from 'os';
@@ -36,53 +36,63 @@ function processAlive(pid: number): boolean {
   }
 }
 
-function readOwner(path: string): { pid: number; token: string } | undefined {
+function readOwner(path: string): { pid: number; token: string; protocol?: string } | undefined {
   try {
     const value = JSON.parse(readFileSync(path, 'utf8')) as unknown;
     if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
     const owner = value as Record<string, unknown>;
     if (!Number.isSafeInteger(owner.pid) || Number(owner.pid) < 1 ||
         typeof owner.token !== 'string' || !owner.token) return undefined;
-    return { pid: Number(owner.pid), token: owner.token };
+    return { pid: Number(owner.pid), token: owner.token,
+      ...(typeof owner.protocol === 'string' ? { protocol: owner.protocol } : {}) };
   } catch {
     return undefined;
   }
 }
 
-/** Acquire one exact per-user watcher lease; stale process-owned leases are recoverable. */
+function loadLockLibrary() {
+  return dlopen(process.platform === 'darwin' ? '/usr/lib/libSystem.B.dylib' : 'libc.so.6', {
+    flock: { args: ['i32', 'i32'], returns: 'i32' },
+  });
+}
+let lockLibrary: ReturnType<typeof loadLockLibrary> | undefined;
+
+/**
+ * The kernel owns exclusion and releases it on crash. Keep one stable inode:
+ * unlinking a PID file allows stale-owner cleanup to delete a newer owner's lease.
+ * The JSON is diagnostic metadata, never the authority for a flock lease.
+ */
 export function acquireMeetingWatchLock(
   options: MeetingWatchLockOptions = {},
 ): MeetingWatchLock | undefined {
   const path = resolve(options.path ?? defaultMeetingWatchLockPath());
   const pid = options.pid ?? process.pid;
   const pidAlive = options.pidAlive ?? processAlive;
-  const token = randomUUID();
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const descriptor = openSync(path, 'wx', 0o600);
-      try {
-        writeFileSync(descriptor, `${JSON.stringify({ pid, token, createdAt: new Date().toISOString() })}\n`);
-      } finally {
+  const descriptor = openSync(path, 'a+', 0o600);
+  let held = false;
+  try {
+    const flock = (lockLibrary ??= loadLockLibrary()).symbols.flock;
+    if (flock(descriptor, 2 | 4) !== 0) return undefined; // LOCK_EX | LOCK_NB
+    // Respect a still-running watcher from the older PID-file implementation.
+    const owner = readOwner(path);
+    if (owner && owner.protocol !== 'flock-1' && pidAlive(owner.pid)) return undefined;
+    ftruncateSync(descriptor, 0);
+    writeFileSync(descriptor, `${JSON.stringify({
+      protocol: 'flock-1', pid, token: randomUUID(), createdAt: new Date().toISOString(),
+    })}\n`);
+    held = true;
+    let released = false;
+    return Object.freeze({
+      path, pid,
+      release() {
+        if (released) return;
+        released = true;
+        // Closing the descriptor releases the lease without a pathname race.
         closeSync(descriptor);
-      }
-      let released = false;
-      return Object.freeze({
-        path,
-        pid,
-        release() {
-          if (released) return;
-          released = true;
-          const owner = readOwner(path);
-          if (owner?.pid === pid && owner.token === token) rmSync(path, { force: true });
-        },
-      });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const owner = readOwner(path);
-      if (owner && pidAlive(owner.pid)) return undefined;
-      if (existsSync(path)) rmSync(path, { force: true });
-    }
+      },
+    });
+  } finally {
+    if (!held) closeSync(descriptor);
   }
-  return undefined;
 }
