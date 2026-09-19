@@ -18,7 +18,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function fixture() {
+function fixture(id = 'meeting-1') {
   const root = mkdtempSync(join(tmpdir(), 'seashell-meeting-test-'));
   roots.push(root);
   const record = createTranscriptRecord({
@@ -32,12 +32,64 @@ function fixture() {
       { id: 'speaker-1', label: 'Ada' },
       { id: 'speaker-2', label: 'Charles' },
     ],
-  }, { id: 'meeting-1', title: 'Launch review', now: new Date('2026-08-10T14:00:00Z') });
+  }, { id, title: 'Launch review', now: new Date('2026-08-10T14:00:00Z') });
   const saved = saveTranscriptRecord(root, record);
   return { root, record, saved };
 }
 
 describe('meeting artifact bundle', () => {
+  test('long transcript IDs preserve distinct reconciliation identities', async () => {
+    const { root, record } = fixture('meeting.notes-' + 'a'.repeat(120));
+    const ids: string[] = [];
+    const runner: NonNullable<Parameters<typeof enrichMeeting>[2]['runner']> = async (_action, _request, options) => {
+      ids.push(options.runId);
+      return { runId: options.runId, compiledRunId: 'compiled', status: 'succeeded',
+        output: { summary: 'Done.', claims: [] }, receipt: {} };
+    };
+    for (const revision of [1, 1, 2]) {
+      await enrichMeeting(root, record.id, { mode: 'post-session',
+        route: { backend: 'codex', model: 'fixture' }, context: { revision }, runner });
+    }
+    expect(ids[0]).toBe(ids[1]);
+    expect(ids[0]).not.toBe(ids[2]);
+    expect(ids.every((id) => id.length <= 96)).toBe(true);
+    expect(ids.every((id) => /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id))).toBe(true);
+  });
+
+  for (const change of ['route', 'transcript'] as const) {
+    test(`changed ${change} after observer failure gets a distinct durable request`, async () => {
+      const { root, record } = fixture();
+      const identities: Array<{ key: unknown; runId: string }> = [];
+      const runner: NonNullable<Parameters<typeof enrichMeeting>[2]['runner']> = async (_action, request, options) => {
+        identities.push({ key: (request as { idempotencyKey: string }).idempotencyKey, runId: options.runId });
+        if (identities.length === 1) throw new Error('provider failure');
+        return { runId: options.runId, compiledRunId: 'compiled', status: 'succeeded',
+          output: { summary: 'Done.', claims: [] }, receipt: {} };
+      };
+      const options = { mode: 'streaming' as const, route: { backend: 'codex' as const, model: 'fixture/first' }, runner };
+      await expect(enrichMeeting(root, record.id, options)).rejects.toThrow('provider failure');
+      if (change === 'transcript') saveTranscriptRecord(root, { ...record,
+        transcript: record.transcript.map((segment) => ({ ...segment, text: segment.text + ' Revised.' })) });
+      await enrichMeeting(root, record.id, { ...options,
+        ...(change === 'route' ? { route: { ...options.route, model: 'fixture/second' } } : {}),
+      });
+      expect(identities).toHaveLength(2);
+      expect(identities[0]!.key).not.toBe(identities[1]!.key);
+      expect(identities[0]!.runId).not.toBe(identities[1]!.runId);
+    });
+  }
+
+  test('an observer cannot cite evidence outside its supplied window', async () => {
+    const { root, record } = fixture();
+    await expect(enrichMeeting(root, record.id, { mode: 'streaming',
+      route: { backend: 'codex', model: 'fixture' }, maximumNewSegments: 2, overlapSegments: 1,
+      maxObserverRuns: 1,
+      runner: async () => ({ runId: 'observer', compiledRunId: 'compiled', status: 'succeeded', receipt: {},
+        output: { summary: 'Unsupported future evidence.', claims: [{ id: 'future', type: 'note',
+          text: 'Notes will be written.', evidenceSegmentIds: ['s000004'], confidence: 0.9 }] } }),
+    })).rejects.toThrow('missing segment s000004');
+  });
+
   test('saves a companion manifest, readable documents, subtitles, and append-only overlays', () => {
     const { root, record, saved } = fixture();
     const artifact = createMeetingArtifact(record, { mode: 'hybrid' });

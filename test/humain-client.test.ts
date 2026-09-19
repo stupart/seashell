@@ -18,7 +18,8 @@ fs.writeFileSync(process.env.FIXTURE_ARGS, JSON.stringify(process.argv.slice(2))
 if (process.env.FIXTURE_HANG) { process.on('SIGTERM', () => {}); setInterval(() => {}, 100); }
 else process.stdout.write(process.env.FIXTURE_RESULT);
 `);
-  const result = { status: 'succeeded', runId: 'expected-run', compiledRunId: 'compiled', receipt: {},
+  const result = { status: 'succeeded', runId: 'expected-run', compiledRunId: 'compiled',
+    receipt: { runId: 'expected-run', compiledRunId: 'compiled', status: 'succeeded' },
     output: { provider: { boundary: 'remote', model: route.model },
       segments: [{ id: 's1', text: 'Hello', startMs: 0, endMs: 100 }] } };
   change(result);
@@ -38,11 +39,23 @@ test('the upload boundary rejects absent or false runtime consent before startin
   }
 });
 
-test('Humain results must match the requested run and exact model', async () => {
+test('Humain results must match their durable receipt and exact model', async () => {
   const wrongRun = fixture((r) => { r.runId = 'another-run'; });
   await expect(runHumainTranscription('audio.wav', route, wrongRun.options)).rejects.toThrow('run');
   const wrongModel = fixture((r) => { r.output.provider.model = 'another-model'; });
   await expect(runHumainTranscription('audio.wav', route, wrongModel.options)).rejects.toThrow('model');
+});
+
+test('a successful idempotent replay may return the original run ID', async () => {
+  const replay = fixture((r) => { r.runId = r.receipt.runId = 'original-run'; });
+  expect((await runHumainTranscription('audio.wav', route, replay.options)).runId).toBe('original-run');
+});
+
+test('a mismatched compiled identity or failed receipt cannot attest success', async () => {
+  for (const mismatch of ['compiledRunId', 'status']) {
+    const f = fixture((r) => { r.receipt[mismatch] = 'invalid'; });
+    await expect(runHumainTranscription('audio.wav', route, f.options)).rejects.toThrow('receipt');
+  }
 });
 
 test('invalid or duplicate segment identities are rejected', async () => {

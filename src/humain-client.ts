@@ -86,7 +86,7 @@ export function resolveHumainExecutable(
   );
 }
 
-function parseResult(stdout: string, runId: string): HumainMeetingResult {
+function parseResult(stdout: string): HumainMeetingResult {
   let value: unknown;
   try {
     value = JSON.parse(stdout);
@@ -99,18 +99,26 @@ function parseResult(stdout: string, runId: string): HumainMeetingResult {
   const result = value as Record<string, unknown>;
   if (
     result.status !== 'succeeded' ||
-    result.runId !== runId ||
+    typeof result.runId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(result.runId) ||
     typeof result.compiledRunId !== 'string' || !result.compiledRunId.trim()
   ) {
     throw new Error(`Humain meeting run did not succeed${
       typeof result.status === 'string' ? ` (${result.status})` : ''
     }`);
   }
+  // Humain owns idempotency: a successful replay returns the original run ID,
+  // even if this invocation proposed a different ID. Bind to its receipt.
+  const receipt = result.receipt as Record<string, unknown> | undefined;
+  if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt) ||
+      receipt.runId !== result.runId || receipt.compiledRunId !== result.compiledRunId ||
+      receipt.status !== 'succeeded') {
+    throw new Error('Humain result does not match its durable run receipt');
+  }
   return result as unknown as HumainMeetingResult;
 }
 
-function parseTranscriptionResult(stdout: string, runId: string, model: string): HumainTranscriptionResult {
-  const result = parseResult(stdout, runId);
+function parseTranscriptionResult(stdout: string, model: string): HumainTranscriptionResult {
+  const result = parseResult(stdout);
   const output = result.output;
   if (!output || typeof output !== 'object' || Array.isArray(output)) {
     throw new Error('Humain transcription returned no artifact');
@@ -226,7 +234,7 @@ export async function runHumainTranscription(
     ...(route.maxCostMicrousd === undefined ? [] : ['--max-cost-microusd', String(route.maxCostMicrousd)]),
     '--approve-upload', '--store', resolve(options.storeDir), '--run-id', options.runId,
   ], options, 32_000_000);
-  return parseTranscriptionResult(stdout, options.runId, route.model);
+  return parseTranscriptionResult(stdout, route.model);
 }
 
 export async function runHumainMeeting(
@@ -245,7 +253,7 @@ export async function runHumainMeeting(
     const stdout = await runHumainCommand([
       'meeting', action, requestPath, '--store', resolve(options.storeDir), '--run-id', options.runId,
     ], options, 4_000_000);
-    return parseResult(stdout, options.runId);
+    return parseResult(stdout);
   } finally {
     rmSync(tempDirectory, { recursive: true, force: true });
     stopTrackingTemp();
