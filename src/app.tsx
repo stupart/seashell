@@ -55,7 +55,7 @@ import {
   type MicrophoneCaptureHandle,
 } from './live-microphone.ts';
 import { CaptureSessionStore, listRecoverableCaptureSessions } from './capture-session.ts';
-import { finalizeCaptureTranscript } from './capture-finalizer.ts';
+import { finalizeCaptureTranscript, saveFinalizedCapture } from './capture-finalizer.ts';
 import { reconcileLiveEcho } from './live-echo.ts';
 import {
   LiveAsrScheduler,
@@ -210,6 +210,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     listenerDisabled ? 'unavailable' : initiallyPaused ? 'stopped' : 'starting',
   );
   const [microphoneLevel, setMicrophoneLevel] = useState<PcmSignalLevel | null>(null);
+  const [microphoneIssue, setMicrophoneIssue] = useState<string | null>(null);
   const [systemAudioLevel, setSystemAudioLevel] = useState<PcmSignalLevel | null>(null);
   const [captureChunkCount, setCaptureChunkCount] = useState(0);
   const [transcribingCount, setTranscribingCount] = useState(0);
@@ -219,6 +220,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [notice, setNotice] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [processing, setProcessing] = useState<ProcessingState | null>(null);
+  const [exitRequested, setExitRequested] = useState(false);
   const [libraryEntries, setLibraryEntries] = useState<TranscriptLibraryEntry[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMode, setSearchMode] = useState(false);
@@ -312,8 +314,8 @@ export default function App(props: { libraryDir?: string } = {}) {
   const navigationItems: NavigationItem[] = useMemo(() => [
     {
       kind: 'live',
-      label: paused && automaticMeetingEnabled
-        ? '○ Watching for meetings'
+      label: paused
+        ? 'Live transcription'
         : `● Live transcription · ${liveCaptureLabel}`,
     },
     ...visibleEntries.map((entry) => ({
@@ -321,7 +323,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       label: entry.kind === 'meeting' ? `M · ${entry.title}` : entry.title,
       entry,
     })),
-  ], [automaticMeetingEnabled, liveCaptureLabel, paused, visibleEntries]);
+  ], [liveCaptureLabel, paused, visibleEntries]);
 
   useEffect(() => {
     setSelectionIndex((current) => moveSelection(current, 0, navigationItems.length));
@@ -525,6 +527,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     systemAudioCapture.current?.stop();
     const generation = liveSessionGeneration.current;
     const capture = startSystemAudioCapture({
+      startAfter: microphoneCapture.current?.startup,
       sessionStartedAtUnixMs: liveSessionStartedAt.current,
       onChunk: (chunk) => {
         void persistLiveChunk({ ...chunk, generation }).then((committed) => {
@@ -591,9 +594,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       onState: (update) => {
         if (sessionGeneration !== liveSessionGeneration.current) return;
         setMicrophoneState(update.state);
-        if (update.state === 'unavailable' && update.message) {
-          setError(`Microphone unavailable: ${update.message}`);
-        }
+        setMicrophoneIssue(update.code && update.message ? update.message : null);
       },
     });
     microphoneCapture.current = capture;
@@ -632,6 +633,9 @@ export default function App(props: { libraryDir?: string } = {}) {
       systemAudioCapture.current?.stop();
       systemAudioCapture.current = null;
       setMicrophoneState('stopped');
+      setMicrophoneIssue(null);
+      setMicrophoneLevel(null);
+      setSystemAudioLevel(null);
       if (!systemAudioDisabled) setSystemAudioState('stopped');
       void Promise.all(captureHandles.map((handle) => handle.done)).then(async () => {
         await captureSessionStore.current?.drainCommits();
@@ -805,28 +809,37 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
   }, [commitMeetingState, config.meeting, currentRecord, libraryRoot, refreshLibrary]);
 
-  const completeCaptureSession = useCallback(async (reason: string) => {
+  const stopDraftTranscription = useCallback(async () => {
+    await Promise.all([localAsrScheduler.current?.stop(), cloudAsrScheduler.current?.stop()]);
+    await localAsrServer.current?.stop();
+    localAsrScheduler.current = null;
+    cloudAsrScheduler.current = null;
+    localAsrServer.current = null;
+    setTranscribingCount(0);
+  }, []);
+
+  const completeCaptureSession = useCallback(async (reason: string, alreadyFinalized = false) => {
     const store = captureSessionStore.current;
     if (!store) return;
     try {
       await store.drainCommits();
       const current = liveRecordRef.current;
-      const duration = Math.max(0, ...store.manifest.chunks.map((chunk) => chunk.endMs)) / 1_000;
-      const record: TranscriptRecord = {
-        ...current,
-        updatedAt: new Date().toISOString(),
-        source: {
-          ...current.source,
-          duration,
-          format: 'capture-session/0.1',
-        },
-      };
-      liveRecordRef.current = record;
-      setLiveRecord(record);
-      if (saveByDefault || liveMeetingRef.current || record.transcript.length > 0) {
-        const saved = saveTranscriptRecord(libraryRoot, record);
-        store.setStatus('completed', reason);
-        store.attachTo(saved.directory);
+      if (saveByDefault || liveMeetingRef.current || current.transcript.length > 0) {
+        const routing = config.transcription ?? DEFAULT_TRANSCRIPTION_ROUTING;
+        const canonicalRoute = selectCanonicalTranscriptionRoute(routing);
+        const cloud = routing.cloud;
+        const record = await saveFinalizedCapture(store, libraryRoot, reason, {
+          title: current.title,
+          onStatus: (label) => setProcessing({ label }),
+          ...(alreadyFinalized ? { finalizedRecord: current } : {}),
+          ...(canonicalRoute === 'cloud' && cloud?.uploadConsent ? {
+            remoteRoute: { model: cloud.model, uploadConsent: true as const,
+              ...(cloud.upstreamProvider === undefined ? {} : { upstreamProvider: cloud.upstreamProvider }),
+              ...(cloud.maxCostMicrousd === undefined ? {} : { maxCostMicrousd: cloud.maxCostMicrousd }) },
+          } : {}),
+        });
+        liveRecordRef.current = record;
+        setLiveRecord(record);
         refreshLibrary();
       } else {
         store.setStatus('interrupted', 'capture-retained-without-published-transcript');
@@ -836,11 +849,12 @@ export default function App(props: { libraryDir?: string } = {}) {
       setError(`Capture remains recoverable: ${
         captureError instanceof Error ? captureError.message : String(captureError)
       }`);
+      throw captureError;
     } finally {
       captureSessionStore.current = null;
       setCaptureChunkCount(0);
     }
-  }, [libraryRoot, refreshLibrary, saveByDefault]);
+  }, [config.transcription, libraryRoot, refreshLibrary, saveByDefault]);
 
   const runCurrentMeetingEnrichment = useCallback((finishLive = false) => {
     const targetRecord = finishLive ? liveRecordRef.current : currentRecord;
@@ -869,12 +883,7 @@ export default function App(props: { libraryDir?: string } = {}) {
           await Promise.all(captureHandles.map((handle) => handle.done));
           const store = captureSessionStore.current;
           await store?.drainCommits();
-          localAsrScheduler.current?.cancelGeneration(liveSessionGeneration.current);
-          cloudAsrScheduler.current?.cancelGeneration(liveSessionGeneration.current);
-          await Promise.all([
-            localAsrScheduler.current?.drain(),
-            cloudAsrScheduler.current?.drain(),
-          ]);
+          await stopDraftTranscription();
           if (store?.manifest.chunks.length) {
             const routing = config.transcription ?? DEFAULT_TRANSCRIPTION_ROUTING;
             const canonicalRoute = selectCanonicalTranscriptionRoute(routing);
@@ -911,7 +920,7 @@ export default function App(props: { libraryDir?: string } = {}) {
             liveRecordRef.current = labeled;
             setLiveRecord(labeled);
           }
-          await completeCaptureSession('meeting-finished');
+          await completeCaptureSession('meeting-finished', true);
         }
         const record = finishLive ? liveRecordRef.current : targetRecord;
         saveTranscriptRecord(libraryRoot, record);
@@ -968,6 +977,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     config.meeting,
     configuredMeetingRoutes,
     completeCaptureSession,
+    stopDraftTranscription,
     currentMeeting,
     currentRecord,
     libraryRoot,
@@ -1174,7 +1184,7 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   const resetLiveSession = useCallback(async () => {
     const resumeCapture = !pausedRef.current;
-    const generation = liveSessionGeneration.current;
+    setProcessing({ label: 'Finishing previous transcript…' });
     const captureHandles = [microphoneCapture.current, systemAudioCapture.current]
       .filter((handle): handle is MicrophoneCaptureHandle | SystemAudioCaptureHandle => Boolean(handle));
     microphoneCapture.current?.stop();
@@ -1183,12 +1193,8 @@ export default function App(props: { libraryDir?: string } = {}) {
     systemAudioCapture.current = null;
     try {
       await Promise.all(captureHandles.map((handle) => handle.done));
-      localAsrScheduler.current?.cancelGeneration(generation);
-      cloudAsrScheduler.current?.cancelGeneration(generation);
-      await Promise.all([
-        localAsrScheduler.current?.drain(),
-        cloudAsrScheduler.current?.drain(),
-      ]);
+      await captureSessionStore.current?.drainCommits();
+      await stopDraftTranscription();
       await completeCaptureSession('new-live-session');
       liveSessionGeneration.current += 1;
       const next = createLiveRecord();
@@ -1208,8 +1214,10 @@ export default function App(props: { libraryDir?: string } = {}) {
       }
     } catch (resetError) {
       setError(resetError instanceof Error ? resetError.message : String(resetError));
+    } finally {
+      setProcessing(null);
     }
-  }, [completeCaptureSession, startListener, startSystemListener]);
+  }, [completeCaptureSession, startListener, startSystemListener, stopDraftTranscription]);
 
   const beginAutomaticMeeting = useCallback(async (candidate: MeetingCandidate) => {
     const needsFreshSession = pausedRef.current && (
@@ -1326,6 +1334,11 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   const gracefulExit = useCallback(() => {
     if (exitInProgress.current) return;
+    if (processing) {
+      setExitRequested(true);
+      setNotice('Finishing the current operation before quitting…');
+      return;
+    }
     exitInProgress.current = true;
     pausedRef.current = true;
     setPaused(true);
@@ -1340,11 +1353,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       try {
         await Promise.all(captureHandles.map((handle) => handle.done));
         await captureSessionStore.current?.drainCommits();
-        await Promise.all([
-          localAsrScheduler.current?.stop(),
-          cloudAsrScheduler.current?.stop(),
-        ]);
-        await localAsrServer.current?.stop();
+        await stopDraftTranscription();
         await completeCaptureSession('application-exit');
       } catch {
         try { captureSessionStore.current?.setStatus('interrupted', 'graceful-exit-failed'); } catch {}
@@ -1353,7 +1362,11 @@ export default function App(props: { libraryDir?: string } = {}) {
         exit();
       }
     })();
-  }, [completeCaptureSession, exit]);
+  }, [completeCaptureSession, exit, processing, stopDraftTranscription]);
+
+  useEffect(() => {
+    if (exitRequested && !processing) gracefulExit();
+  }, [exitRequested, gracefulExit, processing]);
 
   useInput((input, key) => {
     if (chatInputState) {
@@ -1494,6 +1507,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       gracefulExit();
       return;
     }
+    if (processing) return;
     if (key.tab || input === '\t' || input === 'h') {
       toggleHistory();
       return;
@@ -1705,18 +1719,18 @@ export default function App(props: { libraryDir?: string } = {}) {
     : currentMeeting
       ? view === 'live'
         ? `[SPACE] ${paused ? 'Record' : 'Pause'}  [A] Ask  [G] Finish  [H] History  [?] Help  [Q] Quit`
-        : '[A] Ask  [G] Enrich  [H] History  [T/S] Display  [?] Help  [Q] Quit'
+        : '[A] Ask  [G] Enrich  [H] History  [?] Help  [Q] Quit'
     : view === 'live'
       ? terminal.columns < 56
         ? `[SPC] ${paused ? 'Record' : 'Pause'}  [H] History  [Q] Quit`
         : terminal.columns < 80
           ? `[SPC] ${paused ? 'Record now' : 'Pause'}  [F] File  [H] History  [?] Help  [Q] Quit`
-          : `[SPACE] ${paused ? 'Record now' : 'Pause'}  [F] File  [H] History  [T/S] Display  [?] Help  [Q] Quit`
+          : `[SPACE] ${paused ? 'Record now' : 'Pause'}  [F] File  [H] History  [?] Help  [Q] Quit`
       : terminal.columns < 56
         ? '[L] Live  [H] History  [Q] Quit'
         : terminal.columns < 72
-          ? '[L] Live  [H] History  [T/S] View  [?] Help  [Q] Quit'
-          : '[L] Live  [H] History  [T/S] Display  [?] Help  [Q] Quit';
+          ? '[L] Live  [H] History  [?] Help  [Q] Quit'
+          : '[L] Live  [H] History  [?] Help  [Q] Quit';
   const plainTranscript = currentRecord && meetingView === 'transcript' && !showTimestamps && !showSpeakers
     ? renderText({ ...currentRecord, transcript: visibleSegments })
     : '';
@@ -1778,7 +1792,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       borderColor={transcriptBorderColor}
       paddingX={2}
       paddingY={1}
-      minHeight={8}
+      minHeight={4}
       marginLeft={historyOpen ? 1 : 0}
       overflow="hidden"
       aria-label="Transcript reader"
@@ -1798,11 +1812,13 @@ export default function App(props: { libraryDir?: string } = {}) {
           ))}
         </Box>
       ) : visibleSegments.length === 0 ? (
-        <Text dimColor>{view === 'live'
-          ? paused && automaticMeetingEnabled
-            ? 'Waiting for meeting audio · Space records now'
-            : `Play or speak to transcribe locally · ${liveCaptureLabel}`
-          : 'No transcript text'}</Text>
+        view === 'live' && paused ? null : (
+          <Text dimColor>{view === 'live'
+            ? transcribingCount > 0
+              ? 'Preparing transcript…'
+              : 'Speak to transcribe · audio is collected in 10-second chunks'
+            : 'No transcript text'}</Text>
+        )
       ) : plainTranscript ? (
         <Text wrap="wrap">{plainTranscript}</Text>
       ) : (
@@ -1848,60 +1864,73 @@ export default function App(props: { libraryDir?: string } = {}) {
 
       {(error || copied || notice) && (
         <Box marginBottom={1} flexShrink={0}>
-          <Text color={error ? 'red' : 'green'} wrap="truncate-end">
+          <Text color={error ? 'red' : 'green'}>
             {error ?? (copied ? 'Copied!' : notice)}
           </Text>
         </Box>
       )}
 
-      <Box marginBottom={1} flexShrink={0}>
-        {processing ? (
-          <Text color="magenta">
-            ◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}
-          </Text>
-        ) : view === 'record' ? (
-          <Text color="cyan" wrap="truncate-end">
-            {currentMeeting ? 'Meeting · ' : ''}{truncate(title, Math.max(12, terminal.columns - 6))}
-          </Text>
-        ) : paused ? (
-          <Text dimColor>{automaticMeetingEnabled
-            ? watchOwnership === 'external'
-              ? '○ Background meeting watch active'
-              : watchOwnership === 'checking'
-                ? '○ Starting meeting watch…'
-                : `○ Watching for meetings${automationPhase === 'confirming' ? ' · checking signal' : ''}`
-            : '⏸ Paused'}</Text>
-        ) : (
-          <Text>
-            <Text color={listenerState === 'recording' ? 'red' : 'green'}>
-              {systemAudioState === 'active'
-                ? '◉ Capturing · mic + system'
-                : systemAudioState === 'starting'
-                  ? '◌ Listening · system audio starting'
-                  : listenerState === 'recording'
-                    ? '● Recording · mic only'
-                    : '◉ Listening · mic only'}
+      {view === 'live' && !paused && microphoneIssue && (
+        <Box marginBottom={1} flexShrink={0}>
+          <Text color="yellow">{microphoneIssue}</Text>
+        </Box>
+      )}
+
+      {(processing || view === 'record' || !paused || !automaticMeetingEnabled ||
+        watchOwnership === 'external' || watchOwnership === 'checking' ||
+        automationPhase === 'confirming') && (
+        <Box marginBottom={1} flexShrink={0}>
+          {processing ? (
+            <Text color="magenta">
+              ◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}
             </Text>
-            {transcribingCount > 0 && (
-              <Text color="yellow">
-                {' + '}◐ Draft {draftTranscriptionRoute}{transcribingCount > 1 ? ` (${transcribingCount})` : ''}
+          ) : view === 'record' ? (
+            <Text color="cyan" wrap="truncate-end">
+              {currentMeeting ? 'Meeting · ' : ''}{truncate(title, Math.max(12, terminal.columns - 6))}
+            </Text>
+          ) : paused ? (
+            <Text dimColor>{automaticMeetingEnabled
+              ? watchOwnership === 'external'
+                ? '○ Background meeting watch active'
+                : watchOwnership === 'checking'
+                  ? '○ Starting meeting watch…'
+                  : 'Checking meeting signal…'
+              : '⏸ Paused'}</Text>
+          ) : (
+            <Text>
+              <Text color={microphoneState !== 'active' && systemAudioState !== 'active'
+                ? 'yellow' : listenerState === 'recording' ? 'red' : 'green'}>
+                {systemAudioState === 'active'
+                  ? microphoneState === 'active' ? '◉ Capturing · mic + system' : '◉ Capturing · system only'
+                  : microphoneState === 'active'
+                    ? systemAudioState === 'starting' ? '◉ Capturing mic · opening system audio…' : '◉ Capturing · mic only'
+                    : microphoneState === 'starting' || systemAudioState === 'starting'
+                      ? '◌ Opening audio inputs…'
+                      : 'Audio unavailable · press Space twice to retry'}
               </Text>
-            )}
-          </Text>
-        )}
-      </Box>
+              {transcribingCount > 0 && (
+                <Text color="yellow">
+                  {' + '}◐ Draft {draftTranscriptionRoute}{transcribingCount > 1 ? ` (${transcribingCount})` : ''}
+                </Text>
+              )}
+            </Text>
+          )}
+        </Box>
+      )}
 
       {view === 'live' && !paused && (
         <Box marginBottom={1} flexShrink={0}>
-          <Text dimColor>Mic </Text>
-          <Text color={microphoneState === 'active' ? 'green' : 'yellow'}>
-            {levelMeter(microphoneLevel)}
+          <Text>
+            <Text dimColor>Mic </Text>
+            <Text color={microphoneState === 'active' ? 'green' : 'yellow'}>
+              {microphoneState === 'starting' ? 'opening…' : microphoneState === 'unavailable' ? 'unavailable' : levelMeter(microphoneLevel)}
+            </Text>
+            <Text dimColor>  System </Text>
+            <Text color={systemAudioState === 'active' ? 'cyan' : 'yellow'}>
+              {systemAudioState === 'starting' ? 'opening…' : systemAudioState === 'unavailable' ? 'unavailable' : levelMeter(systemAudioLevel)}
+            </Text>
+            <Text dimColor>{`  ${captureChunkCount} safe chunks`}</Text>
           </Text>
-          <Text dimColor>  System </Text>
-          <Text color={systemAudioState === 'active' ? 'cyan' : 'yellow'}>
-            {levelMeter(systemAudioLevel)}
-          </Text>
-          <Text dimColor>{`  ${captureChunkCount} safe chunks`}</Text>
         </Box>
       )}
 
@@ -1955,7 +1984,9 @@ export default function App(props: { libraryDir?: string } = {}) {
                 ? `${currentMeeting.attendees.length} attendees`
                 : currentMeeting && meetingView === 'chat'
                   ? `${Math.floor(currentMeeting.chat.length / 2)} exchanges`
-                  : `${renderText(currentRecord).length} chars`}
+                  : terminal.columns < 56
+                    ? '[T] Time  [S] Speakers'
+                    : `[T] Timestamps  [S] Speakers  ·  ${renderText(currentRecord).length} chars`}
           </Text>
         ) : null}
       </Box>

@@ -6,9 +6,11 @@ import {
   assembleCaptureTrack,
   finalizeCaptureTranscript,
   reconcileCaptureEcho,
+  saveFinalizedCapture,
 } from '../src/capture-finalizer.ts';
 import { CaptureSessionStore } from '../src/capture-session.ts';
 import { pcmS16leToWav } from '../src/live-system-audio.ts';
+import { findTranscriptRecord, listTranscriptRecords } from '../src/transcript-library.ts';
 
 function wav(directory: string, name: string, sample: number): string {
   const path = join(directory, name);
@@ -16,6 +18,42 @@ function wav(directory: string, name: string, sample: number): string {
   for (let offset = 0; offset < pcm.length; offset += 2) pcm.writeInt16LE(sample, offset);
   writeFileSync(path, pcmS16leToWav(pcm));
   return path;
+}
+
+for (const fails of [false, true]) {
+  test(`publishing stopped capture ${fails ? 'retains recoverable audio if final ASR fails' : 'includes the final chunk even without a draft result'}`, async () => {
+    const root = mkdtempSync(join(tmpdir(), 'seashell-publish-final-'));
+    try {
+      const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'stopped-live', startedAtUnixMs: 1 });
+      store.commitChunk({ sourcePath: wav(root, 'first.wav', 1000), trackId: 'microphone',
+        startSeconds: 0, endSeconds: 0.1, audible: true });
+      store.commitChunk({ sourcePath: wav(root, 'tail.wav', 2000), trackId: 'microphone',
+        startSeconds: 0.1, endSeconds: 0.2, audible: true });
+      const publishing = saveFinalizedCapture(store, root, 'application-exit', {
+        remoteRoute: { model: 'fixture', uploadConsent: true },
+        remoteTranscriber: async (path) => {
+          const last = readFileSync(path).readInt16LE(44) === 2000;
+          if (fails && last) throw new Error('final chunk failed');
+          return { runId: 'fixture', compiledRunId: 'fixture', status: 'succeeded', receipt: {},
+            output: { provider: { boundary: 'remote', model: 'fixture' },
+              segments: [{ id: 's000001', startMs: 0, endMs: 100, text: last ? 'Closing words.' : 'Opening words.' }] } };
+        },
+      });
+      if (fails) {
+        await expect(publishing).rejects.toThrow('final chunk failed');
+        expect(store.manifest.status).toBe('interrupted');
+        expect(existsSync(store.manifestPath)).toBe(true);
+        expect(listTranscriptRecords(root)).toHaveLength(0);
+      } else {
+        await publishing;
+        const saved = findTranscriptRecord(root, 'stopped-live');
+        expect(saved.record.transcript.map((s) => s.text).join(' ')).toContain('Closing words.');
+        expect(saved.record.transcript.at(-1)?.end).toBe(0.2);
+        expect(existsSync(store.manifestPath)).toBe(false);
+        expect(store.manifest.status).toBe('completed');
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 }
 
 for (const boundary of ['local', 'remote'] as const) {

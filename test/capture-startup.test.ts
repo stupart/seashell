@@ -1,0 +1,60 @@
+import { expect, test } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { startMicrophoneCapture } from '../src/live-microphone.ts';
+import { startSystemAudioCapture } from '../src/live-system-audio.ts';
+
+test('system capture waits for microphone PCM and both children stop without lost chunks', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-ordered-start-'));
+  const marker = join(root, 'microphone-opened');
+  const helper = join(root, 'system');
+  writeFileSync(helper, `#!${process.execPath}
+import {existsSync} from 'fs';
+if (!existsSync(${JSON.stringify(marker)})) process.exit(42);
+process.stderr.write(JSON.stringify({type:'first-buffer',capturedAtUnixMs:Date.now()})+'\\n');
+process.stdout.write(Buffer.alloc(32000,1));
+setInterval(()=>{},1000);
+`, { mode: 0o755 });
+  const chunks: string[] = [];
+  const options = { sessionStartedAtUnixMs: Date.now(), chunkMilliseconds: 1000,
+    onState() {}, onChunk: (chunk: { path: string; source: string }) => {
+      chunks.push(chunk.source); rmSync(chunk.path);
+    } };
+  const mic = startMicrophoneCapture({ ...options, command: process.execPath,
+    commandArgs: ['-e', `setTimeout(()=>{require('fs').writeFileSync(${JSON.stringify(marker)},'');process.stdout.write(Buffer.alloc(32000,1))},150);setInterval(()=>{},1000)`] });
+  const system = startSystemAudioCapture({ ...options, helperPath: helper, startAfter: mic.startup });
+  try {
+    expect(system.process).toBeUndefined();
+    const deadline = Date.now() + 2000;
+    while (chunks.length < 2 && Date.now() < deadline) await Bun.sleep(10);
+    expect(chunks.toSorted()).toEqual(['microphone', 'system-audio']);
+    mic.stop(); system.stop();
+    await Promise.all([mic.done, system.done]);
+    expect(mic.process.signalCode).not.toBeNull();
+    expect(system.process?.signalCode).not.toBeNull();
+  } finally { mic.stop(); system.stop(); await Promise.all([mic.done, system.done]); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('stopping while waiting for microphone startup prevents a late system capture', async () => {
+  let ready = () => {};
+  const startAfter = new Promise<void>((resolve) => { ready = resolve; });
+  const states: string[] = [];
+  const system = startSystemAudioCapture({ sessionStartedAtUnixMs: Date.now(), startAfter,
+    onState: (update) => states.push(update.state), onChunk() {} });
+  system.stop();
+  await system.done;
+  ready();
+  await Bun.sleep(20);
+  expect(system.process).toBeUndefined();
+  expect(states).toEqual(['starting', 'stopped']);
+});
+
+test('a stuck microphone does not block the optional source forever', async () => {
+  const states: string[] = [];
+  const system = startSystemAudioCapture({ sessionStartedAtUnixMs: Date.now(),
+    startAfter: new Promise(() => {}), startupWaitMs: 20, helperPath: '/nonexistent/seashell-helper',
+    onState: (update) => states.push(update.state), onChunk() {} });
+  await system.done;
+  expect(states).toEqual(['starting', 'unavailable']);
+});
