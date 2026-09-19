@@ -68,9 +68,10 @@ function configuredHumainExecutable(env: NodeJS.ProcessEnv): HumainExecutable | 
 export function resolveHumainExecutable(
   env: NodeJS.ProcessEnv = process.env,
 ): HumainExecutable {
+  env = { ...process.env, ...env };
   const configured = configuredHumainExecutable(env);
   if (configured) return configured;
-  const installed = Bun.which('humain');
+  const installed = Bun.which('humain', { PATH: env.PATH ?? '' });
   if (installed) return { command: installed, prefix: [] };
   const developmentCli = join(homedir(), 'Developer', 'humain-engine', 'dist', 'cli.js');
   if (existsSync(developmentCli)) {
@@ -85,7 +86,7 @@ export function resolveHumainExecutable(
   );
 }
 
-function parseResult(stdout: string): HumainMeetingResult {
+function parseResult(stdout: string, runId: string): HumainMeetingResult {
   let value: unknown;
   try {
     value = JSON.parse(stdout);
@@ -98,8 +99,8 @@ function parseResult(stdout: string): HumainMeetingResult {
   const result = value as Record<string, unknown>;
   if (
     result.status !== 'succeeded' ||
-    typeof result.runId !== 'string' ||
-    typeof result.compiledRunId !== 'string'
+    result.runId !== runId ||
+    typeof result.compiledRunId !== 'string' || !result.compiledRunId.trim()
   ) {
     throw new Error(`Humain meeting run did not succeed${
       typeof result.status === 'string' ? ` (${result.status})` : ''
@@ -108,8 +109,8 @@ function parseResult(stdout: string): HumainMeetingResult {
   return result as unknown as HumainMeetingResult;
 }
 
-function parseTranscriptionResult(stdout: string): HumainTranscriptionResult {
-  const result = parseResult(stdout);
+function parseTranscriptionResult(stdout: string, runId: string, model: string): HumainTranscriptionResult {
+  const result = parseResult(stdout, runId);
   const output = result.output;
   if (!output || typeof output !== 'object' || Array.isArray(output)) {
     throw new Error('Humain transcription returned no artifact');
@@ -120,65 +121,59 @@ function parseTranscriptionResult(stdout: string): HumainTranscriptionResult {
       (artifact.provider as Record<string, unknown>).boundary !== 'remote') {
     throw new Error('Humain transcription artifact is incompatible');
   }
+  if ((artifact.provider as Record<string, unknown>).model !== model) {
+    throw new Error('Humain transcription returned a different model');
+  }
+  const ids = new Set<string>();
   for (const [index, raw] of artifact.segments.entries()) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
       throw new Error(`Humain transcription segment ${index} is invalid`);
     }
     const segment = raw as Record<string, unknown>;
-    if (typeof segment.text !== 'string' || !segment.text.trim() ||
+    if (typeof segment.id !== 'string' || !segment.id.trim() || ids.has(segment.id) ||
+        typeof segment.text !== 'string' || !segment.text.trim() ||
         !Number.isSafeInteger(segment.startMs) || !Number.isSafeInteger(segment.endMs) ||
         Number(segment.startMs) < 0 || Number(segment.endMs) < Number(segment.startMs)) {
       throw new Error(`Humain transcription segment ${index} is invalid`);
     }
+    ids.add(segment.id as string);
   }
   return result as HumainTranscriptionResult;
 }
 
-export async function runHumainTranscription(
-  audioFile: string,
-  route: HumainTranscriptionRoute,
-  options: {
-    readonly storeDir: string;
-    readonly runId: string;
-    readonly env?: NodeJS.ProcessEnv;
-    readonly signal?: AbortSignal;
-  },
-): Promise<HumainTranscriptionResult> {
+export interface HumainRunOptions {
+  readonly storeDir: string;
+  readonly runId: string;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly signal?: AbortSignal;
+  readonly timeoutMs?: number;
+  readonly onStatus?: (message: string) => void;
+}
+
+/** Bound every CLI call, including a stuck provider or a child ignoring SIGTERM. */
+async function runHumainCommand(
+  args: string[], options: HumainRunOptions, maxOutputBytes: number,
+): Promise<string> {
+  if (options.signal?.aborted) throw new Error('Humain run was cancelled before start');
+  const timeoutMs = options.timeoutMs ?? 10 * 60_000;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error('Invalid Humain timeout');
   const executable = resolveHumainExecutable(options.env);
-  if (options.signal?.aborted) throw new Error('Humain transcription was cancelled before start');
   const endManagedSession = beginManagedProcessSession();
   try {
     return await new Promise((resolvePromise, reject) => {
-      const child = spawn(executable.command, [
-        ...executable.prefix,
-        'transcribe',
-        resolve(audioFile),
-        '--provider',
-        'openrouter',
-        '--model',
-        route.model,
-        ...(route.upstreamProvider === undefined
-          ? []
-          : ['--upstream-provider', route.upstreamProvider]),
-        ...(route.maxCostMicrousd === undefined
-          ? []
-          : ['--max-cost-microusd', String(route.maxCostMicrousd)]),
-        '--approve-upload',
-        '--store',
-        options.storeDir,
-        '--run-id',
-        options.runId,
-      ], {
+      const child = spawn(executable.command, [...executable.prefix, ...args], {
         ...(executable.cwd === undefined ? {} : { cwd: executable.cwd }),
         env: { ...process.env, ...options.env },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
-      const stopTrackingChild = trackChildProcess(child);
+      const untrack = trackChildProcess(child);
       let stdout = '';
       let stderr = '';
-      let settled = false;
+      let outputBytes = 0;
+      let failure: Error | undefined;
       let escalation: ReturnType<typeof setTimeout> | undefined;
-      const stop = () => {
+      const stop = (error: Error) => {
+        failure ??= error;
         if (child.exitCode !== null || child.signalCode !== null) return;
         child.kill('SIGTERM');
         escalation ??= setTimeout(() => {
@@ -186,32 +181,31 @@ export async function runHumainTranscription(
         }, 2_000);
         escalation.unref();
       };
-      const onAbort = () => stop();
+      const timeout = setTimeout(() => stop(new Error('Humain run timed out')), timeoutMs);
+      timeout.unref();
+      const onAbort = () => stop(new Error('Humain run was cancelled'));
       options.signal?.addEventListener('abort', onAbort, { once: true });
-      child.stdout?.on('data', (data: Buffer) => { stdout = (stdout + data.toString()).slice(-32_000_000); });
-      child.stderr?.on('data', (data: Buffer) => { stderr = (stderr + data.toString()).slice(-32_000); });
-      child.once('error', (error) => {
-        if (settled) return;
-        settled = true;
-        stopTrackingChild();
-        options.signal?.removeEventListener('abort', onAbort);
-        reject(new Error(`Could not start Humain transcription: ${error.message}`));
+      if (options.signal?.aborted) onAbort();
+      child.stdout?.setEncoding('utf8');
+      child.stderr?.setEncoding('utf8');
+      child.stdout?.on('data', (data: string) => {
+        outputBytes += Buffer.byteLength(data);
+        if (outputBytes > maxOutputBytes) stop(new Error('Humain output exceeded its size limit'));
+        else stdout += data;
       });
+      child.stderr?.on('data', (data: string) => { stderr = (stderr + data).slice(-32_000); });
+      child.once('error', (error) => { failure ??= new Error(`Could not start Humain: ${error.message}`); });
+      // close follows error for failed spawns and drains both output streams.
       child.once('close', (code, signal) => {
-        if (settled) return;
-        settled = true;
+        clearTimeout(timeout);
         if (escalation) clearTimeout(escalation);
-        stopTrackingChild();
+        untrack();
         options.signal?.removeEventListener('abort', onAbort);
-        if (options.signal?.aborted) {
-          reject(new Error('Humain transcription was cancelled'));
-        } else if (code !== 0) {
-          reject(new Error(`Humain transcription failed: ${
-            stderr.trim() || stdout.trim() || (signal ? `signal ${signal}` : `exit ${code}`)
-          }`));
-        } else {
-          try { resolvePromise(parseTranscriptionResult(stdout)); } catch (error) { reject(error); }
-        }
+        if (failure) reject(failure);
+        else if (code !== 0) reject(new Error(`Humain failed: ${
+          stderr.trim() || (signal ? `signal ${signal}` : `exit ${code}`)
+        }`));
+        else resolvePromise(stdout);
       });
     });
   } finally {
@@ -219,80 +213,42 @@ export async function runHumainTranscription(
   }
 }
 
+export async function runHumainTranscription(
+  audioFile: string,
+  route: HumainTranscriptionRoute,
+  options: HumainRunOptions,
+): Promise<HumainTranscriptionResult> {
+  if (route.uploadConsent !== true) throw new Error('Cloud transcription requires explicit uploadConsent');
+  if (typeof route.model !== 'string' || !route.model.trim()) throw new Error('Cloud transcription requires an exact model');
+  const stdout = await runHumainCommand([
+    'transcribe', resolve(audioFile), '--provider', 'openrouter', '--model', route.model,
+    ...(route.upstreamProvider === undefined ? [] : ['--upstream-provider', route.upstreamProvider]),
+    ...(route.maxCostMicrousd === undefined ? [] : ['--max-cost-microusd', String(route.maxCostMicrousd)]),
+    '--approve-upload', '--store', resolve(options.storeDir), '--run-id', options.runId,
+  ], options, 32_000_000);
+  return parseTranscriptionResult(stdout, options.runId, route.model);
+}
+
 export async function runHumainMeeting(
   action: HumainMeetingAction,
   request: unknown,
-  options: {
-    storeDir: string;
-    runId: string;
-    env?: NodeJS.ProcessEnv;
-    onStatus?: (message: string) => void;
-  },
+  options: HumainRunOptions,
 ): Promise<HumainMeetingResult> {
-  const executable = resolveHumainExecutable(options.env);
-  const endManagedSession = beginManagedProcessSession();
   const tempDirectory = mkdtempSync(join(tmpdir(), 'seashell-humain-'));
   const stopTrackingTemp = trackTempDirectory(tempDirectory);
-  const requestPath = join(tempDirectory, 'request.json');
-  writeFileSync(requestPath, `${JSON.stringify(request, null, 2)}\n`, {
-    encoding: 'utf8',
-    mode: 0o600,
-    flag: 'wx',
-  });
-  options.onStatus?.(`Humain ${action}…`);
-
   try {
-    return await new Promise((resolvePromise, reject) => {
-      const child = spawn(executable.command, [
-        ...executable.prefix,
-        'meeting',
-        action,
-        requestPath,
-        '--store',
-        options.storeDir,
-        '--run-id',
-        options.runId,
-      ], {
-        ...(executable.cwd === undefined ? {} : { cwd: executable.cwd }),
-        env: { ...process.env, ...options.env },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      const stopTrackingChild = trackChildProcess(child);
-      let stdout = '';
-      let stderr = '';
-      let settled = false;
-      child.stdout?.on('data', (data) => {
-        stdout = (stdout + data.toString()).slice(-4_000_000);
-      });
-      child.stderr?.on('data', (data) => {
-        stderr = (stderr + data.toString()).slice(-32_000);
-      });
-      child.on('error', (error) => {
-        stopTrackingChild();
-        if (settled) return;
-        settled = true;
-        reject(new Error(`Could not start Humain: ${error.message}`));
-      });
-      child.on('close', (code, signal) => {
-        stopTrackingChild();
-        if (settled) return;
-        settled = true;
-        if (code !== 0) {
-          const detail = stderr.trim() || stdout.trim() || (signal ? `signal ${signal}` : `exit ${code}`);
-          reject(new Error(`Humain ${action} failed: ${detail}`));
-          return;
-        }
-        try {
-          resolvePromise(parseResult(stdout));
-        } catch (error) {
-          reject(error);
-        }
-      });
+    const requestPath = join(tempDirectory, 'request.json');
+    writeFileSync(requestPath, `${JSON.stringify(request, null, 2)}\n`, {
+      encoding: 'utf8', mode: 0o600, flag: 'wx',
     });
+    options.onStatus?.(`Humain ${action}…`);
+    const stdout = await runHumainCommand([
+      'meeting', action, requestPath, '--store', resolve(options.storeDir), '--run-id', options.runId,
+    ], options, 4_000_000);
+    return parseResult(stdout, options.runId);
   } finally {
     rmSync(tempDirectory, { recursive: true, force: true });
     stopTrackingTemp();
-    endManagedSession();
   }
 }
 
