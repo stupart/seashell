@@ -1255,6 +1255,19 @@ export default function App(props: { libraryDir?: string } = {}) {
   useEffect(() => {
     if (!automaticMeetingEnabled || listenerDisabled || watchOwnership !== 'owned') return;
     let cancelled = false;
+    const detectorFailed = (signalError: unknown) => {
+      if (cancelled || isExiting.current) return;
+      const action = meetingAutomationController.current.step(undefined, Date.now());
+      setAutomationPhase(meetingAutomationController.current.state.phase);
+      const message = signalError instanceof Error ? signalError.message : String(signalError);
+      if (action.kind === 'finish') {
+        setAutomaticFinishRequested(true);
+        setNotice(`Meeting signals unavailable · finishing ${action.candidate.title}.`);
+      } else if (meetingSignalFailure.current !== message) {
+        setNotice(`${message} Manual recording is still available.`);
+      }
+      meetingSignalFailure.current = message;
+    };
     const poll = (snapshot: MeetingSignalSnapshot) => {
       if (cancelled || isExiting.current) return;
       try {
@@ -1271,6 +1284,8 @@ export default function App(props: { libraryDir?: string } = {}) {
           setNotice(`Possible ${action.candidate.appName} meeting · press M to record or X to ignore.`);
         } else if (action.kind === 'start') {
           void beginAutomaticMeeting(action.candidate).catch((automationError: unknown) => {
+            meetingAutomationController.current.reset();
+            setAutomationPhase(meetingAutomationController.current.state.phase);
             setError(automationError instanceof Error ? automationError.message : String(automationError));
           });
         } else if (action.kind === 'finish') {
@@ -1278,11 +1293,7 @@ export default function App(props: { libraryDir?: string } = {}) {
           setNotice(`Meeting audio ended · finishing ${action.candidate.title}.`);
         }
       } catch (signalError) {
-        const message = signalError instanceof Error ? signalError.message : String(signalError);
-        if (meetingSignalFailure.current !== message) {
-          meetingSignalFailure.current = message;
-          setNotice(`${message} Manual recording is still available.`);
-        }
+        detectorFailed(signalError);
       }
     };
     const monitor = new MeetingSignalMonitor(
@@ -1290,11 +1301,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       (meetingAutomation.pollSeconds ?? DEFAULT_MEETING_AUTOMATION.pollSeconds) * 1_000,
     );
     const unsubscribe = monitor.subscribe(poll);
-    const unsubscribeError = monitor.onError((signalError) => {
-      if (cancelled || meetingSignalFailure.current === signalError.message) return;
-      meetingSignalFailure.current = signalError.message;
-      setNotice(`${signalError.message} Manual recording is still available.`);
-    });
+    const unsubscribeError = monitor.onError(detectorFailed);
     monitor.start();
     return () => {
       cancelled = true;

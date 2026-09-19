@@ -2,6 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import type { MeetingCalendarEvent } from './meeting-artifact.ts';
+import { terminateManagedChild } from './process-lifecycle.ts';
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -228,6 +229,8 @@ export class MeetingSignalMonitor {
   #errorListeners = new Set<ErrorListener>();
   #failure?: Error;
   #restartTimer?: ReturnType<typeof setTimeout>;
+  #heartbeatTimer?: ReturnType<typeof setInterval>;
+  #lastHeartbeat = 0;
   #stopped = true;
 
   constructor(helperPath = MEETING_SIGNALS_HELPER, intervalMs = 3_000) {
@@ -236,10 +239,13 @@ export class MeetingSignalMonitor {
   }
 
   start(): void {
-    if (this.#child) return;
+    if (this.#child || this.#restartTimer) return;
     this.#stopped = false;
     this.#failure = undefined;
     this.#latest = undefined;
+    this.#buffer = '';
+    this.#lastHeartbeat = performance.now();
+    this.#heartbeatTimer ??= setInterval(() => this.checkHeartbeat(), this.#intervalMs);
     const child = spawn(this.#helperPath, [
       '--watch',
       '--interval-ms',
@@ -248,8 +254,11 @@ export class MeetingSignalMonitor {
     this.#child = child;
     child.stdout!.setEncoding('utf8');
     child.stderr!.setEncoding('utf8');
-    child.stdout!.on('data', (chunk: string) => this.consume(chunk));
+    child.stdout!.on('data', (chunk: string) => {
+      if (this.#child === child) this.consume(chunk);
+    });
     child.stderr!.on('data', (chunk: string) => {
+      if (this.#child !== child) return;
       const message = chunk.trim();
       if (message) this.fail(new Error(`Meeting signal detector: ${message}`));
     });
@@ -268,6 +277,7 @@ export class MeetingSignalMonitor {
   }
 
   latest(): MeetingSignalSnapshot {
+    this.checkHeartbeat();
     if (this.#failure) throw this.#failure;
     if (this.#latest) return this.#latest;
     throw new Error('Meeting signal detector is still starting');
@@ -275,6 +285,7 @@ export class MeetingSignalMonitor {
 
   async waitForSnapshot(timeoutMs = 15_000): Promise<MeetingSignalSnapshot> {
     this.start();
+    this.checkHeartbeat();
     if (this.#failure) throw this.#failure;
     if (this.#latest) return this.#latest;
     return new Promise((resolve, reject) => {
@@ -309,9 +320,14 @@ export class MeetingSignalMonitor {
     this.#stopped = true;
     if (this.#restartTimer) clearTimeout(this.#restartTimer);
     this.#restartTimer = undefined;
+    if (this.#heartbeatTimer) clearInterval(this.#heartbeatTimer);
+    this.#heartbeatTimer = undefined;
     const child = this.#child;
     this.#child = undefined;
-    if (child && !child.killed) child.kill('SIGTERM');
+    this.#latest = undefined;
+    this.#buffer = '';
+    this.fail(new Error('Meeting signal detector stopped'));
+    if (child) void terminateManagedChild(child);
   }
 
   private consume(chunk: string): void {
@@ -322,6 +338,7 @@ export class MeetingSignalMonitor {
       if (!line.trim()) continue;
       try {
         const snapshot = parseMeetingSignalSnapshot(JSON.parse(line));
+        this.#lastHeartbeat = performance.now();
         this.#latest = snapshot;
         this.#failure = undefined;
         for (const listener of this.#listeners) listener(snapshot);
@@ -335,6 +352,19 @@ export class MeetingSignalMonitor {
   private fail(error: Error): void {
     this.#failure = error;
     for (const listener of this.#errorListeners) listener(error);
+  }
+
+  private checkHeartbeat(): void {
+    if (this.#stopped || !this.#child) return;
+    // Use receipt time: a native wall-clock adjustment must not extend a lease
+    // on stale evidence. Three missed intervals allow normal scheduling jitter.
+    if (performance.now() - this.#lastHeartbeat <= Math.max(1_000, this.#intervalMs * 3)) return;
+    const child = this.#child;
+    this.#child = undefined;
+    this.#latest = undefined;
+    this.fail(new Error('Meeting signal detector heartbeat timed out'));
+    void terminateManagedChild(child);
+    this.scheduleRestart();
   }
 
   private scheduleRestart(): void {

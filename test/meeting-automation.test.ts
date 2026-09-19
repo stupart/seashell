@@ -37,6 +37,64 @@ afterEach(() => {
 });
 
 describe('meeting signal parsing and candidate resolution', () => {
+  test('a silent helper cannot keep returning a cached active meeting', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'seashell-signal-stale-'));
+    temporaryRoots.push(root);
+    const helper = join(root, 'signal-helper');
+    writeFileSync(helper, `#!${process.execPath}
+console.log(JSON.stringify({schemaVersion:1,capturedAtUnixMs:Date.now(),supported:true,
+  inputProcesses:[{pid:42,bundleId:'us.zoom.xos',name:'Zoom'}]}));
+setInterval(() => {}, 1000);
+`, { mode: 0o700 });
+    const monitor = new MeetingSignalMonitor(helper, 250);
+    const errors: string[] = [];
+    monitor.onError((error) => errors.push(error.message));
+    try {
+      expect((await monitor.waitForSnapshot()).inputProcesses).toHaveLength(1);
+      await Bun.sleep(1_300);
+      expect(() => monitor.latest()).toThrow('heartbeat');
+      expect(errors.some((message) => message.includes('heartbeat'))).toBe(true);
+    } finally { monitor.stop(); }
+  });
+
+  test('restart discards a partial JSON line from the previous helper', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'seashell-signal-restart-'));
+    temporaryRoots.push(root);
+    const helper = join(root, 'signal-helper');
+    writeFileSync(helper, `#!${process.execPath}
+import {existsSync,writeFileSync} from 'fs';
+const marker = ${JSON.stringify(join(root, 'started'))};
+if (!existsSync(marker)) {
+  writeFileSync(marker, ''); process.stdout.write('{"schemaVersion":');
+} else {
+  console.log(JSON.stringify({schemaVersion:1,capturedAtUnixMs:2000,supported:true,inputProcesses:[]}));
+  setInterval(() => {}, 1000);
+}
+`, { mode: 0o700 });
+    const monitor = new MeetingSignalMonitor(helper, 250);
+    let timer: ReturnType<typeof setTimeout>;
+    const restarted = new Promise<number>((resolve, reject) => {
+      monitor.subscribe((snapshot) => resolve(snapshot.capturedAtUnixMs));
+      timer = setTimeout(() => reject(new Error('helper never recovered')), 3_000);
+    });
+    monitor.start();
+    try { expect(await restarted).toBe(2_000); }
+    finally { clearTimeout(timer!); monitor.stop(); }
+  });
+
+  test('stopping a starting detector promptly rejects pending readers', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'seashell-signal-stop-'));
+    temporaryRoots.push(root);
+    const helper = join(root, 'signal-helper');
+    writeFileSync(helper, `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`, { mode: 0o700 });
+    const monitor = new MeetingSignalMonitor(helper, 250);
+    const pending = monitor.waitForSnapshot(1_000).catch((error: Error) => error.message);
+    const startedAt = Date.now();
+    monitor.stop();
+    expect(await pending).toContain('stopped');
+    expect(Date.now() - startedAt).toBeLessThan(500);
+  });
+
   test('one persistent helper streams multiple snapshots without being respawned', async () => {
     const root = mkdtempSync(join(tmpdir(), 'seashell-signal-monitor-'));
     temporaryRoots.push(root);
