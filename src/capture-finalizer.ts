@@ -5,7 +5,6 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
-  readFileSync,
   renameSync,
   rmSync,
   writeSync,
@@ -15,6 +14,7 @@ import { dirname, join, resolve } from 'path';
 import {
   captureChunkPath,
   loadCaptureSession,
+  readVerifiedCaptureChunk,
   type CaptureSessionManifest,
   type CaptureTrackId,
 } from './capture-session.ts';
@@ -38,8 +38,7 @@ import {
 const SAMPLE_RATE = 16_000;
 const BYTES_PER_FRAME = 2;
 
-function wavPcm(path: string): Buffer {
-  const wav = readFileSync(path);
+function wavPcm(wav: Buffer, path: string): Buffer {
   if (wav.length < 44 || wav.subarray(0, 4).toString('ascii') !== 'RIFF' ||
       wav.subarray(8, 12).toString('ascii') !== 'WAVE') {
     throw new Error(`Capture chunk is not a WAV file: ${path}`);
@@ -93,7 +92,7 @@ export function assembleCaptureTrack(
         writeZeros(descriptor, (desiredStartFrame - writtenFrames) * BYTES_PER_FRAME);
         writtenFrames = desiredStartFrame;
       }
-      const pcm = wavPcm(captureChunkPath(manifestPath, chunk));
+      const pcm = wavPcm(readVerifiedCaptureChunk(manifestPath, chunk), captureChunkPath(manifestPath, chunk));
       const overlapFrames = Math.max(0, writtenFrames - desiredStartFrame);
       const offset = Math.min(pcm.length, overlapFrames * BYTES_PER_FRAME);
       if (offset < pcm.length) {
@@ -223,6 +222,12 @@ export async function finalizeCaptureTranscript(
     const audibleSystem = manifest.chunks.some((chunk) =>
       chunk.trackId === 'system-audio' && chunk.audible);
     if (!hasMicrophone && !hasSystem) throw new Error('Capture session has no audio chunks');
+
+    if (options.remoteRoute) {
+      // Check the entire bundle before the first potentially paid/uploading
+      // dispatch. A damaged later chunk must not produce a partial cloud run.
+      for (const chunk of manifest.chunks) readVerifiedCaptureChunk(absoluteManifest, chunk);
+    }
 
     let microphone: string | undefined;
     let system: string | undefined;

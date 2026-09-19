@@ -637,6 +637,15 @@ export function captureChunkPath(manifestPath: string, chunk: CaptureChunk): str
   return path;
 }
 
+/** Read exactly the bytes attested by the durable chunk journal. */
+export function readVerifiedCaptureChunk(manifestPath: string, chunk: CaptureChunk): Buffer {
+  const data = readFileSync(captureChunkPath(manifestPath, chunk));
+  if (data.length !== chunk.bytes || createHash('sha256').update(data).digest('hex') !== chunk.sha256) {
+    throw new Error(`Capture chunk integrity check failed: ${chunk.id}`);
+  }
+  return data;
+}
+
 export function captureManifestPath(libraryDir: string, sessionId: string): string {
   return join(sessionRoot(libraryDir, sessionId), 'manifest.json');
 }
