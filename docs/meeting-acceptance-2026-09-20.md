@@ -66,6 +66,16 @@ with 201,701 bytes of retained-heap growth and 38,338,560 bytes of RSS growth.
 Evidence: `.gym-results/2026-09-19T16-07-13.933Z-1733/report.md` and its adjacent
 logs/metrics. Working changes were tested before the runtime commit.
 
+A longer **500-meeting** run passed in 107.1 seconds, checking 1,000 child
+processes and 2,000 chunks. No capture children or signal listeners remained.
+Retained heap grew 269,853 bytes between cycles 10 and 500. RSS grew from
+55,803,904 to 105,431,040 bytes, largely levelling off after cycle 200
+(103,645,184 bytes). This is consistent with bounded use in the tested workload,
+not a universal leak guarantee. Metrics: `/tmp/seashell-meeting-gym.3mb8UK/meeting-soak-500/metrics.json`.
+
+[Source CI passed the runtime and gym](https://github.com/stupart/seashell/actions/runs/35454065420)
+on the source pinned by RC4.
+
 The storage exercise separately passed 90 minutes of accelerated capture time,
 1,079 chunks, torn-journal recovery, and 1,080 timeline samples including an
 intentional gap. Actual batch and warm Whisper inference, Humain contracts,
@@ -82,5 +92,21 @@ storage clock is accelerated. Neither is a 60–90 minute elapsed physical call,
 a speech-accuracy evaluation, or a cloud-provider test. Intel first-run ASR
 latency remains a separate distribution concern.
 
-Changes are a reviewable PR candidate; publishing the formula/main branch is
-separate from installing a local preview.
+## Installed preview
+
+Homebrew RC4 pins `bf132e692c22bfae4be60424d4be372c19116876`. The local RC3→RC4
+upgrade, packaged terminal launch, known-phrase transcription, formula test,
+linkage, strict audit, and style checks passed. The installed runtime matched
+the tested source. RC3 was retained because a user-owned terminal still ran it;
+quit that window and reopen `seashell` to use the updated version.
+
+The installed eight-second device check received eight microphone and six
+system chunks. The system contained synthetic speech; the microphone was quiet,
+so the check correctly returned `ready: false` with input-level guidance.
+Receiving buffers is not proof of intelligible microphone speech. The earlier
+source test above had audible signal on both tracks. Test audio was discarded.
+
+Changes are reviewable in [Seashell #13](https://github.com/stupart/seashell/pull/13)
+and [Homebrew tap #1](https://github.com/stupart/homebrew-tap/pull/1), still
+unmerged. Publishing the formula/main branch is separate from the installed
+local preview.
