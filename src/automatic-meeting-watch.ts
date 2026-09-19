@@ -22,6 +22,7 @@ import {
 } from './meeting-automation.ts';
 import {
   createMeetingArtifact,
+  loadMeetingArtifact,
   saveMeetingArtifact,
 } from './meeting-artifact.ts';
 import { enrichMeeting } from './meeting-enrichment.ts';
@@ -299,24 +300,38 @@ export class AutomaticMeetingWatchService {
     });
     saveMeetingArtifact(this.#libraryDir, artifact);
     const mode = this.#config.meeting?.mode ?? artifact.mode;
-    const observer = resolveMeetingRoute(this.#config.meeting, 'observer');
-    const reconciliation = resolveMeetingRoute(this.#config.meeting, 'reconciliation');
-    const hasRequiredRoutes = (mode === 'post-session' || observer) &&
-      (mode === 'streaming' || reconciliation);
-    if (hasRequiredRoutes) {
-      artifact = await this.#dependencies.enrich(this.#libraryDir, record.id, {
-        mode,
-        routes: {
-          ...(observer === undefined ? {} : { observer }),
-          ...(reconciliation === undefined ? {} : { reconciliation }),
-        },
-        minimumNewSegments: this.#config.meeting?.observerMinSegments,
-        maximumNewSegments: this.#config.meeting?.observerMaxSegments,
-        maxObserverRuns: this.#config.meeting?.maxObserverRuns,
-        context: buildMeetingContext(
-          this.#config.meeting?.contextFiles,
-          candidate.calendar,
-        ),
+    try {
+      const observer = resolveMeetingRoute(this.#config.meeting, 'observer');
+      const reconciliation = resolveMeetingRoute(this.#config.meeting, 'reconciliation');
+      const hasRequiredRoutes = (mode === 'post-session' || observer) &&
+        (mode === 'streaming' || reconciliation);
+      if (hasRequiredRoutes) {
+        artifact = await this.#dependencies.enrich(this.#libraryDir, record.id, {
+          mode,
+          routes: {
+            ...(observer === undefined ? {} : { observer }),
+            ...(reconciliation === undefined ? {} : { reconciliation }),
+          },
+          minimumNewSegments: this.#config.meeting?.observerMinSegments,
+          maximumNewSegments: this.#config.meeting?.observerMaxSegments,
+          maxObserverRuns: this.#config.meeting?.maxObserverRuns,
+          context: buildMeetingContext(
+            this.#config.meeting?.contextFiles,
+            candidate.calendar,
+          ),
+        });
+      }
+    } catch (error) {
+      // Enrichment is optional. Preserve its checkpoints and expose the usable
+      // transcript even when context loading or the selected provider fails.
+      artifact = loadMeetingArtifact(this.#libraryDir, record.id) ?? artifact;
+      artifact = { ...artifact, status: 'failed', failure: errorMessage(error),
+        session: { ...artifact.session, stoppedReason: 'failed' } };
+      saveMeetingArtifact(this.#libraryDir, artifact);
+      this.emit({
+        type: 'watch.warning',
+        at: this.#dependencies.now().toISOString(),
+        message: `Meeting ${record.id} is saved; enrichment failed: ${errorMessage(error)}`,
       });
     }
     this.emit({
