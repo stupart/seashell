@@ -87,6 +87,7 @@ export class OwnedWhisperServer {
   private stopTrackingChild: (() => void) | undefined;
   private endManagedSession: (() => void) | undefined;
   private forceCpu = false;
+  private generation = 0;
 
   constructor(
     private readonly serverPath: string,
@@ -132,6 +133,13 @@ export class OwnedWhisperServer {
   }
 
   async stop(): Promise<void> {
+    this.generation += 1;
+    const starting = this.starting;
+    await this.releaseChild();
+    await starting?.catch(() => {});
+  }
+
+  private async releaseChild(): Promise<void> {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = undefined;
     const child = this.child;
@@ -139,7 +147,6 @@ export class OwnedWhisperServer {
     const endManagedSession = this.endManagedSession;
     this.child = undefined;
     this.endpoint = undefined;
-    this.starting = undefined;
     this.stopTrackingChild = undefined;
     this.endManagedSession = undefined;
     await terminateOwnedChild(child);
@@ -148,15 +155,17 @@ export class OwnedWhisperServer {
   }
 
   private async ensureStarted(): Promise<void> {
-    if (this.child && this.endpoint && this.child.exitCode === null && this.child.signalCode === null) return;
     if (this.starting) return await this.starting;
-    this.starting = this.startFresh();
-    try { await this.starting; } finally { this.starting = undefined; }
+    if (this.child && this.endpoint && this.child.exitCode === null && this.child.signalCode === null) return;
+    const starting = this.startFresh(++this.generation);
+    this.starting = starting;
+    try { await starting; } finally { if (this.starting === starting) this.starting = undefined; }
   }
 
-  private async startFresh(): Promise<void> {
-    await this.stop();
+  private async startFresh(generation: number): Promise<void> {
+    await this.releaseChild();
     const port = await reserveLoopbackPort();
+    if (generation !== this.generation) throw new Error('Local Whisper startup cancelled');
     const child = spawn(this.serverPath, [
       ...(this.profile.disableGpu || this.forceCpu ? ['-ng'] : []),
       '-m', this.profile.modelPath,
@@ -172,6 +181,8 @@ export class OwnedWhisperServer {
     this.endManagedSession = endManagedSession;
     this.stopTrackingChild = stopTrackingChild;
     let stderr = '';
+    let spawnError: Error | undefined;
+    child.once('error', (error) => { spawnError = error; });
     child.stderr?.on('data', (data: Buffer) => { stderr = (stderr + data.toString()).slice(-2_000); });
     child.once('close', () => {
       if (this.child === child) {
@@ -183,19 +194,26 @@ export class OwnedWhisperServer {
         endManagedSession();
       }
     });
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) {
-      if (child.exitCode !== null || child.signalCode !== null) {
-        throw new Error(`Local Whisper server exited during startup: ${stderr.trim() || child.exitCode}`);
+    try {
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        if (generation !== this.generation) throw new Error('Local Whisper startup cancelled');
+        if (spawnError) throw new Error(`Could not start local Whisper server: ${spawnError.message}`);
+        if (child.exitCode !== null || child.signalCode !== null) {
+          throw new Error(`Local Whisper server exited during startup: ${stderr.trim() || child.exitCode}`);
+        }
+        try {
+          const response = await fetch(`${this.endpoint}/`, { signal: AbortSignal.timeout(500) });
+          if (response.ok && generation === this.generation) return;
+        } catch {}
+        await delay(100);
       }
-      try {
-        const response = await fetch(`${this.endpoint}/`, { signal: AbortSignal.timeout(500) });
-        if (response.ok) return;
-      } catch {}
-      await delay(100);
+      throw new Error('Timed out starting the private local Whisper server');
+    } catch (error) {
+      if (this.child === child) await this.releaseChild();
+      else await terminateOwnedChild(child);
+      throw error;
     }
-    await this.stop();
-    throw new Error('Timed out starting the private local Whisper server');
   }
 
   private deferIdleShutdown(): void {

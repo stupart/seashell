@@ -1,6 +1,9 @@
 import { spawnSync } from 'child_process';
 import {
   existsSync,
+  chmodSync,
+  closeSync,
+  openSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -27,6 +30,8 @@ export interface LaunchAtLoginOptions {
   readonly projectRoot?: string;
   readonly uid?: number;
   readonly runner?: typeof spawnSync;
+  readonly logsDir?: string;
+  readonly environment?: NodeJS.ProcessEnv;
 }
 
 function xml(value: string): string {
@@ -47,7 +52,7 @@ function paths(options: LaunchAtLoginOptions = {}) {
     launchAgentsDir,
     plistPath: join(launchAgentsDir, `${SEASHELL_LAUNCH_AGENT_LABEL}.plist`),
     executable: join(root, 'seashell'),
-    logsDir: join(support, 'Logs'),
+    logsDir: resolve(options.logsDir ?? join(support, 'Logs')),
   };
 }
 
@@ -62,7 +67,9 @@ function command(options: LaunchAtLoginOptions = {}): readonly string[] {
 
 function plist(options: LaunchAtLoginOptions = {}): string {
   const resolved = paths(options);
-  const path = [
+  const environment = options.environment ?? process.env;
+  const path = [...new Set([
+    ...(environment.PATH ?? '').split(':').filter(Boolean),
     join(homedir(), '.bun', 'bin'),
     '/opt/homebrew/bin',
     '/usr/local/bin',
@@ -70,7 +77,7 @@ function plist(options: LaunchAtLoginOptions = {}): string {
     '/bin',
     '/usr/sbin',
     '/sbin',
-  ].join(':');
+  ])].join(':');
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -87,6 +94,9 @@ function plist(options: LaunchAtLoginOptions = {}): string {
   <dict>
     <key>PATH</key>
     <string>${xml(path)}</string>
+    ${['SEASHELL_CONFIG', 'HUMAIN_CLI'].flatMap((key) => environment[key]
+      ? [`<key>${key}</key><string>${xml(environment[key]!)}</string>`]
+      : []).join('\n    ')}
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -136,6 +146,11 @@ export function enableMeetingLaunchAtLogin(
   if (!existsSync(resolved.executable)) throw new Error(`Sea Shell launcher is missing: ${resolved.executable}`);
   mkdirSync(resolved.launchAgentsDir, { recursive: true, mode: 0o700 });
   mkdirSync(resolved.logsDir, { recursive: true, mode: 0o700 });
+  for (const name of ['meeting-watch.jsonl', 'meeting-watch.error.log']) {
+    const log = join(resolved.logsDir, name);
+    closeSync(openSync(log, 'a', 0o600));
+    chmodSync(log, 0o600);
+  }
   const temporary = `${resolved.plistPath}.${process.pid}.tmp`;
   try {
     writeFileSync(temporary, plist(options), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
@@ -162,7 +177,10 @@ export function disableMeetingLaunchAtLogin(
   const resolved = paths(options);
   const runner = options.runner ?? spawnSync;
   if (loaded(options)) {
-    runner('launchctl', ['bootout', launchDomain(options), resolved.plistPath], { stdio: 'ignore' });
+    const result = runner('launchctl', ['bootout', launchDomain(options), resolved.plistPath], { encoding: 'utf8' });
+    if (result.error || result.status !== 0) {
+      throw new Error(`Could not stop the meeting watcher: ${result.stderr?.trim() || result.error?.message || `exit ${result.status}`}`);
+    }
   }
   if (existsSync(resolved.plistPath)) rmSync(resolved.plistPath);
   return meetingLaunchAtLoginStatus(options);

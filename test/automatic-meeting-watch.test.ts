@@ -12,6 +12,62 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+for (const fault of ['detector', 'capture-start'] as const) {
+  test(`watcher recovers from ${fault} failure without pretending recording is healthy`, async () => {
+    const root = mkdtempSync(join(tmpdir(), 'seashell-auto-fault-'));
+    roots.push(root);
+    let now = 0;
+    let broken = false;
+    let starts = 0;
+    let stops = 0;
+    const events: string[] = [];
+    const service = new AutomaticMeetingWatchService({
+      config: { libraryDir: root, meeting: { automation: {
+        enabled: true, mode: 'automatic', confirmationPolls: 2, endGraceSeconds: 1,
+      } } },
+      onEvent: (event) => events.push(event.type),
+      dependencies: {
+        now: () => new Date(now),
+        readSignals: () => {
+          if (broken) throw new Error('detector disconnected');
+          return { schemaVersion: 1, capturedAtUnixMs: now, supported: true,
+            inputProcesses: [{ pid: 42, bundleId: 'us.zoom.xos', name: 'Zoom' }] };
+        },
+        startCapture: () => {
+          starts += 1;
+          if (fault === 'capture-start' && starts === 1) throw new Error('disk unavailable');
+          const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'fault-test', startedAtUnixMs: now });
+          return { store, sessionId: 'fault-test', manifestPath: store.manifestPath,
+            async stop() { stops += 1; return store.setStatus('captured', 'test'); } };
+        },
+        finalizeCapture: async () => createTranscriptRecord({
+          transcript: [{ start: 0, end: 1, text: 'Recoverable meeting.' }], speakers: [],
+        }, { id: 'fault-test', now: new Date(1_000) }),
+      },
+    });
+    await service.pollOnce();
+    now = 1_000;
+    await service.pollOnce();
+    if (fault === 'capture-start') {
+      expect(service.phase).toBe('watching');
+      expect(events).toContain('watch.error');
+      await service.pollOnce();
+      await service.pollOnce();
+      expect(starts).toBe(2);
+      expect(service.phase).toBe('recording');
+    } else {
+      broken = true;
+      now = 2_000;
+      await service.pollOnce();
+      now = 3_001;
+      expect((await service.pollOnce()).kind).toBe('finish');
+      expect(stops).toBe(1);
+    }
+    await service.shutdown();
+    expect(events).toContain('meeting.ready');
+  });
+}
+
 test('watcher records only after confirmation and finalizes after grace', async () => {
   const root = mkdtempSync(join(tmpdir(), 'seashell-auto-watch-'));
   roots.push(root);

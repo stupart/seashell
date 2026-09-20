@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'child_process';
+import { terminateManagedChild } from './process-lifecycle.ts';
 import {
   hasAudiblePcmSignal,
   LIVE_CAPTURE_CHUNK_MILLISECONDS,
@@ -147,9 +148,10 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
       requestedStop = true;
       child.kill('SIGINT');
       const terminate = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) child.kill('SIGTERM');
+        void terminateManagedChild(child);
       }, 1_500);
       terminate.unref();
+      void done.then(() => clearTimeout(terminate));
     },
   };
 }
