@@ -44,6 +44,9 @@ download; inference remains local afterward.
 
 ## Requirements
 
+The Homebrew installation manages the runtime, tools, and models below for
+you. Apple Silicon is recommended; the formula also supports Intel Macs.
+
 - macOS; Apple Silicon is recommended. Live system audio requires macOS 14.2+
 - [Bun](https://bun.sh)
 - FFmpeg and ffprobe for media inspection and audio extraction
@@ -65,15 +68,28 @@ transcription, diarization, history, and exports do not require it.
 
 ## Installation
 
-The Homebrew release candidate is being tested in
-[stupart/homebrew-tap#1](https://github.com/stupart/homebrew-tap/pull/1).
-It includes a private Bun runtime, native helpers, and local transcription
-models. It is not on the tap's default branch yet. See the
-[distribution acceptance report](docs/distribution-acceptance-2026-09-20.md)
-for tested install paths and release status. The npm package named `seashell`
+On a Mac with Homebrew, install the tested **1.1.0-rc6** release candidate:
+
+```bash
+brew install stupart/tap/seashell
+```
+
+Then run `seashell`. The formula includes a private Bun runtime, native
+helpers, and local transcription models; no separate setup or API key is
+required. The first installation builds the native tools and downloads the
+models, which can take several minutes.
+
+Automatic meeting detection is enabled while the app is open. To also enable
+the background meeting watcher at login, run `seashell setup`.
+
+Fresh installations and real local transcription have passed on Apple Silicon
+and Intel. See the [RC6 acceptance report](docs/google-meet-acceptance-2026-09-20.md)
+for test evidence and remaining limits. The npm package named `seashell`
 belongs to a different project; it does not install this app.
 
-On a Mac with Homebrew, this is the complete first-install command:
+### Install from source
+
+For a Git checkout with in-place source updates, use:
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/stupart/seashell/main/bootstrap.sh)"
@@ -98,6 +114,12 @@ and should not bypass those system dialogs. Local file/live transcription does
 not require an API key, Humain, or a cloud account.
 
 ### Updating
+
+For a Homebrew installation:
+
+```bash
+brew update && brew upgrade stupart/tap/seashell
+```
 
 Git-based installations can update in place; no uninstall is needed:
 
