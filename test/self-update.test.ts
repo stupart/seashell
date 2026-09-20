@@ -8,6 +8,14 @@ import {
 const OLD_SHA = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const NEW_SHA = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
 
+test('Homebrew installations direct updates to the package manager before running Git', () => {
+  let calls = 0;
+  expect(() => updateRepository({ projectRoot: '/opt/homebrew/opt/seashell/libexec', managedBy: 'homebrew',
+    runner: () => { calls++; throw new Error('must not execute'); },
+  })).toThrow('brew upgrade stupart/tap/seashell');
+  expect(calls).toBe(0);
+});
+
 function fakeRunner(options: {
   dirty?: boolean;
   remoteBehind?: boolean;

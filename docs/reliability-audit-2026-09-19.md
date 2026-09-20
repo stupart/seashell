@@ -1,5 +1,10 @@
 # Sea Shell reliability audit — 19 September 2026
 
+Follow-up: [Homebrew distribution acceptance — 20 September](distribution-acceptance-2026-09-20.md)
+adds package-aware update/login paths, bounded diagnostic probes, four regressions,
+a candidate formula, and fresh-install CI. The original ten-round results below
+remain historical evidence.
+
 Ten focused repair/test rounds are prepared as stacked PRs. They address
 reproducible installation, Humain process boundaries, capture lifecycle,
 repeatable verification, recovery, exclusive watcher ownership, meeting replay,

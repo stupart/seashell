@@ -14,6 +14,23 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
+test('packaged watchers keep the stable opt path across Homebrew upgrades', () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-packaged-launch-'));
+  roots.push(root);
+  const stableRoot = join(root, 'opt', 'seashell', 'libexec');
+  mkdirSync(stableRoot, { recursive: true });
+  writeFileSync(join(stableRoot, 'seashell'), '#!/bin/bash\n');
+  const runner = ((_command: string, args: string[]) => ({ status: args[0] === 'print' ? 1 : 0, stderr: '' })) as unknown as typeof spawnSync;
+  const result = enableMeetingLaunchAtLogin({ launchAgentsDir: join(root, 'agents'), logsDir: join(root, 'logs'), runner,
+    environment: { PATH: '/usr/bin', SEASHELL_PACKAGE_ROOT: stableRoot, SEASHELL_MANAGED_BY: 'homebrew' },
+  });
+  const plist = readFileSync(result.plistPath, 'utf8');
+  expect(result.command[0]).toBe(join(stableRoot, 'seashell'));
+  expect(plist).toContain(`<key>WorkingDirectory</key>\n  <string>${stableRoot}</string>`);
+  expect(plist).toContain('<key>SEASHELL_PACKAGE_ROOT</key>');
+  expect(plist).toContain('<key>SEASHELL_MANAGED_BY</key>');
+});
+
 test('launch-at-login writes one exact private user agent and can remove it', () => {
   const root = mkdtempSync(join(tmpdir(), 'seashell-launch-agent-'));
   roots.push(root);

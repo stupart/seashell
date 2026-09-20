@@ -91,6 +91,42 @@ The installer still installs any missing system packages. On an untouched Mac,
 Apple's developer-tool installer, Homebrew's setup, and OS permission dialogs
 remain explicit prerequisites; don't claim an unattended first install there.
 
+## Homebrew distribution gym
+
+The candidate formula and workflow live in
+[stupart/homebrew-tap#1](https://github.com/stupart/homebrew-tap/pull/1).
+CI checks the exact formula checkout on fresh Apple Silicon and Intel macOS
+runners. It downloads checksum-pinned source, Bun, Whisper, and models, compiles
+the native helpers, installs the package, and runs `brew test` and
+`brew linkage --test`. It retains Homebrew logs for 14 days.
+The workflow records timed first-launch diagnostics and gives full-model formula
+acceptance a ten-minute limit, within a twenty-minute job limit; hosted CPU
+inference can exceed Homebrew's default five-minute test allowance.
+During formula acceptance it logs Whisper's elapsed/CPU time and memory, and
+retains a one-second process sample if inference is still active after two minutes.
+
+The formula test starts with only the system PATH and isolated config/library
+directories. It checks the command wrapper, capabilities, repeatable setup
+without autostart, doctor, actual transcription of Whisper's pinned speech
+fixture, and package-aware update guidance. Using the source fixture avoids
+depending on `say` voices, which can yield empty audio in a headless test account.
+
+Register a review checkout, then exercise its formula:
+
+```bash
+brew tap stupart/seashell-preview /absolute/path/to/homebrew-tap-checkout
+brew install --build-from-source stupart/seashell-preview/seashell
+brew test stupart/seashell-preview/seashell
+brew linkage --test stupart/seashell-preview/seashell
+brew audit --strict stupart/seashell-preview/seashell
+```
+
+Use a disposable test account for installation experiments. Unlike the source
+bootstrap, the Homebrew package does not configure a login watcher at install
+time; `seashell` works with defaults, and `seashell setup` explicitly opts into
+the watcher. See the [acceptance report](distribution-acceptance-2026-09-20.md)
+for results and the distinction between candidate and published commands.
+
 ## Device acceptance and soak
 
 Use an Apple Silicon Mac with actual audio devices as the device gym. A macOS VM

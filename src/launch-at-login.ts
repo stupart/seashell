@@ -44,7 +44,9 @@ function xml(value: string): string {
 }
 
 function paths(options: LaunchAtLoginOptions = {}) {
-  const root = resolve(options.projectRoot ?? PROJECT_ROOT);
+  const environment = options.environment ?? process.env;
+  // A package manager's opt path survives replacement of a versioned Cellar.
+  const root = resolve(options.projectRoot ?? environment.SEASHELL_PACKAGE_ROOT ?? PROJECT_ROOT);
   const launchAgentsDir = resolve(options.launchAgentsDir ?? join(homedir(), 'Library', 'LaunchAgents'));
   const support = join(homedir(), 'Library', 'Application Support', 'Sea Shell');
   return {
@@ -94,7 +96,7 @@ function plist(options: LaunchAtLoginOptions = {}): string {
   <dict>
     <key>PATH</key>
     <string>${xml(path)}</string>
-    ${['SEASHELL_CONFIG', 'HUMAIN_CLI'].flatMap((key) => environment[key]
+    ${['SEASHELL_CONFIG', 'HUMAIN_CLI', 'SEASHELL_PACKAGE_ROOT', 'SEASHELL_MANAGED_BY'].flatMap((key) => environment[key]
       ? [`<key>${key}</key><string>${xml(environment[key]!)}</string>`]
       : []).join('\n    ')}
   </dict>

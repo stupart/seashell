@@ -709,7 +709,7 @@ Usage:
   seashell setup [--no-autostart] [--json]  Apply safe defaults on a true first install
   seashell doctor [--json]                  Check dependencies and models
   seashell capabilities [--json]            Describe optional engine capabilities
-  seashell update [--check] [--json]        Safely update this Git checkout
+  seashell update [--check] [--json]        Update Sea Shell or show package-manager guidance
 
 Transcription options:
   --timestamps                 Include aligned timestamps in text output

@@ -262,7 +262,13 @@ interface DoctorCheck {
   help?: string;
 }
 
-export function doctorChecks(): DoctorCheck[] {
+export function doctorChecks(options: {
+  systemAudioHelper?: string;
+  meetingSignalsHelper?: string;
+  systemAudioProbeTimeoutMs?: number;
+} = {}): DoctorCheck[] {
+  const systemAudioHelper = options.systemAudioHelper ?? SYSTEM_AUDIO_HELPER;
+  const meetingSignalsHelper = options.meetingSignalsHelper ?? MEETING_SIGNALS_HELPER;
   const commandCheck = (
     name: string,
     required: boolean,
@@ -278,7 +284,7 @@ export function doctorChecks(): DoctorCheck[] {
     help: string,
   ): DoctorCheck => ({ name, path, ok: existsSync(path), required, help });
   const systemAudioPermissionCheck = (): DoctorCheck => {
-    if (!existsSync(SYSTEM_AUDIO_HELPER)) {
+    if (!existsSync(systemAudioHelper)) {
       return {
         name: 'system-audio-probe',
         ok: false,
@@ -286,9 +292,12 @@ export function doctorChecks(): DoctorCheck[] {
         help: 'Run ./install.sh before testing live system audio',
       };
     }
-    const result = spawnSync(SYSTEM_AUDIO_HELPER, ['--probe-ms', '500'], {
+    const result = spawnSync(systemAudioHelper, ['--probe-ms', '500'], {
       encoding: 'utf8',
-      timeout: 5_000,
+      timeout: options.systemAudioProbeTimeoutMs ?? 5_000,
+      // The native helper handles SIGTERM on its main queue, which CoreAudio
+      // startup can block. A read-only probe must still honor its deadline.
+      killSignal: 'SIGKILL',
       maxBuffer: 256 * 1024,
     });
     const events = (result.stderr ?? '').split('\n').flatMap((line) => {
@@ -307,14 +316,16 @@ export function doctorChecks(): DoctorCheck[] {
         : started
           ? { path: 'Helper started; run `seashell capture test` while computer audio is playing' }
         : {
-            help: failure?.type === 'error'
-              ? failure.message
-              : 'Allow Screen & System Audio Recording, then verify the active output device',
+            help: (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT'
+              ? 'System audio probe timed out; check macOS audio permissions and the active output device'
+              : failure?.type === 'error'
+                ? failure.message
+                : 'Allow Screen & System Audio Recording, then verify the active output device',
           }),
     };
   };
   const meetingSignalCheck = (): DoctorCheck => {
-    if (!existsSync(MEETING_SIGNALS_HELPER)) {
+    if (!existsSync(meetingSignalsHelper)) {
       return {
         name: 'meeting-signals',
         ok: false,
@@ -323,7 +334,7 @@ export function doctorChecks(): DoctorCheck[] {
       };
     }
     try {
-      const snapshot = readMeetingSignalSnapshot();
+      const snapshot = readMeetingSignalSnapshot(meetingSignalsHelper);
       return {
         name: 'meeting-signals',
         ok: snapshot.supported,
@@ -367,7 +378,7 @@ export function doctorChecks(): DoctorCheck[] {
     ),
     fileCheck(
       'system-audio-helper',
-      SYSTEM_AUDIO_HELPER,
+      systemAudioHelper,
       false,
       'Run ./install.sh; live system audio requires macOS 14.2+',
     ),
@@ -391,7 +402,9 @@ function executeDoctor(json: boolean): number {
 
 function executeUpdate(check: boolean, json: boolean): number {
   try {
-    const result = updateRepository({ projectRoot: PROJECT_ROOT, check });
+    const result = updateRepository({ projectRoot: PROJECT_ROOT, check,
+      ...(process.env.SEASHELL_MANAGED_BY === 'homebrew' ? { managedBy: 'homebrew' as const } : {}),
+    });
     print(json ? JSON.stringify({ ok: true, ...result }, null, 2) : formatSelfUpdateResult(result));
     return 0;
   } catch (error) {
