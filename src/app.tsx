@@ -212,7 +212,6 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [microphoneLevel, setMicrophoneLevel] = useState<PcmSignalLevel | null>(null);
   const [microphoneIssue, setMicrophoneIssue] = useState<string | null>(null);
   const [systemAudioLevel, setSystemAudioLevel] = useState<PcmSignalLevel | null>(null);
-  const [captureChunkCount, setCaptureChunkCount] = useState(0);
   const [transcribingCount, setTranscribingCount] = useState(0);
   const [draftTranscriptionRoute, setDraftTranscriptionRoute] = useState<TranscriptionRoute>('local');
   const [paused, setPaused] = useState(initiallyPaused);
@@ -306,24 +305,19 @@ export default function App(props: { libraryDir?: string } = {}) {
       : libraryEntries,
     [libraryEntries, libraryRoot, searchQuery],
   );
-  const liveCaptureLabel = systemAudioState === 'active'
-    ? 'mic + system'
-    : systemAudioState === 'starting'
-      ? 'mic + system starting'
-      : 'mic only';
   const navigationItems: NavigationItem[] = useMemo(() => [
     {
       kind: 'live',
       label: paused
         ? 'Live transcription'
-        : `● Live transcription · ${liveCaptureLabel}`,
+        : '● Live transcription',
     },
     ...visibleEntries.map((entry) => ({
       kind: 'record' as const,
       label: entry.kind === 'meeting' ? `M · ${entry.title}` : entry.title,
       entry,
     })),
-  ], [liveCaptureLabel, paused, visibleEntries]);
+  ], [paused, visibleEntries]);
 
   useEffect(() => {
     setSelectionIndex((current) => moveSelection(current, 0, navigationItems.length));
@@ -484,7 +478,6 @@ export default function App(props: { libraryDir?: string } = {}) {
         startedAtUnixMs: liveSessionStartedAt.current,
         createdAt: liveRecordRef.current.createdAt,
       });
-      setCaptureChunkCount(captureSessionStore.current.manifest.chunks.length);
     }
     return captureSessionStore.current;
   }, [libraryRoot]);
@@ -510,10 +503,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         endSeconds: options.endSeconds,
         audible: options.audible,
         clock: options.clock,
-      }).then((chunk) => {
-      setCaptureChunkCount(store.manifest.chunks.length);
-      return chunk;
-    }).catch((captureError: unknown) => {
+      }).catch((captureError: unknown) => {
       cleanupFile(options.path);
       setError(`Could not preserve live audio: ${
         captureError instanceof Error ? captureError.message : String(captureError)
@@ -852,7 +842,6 @@ export default function App(props: { libraryDir?: string } = {}) {
       throw captureError;
     } finally {
       captureSessionStore.current = null;
-      setCaptureChunkCount(0);
     }
   }, [config.transcription, libraryRoot, refreshLibrary, saveByDefault]);
 
@@ -1816,7 +1805,7 @@ export default function App(props: { libraryDir?: string } = {}) {
           <Text dimColor>{view === 'live'
             ? transcribingCount > 0
               ? 'Preparing transcript…'
-              : 'Speak to transcribe · audio is collected in 10-second chunks'
+              : 'Speak to transcribe · the first words take a moment'
             : 'No transcript text'}</Text>
         )
       ) : plainTranscript ? (
@@ -1898,15 +1887,13 @@ export default function App(props: { libraryDir?: string } = {}) {
               : '⏸ Paused'}</Text>
           ) : (
             <Text>
-              <Text color={microphoneState !== 'active' && systemAudioState !== 'active'
+              <Text color={microphoneState !== 'active' && systemAudioState !== 'active' && systemAudioState !== 'ready'
                 ? 'yellow' : listenerState === 'recording' ? 'red' : 'green'}>
-                {systemAudioState === 'active'
-                  ? microphoneState === 'active' ? '◉ Capturing · mic + system' : '◉ Capturing · system only'
-                  : microphoneState === 'active'
-                    ? systemAudioState === 'starting' ? '◉ Capturing mic · opening system audio…' : '◉ Capturing · mic only'
-                    : microphoneState === 'starting' || systemAudioState === 'starting'
-                      ? '◌ Opening audio inputs…'
-                      : 'Audio unavailable · press Space twice to retry'}
+                {microphoneState === 'active' || systemAudioState === 'active' || systemAudioState === 'ready'
+                  ? '◉ Recording'
+                  : microphoneState === 'starting' || systemAudioState === 'starting'
+                    ? '◌ Starting recording…'
+                    : 'Audio unavailable · press Space twice to retry'}
               </Text>
               {transcribingCount > 0 && (
                 <Text color="yellow">
@@ -1921,15 +1908,14 @@ export default function App(props: { libraryDir?: string } = {}) {
       {view === 'live' && !paused && (
         <Box marginBottom={1} flexShrink={0}>
           <Text>
-            <Text dimColor>Mic </Text>
+            <Text dimColor>Microphone </Text>
             <Text color={microphoneState === 'active' ? 'green' : 'yellow'}>
-              {microphoneState === 'starting' ? 'opening…' : microphoneState === 'unavailable' ? 'unavailable' : levelMeter(microphoneLevel)}
+              {microphoneState === 'starting' ? 'starting…' : microphoneState === 'active' ? levelMeter(microphoneLevel) : microphoneState}
             </Text>
-            <Text dimColor>  System </Text>
-            <Text color={systemAudioState === 'active' ? 'cyan' : 'yellow'}>
-              {systemAudioState === 'starting' ? 'opening…' : systemAudioState === 'unavailable' ? 'unavailable' : levelMeter(systemAudioLevel)}
+            <Text dimColor>  Computer audio </Text>
+            <Text color={systemAudioState === 'active' || systemAudioState === 'ready' ? 'cyan' : 'yellow'}>
+              {systemAudioState === 'starting' ? 'starting…' : systemAudioState === 'active' ? levelMeter(systemAudioLevel) : systemAudioState}
             </Text>
-            <Text dimColor>{`  ${captureChunkCount} safe chunks`}</Text>
           </Text>
         </Box>
       )}

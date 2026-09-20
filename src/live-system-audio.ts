@@ -16,7 +16,7 @@ export const SYSTEM_AUDIO_HELPER = join(
 export const LIVE_CAPTURE_SAMPLE_RATE = 16_000;
 export const LIVE_CAPTURE_CHUNK_MILLISECONDS = 10_000;
 
-export type SystemAudioCaptureState = 'starting' | 'active' | 'unavailable' | 'stopped';
+export type SystemAudioCaptureState = 'starting' | 'ready' | 'active' | 'unavailable' | 'stopped';
 
 export interface LiveCaptureClock {
   readonly kind: 'device-sample-clock' | 'process-start-estimate';
@@ -376,6 +376,7 @@ export function startSystemAudioCapture(
   const minimumChunkMilliseconds = options.minimumChunkMilliseconds ?? 500;
   const chunker = new PcmS16leChunker(LIVE_CAPTURE_SAMPLE_RATE, chunkMilliseconds);
   let firstBufferAtUnixMs: number | undefined;
+  let helperReady = false;
   let clock: LiveCaptureClock | undefined;
   const pendingDiscontinuities: Extract<NativeSystemAudioEvent, { type: 'discontinuity' }>[] = [];
   let requestedStop = false;
@@ -464,7 +465,14 @@ export function startSystemAudioCapture(
     if (!line.trim()) return;
     try {
       const event = parseNativeSystemAudioEvent(line);
-      if (event.type === 'first-buffer') {
+      if (event.type === 'start') {
+        // Opening the device succeeds before it necessarily supplies audio.
+        // The first-buffer callback can race ahead of this startup event.
+        if (!helperReady && firstBufferAtUnixMs === undefined && !requestedStop) {
+          options.onState({ state: 'ready', message: 'Computer audio ready' });
+        }
+        helperReady = true;
+      } else if (event.type === 'first-buffer') {
         const firstBufferDurationMs = (event.bufferFrames ?? 0) * 1_000 /
           (event.sourceSampleRate ?? LIVE_CAPTURE_SAMPLE_RATE);
         const precedingGapMs = pendingDiscontinuities.reduce(
@@ -488,7 +496,7 @@ export function startSystemAudioCapture(
           ...(event.hostTime === undefined ? {} : { hostTime: event.hostTime }),
           ...(event.sampleTime === undefined ? {} : { sampleTime: event.sampleTime }),
         });
-        options.onState({ state: 'active', message: 'Microphone + system audio' });
+        options.onState({ state: 'active', message: 'Receiving computer audio' });
         for (const gap of pendingDiscontinuities.splice(0)) publishDiscontinuity(gap);
         for (const chunk of waiting.splice(0)) publish(chunk);
       } else if (event.type === 'discontinuity') {

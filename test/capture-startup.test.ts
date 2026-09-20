@@ -58,3 +58,52 @@ test('a stuck microphone does not block the optional source forever', async () =
   await system.done;
   expect(states).toEqual(['starting', 'unavailable']);
 });
+
+for (const firstBufferBeforeStart of [false, true]) {
+  test(`computer audio becomes ready without PCM and never downgrades active capture (buffer first: ${firstBufferBeforeStart})`, async () => {
+    const root = mkdtempSync(join(tmpdir(), 'seashell-audio-ready-'));
+    const marker = join(root, 'supply-audio');
+    const helper = join(root, 'system');
+    writeFileSync(helper, `#!${process.execPath}
+import {existsSync} from 'fs';
+const event = (value) => process.stderr.write(JSON.stringify(value)+'\\n');
+const start = () => event({type:'start',sampleRate:16000,channels:1,bitsPerChannel:16});
+if (!${firstBufferBeforeStart}) { start(); start(); }
+while (!existsSync(${JSON.stringify(marker)})) await Bun.sleep(10);
+event({type:'first-buffer',capturedAtUnixMs:Date.now()});
+start();
+process.stdout.write(Buffer.alloc(32000,1));
+setInterval(()=>{},1000);
+`, { mode: 0o755 });
+    const states: string[] = [];
+    let chunks = 0;
+    const capture = startSystemAudioCapture({
+      helperPath: helper, sessionStartedAtUnixMs: Date.now(), chunkMilliseconds: 1000,
+      onState: (update) => states.push(update.state),
+      onChunk: (chunk) => { chunks++; rmSync(chunk.path); },
+    });
+    const until = async (check: () => boolean) => {
+      const deadline = Date.now() + 2000;
+      while (!check() && Date.now() < deadline) await Bun.sleep(10);
+      expect(check()).toBe(true);
+    };
+    try {
+      if (!firstBufferBeforeStart) {
+        await until(() => states.includes('ready'));
+        expect(states).toEqual(['starting', 'ready']);
+        expect(chunks).toBe(0);
+      }
+      writeFileSync(marker, '');
+      await until(() => chunks === 1);
+      capture.stop();
+      await capture.done;
+      expect(states).toEqual(firstBufferBeforeStart
+        ? ['starting', 'active', 'stopped']
+        : ['starting', 'ready', 'active', 'stopped']);
+    } finally {
+      capture.stop();
+      await capture.done;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}

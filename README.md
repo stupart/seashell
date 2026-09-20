@@ -158,8 +158,9 @@ seashell meeting show <transcript-id>
 seashell meeting chat <transcript-id> "What did we decide?"
 ```
 
-Automatic meeting capture is already on after a normal first install. Inspect,
-disable, or re-enable it with:
+Automatic meeting detection is on by default while the TUI is open. The source
+installer also enables launch at login on a first install; Homebrew installation
+does not enable it. Inspect or change the separate login watcher with:
 
 ```bash
 seashell meeting autostart status
@@ -219,14 +220,43 @@ seashell capture test --seconds 5
 ```
 
 The test reports microphone and system signal independently and deletes only
-its own test recording. During capture, the footer shows both meters and the
-number of safely committed chunks.
+its own test recording. During capture, the status row labels **Microphone** and
+**Computer audio** separately. “Starting…” means the source is still opening;
+computer audio “ready” means the helper opened, and its meter appears after the
+first audio buffer. Readiness alone does not prove an audible signal. Audio is
+still saved durably without exposing storage counters in the normal view.
 
-Run one cheap detection probe without recording a full meeting:
+With the TUI and login watcher stopped, run one cheap detection probe without
+recording a full meeting (only one watcher can own detection):
 
 ```bash
 seashell meeting watch --once --json
 ```
+
+For a solo Google Meet check, open Sea Shell in its idle automatic mode (pause
+any manual recording first), then join an instant meeting with the microphone
+on. Without a matching calendar event, expect a browser recording prompt after
+two polls and press **M** to accept it. Speak a recognizable test phrase; play
+some known speech on the computer to exercise the second track, since a solo
+Meet has no remote participant audio. Leave the call, allow the 20-second end
+grace period and finalization, then check the saved meeting for both phrases.
+This checks the real detection/capture/save path; the automated meeting soak
+uses simulated detection and transcription.
+
+### Running alongside Conch
+
+Conch and Sea Shell currently own separate microphone streams and Whisper
+workers. Reusing the same model file can save disk space, but does not share a
+loaded model or transcription work. Conch's optional `meeting-autopause` setting
+pauses it when another app uses a microphone; this can also include Sea Shell's
+manual recording. It is microphone-activity detection, not a shared meeting
+protocol. Conch's spoken output can appear in Sea Shell's computer-audio track.
+
+A shared local transcription service could avoid duplicate model memory and
+schedule short Conch requests alongside meeting work. That needs separate
+request ownership, cancellation, and result routing: a meeting transcript
+must not become a Conch voice command. No shared service or transcript feed is
+implemented yet.
 
 ### Live performance and routing
 
