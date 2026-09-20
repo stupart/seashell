@@ -2,15 +2,65 @@ import { afterEach, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { AutomaticMeetingWatchService } from '../src/automatic-meeting-watch.ts';
+import { AutomaticMeetingWatchService, type AutomaticMeetingWatchEvent } from '../src/automatic-meeting-watch.ts';
 import { CaptureSessionStore } from '../src/capture-session.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 import type { DurableLiveCaptureHandle } from '../src/durable-live-capture.ts';
+import { findTranscriptRecord } from '../src/transcript-library.ts';
+import { loadMeetingArtifact } from '../src/meeting-artifact.ts';
 
 const roots: string[] = [];
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
+
+for (const failure of ['provider', 'context', 'transcription'] as const) {
+  test(`watcher reports the saved meeting after ${failure} failure only when its transcript exists`, async () => {
+    const root = mkdtempSync(join(tmpdir(), 'seashell-enrichment-fault-'));
+    roots.push(root);
+    const events: AutomaticMeetingWatchEvent[] = [];
+    const service = new AutomaticMeetingWatchService({
+      config: { libraryDir: root, meeting: {
+        mode: 'post-session',
+        routes: { reconciliation: { backend: 'openrouter', model: 'test/notes' } },
+        ...(failure === 'context' ? { contextFiles: [join(root, 'missing.txt')] } : {}),
+        automation: { enabled: true, mode: 'automatic', confirmationPolls: 2 },
+      } },
+      onEvent: (value) => events.push(value),
+      dependencies: {
+        now: () => new Date(1_000),
+        readSignals: () => ({ schemaVersion: 1, capturedAtUnixMs: 1_000, supported: true,
+          inputProcesses: [{ pid: 42, bundleId: 'us.zoom.xos', name: 'Zoom' }] }),
+        startCapture: () => {
+          const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'enrichment-fault', startedAtUnixMs: 1_000 });
+          return { store, sessionId: 'enrichment-fault', manifestPath: store.manifestPath,
+            async stop() { return store.setStatus('captured', 'test'); } };
+        },
+        finalizeCapture: async () => {
+          if (failure === 'transcription') throw new Error('ASR unavailable');
+          return createTranscriptRecord({ transcript: [{ start: 0, end: 1, text: 'Saved meeting.' }], speakers: [] },
+            { id: 'enrichment-fault', now: new Date(1_000) });
+        },
+        enrich: async () => { throw new Error('Provider unavailable'); },
+      },
+    });
+    await service.pollOnce();
+    await service.pollOnce();
+    await service.shutdown();
+    if (failure === 'transcription') {
+      expect(events.map((value) => value.type)).not.toContain('meeting.ready');
+      expect(events.map((value) => value.type)).toContain('watch.error');
+    } else {
+      expect(events.map((value) => value.type).slice(-2)).toEqual(['watch.warning', 'meeting.ready']);
+      expect(events.map((value) => value.type)).not.toContain('watch.error');
+      expect(findTranscriptRecord(root, 'enrichment-fault').record.transcript[0]?.text).toBe('Saved meeting.');
+      expect(loadMeetingArtifact(root, 'enrichment-fault')?.status).toBe('failed');
+      expect(loadMeetingArtifact(root, 'enrichment-fault')?.failure).toContain(
+        failure === 'provider' ? 'Provider unavailable' : 'missing.txt',
+      );
+    }
+  });
+}
 
 for (const fault of ['detector', 'capture-start'] as const) {
   test(`watcher recovers from ${fault} failure without pretending recording is healthy`, async () => {
