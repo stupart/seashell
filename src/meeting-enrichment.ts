@@ -59,8 +59,10 @@ function stableKey(parts: unknown[]): string {
   return createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 }
 
-function runSafeId(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]+/gu, '-').slice(0, 96);
+function runSafeId(value: string, idempotencyKey: string): string {
+  // Reserve the digest before truncating the readable prefix. Long transcript
+  // IDs and changed requests must never share one durable run directory.
+  return `${value.replace(/[^a-zA-Z0-9_-]+/gu, '-').slice(0, 63)}-${idempotencyKey.slice(0, 32)}`;
 }
 
 export function meetingSegments(record: TranscriptRecord) {
@@ -192,11 +194,12 @@ export async function enrichMeeting(
           'observe',
           window.fromCursor,
           window.toCursor,
+          window.segments,
           observerRoute,
           approvedContext,
           artifact.provisionalClaims,
         ]);
-        const runId = runSafeId(`meeting-${transcriptId}-observe-${window.fromCursor}-${window.toCursor}`);
+        const runId = runSafeId(`meeting-${transcriptId}-observe-${window.fromCursor}-${window.toCursor}`, idempotencyKey);
         const result = await runner('observe', {
           meetingId: artifact.meetingId,
           ...humainRouteRequest(observerRoute),
@@ -205,7 +208,7 @@ export async function enrichMeeting(
           context: approvedContext,
           idempotencyKey,
         }, { storeDir, runId, onStatus: options.onStatus });
-        const output = parseEnrichmentOutput(result.output, validIds);
+        const output = parseEnrichmentOutput(result.output, new Set(window.segments.map((segment) => segment.id)));
         appendProvisionalOverlay(libraryDir, transcriptId, {
           schemaVersion: 1,
           runId: result.runId,
@@ -253,7 +256,7 @@ export async function enrichMeeting(
         reconciliationRoute,
         approvedContext,
       ]);
-      const runId = runSafeId(`meeting-${transcriptId}-reconcile-${idempotencyKey.slice(0, 10)}`);
+      const runId = runSafeId(`meeting-${transcriptId}-reconcile`, idempotencyKey);
       const result = await runner('reconcile', {
         meetingId: artifact.meetingId,
         ...humainRouteRequest(reconciliationRoute),
@@ -335,11 +338,12 @@ export async function chatWithMeeting(
     transcriptId,
     'chat',
     trimmed,
+    segments,
     artifact.analysis?.claims ?? artifact.provisionalClaims,
     route,
     approvedContext,
   ]);
-  const runId = runSafeId(`meeting-${transcriptId}-chat-${idempotencyKey.slice(0, 12)}`);
+  const runId = runSafeId(`meeting-${transcriptId}-chat`, idempotencyKey);
   const result = await runHumainMeeting('chat', {
     meetingId: artifact.meetingId,
     ...humainRouteRequest(route),

@@ -27,10 +27,12 @@ The regression suite includes:
 - Model HTTP/interruption/checksum failures and safe retry; update repair retry.
 - Media preparation, timed transcripts, subtitle rendering, library persistence.
 - Durable capture commits, journal recovery, track gaps, echo suppression.
-- Meeting detection/consent, detector failure, capture startup failure.
+- Meeting detection/consent, expired heartbeats, partial detector messages across
+  restart, capture startup failure, and saved meetings after enrichment failure.
 - Capture children ignoring shutdown, server readiness races, missing binaries,
   cancellation during startup, and bounded Humain cancellation.
-- Humain consent, run/model identity, segment IDs, and caller-relative paths.
+- Humain consent, receipt/model identity, segment IDs, caller-relative paths,
+  long meeting IDs, changed observer requests, and window-scoped evidence.
 - Login-agent configuration, private logs, and failed shutdown reporting.
 
 The macOS GitHub Actions workflow runs the default gym plus native compilation
@@ -44,15 +46,24 @@ inference, library/subtitle output, and creation of a meeting artifact:
 
 ```bash
 bun run gym -- --asr
+bun run gym -- --humain /absolute/path/to/humain-engine/dist/cli.js
 bun run gym -- --rounds 3 --asr --humain /absolute/path/to/humain-engine/dist/cli.js
 ```
 
 `--asr` uses macOS `say` to synthesize a known speech fixture to disk; it does
-not open the microphone or play audio. The Humain check invokes local Seashell
-transcription and requires a successful local artifact with expected words.
-Build Humain first. It remains an optional sibling integration, with no package
-dependency added to either product. This check does not exercise paid/remote
-meeting notes or cloud transcription.
+not open the microphone or play audio. Build Humain first. `--humain` exercises
+the real Humain CLI, compiler, semantic validation, durable run store, and
+receipt through an isolated local model-executable fixture. It verifies successful
+and terminal-failure replay without redispatch, long meeting identities, a changed
+observer route, and chat evidence. Its child environment excludes ambient API
+credentials, and its executable path cannot resolve the installed model CLI.
+
+Combining `--asr` and `--humain` also invokes local Seashell transcription through
+Humain and requires a successful local artifact with expected words. Humain
+remains an optional sibling integration, with no package dependency added to
+either product. These checks do not exercise paid/remote meeting providers or
+cloud transcription. An unchanged terminal Humain request remains terminal;
+Seashell does not silently retry a possibly paid dispatch under a new identity.
 
 For a fresh installer acceptance run, use a dedicated macOS test account with
 Homebrew and Apple Command Line Tools. The public command is still:

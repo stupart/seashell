@@ -24,7 +24,6 @@ for (let i = 0; i < args.length; i++) {
   } else throw new Error(`Unknown or incomplete gym option: ${arg}`);
 }
 if (!Number.isSafeInteger(rounds) || rounds < 1 || rounds > 10) throw new Error('--rounds must be 1..10');
-if (humain && !asr) throw new Error('--humain requires --asr');
 if (native && process.platform !== 'darwin') throw new Error('--native and --asr require macOS');
 
 const output = join(root, '.gym-results', `${new Date().toISOString().replaceAll(':', '-')}-${process.pid}`);
@@ -110,6 +109,9 @@ try {
     });
   }
   if (native) await check('native-build', async () => { await command('native-build', ['bash', 'scripts/build-native.sh']); });
+  if (humain) await check('humain-meeting-contract', async () => {
+    await command('humain-meeting-contract', [process.execPath, 'scripts/gym-humain.ts', humain!, join(output, 'humain-contract')]);
+  });
   if (asr) {
     const aiff = join(output, 'speech.aiff');
     const wav = join(output, 'speech.wav');
