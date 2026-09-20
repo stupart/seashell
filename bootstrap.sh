@@ -4,7 +4,13 @@ set -euo pipefail
 REPOSITORY_URL="${SEASHELL_REPOSITORY_URL:-https://github.com/stupart/seashell.git}"
 INSTALL_ROOT="${SEASHELL_INSTALL_DIR:-${HOME}/.local/share/seashell}"
 
-if ! command -v git &> /dev/null; then
+if [ "$(uname -s)" != Darwin ]; then
+    echo "Sea Shell requires macOS." >&2
+    exit 1
+fi
+
+# /usr/bin/git exists even on Macs without the Command Line Tools.
+if ! xcrun --find clang &> /dev/null || ! git --version &> /dev/null; then
     echo "Sea Shell needs Apple's Command Line Tools. Starting their installer..."
     xcode-select --install 2>/dev/null || true
     echo "Finish that macOS installation, then run this command again."

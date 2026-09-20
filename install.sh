@@ -9,6 +9,17 @@ echo ""
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
+REPAIR=0
+if [ "${1:-}" = --repair ]; then REPAIR=1; shift; fi
+if [ "$#" -ne 0 ]; then
+    echo "Usage: install.sh [--repair]" >&2
+    exit 1
+fi
+
+if [ "$(uname -s)" != Darwin ]; then
+    echo "Sea Shell requires macOS." >&2
+    exit 1
+fi
 
 # Install ordinary package dependencies when possible, so a normal Homebrew Mac
 # needs only this installer command.
@@ -22,6 +33,10 @@ check_command() {
 
 check_command "git" "Install git: xcode-select --install"
 check_command "xcrun" "Install the Xcode Command Line Tools: xcode-select --install"
+if ! xcrun --find clang &> /dev/null || ! xcrun --find swiftc &> /dev/null; then
+    echo "Install the Xcode Command Line Tools with xcode-select --install, then retry." >&2
+    exit 1
+fi
 
 if ! command -v bun &> /dev/null; then
     echo "Installing Bun..."
@@ -54,86 +69,46 @@ check_command "cmake" "Install cmake: brew install cmake"
 echo "All dependencies found."
 echo ""
 
-# Build the native macOS 14.2+ system-audio helper used by live meeting capture.
-SYSTEM_AUDIO_SOURCE="native/macos-system-audio.swift"
-SYSTEM_AUDIO_ATOMIC_SOURCE="native/seashell-atomic.c"
-SYSTEM_AUDIO_ATOMIC_HEADER="native/seashell-atomic.h"
-SYSTEM_AUDIO_BINARY="native/bin/seashell-system-audio"
-MEETING_SIGNALS_SOURCE="native/macos-meeting-signals.swift"
-MEETING_SIGNALS_BINARY="native/bin/seashell-meeting-signals"
-mkdir -p native/bin
-if [ ! -x "$SYSTEM_AUDIO_BINARY" ] || [ "$SYSTEM_AUDIO_SOURCE" -nt "$SYSTEM_AUDIO_BINARY" ] || \
-   [ "$SYSTEM_AUDIO_ATOMIC_SOURCE" -nt "$SYSTEM_AUDIO_BINARY" ] || \
-   [ "$SYSTEM_AUDIO_ATOMIC_HEADER" -nt "$SYSTEM_AUDIO_BINARY" ]; then
-    echo "Building native system-audio capture helper..."
-    ATOMIC_OBJECT="native/bin/seashell-atomic.o"
-    xcrun clang -std=c11 -O2 -c "$SYSTEM_AUDIO_ATOMIC_SOURCE" -o "$ATOMIC_OBJECT"
-    xcrun swiftc "$SYSTEM_AUDIO_SOURCE" "$ATOMIC_OBJECT" -O \
-        -import-objc-header "$SYSTEM_AUDIO_ATOMIC_HEADER" \
-        -framework AVFoundation \
-        -framework AudioToolbox \
-        -framework CoreAudio \
-        -o "$SYSTEM_AUDIO_BINARY"
-    rm -f "$ATOMIC_OBJECT"
+# The same native build runs during installation, updates, and the test gym.
+bash scripts/build-native.sh
+
+# Pin the backend so repeat installs do not silently change the ASR engine.
+WHISPER_REVISION="927cfce34f31707e17f2bff35c349632fb9e2c3a"
+if [ ! -d whisper.cpp ]; then
+    git clone --branch v1.9.4 --depth 1 https://github.com/ggml-org/whisper.cpp.git whisper.cpp
 fi
-
-if [ ! -x "$MEETING_SIGNALS_BINARY" ] || [ "$MEETING_SIGNALS_SOURCE" -nt "$MEETING_SIGNALS_BINARY" ]; then
-    echo "Building native meeting-signal helper..."
-    xcrun swiftc "$MEETING_SIGNALS_SOURCE" -O \
-        -framework AppKit \
-        -framework CoreAudio \
-        -o "$MEETING_SIGNALS_BINARY"
+if [ "$(git -C whisper.cpp rev-parse HEAD)" != "$WHISPER_REVISION" ]; then
+    if [ -n "$(git -C whisper.cpp status --porcelain --untracked-files=no)" ]; then
+        echo "whisper.cpp has local changes; preserve them before rerunning the installer." >&2
+        exit 1
+    fi
+    git -C whisper.cpp fetch --depth 1 origin "$WHISPER_REVISION"
+    git -C whisper.cpp checkout --detach "$WHISPER_REVISION"
 fi
+cmake -S whisper.cpp -B whisper.cpp/build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build whisper.cpp/build --config Release --parallel "$(sysctl -n hw.ncpu)" \
+    --target whisper-cli whisper-server
 
-echo "Native capture and meeting-signal helpers built successfully."
-echo ""
-
-# Clone and build whisper.cpp
-if [ ! -d "whisper.cpp" ]; then
-    echo "Cloning whisper.cpp..."
-    git clone https://github.com/ggerganov/whisper.cpp.git
-fi
-
-if [ ! -f "whisper.cpp/build/bin/whisper-cli" ]; then
-    echo "Building whisper.cpp with Metal support..."
-    cd whisper.cpp
-    cmake -B build -DGGML_METAL=ON
-    cmake --build build --config Release -j
-    cd ..
-fi
-
-echo "whisper.cpp built successfully."
-echo ""
-
-# Download models
-mkdir -p models
-mkdir -p whisper.cpp/models
-
-# Main transcription model
-if [ ! -f "models/ggml-large-v3-turbo-q5_0.bin" ]; then
-    echo "Downloading Whisper large-v3-turbo model (547MB)..."
-    curl -L -o models/ggml-large-v3-turbo-q5_0.bin \
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin"
-fi
-
-# VAD model for voice detection (check size - whisper.cpp has a tiny placeholder file)
-VAD_MODEL="whisper.cpp/models/ggml-silero-v6.2.0.bin"
-VAD_SIZE=$(stat -f%z "$VAD_MODEL" 2>/dev/null || echo "0")
-if [ "$VAD_SIZE" -lt 100000 ]; then
-    echo "Downloading Silero VAD model..."
-    curl -L -o "$VAD_MODEL" \
-        "https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin"
-fi
-
-echo "Models downloaded."
-echo ""
+# SHA-256 values are the publishers' LFS object IDs. Never trust presence alone.
+bash scripts/download-model.sh models/ggml-large-v3-turbo-q5_0.bin \
+    https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin \
+    394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2
+bash scripts/download-model.sh whisper.cpp/models/ggml-silero-v6.2.0.bin \
+    https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v6.2.0.bin \
+    2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987
 
 # Install Node dependencies
 echo "Installing dependencies..."
-bun install
+bun install --frozen-lockfile
 
 # Make seashell executable
 chmod +x seashell
+
+# Updates repair binaries/models/dependencies without changing login or PATH choices.
+if [ "$REPAIR" = 1 ]; then
+    echo "Sea Shell runtime repaired. Existing setup preserved."
+    exit 0
+fi
 
 # Create symlink for global access
 echo ""
@@ -144,7 +119,11 @@ BREW_BIN=""
 if command -v brew &> /dev/null; then
     BREW_BIN="$(brew --prefix)/bin"
 fi
-if [ -n "$BREW_BIN" ] && [ -d "$BREW_BIN" ] && [ -w "$BREW_BIN" ]; then
+if [ -n "${SEASHELL_BIN_DIR:-}" ]; then
+    mkdir -p "$SEASHELL_BIN_DIR"
+    ln -sf "$SCRIPT_DIR/seashell" "$SEASHELL_BIN_DIR/seashell"
+    echo "Installed to $SEASHELL_BIN_DIR/seashell"
+elif [ -n "$BREW_BIN" ] && [ -d "$BREW_BIN" ] && [ -w "$BREW_BIN" ]; then
     ln -sf "$SCRIPT_DIR/seashell" "$BREW_BIN/seashell"
     echo "Installed to $BREW_BIN/seashell"
 elif [ -w "/usr/local/bin" ]; then
