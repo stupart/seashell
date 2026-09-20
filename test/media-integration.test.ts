@@ -20,9 +20,11 @@ function fixtureDirectory(): string {
 }
 
 const hasFfmpeg = Boolean(Bun.which('ffmpeg') && Bun.which('ffprobe'));
+if (!hasFfmpeg && process.env.SEASHELL_REQUIRE_MEDIA_TESTS === '1') {
+  throw new Error('Media integration tests require ffmpeg and ffprobe on PATH');
+}
 
-test('extracts audio from a generated video into canonical mono PCM', async () => {
-  if (!hasFfmpeg) return;
+test.skipIf(!hasFfmpeg)('extracts audio from a generated video into canonical mono PCM', async () => {
   const directory = fixtureDirectory();
   const videoPath = join(directory, 'Meeting $(draft) FINAL.MP4');
   const generated = spawnSync('ffmpeg', [
@@ -52,8 +54,7 @@ test('extracts audio from a generated video into canonical mono PCM', async () =
   expect(existsSync(preparedDirectory)).toBe(false);
 }, 20_000);
 
-test('rejects a generated video that has no audio stream', async () => {
-  if (!hasFfmpeg) return;
+test.skipIf(!hasFfmpeg)('rejects a generated video that has no audio stream', async () => {
   const directory = fixtureDirectory();
   const videoPath = join(directory, 'silent-video.mp4');
   const generated = spawnSync('ffmpeg', [
