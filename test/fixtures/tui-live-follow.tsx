@@ -51,7 +51,9 @@ const app = render(<App />, {
   stdin: input as unknown as NodeJS.ReadStream,
   stdout: output as unknown as NodeJS.WriteStream,
   stderr: output as unknown as NodeJS.WriteStream,
-  patchConsole: false, exitOnCtrlC: false,
+  // Ink normally suppresses intermediate frames under CI. Keep them observable
+  // in this isolated stream renderer without changing the production UI.
+  debug: true, patchConsole: false, exitOnCtrlC: false,
 });
 const until = async (check: () => boolean) => {
   const deadline = Date.now() + 3000;

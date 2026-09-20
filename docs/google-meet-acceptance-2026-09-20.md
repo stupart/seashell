@@ -62,4 +62,19 @@ RC5's fresh installs passed on both
 [Apple Silicon and Intel](https://github.com/stupart/homebrew-tap/actions/runs/35495853970).
 The full-model formula transcription tests took 4m04s and 9m37s respectively on
 hosted runners. Intel remains a performance limitation, despite passing the
-correctness check. The newer reader/clock candidate is validated separately.
+correctness check.
+
+## Installed reader and clock fixes
+
+RC6 pins `b8e812c4213f51cb2953d750646b22326efab3d3`. The local RC5→RC6 upgrade,
+formula tests with real transcription, linkage, strict audit, and style passed.
+The installed app module is byte-identical to the tested source. The running
+RC4 terminal was preserved; reopening `seashell` selects the updated app.
+[Fresh RC6 installation CI](https://github.com/stupart/homebrew-tap/actions/runs/35497237067)
+tracks both architectures independently.
+
+The first source CI run exposed a fixture issue: Ink intentionally suppresses
+intermediate terminal frames under `CI=true`. Both reader tests reproduced that
+failure locally with `CI=true`. Enabling Ink's debug frame output only in the
+isolated fixture made the rendered frames observable, and both tests then
+passed under CI mode. The application code did not change in that follow-up.
