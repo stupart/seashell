@@ -10,16 +10,18 @@ const args = process.argv.slice(2);
 let rounds = 1;
 let native = false;
 let asr = false;
+let captureSoak = false;
 let humain: string | undefined;
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
   if (arg === '--') continue;
   if (arg === '--native') native = true;
+  else if (arg === '--capture-soak') captureSoak = true;
   else if (arg === '--asr') { asr = true; native = true; }
   else if (arg === '--rounds') rounds = Number(args[++i]);
   else if (arg === '--humain' && args[i + 1]) humain = resolve(args[++i]!);
   else if (arg === '--help') {
-    console.log('bun run gym [--rounds 1..10] [--native] [--asr] [--humain /path/to/dist/cli.js]');
+    console.log('bun run gym [--rounds 1..10] [--native] [--asr] [--capture-soak] [--humain /path/to/dist/cli.js]');
     process.exit(0);
   } else throw new Error(`Unknown or incomplete gym option: ${arg}`);
 }
@@ -38,7 +40,7 @@ const metadata = {
   bun: Bun.version, node: spawnSync('node', ['--version'], { encoding: 'utf8' }).stdout?.trim(),
   revision: spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout?.trim(),
   dirty: Boolean(spawnSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' }).stdout?.trim()),
-  requested: { rounds, native, asr, humain: Boolean(humain) },
+  requested: { rounds, native, asr, captureSoak, humain: Boolean(humain) },
 };
 function report() {
   writeFileSync(join(output, 'results.json'), JSON.stringify({ ...metadata, results }, null, 2) + '\n', { mode: 0o600 });
@@ -109,6 +111,9 @@ try {
     });
   }
   if (native) await check('native-build', async () => { await command('native-build', ['bash', 'scripts/build-native.sh']); });
+  if (captureSoak) await check('capture-storage-soak', async () => {
+    await command('capture-storage-soak', [process.execPath, 'scripts/gym-capture-soak.ts', join(output, 'capture-soak')], 180_000);
+  });
   if (humain) await check('humain-meeting-contract', async () => {
     await command('humain-meeting-contract', [process.execPath, 'scripts/gym-humain.ts', humain!, join(output, 'humain-contract')]);
   });

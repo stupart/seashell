@@ -12,6 +12,7 @@ bun install --frozen-lockfile
 brew install ffmpeg
 bun run gym
 bun run gym -- --rounds 3 --native
+bun run gym -- --capture-soak
 ```
 
 The gym requires FFmpeg instead of silently counting missing media tests as
@@ -36,8 +37,19 @@ The regression suite includes:
 - Login-agent configuration, private logs, and failed shutdown reporting.
 
 The macOS GitHub Actions workflow runs the default gym plus native compilation
-for each PR and keeps evidence for 14 days. It requires no private Humain repo,
+and the accelerated capture-storage exercise for each PR and keeps evidence for
+14 days. It requires no private Humain repo,
 model download, microphone, Calendar permission, or cloud credentials.
+
+`--capture-soak` accelerates a 90-minute, two-track capture clock through 1,079
+real WAV chunk commits (about 345 MB). It injects a stale projection and torn
+journal append, reopens the store, continues recording, then assembles both
+complete tracks and verifies 1,080 timeline samples including a deliberate
+10-second microphone gap. Metrics include commit-window latency, sampled RSS,
+CPU time, event-loop delay, and assembly time. Successful runs delete generated
+audio and retain metrics; failed runs retain the fixture for diagnosis. This
+tests storage and recovery under volume, not native devices or ASR throughput
+over 90 minutes of elapsed time.
 
 ## Real local ASR and Humain compatibility
 

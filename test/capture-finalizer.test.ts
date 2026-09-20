@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -16,6 +16,43 @@ function wav(directory: string, name: string, sample: number): string {
   for (let offset = 0; offset < pcm.length; offset += 2) pcm.writeInt16LE(sample, offset);
   writeFileSync(path, pcmS16leToWav(pcm));
   return path;
+}
+
+for (const boundary of ['local', 'remote'] as const) {
+  for (const damage of ['modified', 'truncated'] as const) {
+    test(`${boundary} finalization rejects ${damage} committed audio before producing a result`, async () => {
+      const root = mkdtempSync(join(tmpdir(), 'seashell-capture-integrity-'));
+      try {
+        const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'integrity', startedAtUnixMs: 1 });
+        store.commitChunk({ sourcePath: wav(root, 'good.wav', 100), trackId: 'microphone',
+          startSeconds: 0, endSeconds: 0.1, audible: true });
+        const chunk = store.commitChunk({ sourcePath: wav(root, 'damaged.wav', 200), trackId: 'microphone',
+          startSeconds: 0.1, endSeconds: 0.2, audible: true });
+        const data = readFileSync(chunk.path);
+        data[44] = data[44]! ^ 0xff;
+        writeFileSync(chunk.path, damage === 'truncated' ? data.subarray(0, data.length - 2) : data);
+        if (boundary === 'local') {
+          const output = join(root, 'assembled.wav');
+          expect(() => assembleCaptureTrack(store.manifestPath, store.manifest, 'microphone', output))
+            .toThrow('Capture chunk integrity check failed');
+          expect(existsSync(output)).toBe(false);
+          expect(existsSync(`${output}.partial`)).toBe(false);
+        } else {
+          let calls = 0;
+          await expect(finalizeCaptureTranscript(store.manifestPath, {
+            remoteRoute: { model: 'fixture', uploadConsent: true },
+            remoteTranscriber: async () => {
+              calls += 1;
+              return { runId: 'fixture', compiledRunId: 'fixture', status: 'succeeded', receipt: {},
+                output: { provider: { boundary: 'remote', model: 'fixture' }, segments: [] } };
+            },
+          })).rejects.toThrow('Capture chunk integrity check failed');
+          expect(calls).toBe(0);
+        }
+        expect(existsSync(chunk.path)).toBe(true);
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    });
+  }
 }
 
 test('capture finalizer assembles chunks on their session clock and preserves gaps', () => {

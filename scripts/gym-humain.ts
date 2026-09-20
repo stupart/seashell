@@ -17,6 +17,12 @@ writeFileSync(join(bin, 'package.json'), '{"type":"commonjs"}\n', { mode: 0o600 
 const node = Bun.which('node');
 if (!node) throw new Error('Node is required for the Humain contract gym');
 symlinkSync(node, join(bin, 'node'));
+// Preserve Node's real module resolution while giving the CLI an empty project
+// cwd, so the sibling checkout's .env/.env.local cannot affect the fixture.
+const isolatedDist = join(root, 'engine', 'dist');
+mkdirSync(isolatedDist, { recursive: true, mode: 0o700 });
+const isolatedCli = join(isolatedDist, 'cli.js');
+symlinkSync(cli, isolatedCli);
 const calls = join(root, 'provider-calls.jsonl');
 writeFileSync(calls, '', { mode: 0o600 });
 writeFileSync(join(bin, 'codex'), `#!${node}
@@ -40,7 +46,7 @@ else if (args[0] === 'exec') {
 // Isolate executable discovery. The stub's absolute Node shebang avoids a
 // fallback to installed Codex, and no ambient API credential is passed onward.
 const env: NodeJS.ProcessEnv = Object.fromEntries(Object.keys(process.env).map((key) => [key, undefined]));
-Object.assign(env, { PATH: bin, HUMAIN_CLI: cli, TMPDIR: root });
+Object.assign(env, { PATH: bin, HUMAIN_CLI: isolatedCli, TMPDIR: root });
 const count = () => readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean).length;
 const request = { meetingId: 'gym-contract', backend: 'codex', model: 'fixture/success',
   segments: [{ id: 's000001', start: 0, end: 1, text: 'We will ship Friday.' }],
