@@ -179,7 +179,7 @@ function captureRoot(libraryDir: string): string {
 }
 
 function sessionRoot(libraryDir: string, sessionId: string): string {
-  if (!/^[A-Za-z0-9._-]+$/.test(sessionId)) throw new Error('Capture session ID is unsafe');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(sessionId)) throw new Error('Capture session ID is unsafe');
   return join(captureRoot(libraryDir), sessionId);
 }
 
@@ -285,7 +285,11 @@ export function loadCaptureSession(path: string): CaptureSessionManifest {
   const journalPath = join(root, 'events.jsonl');
   if (!existsSync(journalPath)) return projected;
   let manifest = projected;
-  const events = readFileSync(journalPath, 'utf8').split('\n').filter(Boolean)
+  const journal = readFileSync(journalPath, 'utf8');
+  // Only newline-terminated records were fully appended. A torn tail must not
+  // hide prior committed audio; corruption inside committed records still fails.
+  const committed = journal.slice(0, journal.lastIndexOf('\n') + 1);
+  const events = committed.split('\n').filter(Boolean)
     .map((line) => parseEvent(line, journalPath));
   for (const event of events) {
     if (event.type === 'chunk.committed' && !manifest.chunks.some((chunk) => chunk.id === event.chunk.id)) {
@@ -344,6 +348,17 @@ export class CaptureSessionStore {
     this.journalPath = join(this.root, 'events.jsonl');
     if (existsSync(this.manifestPath)) {
       this.manifestValue = loadCaptureSession(this.manifestPath);
+      if (existsSync(this.journalPath)) {
+        const journal = readFileSync(this.journalPath);
+        const committedBytes = journal.lastIndexOf(0x0a) + 1;
+        if (committedBytes < journal.length) {
+          // Preserve incomplete bytes for inspection before allowing new appends.
+          writeFileSync(`${this.journalPath}.partial-${randomUUID()}`, journal.subarray(committedBytes), {
+            mode: 0o600, flag: 'wx',
+          });
+          atomicWrite(this.journalPath, journal.subarray(0, committedBytes).toString('utf8'));
+        }
+      }
       return;
     }
     mkdirSync(join(this.root, 'tracks', 'microphone'), { recursive: true, mode: 0o700 });

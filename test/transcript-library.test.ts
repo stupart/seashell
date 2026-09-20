@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readdirSync, rmSync, statSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { resolveLibraryDir } from '../src/config.ts';
 import {
   findTranscriptRecord,
@@ -50,6 +50,26 @@ function record() {
 }
 
 describe('transcript library', () => {
+  test('a corrupt unrelated transcript does not block opening or exporting healthy records', () => {
+    const root = temporaryDirectory();
+    const saved = saveTranscriptRecord(root, record());
+    saveTranscriptRecord(root, { ...record(), id: 'second-record' });
+    const dateDir = dirname(saved.directory);
+    const [first, second] = readdirSync(dateDir);
+    writeFileSync(join(dateDir, first!, 'transcript.json'), '{broken');
+    const healthy = JSON.parse(readFileSync(join(dateDir, second!, 'transcript.json'), 'utf8'));
+    expect(findTranscriptRecord(root, healthy.id).record.id).toBe(healthy.id);
+    expect(writeTranscriptExport(root, healthy.id, 'srt')).toEndWith('.srt');
+  });
+
+  test('transcript IDs cannot escape the library directory', () => {
+    const root = join(temporaryDirectory(), 'library');
+    mkdirSync(root);
+    expect(() => saveTranscriptRecord(root, { ...record(), id: '../../../../outside' }))
+      .toThrow('Transcript ID');
+    expect(readdirSync(root)).toEqual([]);
+  });
+
   test('atomically saves canonical JSON plus a readable transcript', () => {
     const root = temporaryDirectory();
     const saved = saveTranscriptRecord(root, record());

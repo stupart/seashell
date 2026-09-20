@@ -42,6 +42,10 @@ function slugify(value: string): string {
     .slice(0, 60) || 'transcript';
 }
 
+function assertTranscriptId(id: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id)) throw new Error('Transcript ID is unsafe');
+}
+
 function localDateKey(isoTimestamp: string): string {
   const date = new Date(isoTimestamp);
   if (Number.isNaN(date.getTime())) throw new Error(`Invalid transcript date: ${isoTimestamp}`);
@@ -130,6 +134,7 @@ export function parseTranscriptRecord(value: unknown, path = 'transcript.json'):
   if (!validSegments || !validSpeakers) {
     throw new Error(`${path} contains invalid transcript segments or speakers`);
   }
+  assertTranscriptId(record.id);
   return record as TranscriptRecord;
 }
 
@@ -156,6 +161,7 @@ export function saveTranscriptRecord(
   libraryDir: string,
   record: TranscriptRecord,
 ): SavedTranscript {
+  assertTranscriptId(record.id);
   const existingPath = existingRecordPath(libraryDir, record.id);
   const date = localDateKey(record.createdAt);
   const directory = existingPath
@@ -206,8 +212,12 @@ export function findTranscriptRecord(
   id: string,
 ): { path: string; record: TranscriptRecord } {
   for (const path of transcriptJsonPaths(libraryDir)) {
-    const record = loadTranscriptPath(path);
-    if (record.id === id) return { path, record };
+    try {
+      const record = loadTranscriptPath(path);
+      if (record.id === id) return { path, record };
+    } catch {
+      // Match listing/search behavior: unrelated damaged records stay on disk.
+    }
   }
   throw new Error(`Transcript not found: ${id}`);
 }

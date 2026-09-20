@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, writeFileSync } from 'fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -8,6 +8,33 @@ import {
   loadCaptureSession,
 } from '../src/capture-session.ts';
 import { pcmS16leToWav } from '../src/live-system-audio.ts';
+
+test('dot-segment capture IDs cannot escape their session directory', () => {
+  for (const sessionId of ['.', '..', '../outside']) {
+    expect(() => new CaptureSessionStore({ libraryDir: '/unused', sessionId, startedAtUnixMs: 1 }))
+      .toThrow('Capture session ID is unsafe');
+  }
+});
+
+test('an interrupted final journal write does not hide committed capture audio', () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-torn-journal-'));
+  try {
+    const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'torn', startedAtUnixMs: 1 });
+    store.commitChunk({ sourcePath: fixtureWav(root, 'chunk.wav'), trackId: 'microphone',
+      startSeconds: 0, endSeconds: 1, audible: true });
+    const journal = join(store.root, 'events.jsonl');
+    appendFileSync(journal, '{"type":"chunk.commi');
+    expect(loadCaptureSession(store.manifestPath).chunks).toHaveLength(1);
+    expect(listRecoverableCaptureSessions(root)).toHaveLength(1);
+    const recovered = new CaptureSessionStore({ libraryDir: root, sessionId: 'torn', startedAtUnixMs: 1 });
+    recovered.setStatus('captured', 'recovered');
+    expect(loadCaptureSession(store.manifestPath).chunks).toHaveLength(1);
+    expect(loadCaptureSession(store.manifestPath).status).toBe('captured');
+    // A newline-terminated corrupt event is a different failure; do not hide it.
+    appendFileSync(journal, '{broken}\n');
+    expect(() => loadCaptureSession(store.manifestPath)).toThrow();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 function fixtureWav(directory: string, name: string): string {
   const path = join(directory, name);
