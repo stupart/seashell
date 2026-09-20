@@ -261,7 +261,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const liveRecordRef = useRef(liveRecord);
   const liveMeetingRef = useRef<MeetingArtifact | null>(null);
   const observerActiveRef = useRef(false);
-  const liveSessionStartedAt = useRef(Date.now());
+  const liveSessionStartedAt = useRef<number | null>(null);
   const calendarSuggestionRef = useRef<MeetingCalendarEvent | null>(null);
   const meetingAutomationController = useRef(new MeetingAutomationController(meetingAutomation));
   const meetingSignalFailure = useRef<string | null>(null);
@@ -466,6 +466,23 @@ export default function App(props: { libraryDir?: string } = {}) {
     });
   }, [appendLiveSegment, cleanupFile, config.transcription, libraryRoot]);
 
+  const ensureLiveSessionStartedAt = useCallback(() => {
+    if (liveSessionStartedAt.current === null) {
+      const startedAt = Date.now();
+      const now = new Date(startedAt);
+      liveSessionStartedAt.current = startedAt;
+      const record = {
+        ...liveRecordRef.current,
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        title: liveMeetingRef.current ? liveRecordRef.current.title : liveTitle(now),
+      };
+      liveRecordRef.current = record;
+      setLiveRecord(record);
+    }
+    return liveSessionStartedAt.current;
+  }, []);
+
   const ensureCaptureStore = useCallback((generation: number) => {
     if (generation !== liveSessionGeneration.current) return null;
     if (
@@ -475,12 +492,12 @@ export default function App(props: { libraryDir?: string } = {}) {
       captureSessionStore.current = new CaptureSessionStore({
         libraryDir: libraryRoot,
         sessionId: liveRecordRef.current.id,
-        startedAtUnixMs: liveSessionStartedAt.current,
+        startedAtUnixMs: ensureLiveSessionStartedAt(),
         createdAt: liveRecordRef.current.createdAt,
       });
     }
     return captureSessionStore.current;
-  }, [libraryRoot]);
+  }, [ensureLiveSessionStartedAt, libraryRoot]);
 
   const persistLiveChunk = useCallback((options: {
     path: string;
@@ -518,7 +535,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     const generation = liveSessionGeneration.current;
     const capture = startSystemAudioCapture({
       startAfter: microphoneCapture.current?.startup,
-      sessionStartedAtUnixMs: liveSessionStartedAt.current,
+      sessionStartedAtUnixMs: ensureLiveSessionStartedAt(),
       onChunk: (chunk) => {
         void persistLiveChunk({ ...chunk, generation }).then((committed) => {
           if (!committed || !chunk.audible) return;
@@ -556,14 +573,14 @@ export default function App(props: { libraryDir?: string } = {}) {
       },
     });
     systemAudioCapture.current = capture;
-  }, [ensureCaptureStore, persistLiveChunk, systemAudioDisabled, transcribeLiveChunk]);
+  }, [ensureCaptureStore, ensureLiveSessionStartedAt, persistLiveChunk, systemAudioDisabled, transcribeLiveChunk]);
 
   const startListener = useCallback(() => {
     if (listenerDisabled || isExiting.current || pausedRef.current) return;
     microphoneCapture.current?.stop();
     const sessionGeneration = liveSessionGeneration.current;
     const capture = startMicrophoneCapture({
-      sessionStartedAtUnixMs: liveSessionStartedAt.current,
+      sessionStartedAtUnixMs: ensureLiveSessionStartedAt(),
       onChunk: (chunk) => {
         void persistLiveChunk({ ...chunk, generation: sessionGeneration }).then((committed) => {
           if (!committed || !chunk.audible) return;
@@ -588,7 +605,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       },
     });
     microphoneCapture.current = capture;
-  }, [listenerDisabled, persistLiveChunk, transcribeLiveChunk]);
+  }, [ensureLiveSessionStartedAt, listenerDisabled, persistLiveChunk, transcribeLiveChunk]);
 
   useEffect(() => {
     if (listenerDisabled) return;
@@ -1188,7 +1205,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       liveSessionGeneration.current += 1;
       const next = createLiveRecord();
       liveRecordRef.current = next;
-      liveSessionStartedAt.current = Date.now();
+      liveSessionStartedAt.current = null;
       setLiveRecord(next);
       liveMeetingRef.current = null;
       setLiveMeeting(null);
@@ -1215,6 +1232,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       captureSessionStore.current !== null
     );
     if (needsFreshSession) await resetLiveSession();
+    ensureLiveSessionStartedAt();
     const base = liveRecordRef.current;
     const record: TranscriptRecord = {
       ...base,
@@ -1243,6 +1261,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     if (pausedRef.current) setListeningPaused(false);
   }, [
     config.meeting,
+    ensureLiveSessionStartedAt,
     libraryRoot,
     refreshLibrary,
     resetLiveSession,
