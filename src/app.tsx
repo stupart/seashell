@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Box, Text, useApp, useInput } from 'ink';
+import { Box, Text, measureElement, useApp, useInput, type DOMElement } from 'ink';
 import { execFileSync, spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { existsSync, statSync, unlinkSync } from 'fs';
@@ -239,6 +239,14 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [selectionIndex, setSelectionIndex] = useState(0);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [transcriptScroll, setTranscriptScroll] = useState(0);
+  const [followLiveTranscript, setFollowLiveTranscript] = useState(true);
+  const transcriptPaneRef = useRef<DOMElement>(null);
+  const [transcriptContentRows, setTranscriptContentRows] = useState<number>();
+  useEffect(() => {
+    if (!transcriptPaneRef.current) return;
+    const rows = Math.max(1, Math.floor(measureElement(transcriptPaneRef.current).height) - 4);
+    setTranscriptContentRows((previous) => previous === rows ? previous : rows);
+  });
   const [showTimestamps, setShowTimestamps] = useState(true);
   const [showSpeakers, setShowSpeakers] = useState(true);
   const [speakerSelection, setSpeakerSelection] = useState(0);
@@ -330,6 +338,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   }, []);
 
   const appendLiveSegment = useCallback((segment: TranscriptRecord['transcript'][number]) => {
+    if (!/[\p{L}\p{N}]/u.test(segment.text)) return;
     const current = liveRecordRef.current;
     const nextSpeakers = segment.speaker && !current.speakers.some(
       (speaker) => speaker.id === segment.speaker,
@@ -729,6 +738,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     if (!item) return;
     if (item.kind === 'live') {
       setView('live');
+      setFollowLiveTranscript(true);
       setTranscriptScroll(0);
       setError(null);
       return;
@@ -766,16 +776,21 @@ export default function App(props: { libraryDir?: string } = {}) {
       ? 3
       : 2;
   const visibleRows = Math.max(
-    2,
-    Math.floor(layout.visibleTranscriptRows / segmentRowEstimate),
+    1,
+    Math.floor((transcriptContentRows ?? layout.visibleTranscriptRows) / segmentRowEstimate),
   );
   const sidebarStart = Math.max(
     0,
     selectionIndex - layout.visibleLibraryItems + 1,
   );
+  const showingLiveTranscript = view === 'live' && meetingView === 'transcript';
+  const latestTranscriptScroll = Math.max(0, displaySegments.length - visibleRows);
+  const visibleTranscriptScroll = showingLiveTranscript && followLiveTranscript
+    ? latestTranscriptScroll
+    : Math.min(transcriptScroll, latestTranscriptScroll);
   const visibleSegments = displaySegments.slice(
-    transcriptScroll,
-    transcriptScroll + visibleRows,
+    visibleTranscriptScroll,
+    visibleTranscriptScroll + visibleRows,
   );
   const selectedSpeaker = currentRecord?.speakers[speakerSelection];
   const configuredMeetingRoutes = useMemo(() => ({
@@ -808,9 +823,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       setMeetingView('transcript');
       setCalendarSuggestion(null);
       refreshLibrary();
-      setNotice(calendar
-        ? `Meeting attached: ${calendar.title}.`
-        : 'Marked as a meeting. The base transcript remains independent.');
+      setNotice(calendar ? `Meeting attached: ${calendar.title}.` : null);
     } catch (meetingError) {
       setError(meetingError instanceof Error ? meetingError.message : String(meetingError));
     }
@@ -1148,6 +1161,14 @@ export default function App(props: { libraryDir?: string } = {}) {
   const scrollVisibleRows = currentMeeting && meetingView !== 'transcript'
     ? layout.visibleTranscriptRows
     : visibleRows;
+  const scrollTranscriptBy = (delta: number) => {
+    const next = moveTranscriptScroll(
+      meetingView === 'transcript' ? visibleTranscriptScroll : transcriptScroll,
+      delta, scrollItemCount, scrollVisibleRows,
+    );
+    setTranscriptScroll(next);
+    if (showingLiveTranscript) setFollowLiveTranscript(next >= latestTranscriptScroll);
+  };
 
   const copyCurrentTranscript = useCallback(() => {
     if (!currentRecord) return;
@@ -1212,6 +1233,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       setMeetingView('transcript');
       setTranscriptScroll(0);
       setNotice('Started a fresh live transcript.');
+      setFollowLiveTranscript(true);
       setMicrophoneLevel(null);
       setSystemAudioLevel(null);
       if (resumeCapture) {
@@ -1255,8 +1277,9 @@ export default function App(props: { libraryDir?: string } = {}) {
     setMeetingView('transcript');
     setHistoryOpen(false);
     setAutomaticCandidate(null);
+    setFollowLiveTranscript(true);
     setError(null);
-    setNotice(`Recording ${candidate.title} automatically.`);
+    setNotice(null);
     refreshLibrary();
     if (pausedRef.current) setListeningPaused(false);
   }, [
@@ -1528,6 +1551,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     if (input === 'l') {
       setView('live');
       setMeetingView('transcript');
+      setFollowLiveTranscript(true);
       setHistoryOpen(false);
       setSelectionIndex(0);
       setTranscriptScroll(0);
@@ -1575,6 +1599,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     if (currentMeeting && input >= '1' && input <= '4') {
       const views: MeetingView[] = ['notes', 'transcript', 'analysis', 'chat'];
       setMeetingView(views[Number(input) - 1]!);
+      if (input === '2') setFollowLiveTranscript(true);
       setTranscriptScroll(0);
       setError(null);
       setNotice(null);
@@ -1640,12 +1665,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         setSelectionIndex(next);
         showNavigationItem(navigationItems[next]);
       } else {
-        setTranscriptScroll((scroll) => moveTranscriptScroll(
-          scroll,
-          -1,
-          scrollItemCount,
-          scrollVisibleRows,
-        ));
+        scrollTranscriptBy(-1);
       }
       return;
     }
@@ -1655,12 +1675,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         setSelectionIndex(next);
         showNavigationItem(navigationItems[next]);
       } else {
-        setTranscriptScroll((scroll) => moveTranscriptScroll(
-          scroll,
-          1,
-          scrollItemCount,
-          scrollVisibleRows,
-        ));
+        scrollTranscriptBy(1);
       }
       return;
     }
@@ -1675,12 +1690,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         showNavigationItem(navigationItems[next]);
         return;
       }
-      setTranscriptScroll((scroll) => moveTranscriptScroll(
-        scroll,
-        -scrollVisibleRows,
-        scrollItemCount,
-        scrollVisibleRows,
-      ));
+      scrollTranscriptBy(-scrollVisibleRows);
       return;
     }
     if (key.pageDown) {
@@ -1694,12 +1704,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         showNavigationItem(navigationItems[next]);
         return;
       }
-      setTranscriptScroll((scroll) => moveTranscriptScroll(
-        scroll,
-        scrollVisibleRows,
-        scrollItemCount,
-        scrollVisibleRows,
-      ));
+      scrollTranscriptBy(scrollVisibleRows);
       return;
     }
     if (key.return && historyOpen) {
@@ -1726,7 +1731,9 @@ export default function App(props: { libraryDir?: string } = {}) {
       : '[↑↓] Browse  [ENTER] Open  [/] Search  [H/ESC] Close'
     : currentMeeting
       ? view === 'live'
-        ? `[SPACE] ${paused ? 'Record' : 'Pause'}  [A] Ask  [G] Finish  [H] History  [?] Help  [Q] Quit`
+        ? terminal.columns < 56
+          ? `[SPC] ${paused ? 'Record' : 'Pause'} [G] Finish [H] History [Q] Quit`
+          : `[SPACE] ${paused ? 'Record' : 'Pause'}  [A] Ask  [G] Finish  [H] History  [?] Help  [Q] Quit`
         : '[A] Ask  [G] Enrich  [H] History  [?] Help  [Q] Quit'
     : view === 'live'
       ? terminal.columns < 56
@@ -1793,6 +1800,7 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   const transcriptPane = (
     <Box
+      ref={transcriptPaneRef}
       flexGrow={1}
       minWidth={0}
       flexDirection="column"
@@ -1931,7 +1939,7 @@ export default function App(props: { libraryDir?: string } = {}) {
             <Text color={microphoneState === 'active' ? 'green' : 'yellow'}>
               {microphoneState === 'starting' ? 'starting…' : microphoneState === 'active' ? levelMeter(microphoneLevel) : microphoneState}
             </Text>
-            <Text dimColor>  Computer audio </Text>
+            <Text dimColor>{terminal.columns < 56 ? '  Computer ' : '  Computer audio '}</Text>
             <Text color={systemAudioState === 'active' || systemAudioState === 'ready' ? 'cyan' : 'yellow'}>
               {systemAudioState === 'starting' ? 'starting…' : systemAudioState === 'active' ? levelMeter(systemAudioLevel) : systemAudioState}
             </Text>
@@ -1941,18 +1949,22 @@ export default function App(props: { libraryDir?: string } = {}) {
 
       {currentMeeting && !drawerOnly && (
         <Box marginBottom={1} flexShrink={0}>
-          {([
-            ['notes', '1 Notes'],
-            ['transcript', '2 Transcript'],
-            ['analysis', '3 Analysis'],
-            ['chat', '4 Chat'],
-          ] as Array<[MeetingView, string]>).map(([candidate, label], index) => (
-            <React.Fragment key={candidate}>
-              {index > 0 && <Text dimColor>  </Text>}
-              <Text inverse={meetingView === candidate}>{` ${label} `}</Text>
-            </React.Fragment>
-          ))}
-          <Text dimColor>  {currentMeeting.status[0]!.toUpperCase() + currentMeeting.status.slice(1)}</Text>
+          <Text>
+            {([
+              ['notes', '1 Notes'],
+              ['transcript', terminal.columns < 56 ? '2 Text' : '2 Transcript'],
+              ['analysis', '3 Analysis'],
+              ['chat', '4 Chat'],
+            ] as Array<[MeetingView, string]>).map(([candidate, label], index) => (
+              <React.Fragment key={candidate}>
+                {index > 0 && <Text dimColor>  </Text>}
+                <Text inverse={meetingView === candidate}>{` ${label} `}</Text>
+              </React.Fragment>
+            ))}
+            {currentMeeting.status !== 'base-only' && (
+              <Text dimColor>  {currentMeeting.status[0]!.toUpperCase() + currentMeeting.status.slice(1)}</Text>
+            )}
+          </Text>
         </Box>
       )}
 
@@ -1962,6 +1974,9 @@ export default function App(props: { libraryDir?: string } = {}) {
       </Box>
 
       <Box flexDirection="column" marginTop={1} flexShrink={0}>
+        {showingLiveTranscript && !followLiveTranscript && !historyOpen && (
+          <Text dimColor>Reading earlier text · [L] Latest</Text>
+        )}
         {chatInputState ? (
           <Text color="yellow">Ask: {chatInputState.input}█  [Enter send · Esc cancel]</Text>
         ) : renameState ? (
