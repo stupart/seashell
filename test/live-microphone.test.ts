@@ -2,6 +2,22 @@ import { expect, test } from 'bun:test';
 import { readFileSync } from 'fs';
 import { startMicrophoneCapture } from '../src/live-microphone.ts';
 
+test('a microphone that produces no PCM reports guidance and can recover after access is granted', async () => {
+  const states: Array<{ state: string; code?: string; message?: string }> = [];
+  const handle = startMicrophoneCapture({
+    sessionStartedAtUnixMs: Date.now(), startupTimeoutMs: 50,
+    command: process.execPath,
+    commandArgs: ['-e', 'setTimeout(()=>process.stdout.write(Buffer.alloc(3200)),200); setInterval(()=>{},1000)'],
+    onState: (state) => states.push(state), onChunk: (chunk) => { void Bun.file(chunk.path).delete(); },
+  });
+  try {
+    await handle.startup;
+    expect(states.map((state) => state.code)).toContain('microphone_no_audio');
+    expect(states.find((state) => state.code)?.message).toContain('Privacy & Security');
+    expect(states.at(-1)?.state).toBe('active');
+  } finally { handle.stop(); await handle.done; }
+});
+
 test('microphone controller exposes a stoppable continuous capture lifecycle', async () => {
   const states: string[] = [];
   const chunks: string[] = [];

@@ -108,33 +108,41 @@ export function startDurableLiveCapture(
     });
   }
   if (options.systemAudio !== false) {
-    systemAudio = (options.systemAudioStarter ?? startSystemAudioCapture)({
-      sessionStartedAtUnixMs: startedAt.getTime(),
-      ...(options.chunkMilliseconds === undefined ? {} : { chunkMilliseconds: options.chunkMilliseconds }),
-      onChunk: (chunk) => commit({
-        sourcePath: chunk.path,
-        trackId: 'system-audio',
-        startSeconds: chunk.startSeconds,
-        endSeconds: chunk.endSeconds,
-        audible: chunk.audible,
-        clock: chunk.clock,
-      }),
-      onDiscontinuity: (event) => {
-        void store.recordDiscontinuityAsync({
+    try {
+      systemAudio = (options.systemAudioStarter ?? startSystemAudioCapture)({
+        startAfter: microphone?.startup,
+        sessionStartedAtUnixMs: startedAt.getTime(),
+        ...(options.chunkMilliseconds === undefined ? {} : { chunkMilliseconds: options.chunkMilliseconds }),
+        onChunk: (chunk) => commit({
+          sourcePath: chunk.path,
           trackId: 'system-audio',
-          atSeconds: event.atFrame / LIVE_CAPTURE_SAMPLE_RATE,
-          durationSeconds: event.durationFrames / LIVE_CAPTURE_SAMPLE_RATE,
-          reason: event.reason,
-        }).catch(fail);
-      },
-      onLevel: (level) => { systemAudioLevel = level; status(); },
-      onState: (update) => {
-        systemAudioState = update.state;
-        // System audio is optional at runtime; mic-only capture remains useful.
-        if (update.state === 'unavailable' && update.message) options.onError?.(new Error(update.message));
-        status();
-      },
-    });
+          startSeconds: chunk.startSeconds,
+          endSeconds: chunk.endSeconds,
+          audible: chunk.audible,
+          clock: chunk.clock,
+        }),
+        onDiscontinuity: (event) => {
+          void store.recordDiscontinuityAsync({
+            trackId: 'system-audio',
+            atSeconds: event.atFrame / LIVE_CAPTURE_SAMPLE_RATE,
+            durationSeconds: event.durationFrames / LIVE_CAPTURE_SAMPLE_RATE,
+            reason: event.reason,
+          }).catch(fail);
+        },
+        onLevel: (level) => { systemAudioLevel = level; status(); },
+        onState: (update) => {
+          systemAudioState = update.state;
+          // System audio is optional at runtime; mic-only capture remains useful.
+          if (update.state === 'unavailable' && update.message) options.onError?.(new Error(update.message));
+          status();
+        },
+      });
+    } catch (error) {
+      // System audio is optional; keep the microphone handle reachable so it
+      // can flush its final chunk and stop normally after a startup failure.
+      systemAudioState = 'unavailable';
+      options.onError?.(error instanceof Error ? error : new Error(String(error)));
+    }
   }
   status();
 

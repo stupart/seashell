@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import type { ChildProcess } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -21,6 +21,48 @@ function fixture(root: string, name: string): string {
   writeFileSync(path, pcmS16leToWav(Buffer.alloc(32_000, 1)));
   return path;
 }
+
+test('a throwing optional audio starter preserves ownership of the microphone and its final chunk', async () => {
+  const libraryDir = mkdtempSync(join(tmpdir(), 'seashell-start-fault-'));
+  roots.push(libraryDir);
+  const microphone = spawn('/bin/sleep', ['30'], { stdio: 'ignore' });
+  const done = new Promise<void>((resolve) => microphone.once('close', () => resolve()));
+  const warnings: string[] = [];
+  let stops = 0;
+  try {
+    const handle = startDurableLiveCapture({
+      libraryDir,
+      sessionId: 'startup-fault',
+      microphoneStarter: (options) => ({
+        process: microphone,
+        done,
+        stop() {
+          stops++;
+          options.onChunk({
+            path: fixture(libraryDir, 'last-mic.wav'), startSeconds: 0, endSeconds: 1,
+            sequence: 1, source: 'microphone', audible: true,
+            level: { rms: 0.1, peak: 0.2, rmsDbfs: -20 },
+            clock: { kind: 'process-start-estimate', originUnixMs: Date.now(),
+              sampleRate: 16_000, uncertaintyMs: 2 },
+          });
+          microphone.kill('SIGTERM');
+        },
+      }),
+      systemAudioStarter: () => { throw new Error('helper launch failed'); },
+      onError: (error) => warnings.push(error.message),
+    });
+    const manifest = await handle.stop();
+    expect(stops).toBe(1);
+    expect(microphone.signalCode).toBe('SIGTERM');
+    expect(manifest.chunks).toHaveLength(1);
+    expect(manifest.chunks[0]?.trackId).toBe('microphone');
+    expect(manifest.status).toBe('captured');
+    expect(warnings).toEqual(['helper launch failed']);
+  } finally {
+    if (microphone.exitCode === null && microphone.signalCode === null) microphone.kill('SIGKILL');
+    await done;
+  }
+});
 
 test('durably drains both capture tracks and clock discontinuities before stop resolves', async () => {
   const libraryDir = mkdtempSync(join(tmpdir(), 'seashell-durable-library-'));

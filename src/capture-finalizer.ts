@@ -13,6 +13,7 @@ import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
 import {
   captureChunkPath,
+  type CaptureSessionStore,
   loadCaptureSession,
   readVerifiedCaptureChunk,
   type CaptureSessionManifest,
@@ -22,6 +23,7 @@ import { seashellCapabilityManifest } from './capabilities.ts';
 import { isLikelySystemAudioLeak } from './live-echo.ts';
 import { pcmS16leToWav } from './live-system-audio.ts';
 import { createTranscriptRecord } from './transcript-record.ts';
+import { saveTranscriptRecord } from './transcript-library.ts';
 import { coalesceTranscriptSegments } from './transcript-renderer.ts';
 import type {
   StructuredTranscript,
@@ -176,6 +178,28 @@ export interface FinalizeCaptureOptions {
   readonly remoteRoute?: HumainTranscriptionRoute;
   /** Test/provider seam. Production defaults to the Humain CLI boundary. */
   readonly remoteTranscriber?: typeof runHumainTranscription;
+}
+
+/** A stopped draft queue is not a complete transcript. Publish only a canonical
+ * pass over the durable audio, or a canonical record already produced by the
+ * meeting flow. Failures leave the bundle in the recoverable capture store. */
+export async function saveFinalizedCapture(
+  store: CaptureSessionStore,
+  libraryDir: string,
+  reason: string,
+  options: FinalizeCaptureOptions & { readonly finalizedRecord?: TranscriptRecord } = {},
+): Promise<TranscriptRecord> {
+  try {
+    await store.drainCommits();
+    const record = options.finalizedRecord ?? await finalizeCaptureTranscript(store.manifestPath, options);
+    const saved = saveTranscriptRecord(libraryDir, record);
+    store.setStatus('completed', reason);
+    store.attachTo(saved.directory);
+    return record;
+  } catch (error) {
+    store.setStatus('interrupted', 'finalization-failed');
+    throw error;
+  }
 }
 
 async function remoteTrackSegments(

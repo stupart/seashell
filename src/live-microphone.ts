@@ -34,11 +34,15 @@ export interface StartMicrophoneOptions {
   /** Test/development override; production uses the fixed SoX command below. */
   readonly command?: string;
   readonly commandArgs?: readonly string[];
+  /** Deadline for reporting a source that never supplies PCM. */
+  readonly startupTimeoutMs?: number;
 }
 
 export interface MicrophoneCaptureHandle {
   readonly process: ChildProcess;
   readonly done: Promise<void>;
+  /** Settles when the input opens or fails, so CoreAudio sources open in order. */
+  readonly startup?: Promise<void>;
   stop(): void;
 }
 
@@ -59,6 +63,13 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
   let failure: string | undefined;
   let resolveDone: () => void = () => {};
   const done = new Promise<void>((resolve) => { resolveDone = resolve; });
+  let settleStartup = () => {};
+  const startup = new Promise<void>((resolve) => { settleStartup = resolve; });
+  const startupTimer = setTimeout(() => {
+    options.onState({ state: 'starting', code: 'microphone_no_audio',
+      message: 'No microphone audio received. Check System Settings → Privacy & Security → Microphone for your terminal app, and Sound → Input. Then press Space twice to retry.' });
+  }, options.startupTimeoutMs ?? 8_000);
+  startupTimer.unref();
 
   const publish = (chunk: ReturnType<PcmS16leChunker['flush']>) => {
     if (!chunk || clock === undefined) return;
@@ -106,6 +117,8 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
   child.stderr?.on('data', (data: Buffer) => { stderr = (stderr + data.toString()).slice(-2_000); });
   child.stdout?.on('data', (data: Buffer) => {
     if (clock === undefined) {
+      clearTimeout(startupTimer);
+      settleStartup();
       const firstDataAtUnixMs = Date.now();
       clock = Object.freeze({
         kind: 'process-start-estimate' as const,
@@ -124,6 +137,8 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
   });
   child.on('error', (error) => { failure = error.message; });
   child.on('close', (code, signal) => {
+    clearTimeout(startupTimer);
+    settleStartup();
     publish(chunker.flush());
     const state: SystemAudioCaptureState = requestedStop ? 'stopped' : 'unavailable';
     options.onState({
@@ -143,9 +158,11 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
   return {
     process: child,
     done,
+    startup,
     stop() {
       if (requestedStop) return;
       requestedStop = true;
+      clearTimeout(startupTimer);
       child.kill('SIGINT');
       const terminate = setTimeout(() => {
         void terminateManagedChild(child);

@@ -309,6 +309,9 @@ function permissionMessage(event: Extract<NativeSystemAudioEvent, { type: 'error
 }
 
 export interface StartSystemAudioOptions {
+  /** Avoid concurrent CoreAudio device initialization with the microphone. */
+  readonly startAfter?: Promise<void>;
+  readonly startupWaitMs?: number;
   readonly sessionStartedAtUnixMs: number;
   readonly helperPath?: string;
   readonly chunkMilliseconds?: number;
@@ -328,6 +331,38 @@ export interface SystemAudioCaptureHandle {
 export function startSystemAudioCapture(
   options: StartSystemAudioOptions,
 ): SystemAudioCaptureHandle {
+  if (options.startAfter) {
+    let capture: SystemAudioCaptureHandle | undefined;
+    let stopped = false;
+    let settleWait = () => {};
+    const wait = new Promise<void>((resolve) => { settleWait = resolve; });
+    const timer = setTimeout(settleWait, options.startupWaitMs ?? 5_000);
+    void options.startAfter.then(settleWait, settleWait);
+    options.onState({ state: 'starting', message: 'Opening microphone before system audio…' });
+    const done = wait.then(async () => {
+      clearTimeout(timer);
+      if (stopped) return;
+      try {
+        capture = startSystemAudioCapture({ ...options, startAfter: undefined });
+        await capture.done;
+      } catch (error) {
+        options.onState({ state: 'unavailable', code: 'spawn_failed',
+          message: error instanceof Error ? error.message : String(error) });
+      }
+    });
+    return {
+      get process() { return capture?.process; },
+      done,
+      stop() {
+        if (stopped) return;
+        stopped = true;
+        clearTimeout(timer);
+        settleWait();
+        if (capture) capture.stop();
+        else options.onState({ state: 'stopped' });
+      },
+    };
+  }
   const helperPath = options.helperPath ?? SYSTEM_AUDIO_HELPER;
   if (!existsSync(helperPath)) {
     options.onState({

@@ -19,6 +19,7 @@ export interface CaptureSignalTestResult {
     readonly rmsDbfs: number | null;
     readonly chunks: number;
     readonly audibleChunks: number;
+    readonly message?: string;
   };
   readonly systemAudio: {
     readonly state: SystemAudioCaptureState;
@@ -26,6 +27,7 @@ export interface CaptureSignalTestResult {
     readonly rmsDbfs: number | null;
     readonly chunks: number;
     readonly audibleChunks: number;
+    readonly message?: string;
   };
   readonly ready: boolean;
   readonly guidance: readonly string[];
@@ -56,11 +58,17 @@ async function captureForDuration(
   let systemAudioState: SystemAudioCaptureState = 'starting';
   let microphoneLevel: PcmSignalLevel | null = null;
   let systemAudioLevel: PcmSignalLevel | null = null;
+  let microphoneMessage: string | undefined;
+  let systemAudioMessage: string | undefined;
   const microphone = startMicrophoneCapture({
     sessionStartedAtUnixMs: now.getTime(),
     chunkMilliseconds: 1_000,
     onLevel: (level) => { microphoneLevel = louder(microphoneLevel, level); },
-    onState: (update) => { microphoneState = update.state; },
+    onState: (update) => {
+      microphoneState = update.state;
+      if (update.code) microphoneMessage = update.message;
+      else if (update.state === 'active') microphoneMessage = undefined;
+    },
     onChunk: (chunk) => {
       store.commitChunk({
         sourcePath: chunk.path,
@@ -72,10 +80,15 @@ async function captureForDuration(
     },
   });
   const system = startSystemAudioCapture({
+    startAfter: microphone.startup,
     sessionStartedAtUnixMs: now.getTime(),
     chunkMilliseconds: 1_000,
     onLevel: (level) => { systemAudioLevel = louder(systemAudioLevel, level); },
-    onState: (update) => { systemAudioState = update.state; },
+    onState: (update) => {
+      systemAudioState = update.state;
+      if (update.code) systemAudioMessage = update.message;
+      else if (update.state === 'active') systemAudioMessage = undefined;
+    },
     onChunk: (chunk) => {
       store.commitChunk({
         sourcePath: chunk.path,
@@ -94,11 +107,13 @@ async function captureForDuration(
   const summarize = (trackId: 'microphone' | 'system-audio', state: SystemAudioCaptureState, level: PcmSignalLevel | null) => {
     const chunks = manifest.chunks.filter((chunk) => chunk.trackId === trackId);
     return Object.freeze({
-      state,
+      state: chunks.length === 0 && state === 'stopped' ? 'unavailable' as const : state,
       peak: level?.peak ?? 0,
       rmsDbfs: level && Number.isFinite(level.rmsDbfs) ? level.rmsDbfs : null,
       chunks: chunks.length,
       audibleChunks: chunks.filter((chunk) => chunk.audible).length,
+      ...((trackId === 'microphone' ? microphoneMessage : systemAudioMessage)
+        ? { message: trackId === 'microphone' ? microphoneMessage : systemAudioMessage } : {}),
     });
   };
   const microphoneSummary = summarize('microphone', microphoneState, microphoneLevel);
@@ -106,10 +121,14 @@ async function captureForDuration(
   const guidance = [
     ...(microphoneSummary.audibleChunks > 0
       ? []
-      : ['Speak during the test; if the microphone stays quiet, check its input selection and macOS permission.']),
+      : [microphoneMessage ?? (microphoneSummary.chunks === 0
+        ? 'No microphone audio received. Check System Settings → Privacy & Security → Microphone for your terminal app, and Sound → Input.'
+        : 'Microphone audio arrived but no speech was detected. Speak during the test and check Sound → Input for the selected microphone and input level.')]),
     ...(systemSummary.audibleChunks > 0
       ? []
-      : ['Play speech or meeting audio during the test; permission alone cannot prove an audible system signal.']),
+      : [systemAudioMessage ?? (systemSummary.chunks === 0
+        ? 'No system audio received. Play audio and check Privacy & Security → Screen & System Audio Recording and the selected output device.'
+        : 'Play speech or meeting audio during the test; permission alone cannot prove an audible system signal.')]),
   ];
   return {
     store,

@@ -300,7 +300,10 @@ export class LiveAsrScheduler {
       entry.resolve({ status: 'cancelled', text: '', latencyMs: 0 });
       controller.abort();
     }
-    await Promise.race([this.drain(), delay(2_000)]);
+    // A losing drain() would keep polling forever if a provider ignores abort.
+    // Bound the polling itself so stopping leaves no background timer behind.
+    const deadline = performance.now() + 2_000;
+    while (this.depth > 0 && performance.now() < deadline) await delay(25);
     this.changed();
   }
 
