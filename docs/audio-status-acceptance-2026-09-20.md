@@ -30,6 +30,21 @@ the active state. Ready does not establish that speech or even PCM arrived.
 Gym evidence: `.gym-results/2026-09-20T06-59-37.015Z-29050/report.md`.
 Terminal evidence: `/var/folders/hj/cg29fnq929v27cj88gsnrskr0000gn/T/seashell-audio-status-l6a1w607/`.
 
+## Installed preview
+
+Homebrew RC5 pins `c446d69be3afcd5aa3f43736672fdc48abfedc3f`. The local RC4→RC5
+upgrade succeeded, and hashes of the installed UI and capture module match the
+tested source. The packaged TUI opened and exited with capture disabled and an
+isolated library. Formula tests (including actual known-phrase transcription),
+linkage, strict audit, and style passed. The existing user-owned RC4 window was
+left running; quitting and reopening `seashell` selects RC5.
+
+[Source CI passed](https://github.com/stupart/seashell/actions/runs/35495817804).
+[Fresh Apple Silicon and Intel installation CI](https://github.com/stupart/homebrew-tap/actions/runs/35495853970)
+is tracked separately. Both PRs remain unmerged:
+[source #14](https://github.com/stupart/seashell/pull/14) and
+[formula #1](https://github.com/stupart/homebrew-tap/pull/1).
+
 ## Real Meet test and Conch
 
 The requested app is Google Meet. The browser/native computer-control connection
