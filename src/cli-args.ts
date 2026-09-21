@@ -98,6 +98,7 @@ export interface CaptureCommand {
 export type CliCommand =
   | { kind: 'ai'; action: 'install'; tarball: string; json: boolean }
   | { kind: 'ai'; action: 'status' | 'providers'; json: boolean }
+  | { kind: 'ai-setup' }
   | { kind: 'help' }
   | { kind: 'tui'; libraryDir?: string }
   | { kind: 'capabilities'; json: boolean }
@@ -671,11 +672,12 @@ export function parseCliArgs(args: string[]): CliCommand {
   }
   if (args[0] === 'ai') {
     const rest = args.slice(1).filter((arg) => arg !== '--json');
+    if (rest[0] === 'setup' && rest.length === 1 && !args.includes('--json')) return { kind: 'ai-setup' };
     if ((rest[0] === 'status' || rest[0] === 'providers') && rest.length === 1) return { kind: 'ai', action: rest[0], json: args.includes('--json') };
     if (rest[0] === 'install' && rest.length === 2 && !rest[1]!.startsWith('-')) {
       return { kind: 'ai', action: 'install', tarball: rest[1]!, json: args.includes('--json') };
     }
-    throw new Error('Usage: seashell ai install <trusted-package.tgz> | seashell ai status | providers [--json]');
+    throw new Error('Usage: seashell ai install <trusted-package.tgz> | seashell ai setup | status | providers [--json]');
   }
   if (args[0] === 'doctor') {
     const unknown = args.slice(1).filter((arg) => arg !== '--json');
@@ -718,6 +720,7 @@ Usage:
   seashell meeting <action> [options]       Create, enrich, browse, or chat with meetings
   seashell ai install <package.tgz>        Install a compatible Humain engine package
   seashell ai status [--json]             Check engine and Node readiness
+  seashell ai setup                       Choose meeting AI interactively
   seashell ai providers [--json]          Discover providers and login/setup steps
   seashell setup [--no-autostart] [--json]  Apply safe defaults on a true first install
   seashell doctor [--json]                  Check dependencies and models

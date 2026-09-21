@@ -661,7 +661,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
 }
 
 async function executeCapture(
-  command: Extract<Exclude<CliCommand, { kind: 'tui' | 'help' }>, { kind: 'capture' }>,
+  command: Extract<Exclude<CliCommand, { kind: 'tui' | 'help' | 'ai-setup' }>, { kind: 'capture' }>,
 ): Promise<number> {
   const config = loadConfig();
   const libraryDir = resolveLibraryDir(command.libraryDir, process.env, config);
@@ -734,7 +734,7 @@ async function executeCapture(
   return 0;
 }
 
-export async function executeCliCommand(command: Exclude<CliCommand, { kind: 'tui' | 'help' }>): Promise<number> {
+export async function executeCliCommand(command: Exclude<CliCommand, { kind: 'tui' | 'help' | 'ai-setup' }>): Promise<number> {
   switch (command.kind) {
     case 'capabilities':
       print(command.json
@@ -761,7 +761,7 @@ export async function executeCliCommand(command: Exclude<CliCommand, { kind: 'tu
         print(command.json ? JSON.stringify(installed, null, 2) :
           `Humain ${installed.version} installed.
 Discover available providers: seashell ai providers
-Choose your model with: seashell meeting setup --backend <backend> --model <model>
+Choose your provider and model: seashell ai setup
 Backends: local-openai, codex, claude-code, openrouter`);
         return 0;
       }

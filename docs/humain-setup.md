@@ -29,7 +29,25 @@ seashell ai providers
 The provider list reports local CLI authentication and configured endpoints, with
 next steps when something is missing. It does not send transcripts for a test.
 Readiness is not a guarantee of model quality or of every native harness feature.
-Choose an explicit model using the provider you want:
+Choose inside the TUI with **P → AI provider**, or open the same picker directly:
+
+```sh
+seashell ai setup
+```
+
+The picker shows Claude Code, Codex, a local model server and OpenRouter, with
+readiness and missing setup steps from Humain. Use arrows and Enter to select a
+provider, then enter its supported model ID and press Enter to save. Claude Code
+starts with `sonnet`; other routes require an explicit model ID rather than a
+guessed model list. Escape leaves the current choice unchanged. Discovery and
+saving do not make model calls. Recording keeps running while the picker is open.
+
+Saving applies the provider/model to all meeting roles, enables post-session
+notes and chat, preserves compatible budgets, and retains calendar/capture
+settings. The picker shows where meeting text goes before saving. Advanced
+per-role routes and streaming/hybrid modes remain available through `meeting setup`.
+
+For scripted setup, choose an explicit model using the provider you want:
 
 ```sh
 seashell meeting setup --backend claude-code --model sonnet --mode post-session

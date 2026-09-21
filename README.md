@@ -1,6 +1,8 @@
 # Sea Shell
 
-For optional summaries and meeting chat, see [Humain setup](docs/humain-setup.md).
+For optional summaries and meeting chat, press **P** in Seashell or run
+`seashell ai setup` to choose Claude Code, Codex, a local model, or OpenRouter.
+See [Humain setup](docs/humain-setup.md) for engine installation and provider details.
 Capture and transcription work without it.
 
 

@@ -11,6 +11,7 @@ import {
 } from './calendar.ts';
 import {
   loadConfig,
+  updateMeetingConfig,
   resolveLibraryDir,
   resolveMeetingRoute,
   resolveSaveByDefault,
@@ -69,6 +70,7 @@ import {
   selectCanonicalTranscriptionRoute,
   type TranscriptionRoute,
 } from './transcription-routing.ts';
+import AIProviderPicker from './AIProviderPicker.tsx';
 import { runHumainTranscription } from './humain-client.ts';
 import {
   DEFAULT_WHISPER_MODEL_FILENAME,
@@ -183,7 +185,8 @@ function useTerminalSize(): { columns: number; rows: number } {
 
 export default function App(props: { libraryDir?: string } = {}) {
   const { exit } = useApp();
-  const config = useMemo(() => loadConfig(), []);
+  const [config, setConfig] = useState(() => loadConfig());
+  const [aiSetupOpen, setAiSetupOpen] = useState(false);
   const libraryRoot = useMemo(
     () => resolveLibraryDir(props.libraryDir, process.env, config),
     [props.libraryDir, config],
@@ -898,7 +901,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     const missingObserver = mode !== 'post-session' && !configuredMeetingRoutes.observer;
     const missingReconciliation = mode !== 'streaming' && !configuredMeetingRoutes.reconciliation;
     if ((missingObserver || missingReconciliation) && !finishLive) {
-      setError(`Configure the ${missingObserver ? 'observer' : 'reconciliation'} route before running ${mode} meeting intelligence.`);
+      setAiSetupOpen(true);
       return;
     }
     const wasListening = view === 'live' && !pausedRef.current;
@@ -1552,6 +1555,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
     if (processing) return;
+    if (input === 'p') { setAiSetupOpen(true); return; }
     if (key.tab || input === '\t' || input === 'h') {
       toggleHistory();
       return;
@@ -1602,7 +1606,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
     if (input === 'a' && currentMeeting) {
       if (!configuredMeetingRoutes.chat) {
-        setError('Configure the meeting chat route before using meeting chat.');
+        setAiSetupOpen(true);
       } else {
         setMeetingView('chat');
         setChatInputState({ input: '' });
@@ -1724,7 +1728,20 @@ export default function App(props: { libraryDir?: string } = {}) {
       showNavigationItem(navigationItems[selectionIndex]);
       setHistoryOpen(false);
     }
-  });
+  }, { isActive: !aiSetupOpen });
+
+  if (aiSetupOpen) return <AIProviderPicker current={config.meeting} recording={!paused && !listenerDisabled}
+    onClose={() => setAiSetupOpen(false)}
+    onSave={(patch) => {
+      const saved = updateMeetingConfig(patch);
+      // Keep capture settings and their object identities stable while changing AI routes.
+      setConfig((current) => ({ ...current, meeting: { ...saved.meeting,
+        calendar: current.meeting?.calendar, automation: current.meeting?.automation,
+      } }));
+      setAiSetupOpen(false);
+      setError(null);
+      setNotice(`Meeting AI: ${patch.backend} · ${patch.model} · notes after meetings`);
+    }} />;
 
   const title = view === 'live' ? liveRecord.title : selectedRecord?.title ?? 'Transcript';
   const transcriptBorderColor = processing
@@ -1745,20 +1762,20 @@ export default function App(props: { libraryDir?: string } = {}) {
     : currentMeeting
       ? view === 'live'
         ? terminal.columns < 56
-          ? `[SPC] ${paused ? 'Record' : 'Pause'} [G] Finish [H] History [Q] Quit`
-          : `[SPACE] ${paused ? 'Record' : 'Pause'}  [A] Ask  [G] Finish  [H] History  [?] Help  [Q] Quit`
-        : '[A] Ask  [G] Enrich  [H] History  [?] Help  [Q] Quit'
+          ? `[SPC] ${paused ? 'Rec' : 'Pause'} [G] End [P] AI [Q] Quit`
+          : `[SPACE] ${paused ? 'Record' : 'Pause'}  [A] Ask  [G] Finish  [H] History  [P] AI  [?] Help  [Q] Quit`
+        : '[A] Ask  [G] Enrich  [H] History  [P] AI  [?] Help  [Q] Quit'
     : view === 'live'
       ? terminal.columns < 56
-        ? `[SPC] ${paused ? 'Record' : 'Pause'}  [H] History  [Q] Quit`
+        ? `[SPC] ${paused ? 'Rec' : 'Pause'} [H] History [P] AI [Q] Quit`
         : terminal.columns < 80
-          ? `[SPC] ${paused ? 'Record now' : 'Pause'}  [F] File  [H] History  [?] Help  [Q] Quit`
-          : `[SPACE] ${paused ? 'Record now' : 'Pause'}  [F] File  [H] History  [?] Help  [Q] Quit`
+          ? `[SPC] ${paused ? 'Record now' : 'Pause'}  [F] File  [H] History  [P] AI  [?] Help  [Q] Quit`
+          : `[SPACE] ${paused ? 'Record now' : 'Pause'}  [F] File  [H] History  [P] AI  [?] Help  [Q] Quit`
       : terminal.columns < 56
-        ? '[L] Live  [H] History  [Q] Quit'
+        ? '[L] Live [H] History [P] AI [Q] Quit'
         : terminal.columns < 72
-          ? '[L] Live  [H] History  [?] Help  [Q] Quit'
-          : '[L] Live  [H] History  [?] Help  [Q] Quit';
+          ? '[L] Live  [H] History  [P] AI  [?] Help  [Q] Quit'
+          : '[L] Live  [H] History  [P] AI  [?] Help  [Q] Quit';
   const plainTranscript = currentRecord && meetingView === 'transcript' && !showTimestamps && !showSpeakers
     ? renderText({ ...currentRecord, transcript: visibleSegments })
     : '';
@@ -2007,6 +2024,7 @@ export default function App(props: { libraryDir?: string } = {}) {
             <Text dimColor>C copy · E export · O folder · D trash · DEL clear live</Text>
             <Text dimColor>[/] choose speaker · R rename · ↑↓ scroll · L live · Q quit</Text>
             <Text dimColor>M mark meeting · 1-4 meeting views · G enrich/finalize · A ask</Text>
+            <Text dimColor>P choose AI provider and model (Claude Code, Codex, local, OpenRouter)</Text>
             <Text dimColor>Automatic meeting prompt: M record · X ignore</Text>
           </>
         ) : !historyOpen && currentRecord?.transcript.length ? (
