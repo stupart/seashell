@@ -13,6 +13,7 @@ import {
 import { basename, dirname, extname, join } from 'path';
 import { renderText, renderTranscript } from './transcript-renderer.ts';
 import type { TranscriptFormat, TranscriptRecord } from './transcript-types.ts';
+import { archiveMeetingTranscript, synchronizeMeetingTranscript } from './meeting-artifact.ts';
 
 export interface TranscriptLibraryEntry {
   id: string;
@@ -31,6 +32,7 @@ export interface SavedTranscript {
   directory: string;
   jsonPath: string;
   textPath: string;
+  meetingWarning?: string;
 }
 
 function slugify(value: string): string {
@@ -170,12 +172,21 @@ export function saveTranscriptRecord(
   const jsonPath = join(directory, 'transcript.json');
   const textPath = join(directory, 'transcript.txt');
 
+  let meetingWarning: string | undefined;
+  try {
+    if (existingPath) archiveMeetingTranscript(directory, loadTranscriptPath(existingPath), record);
+  } catch (error) {
+    meetingWarning = `Transcript saved; meeting history needs repair: ${error instanceof Error ? error.message : String(error)}`;
+  }
   atomicWrite(jsonPath, `${JSON.stringify(record, null, 2)}\n`);
   atomicWrite(textPath, `${renderText(record, {
     timestamps: true,
     speakers: record.speakers.length > 0,
   })}\n`);
-  return { directory, jsonPath, textPath };
+  try { synchronizeMeetingTranscript(directory, record); } catch (error) {
+    meetingWarning = `Transcript saved; meeting notes need repair: ${error instanceof Error ? error.message : String(error)}`;
+  }
+  return { directory, jsonPath, textPath, ...(meetingWarning ? { meetingWarning } : {}) };
 }
 
 function toEntry(path: string, record: TranscriptRecord): TranscriptLibraryEntry {

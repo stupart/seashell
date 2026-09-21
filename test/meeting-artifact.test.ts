@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -38,6 +38,101 @@ function fixture(id = 'meeting-1') {
 }
 
 describe('meeting artifact bundle', () => {
+  test('damaged optional meeting metadata cannot prevent saving the base transcript', () => {
+    const { root, record, saved } = fixture();
+    writeFileSync(join(saved.directory, 'meeting.json'), '{incomplete');
+    const next = { ...record, transcript: [{ start: 0, end: 1, text: 'Still captured.' }] };
+    expect(saveTranscriptRecord(root, next).meetingWarning).toContain('Transcript saved');
+    expect(JSON.parse(readFileSync(saved.jsonPath, 'utf8')).transcript[0].text).toBe('Still captured.');
+    expect(() => loadMeetingArtifact(root, record.id)).toThrow('malformed JSON');
+  });
+  for (const change of ['text', 'insert', 'remove', 'merge', 'split', 'speaker'] as const) {
+    test(`a ${change} revision retires old claims and restarts observation without resetting its budget`, async () => {
+      const { root, record, saved } = fixture();
+      const before = createMeetingArtifact(record, { mode: 'hybrid' });
+      before.session.cursor = record.transcript.length;
+      before.session.observerRunIds = ['prior-observer'];
+      before.provisionalClaims = [{ id: 'old', type: 'decision', text: 'Ship Friday', evidenceSegmentIds: ['s000002'], confidence: .9 }];
+      before.analysis = { final: true, summary: 'Old summary', claims: before.provisionalClaims, runId: 'prior-final', createdAt: record.createdAt };
+      saveMeetingArtifact(root, before);
+      const next = structuredClone(record);
+      if (change === 'text') next.transcript[1]!.text = 'We should ship Monday.';
+      if (change === 'insert') next.transcript.unshift({ start: 0, end: 0, text: 'Welcome.' });
+      if (change === 'remove') next.transcript.splice(1, 1);
+      if (change === 'merge') next.transcript.splice(1, 2, { start: 2, end: 7, text: 'We should ship Friday. Agreed.' });
+      if (change === 'split') next.transcript.splice(1, 1, { start: 2, end: 3, text: 'We should' }, { start: 3, end: 5, text: 'ship Friday.' });
+      if (change === 'speaker') next.speakers[1]!.label = 'Someone else';
+      saveTranscriptRecord(root, next);
+      const refreshed = loadMeetingArtifact(root, record.id)!;
+      expect(refreshed.session.cursor).toBe(0);
+      expect(refreshed.session.observerRunIds).toEqual(['prior-observer']);
+      expect(refreshed.provisionalClaims).toEqual([]);
+      expect(refreshed.analysis).toBeUndefined();
+      expect(existsSync(join(saved.directory, 'overlays', 'final.json'))).toBe(false);
+      expect(readFileSync(join(saved.directory, 'documents', 'summary.md'), 'utf8')).not.toContain('Old summary');
+      const history = readdirSync(join(saved.directory, 'history', 'meeting-revisions')).map((name) =>
+        JSON.parse(readFileSync(join(saved.directory, 'history', 'meeting-revisions', name), 'utf8')));
+      expect(history.some((entry) => entry.transcript?.transcript[1]?.text === record.transcript[1]!.text && entry.meeting.analysis?.summary === 'Old summary')).toBe(true);
+      const actions: string[] = [];
+      await enrichMeeting(root, record.id, { mode: 'hybrid', route: { backend: 'codex', model: 'fixture' },
+        runner: async (action, request) => {
+          actions.push(action);
+          const input = request as { priorClaims?: unknown[]; provisionalClaims?: unknown[] };
+          expect(input.priorClaims ?? input.provisionalClaims).toEqual([]);
+          return { runId: `new-${action}`, compiledRunId: 'new', status: 'succeeded', receipt: {}, output: { summary: 'Fresh summary', claims: [] } };
+        } });
+      expect(actions).toEqual(['observe', 'reconcile']);
+    });
+  }
+
+  test('ordinary append retains observed evidence and cursor, while retiring a completed summary', () => {
+    const { root, record } = fixture();
+    const artifact = createMeetingArtifact(record);
+    artifact.session.cursor = 4;
+    artifact.session.observerRunIds = ['observed'];
+    artifact.provisionalClaims = [{ id: 'kept', type: 'note', text: 'Ada introduced herself', evidenceSegmentIds: ['s000001'], confidence: .9 }];
+    artifact.analysis = { final: true, summary: 'Earlier complete record', claims: [], runId: 'final', createdAt: record.createdAt };
+    saveMeetingArtifact(root, artifact);
+    saveTranscriptRecord(root, { ...record, transcript: [...record.transcript, { id: 'later', start: 10, end: 12, text: 'A new topic.' }] });
+    const loaded = loadMeetingArtifact(root, record.id)!;
+    expect(loaded.session.cursor).toBe(4);
+    expect(loaded.provisionalClaims).toEqual(artifact.provisionalClaims);
+    expect(loaded.analysis).toBeUndefined();
+  });
+
+  test('an in-flight model result cannot reattach evidence after a transcript replacement', async () => {
+    const { root, record } = fixture();
+    await expect(enrichMeeting(root, record.id, { mode: 'post-session', route: { backend: 'codex', model: 'fixture' },
+      runner: async () => {
+        saveTranscriptRecord(root, { ...record, transcript: record.transcript.map((segment) => ({ ...segment, text: 'Changed evidence.' })) });
+        return { runId: 'stale-result', compiledRunId: 'stale', status: 'succeeded', receipt: {},
+          output: { summary: 'Stale summary', claims: [{ id: 'stale', type: 'note', text: 'Wrong meaning', evidenceSegmentIds: ['s000001'], confidence: .9 }] } };
+      } })).rejects.toThrow('Transcript changed');
+    const loaded = loadMeetingArtifact(root, record.id)!;
+    expect(loaded.status).toBe('base-only');
+    expect(loaded.analysis).toBeUndefined();
+    expect(loaded.provisionalClaims).toEqual([]);
+  });
+
+  test('legacy and interrupted replacements are repaired on load before chat or enrichment', () => {
+    const { root, record, saved } = fixture();
+    const artifact = createMeetingArtifact(record);
+    artifact.session.cursor = 4;
+    artifact.session.observerRunIds = ['old'];
+    artifact.provisionalClaims = [{ id: 'unknown', type: 'note', text: 'Unbound legacy evidence', evidenceSegmentIds: ['s000001'], confidence: .9 }];
+    delete artifact.transcriptEvidence;
+    writeFileSync(join(saved.directory, 'meeting.json'), JSON.stringify(artifact));
+    const loaded = loadMeetingArtifact(root, record.id)!;
+    expect(loaded.provisionalClaims).toEqual([]);
+    expect(loaded.session.cursor).toBe(0);
+    expect(loaded.session.observerRunIds).toEqual(['old']);
+    // Simulate a crash after transcript.json was replaced but before meeting refresh.
+    loaded.provisionalClaims = [{ id: 'bound', type: 'note', text: 'Prior evidence', evidenceSegmentIds: ['s000001'], confidence: .9 }];
+    saveMeetingArtifact(root, loaded);
+    writeFileSync(saved.jsonPath, JSON.stringify({ ...record, transcript: [] }));
+    expect(loadMeetingArtifact(root, record.id)!.provisionalClaims).toEqual([]);
+  });
+
   test('long transcript IDs preserve distinct reconciliation identities', async () => {
     const { root, record } = fixture('meeting.notes-' + 'a'.repeat(120));
     const ids: string[] = [];

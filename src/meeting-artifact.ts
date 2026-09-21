@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import {
   closeSync,
   existsSync,
@@ -15,6 +15,7 @@ import { basename, dirname, join } from 'path';
 import { findTranscriptRecord } from './transcript-library.ts';
 import { renderSrt, renderText, renderVtt } from './transcript-renderer.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
+import { compareMeetingEvidence, meetingEvidence, parseMeetingEvidence, type MeetingEvidence } from './meeting-evidence.ts';
 
 export const MEETING_CLAIM_TYPES = [
   'speaker_identity',
@@ -76,6 +77,7 @@ export interface MeetingProvisionalOverlay {
   toCursor: number;
   summary: string;
   claims: MeetingClaim[];
+  transcriptRevision?: string;
 }
 
 export interface MeetingChatMessage {
@@ -110,6 +112,8 @@ export interface MeetingArtifact {
   analysis?: MeetingAnalysis;
   chat: MeetingChatMessage[];
   failure?: string;
+  /** Content binding, independent of positional segment IDs and modified times. */
+  transcriptEvidence?: MeetingEvidence;
 }
 
 export interface CreateMeetingArtifactOptions {
@@ -174,6 +178,7 @@ export function createMeetingArtifact(
     },
     provisionalClaims: [],
     chat: [],
+    transcriptEvidence: meetingEvidence(record),
   };
 }
 
@@ -316,6 +321,7 @@ export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): Mee
   }
   const calendar = parseCalendar(artifact.calendar);
   const analysis = parseAnalysis(artifact.analysis);
+  const transcriptEvidence = parseMeetingEvidence(artifact.transcriptEvidence);
   return {
     schemaVersion: 1,
     meetingId: string(artifact.meetingId, 'meetingId'),
@@ -325,6 +331,7 @@ export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): Mee
     updatedAt: string(artifact.updatedAt, 'meeting updatedAt'),
     status: artifact.status as MeetingArtifactStatus,
     mode: artifact.mode as MeetingEnrichmentMode,
+    ...(transcriptEvidence ? { transcriptEvidence } : {}),
     ...(calendar === undefined ? {} : { calendar }),
     attendees: parseAttendees(artifact.attendees ?? []),
     session: {
@@ -380,10 +387,11 @@ export function loadMeetingArtifact(
   libraryDir: string,
   transcriptId: string,
 ): MeetingArtifact | undefined {
-  const path = meetingArtifactPath(libraryDir, transcriptId);
+  const found = findTranscriptRecord(libraryDir, transcriptId);
+  const path = join(dirname(found.path), 'meeting.json');
   if (!existsSync(path)) return undefined;
   try {
-    return parseMeetingArtifact(JSON.parse(readFileSync(path, 'utf8')), path);
+    return synchronizeMeetingTranscript(dirname(path), found.record);
   } catch (error) {
     if (error instanceof SyntaxError) throw new Error(`${path} contains malformed JSON`);
     throw error;
@@ -410,6 +418,8 @@ function writeMeetingProjections(
   const analysis = artifact.analysis;
   if (analysis) {
     atomicWrite(join(directory, 'overlays', 'final.json'), `${JSON.stringify(analysis, null, 2)}\n`);
+  } else {
+    rmSync(join(directory, 'overlays', 'final.json'), { force: true });
   }
   atomicWrite(
     join(directory, 'documents', 'summary.md'),
@@ -440,10 +450,68 @@ export function saveMeetingArtifact(
 ): string {
   const { path, record } = findTranscriptRecord(libraryDir, artifact.transcriptId);
   const directory = dirname(path);
+  const evidence = meetingEvidence(record);
+  const change = compareMeetingEvidence(artifact.transcriptEvidence, evidence);
+  if (change === 'revised' && (artifact.transcriptEvidence || artifact.provisionalClaims.length || artifact.analysis || artifact.chat.length || artifact.session.cursor)) {
+    throw new Error('Transcript changed while meeting analysis was running. Retry with the current transcript.');
+  }
+  if (change === 'append' && (artifact.analysis?.final || artifact.chat.length)) {
+    throw new Error('Transcript grew while meeting analysis was running. Retry with the current transcript.');
+  }
+  artifact.transcriptEvidence = evidence;
   artifact.updatedAt = new Date().toISOString();
   atomicWrite(join(directory, 'meeting.json'), `${JSON.stringify(artifact, null, 2)}\n`);
   writeMeetingProjections(directory, artifact, record);
   return directory;
+}
+
+/** Save evidence before replacement. Called before the authoritative transcript write. */
+export function archiveMeetingTranscript(directory: string, previous: TranscriptRecord, next: TranscriptRecord): void {
+  const path = join(directory, 'meeting.json');
+  if (!existsSync(path) || meetingEvidence(previous).revision === meetingEvidence(next).revision) return;
+  const artifact = parseMeetingArtifact(JSON.parse(readFileSync(path, 'utf8')), path);
+  const change = compareMeetingEvidence(meetingEvidence(previous), meetingEvidence(next));
+  if (change === 'revised' || artifact.analysis?.final || artifact.chat.length) {
+    retainMeetingRevision(directory, artifact, previous);
+  }
+}
+
+function retainMeetingRevision(directory: string, artifact: MeetingArtifact, transcript?: TranscriptRecord): void {
+  const content = JSON.stringify({ schemaVersion: 1, meeting: artifact, transcript: transcript ?? null }, null, 2) + '\n';
+  const id = createHash('sha256').update(content).digest('hex');
+  const path = join(directory, 'history', 'meeting-revisions', `${id}.json`);
+  if (!existsSync(path)) atomicWrite(path, content);
+}
+
+/** Also repairs interruption between transcript replacement and projection refresh. */
+export function synchronizeMeetingTranscript(directory: string, record: TranscriptRecord): MeetingArtifact | undefined {
+  const path = join(directory, 'meeting.json');
+  if (!existsSync(path)) return undefined;
+  const artifact = parseMeetingArtifact(JSON.parse(readFileSync(path, 'utf8')), path);
+  const evidence = meetingEvidence(record);
+  const change = compareMeetingEvidence(artifact.transcriptEvidence, evidence);
+  if (change === 'same') return artifact;
+  if (change === 'revised' || artifact.analysis?.final || artifact.chat.length) retainMeetingRevision(directory, artifact);
+  const updated: MeetingArtifact = {
+    ...artifact,
+    transcriptEvidence: evidence,
+    status: 'base-only',
+    updatedAt: new Date().toISOString(),
+    session: {
+      ...artifact.session,
+      ...(change === 'revised' ? { cursor: 0 } : {}),
+      // Keep cumulative observer runs so revisions cannot reset the cost budget.
+      reconciliationRunId: undefined,
+      stoppedReason: undefined,
+    },
+    provisionalClaims: change === 'revised' ? [] : artifact.provisionalClaims,
+    analysis: undefined,
+    chat: [],
+    failure: undefined,
+  };
+  atomicWrite(path, `${JSON.stringify(updated, null, 2)}\n`);
+  writeMeetingProjections(directory, updated, record);
+  return updated;
 }
 
 export function appendProvisionalOverlay(

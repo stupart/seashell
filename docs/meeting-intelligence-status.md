@@ -140,11 +140,10 @@ discovery and missing CLI context, then passed after the fixes.
 ## Remaining work
 
 1. **Reliable evidence through finalization.** Live drafts can be resegmented or
-   reordered by final ASR. Current fallback segment IDs are positional, and
-   enrichment retains its observer cursor and provisional claims across that
-   replacement. Add explicit transcript revisions, invalidate or map draft
-   evidence, and regression-test corrections and changed segmentation. Until
-   that is hardened, prefer post-session analysis of the completed transcript.
+   reordered by final ASR. Source now binds meeting state to transcript content,
+   archives superseded evidence, resets the cursor/claims on revision, and
+   rejects stale in-flight results. This fix requires the next package revision.
+   Still validate the full live-to-final journey with real diarization and AI.
 2. **Supported intelligence setup.** Distribute Humain, define compatible
    versions, check its executable/runtime/provider login and selected model,
    and explain readiness inside Seashell. Keep transcript-only mode useful.

@@ -217,6 +217,7 @@ export async function enrichMeeting(
           toCursor: window.toCursor,
           summary: output.summary,
           claims: output.claims,
+          transcriptRevision: artifact.transcriptEvidence?.revision,
         });
         cursor = window.toCursor;
         runs += 1;
@@ -310,7 +311,12 @@ export async function enrichMeeting(
       failure: message,
       session: { ...artifact.session, stoppedReason: 'failed' },
     };
-    saveMeetingArtifact(libraryDir, artifact);
+    // Preserve a concurrent transcript refresh rather than overwriting it with
+    // this failed/stale operation's claims, cursor or error projection.
+    const current = loadMeetingArtifact(libraryDir, transcriptId);
+    if (current?.transcriptEvidence?.revision === artifact.transcriptEvidence?.revision) {
+      saveMeetingArtifact(libraryDir, artifact);
+    }
     throw error;
   }
 }

@@ -365,7 +365,13 @@ export default function App(props: { libraryDir?: string } = {}) {
     setLiveRecord(next);
     if (saveByDefault || liveMeetingRef.current) {
       try {
-        saveTranscriptRecord(libraryRoot, next);
+        const saved = saveTranscriptRecord(libraryRoot, next);
+        if (saved.meetingWarning) setNotice(saved.meetingWarning);
+        if (liveMeetingRef.current) {
+          const meeting = loadMeetingArtifact(libraryRoot, next.id) ?? null;
+          liveMeetingRef.current = meeting;
+          setLiveMeeting(meeting);
+        }
         refreshLibrary();
       } catch (saveError) {
         setError(saveError instanceof Error ? saveError.message : String(saveError));
@@ -860,6 +866,11 @@ export default function App(props: { libraryDir?: string } = {}) {
         });
         liveRecordRef.current = record;
         setLiveRecord(record);
+        if (liveMeetingRef.current) {
+          const meeting = loadMeetingArtifact(libraryRoot, record.id) ?? null;
+          liveMeetingRef.current = meeting;
+          setLiveMeeting(meeting);
+        }
         refreshLibrary();
       } else {
         store.setStatus('interrupted', 'capture-retained-without-published-transcript');
@@ -1443,6 +1454,8 @@ export default function App(props: { libraryDir?: string } = {}) {
             } else {
               setSelectedRecord(renamed);
             }
+            const meeting = loadMeetingArtifact(libraryRoot, renamed.id);
+            if (meeting) commitMeetingState(meeting);
             refreshLibrary();
             setNotice(`${renameState.speakerId} renamed to ${renameState.input.trim()}.`);
           } catch (renameError) {
