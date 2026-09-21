@@ -401,10 +401,18 @@ delete records from its TUI or CLI.
 
 Capture and transcription work with the public Homebrew package. AI notes,
 analysis, and meeting chat additionally require Humain and an exact configured
-model route. Humain is currently private and has no published package, so these
-features are not an out-of-the-box part of the public install. See
-[meeting intelligence status](docs/meeting-intelligence-status.md) for the
-implemented features, setup requirements, test coverage, and remaining work.
+model route. Humain is currently private, so the public install does not include
+its engine package. Given a trusted compatible tarball, RC7 supports:
+
+```sh
+seashell ai install /path/to/humain-engine-0.0.1.tgz
+seashell ai status
+seashell ai providers
+```
+
+Homebrew supplies the required Node runtime. See [Humain setup](docs/humain-setup.md)
+for private-package installation and [meeting intelligence status](docs/meeting-intelligence-status.md)
+for coverage and remaining work.
 
 A meeting is a companion artifact, not a replacement transcript. Marking a
 transcript creates `meeting.json` beside the authoritative `transcript.json`.
@@ -441,12 +449,21 @@ seashell meeting setup \
   --mode hybrid
 ```
 
-Humain must be installed as `humain`, or `HUMAIN_CLI` can point to its built
-`dist/cli.js` (requires Node.js 22.13 or later). Current source discovers only
-the configured executable or `humain` on PATH; RC6 still has the legacy
-development-folder fallback noted in the status guide. Codex and Claude Code routes use Humain's subscription
-adapters. OpenRouter uses the API key configured in Humain and keeps exact
-model, token, and cost provenance in its private run store.
+For local notes, configure a JSON-schema-capable model server and select it explicitly:
+
+```sh
+export HUMAIN_LOCAL_OPENAI_BASE_URL=http://127.0.0.1:11434/v1
+seashell meeting setup --backend local-openai --model <installed-model-id> --mode post-session
+```
+
+Keep that endpoint variable available to the process launching Seashell. Provider
+selection and authentication are separate from engine installation.
+
+Discovery checks an explicit `HUMAIN_CLI`, then the selected package installed by
+`seashell ai install`, then `humain` on PATH. Node.js 22.13+ is required; there is
+no developer-folder fallback in RC7. Codex and Claude Code use subscription
+adapters. OpenRouter uses its configured API key. Humain keeps model, token, and
+cost provenance in its private run store.
 
 Humain is optional in both directions. Sea Shell without Humain still records,
 transcribes, diarizes, saves, and exports locally. Humain without Sea Shell
@@ -799,13 +816,13 @@ seashell meeting show <id> --json
 
 ## Privacy
 
-- Audio, video, durable live-capture chunks, transcripts, and speaker
-  inference stay local.
+- Default capture, transcription, durable chunks, and speaker inference stay
+  local. Explicitly consented cloud transcription uploads the selected audio.
 - Roster and active-speaker evidence stays local in the built-in identity pass.
 - Meeting enrichment sends only the selected transcript and explicitly supplied
   context to the configured Humain route. Codex/Claude Code subscription and
-  OpenRouter routes are remote; use meeting mode only when that data sharing is
-  appropriate.
+  OpenRouter routes are remote; use them when that data sharing is appropriate.
+  `local-openai` connects only to the configured loopback model server.
 - Newly written transcript, meeting, capture, config, and LaunchAgent log
   folders use private per-user permissions (`0700` directories and `0600`
   files), subject to the security of the macOS account and disk.
