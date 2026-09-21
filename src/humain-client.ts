@@ -1,3 +1,4 @@
+import { installedHumainCli } from './humain-install.ts';
 import { spawn } from 'child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -9,7 +10,7 @@ import {
 } from './process-lifecycle.ts';
 
 export type HumainMeetingAction = 'observe' | 'reconcile' | 'chat';
-export type HumainBackend = 'codex' | 'claude-code' | 'openrouter';
+export type HumainBackend = 'codex' | 'claude-code' | 'openrouter' | 'local-openai';
 
 export interface HumainMeetingRoute {
   backend: HumainBackend;
@@ -71,10 +72,12 @@ export function resolveHumainExecutable(
   env = { ...process.env, ...env };
   const configured = configuredHumainExecutable(env);
   if (configured) return configured;
+  const packaged = installedHumainCli(env);
+  if (packaged) return { command: 'node', prefix: [packaged], cwd: dirname(dirname(packaged)) };
   const installed = Bun.which('humain', { PATH: env.PATH ?? '' });
   if (installed) return { command: installed, prefix: [] };
   throw new Error(
-    'Humain is not available. Install its CLI or set HUMAIN_CLI to humain-engine/dist/cli.js.',
+    'Humain is not available. Run seashell ai install <humain-package.tgz>, or install its CLI.',
   );
 }
 
@@ -152,7 +155,7 @@ export interface HumainRunOptions {
 
 /** Bound every CLI call, including a stuck provider or a child ignoring SIGTERM. */
 async function runHumainCommand(
-  args: string[], options: HumainRunOptions, maxOutputBytes: number,
+  args: string[], options: Omit<HumainRunOptions, 'storeDir' | 'runId'>, maxOutputBytes: number,
 ): Promise<string> {
   if (options.signal?.aborted) throw new Error('Humain run was cancelled before start');
   const timeoutMs = options.timeoutMs ?? 10 * 60_000;
@@ -264,4 +267,18 @@ export function humainRouteRequest(route: HumainMeetingRoute) {
       ? {}
       : { maxCostMicrousd: route.maxCostMicrousd }),
   };
+}
+
+/** Read-only provider discovery using the same installed engine as meeting calls. */
+export async function discoverHumainProviders(env?: NodeJS.ProcessEnv): Promise<{
+  integrations: { id: string; ready: boolean; detail: string; nextStep?: string }[];
+}> {
+  const stdout = await runHumainCommand(['setup', '--json'], { env, timeoutMs: 45_000 }, 1_000_000);
+  const value = JSON.parse(stdout);
+  if (!value || !Array.isArray(value.integrations) || value.integrations.some((item: any) =>
+    !item || typeof item.id !== 'string' || typeof item.ready !== 'boolean' || typeof item.detail !== 'string' ||
+    (item.nextStep !== undefined && typeof item.nextStep !== 'string'))) {
+    throw new Error('Humain returned incompatible provider discovery data');
+  }
+  return value;
 }

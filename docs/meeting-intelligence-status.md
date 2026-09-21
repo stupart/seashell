@@ -84,17 +84,17 @@ The integration works in both directions:
 
 As audited, `stupart/humain-engine` is private and its package has
 `private: true`. Public Seashell users cannot complete intelligence setup from
-the public install alone. A distributable Humain CLI and supported version
-contract are still needed. Users with repository access can build it, use
-`humain` on PATH or set `HUMAIN_CLI` to `dist/cli.js`, and supply Node.js 22.13+.
-They also need an authenticated Codex/Claude Code harness or a configured
-OpenRouter account and an exact model. The bundled Bun runtime does not install
-Node or authenticate these providers.
+the public install alone. A private compatible tarball can now be installed with
+`seashell ai install <package.tgz>`; see [Humain setup](humain-setup.md).
+`ai status` checks engine/runtime presence and `ai providers` exposes discovery.
+Node.js 22.13+ and a selected provider/model are still required. `HUMAIN_CLI` and
+`humain` on PATH remain explicit alternatives. Public licensing/distribution and
+bundling Node into an app release remain open.
 
-Seashell currently exposes `codex`, `claude-code`, and `openrouter` routes for
-meeting intelligence. These can send the transcript and approved context to a
-remote model even though recording and Whisper transcription stay local.
-There is no selectable fully local notes model in Seashell's route schema yet.
+Seashell exposes `codex`, `claude-code`, `openrouter`, and `local-openai` routes for
+meeting intelligence. The first three send the transcript and approved context
+to a remote backend. `local-openai` uses a separately configured loopback model
+server supporting JSON-schema output. Recording and Whisper remain local.
 Humain handles provider credentials; Seashell's configuration stores route
 selection, optional per-run limits, and workflow preferences.
 
@@ -144,9 +144,11 @@ discovery and missing CLI context, then passed after the fixes.
    archives superseded evidence, resets the cursor/claims on revision, and
    rejects stale in-flight results. This fix requires the next package revision.
    Still validate the full live-to-final journey with real diarization and AI.
-2. **Supported intelligence setup.** Distribute Humain, define compatible
-   versions, check its executable/runtime/provider login and selected model,
-   and explain readiness inside Seashell. Keep transcript-only mode useful.
+2. **Supported intelligence setup.** A private packed-engine install now exists:
+   `seashell ai install <package.tgz>`, `ai status`, and `ai providers` verify
+   the Node/API boundary and expose provider readiness. See [setup](humain-setup.md).
+   Public distribution/licensing, selected-model compatibility checks and a
+   polished interactive onboarding flow remain. Transcript-only mode stays useful.
 3. **Quality and long-meeting tests.** Score synthetic meetings containing
    reversals, ambiguous owners, relative dates, overlapping speakers, and
    unanswerable questions against expected claims and citations. Exercise one

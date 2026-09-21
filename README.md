@@ -1,5 +1,9 @@
 # Sea Shell
 
+For optional summaries and meeting chat, see [Humain setup](docs/humain-setup.md).
+Capture and transcription work without it.
+
+
 Local-first speech-to-text for audio, video, live microphone + system-audio
 sessions, speaker diarization, subtitles, and a durable transcript library on
 macOS.

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- Install a private Humain engine package with `seashell ai install`, inspect Node readiness and discover AI providers.
+- Select a loopback `local-openai` model for evidence-validated meeting analysis.
+
 ### Fixed
 
 - Meeting claims, notes and chat now bind to transcript content. Replacing or
@@ -9,7 +14,7 @@
   and rejects in-flight results for a superseded revision. Ordinary append
   preserves valid observations; cumulative observer budgets remain bounded.
 
-- Humain discovery uses only an explicit `HUMAIN_CLI` or `humain` on PATH,
+- Humain discovery uses an explicit `HUMAIN_CLI`, an installed engine package, or `humain` on PATH,
   instead of silently selecting a developer checkout under the user's home.
 - CLI meeting enrichment includes configured context files and saved meeting
   context. An explicit `--context` replaces it; unavailable approved files stop

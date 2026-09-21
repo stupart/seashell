@@ -96,6 +96,8 @@ export interface CaptureCommand {
 }
 
 export type CliCommand =
+  | { kind: 'ai'; action: 'install'; tarball: string; json: boolean }
+  | { kind: 'ai'; action: 'status' | 'providers'; json: boolean }
   | { kind: 'help' }
   | { kind: 'tui'; libraryDir?: string }
   | { kind: 'capabilities'; json: boolean }
@@ -352,8 +354,8 @@ function meetingMode(value: string): MeetingEnrichmentMode {
 }
 
 function meetingBackend(value: string): HumainBackend {
-  if (value === 'codex' || value === 'claude-code' || value === 'openrouter') return value;
-  throw new Error('--backend must be codex, claude-code, or openrouter');
+  if (value === 'codex' || value === 'claude-code' || value === 'openrouter' || value === 'local-openai') return value;
+  throw new Error('--backend must be codex, claude-code, openrouter, or local-openai');
 }
 
 function parseMeeting(args: string[]): MeetingCommand {
@@ -667,6 +669,14 @@ export function parseCliArgs(args: string[]): CliCommand {
     }
     throw new Error('Usage: seashell tui [--library-dir <path>]');
   }
+  if (args[0] === 'ai') {
+    const rest = args.slice(1).filter((arg) => arg !== '--json');
+    if ((rest[0] === 'status' || rest[0] === 'providers') && rest.length === 1) return { kind: 'ai', action: rest[0], json: args.includes('--json') };
+    if (rest[0] === 'install' && rest.length === 2 && !rest[1]!.startsWith('-')) {
+      return { kind: 'ai', action: 'install', tarball: rest[1]!, json: args.includes('--json') };
+    }
+    throw new Error('Usage: seashell ai install <trusted-package.tgz> | seashell ai status | providers [--json]');
+  }
   if (args[0] === 'doctor') {
     const unknown = args.slice(1).filter((arg) => arg !== '--json');
     if (unknown.length) throw new Error(`Unknown doctor option: ${unknown[0]}`);
@@ -706,6 +716,9 @@ Usage:
   seashell library <action> [options]       Browse and manage saved transcripts
   seashell capture <action> [options]       Inspect or finalize recoverable live capture
   seashell meeting <action> [options]       Create, enrich, browse, or chat with meetings
+  seashell ai install <package.tgz>        Install a compatible Humain engine package
+  seashell ai status [--json]             Check engine and Node readiness
+  seashell ai providers [--json]          Discover providers and login/setup steps
   seashell setup [--no-autostart] [--json]  Apply safe defaults on a true first install
   seashell doctor [--json]                  Check dependencies and models
   seashell capabilities [--json]            Describe optional engine capabilities
