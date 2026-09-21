@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased — AI provider picker
+
+- Choose meeting AI from the TUI with P or `seashell ai setup`.
+- Discover Claude Code, Codex, local models and OpenRouter through Humain, with setup guidance and explicit model/privacy choices.
+- Apply post-session notes/chat settings without restarting capture or losing compatible limits.
+
 ## Unreleased
 
 ### Added

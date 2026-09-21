@@ -25,7 +25,7 @@ else process.stdout.write(process.env.FIXTURE_RESULT);
   change(result);
   const argsPath = join(root, 'args.json');
   const options = { runId: 'expected-run', storeDir: 'relative store', env: {
-    HUMAIN_CLI: cli, FIXTURE_ARGS: argsPath, FIXTURE_RESULT: JSON.stringify(result),
+    HUMAIN_CLI: cli, SEASHELL_HUMAIN_DIR: join(root, 'intelligence'), FIXTURE_ARGS: argsPath, FIXTURE_RESULT: JSON.stringify(result),
   } };
   return { root, argsPath, options };
 }

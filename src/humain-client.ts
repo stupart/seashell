@@ -270,10 +270,10 @@ export function humainRouteRequest(route: HumainMeetingRoute) {
 }
 
 /** Read-only provider discovery using the same installed engine as meeting calls. */
-export async function discoverHumainProviders(env?: NodeJS.ProcessEnv): Promise<{
+export async function discoverHumainProviders(env?: NodeJS.ProcessEnv, options: { signal?: AbortSignal } = {}): Promise<{
   integrations: { id: string; ready: boolean; detail: string; nextStep?: string }[];
 }> {
-  const stdout = await runHumainCommand(['setup', '--json'], { env, timeoutMs: 45_000 }, 1_000_000);
+  const stdout = await runHumainCommand(['setup', '--json'], { env, signal: options.signal, timeoutMs: 45_000 }, 1_000_000);
   const value = JSON.parse(stdout);
   if (!value || !Array.isArray(value.integrations) || value.integrations.some((item: any) =>
     !item || typeof item.id !== 'string' || typeof item.ready !== 'boolean' || typeof item.detail !== 'string' ||
