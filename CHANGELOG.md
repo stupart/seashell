@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Meeting claims, notes and chat now bind to transcript content. Replacing or
+  re-segmenting a transcript archives old evidence, resets stale observation,
+  and rejects in-flight results for a superseded revision. Ordinary append
+  preserves valid observations; cumulative observer budgets remain bounded.
+
 - Humain discovery uses only an explicit `HUMAIN_CLI` or `humain` on PATH,
   instead of silently selecting a developer checkout under the user's home.
 - CLI meeting enrichment includes configured context files and saved meeting
