@@ -55,7 +55,7 @@ function parseRoute(value: unknown, label: string): HumainMeetingRoute | undefin
     throw new Error(`Sea Shell config ${label} must be an object`);
   }
   const route = value as Record<string, unknown>;
-  const backends: HumainBackend[] = ['codex', 'claude-code', 'openrouter'];
+  const backends: HumainBackend[] = ['codex', 'claude-code', 'openrouter', 'local-openai'];
   if (!backends.includes(route.backend as HumainBackend)) {
     throw new Error(`Sea Shell config ${label}.backend is invalid`);
   }
@@ -99,7 +99,7 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
   }
   const meeting = value as Record<string, unknown>;
   const modes: MeetingEnrichmentMode[] = ['streaming', 'post-session', 'hybrid'];
-  const backends: HumainBackend[] = ['codex', 'claude-code', 'openrouter'];
+  const backends: HumainBackend[] = ['codex', 'claude-code', 'openrouter', 'local-openai'];
   if (meeting.mode !== undefined && !modes.includes(meeting.mode as MeetingEnrichmentMode)) {
     throw new Error('Sea Shell config meeting.mode is invalid');
   }

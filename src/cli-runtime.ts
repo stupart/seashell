@@ -1,3 +1,5 @@
+import { installHumainPackage, requireHumainNode } from './humain-install.ts';
+import { discoverHumainProviders, resolveHumainExecutable } from './humain-client.ts';
 import { randomUUID } from 'crypto';
 import { spawnSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
@@ -353,7 +355,18 @@ export function doctorChecks(options: {
     }
   };
 
+  const humainCheck = () => {
+    try {
+      const executable = resolveHumainExecutable();
+      requireHumainNode();
+      return { name: 'meeting-ai', ok: true, required: false, path: executable.prefix[0] ?? executable.command };
+    } catch (error) {
+      return { name: 'meeting-ai', ok: false, required: false,
+        help: error instanceof Error ? error.message : String(error) };
+    }
+  };
   return [
+    humainCheck(),
     commandCheck('bun', true, 'Install Bun from https://bun.sh'),
     commandCheck('ffmpeg', true, 'brew install ffmpeg'),
     commandCheck('ffprobe', true, 'brew install ffmpeg'),
@@ -734,6 +747,37 @@ export async function executeCliCommand(command: Exclude<CliCommand, { kind: 'tu
       return executeCapture(command);
     case 'library':
       return executeLibrary(command);
+    case 'ai': {
+      if (command.action === 'providers') {
+        requireHumainNode();
+        const result = await discoverHumainProviders();
+        print(command.json ? JSON.stringify(result, null, 2) : result.integrations.map((provider) =>
+          `${provider.ready ? '✓' : '○'} ${provider.id}: ${provider.detail}${provider.nextStep ? `\n  ${provider.nextStep}` : ''}`
+        ).join('\n'));
+        return 0;
+      }
+      if (command.action === 'install') {
+        const installed = await installHumainPackage(command.tarball);
+        print(command.json ? JSON.stringify(installed, null, 2) :
+          `Humain ${installed.version} installed.
+Discover available providers: seashell ai providers
+Choose your model with: seashell meeting setup --backend <backend> --model <model>
+Backends: local-openai, codex, claude-code, openrouter`);
+        return 0;
+      }
+      try {
+        const executable = resolveHumainExecutable();
+        const node = requireHumainNode();
+        print(command.json ? JSON.stringify({ ready: true, executable, node: node.version }, null, 2) :
+          `Humain engine found: ${executable.prefix[0] ?? executable.command}
+Node ${node.version}. Provider/model readiness is separate; run seashell ai providers.`);
+        return 0;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        print(command.json ? JSON.stringify({ ready: false, help: message }, null, 2) : message);
+        return 1;
+      }
+    }
     case 'doctor':
       return executeDoctor(command.json);
     case 'setup': {
