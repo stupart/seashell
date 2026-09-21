@@ -114,3 +114,19 @@ test('a configured PATH is honored when discovering an installed Humain', async 
     ...f.options, env: { ...f.options.env, HUMAIN_CLI: '', PATH: bin },
   })).status).toBe('succeeded');
 });
+
+test('an unconfigured developer checkout is not silently used as Humain', () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-humain-discovery-'));
+  roots.push(root);
+  const dist = join(root, 'Developer', 'humain-engine', 'dist');
+  mkdirSync(dist, { recursive: true });
+  writeFileSync(join(dist, 'cli.js'), '// An unrelated development checkout.\n');
+  const client = new URL('../src/humain-client.ts', import.meta.url).href;
+  const result = Bun.spawnSync([process.execPath, '-e', `
+    const { resolveHumainExecutable } = await import(${JSON.stringify(client)});
+    try { resolveHumainExecutable(); process.exit(2); }
+    catch (error) { console.log(error.message); }
+  `], { env: { ...process.env, HOME: root, PATH: '', HUMAIN_CLI: '' } });
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout.toString()).toContain('Humain is not available');
+});

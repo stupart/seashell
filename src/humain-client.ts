@@ -1,6 +1,6 @@
 import { spawn } from 'child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
-import { homedir, tmpdir } from 'os';
+import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
 import {
   beginManagedProcessSession,
@@ -73,14 +73,6 @@ export function resolveHumainExecutable(
   if (configured) return configured;
   const installed = Bun.which('humain', { PATH: env.PATH ?? '' });
   if (installed) return { command: installed, prefix: [] };
-  const developmentCli = join(homedir(), 'Developer', 'humain-engine', 'dist', 'cli.js');
-  if (existsSync(developmentCli)) {
-    return {
-      command: 'node',
-      prefix: [developmentCli],
-      cwd: dirname(dirname(developmentCli)),
-    };
-  }
   throw new Error(
     'Humain is not available. Install its CLI or set HUMAIN_CLI to humain-engine/dist/cli.js.',
   );

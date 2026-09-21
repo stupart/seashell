@@ -2,8 +2,29 @@
 
 ## Unreleased
 
+### Fixed
+
+- Humain discovery uses only an explicit `HUMAIN_CLI` or `humain` on PATH,
+  instead of silently selecting a developer checkout under the user's home.
+- CLI meeting enrichment includes configured context files and saved meeting
+  context. An explicit `--context` replaces it; unavailable approved files stop
+  dispatch before the model runs.
+
+### Documentation and validation
+
+- Updated publication status, public install testing, and the meeting/Humain
+  readiness guide, including private-engine and live-evidence limitations.
+- 187 Bun tests, 3 Python tests, typecheck, native compilation, accelerated
+  capture-storage recovery, and 100 synthetic meeting lifecycles passed.
+- The real Humain contract gym passed with a local fixture provider.
+
+## 1.1.0-rc6 — Homebrew candidate, 20 September 2026
+
 ### Added
 
+- Public Homebrew formula with bundled Bun, native helpers, and local models;
+  fresh Apple Silicon and Intel install/transcription checks; MIT license file.
+- Reliability gym with accelerated capture recovery and repeated meeting tests.
 - Audio and video transcription through one timestamped media pipeline.
 - Independent timestamp and speaker presentation across text, JSON, SRT, VTT,
   CLI, and TUI surfaces.
@@ -38,6 +59,10 @@
 
 ### Changed
 
+- Fixed silent capture startup, incomplete final transcripts, capture shutdown,
+  torn-journal recovery, stale meeting signals, and duplicate watcher ownership.
+- Start timestamps when recording begins; follow incoming live text while
+  retaining manual scrollback; clarify microphone/computer-audio status.
 - TUI timestamps use a compact media-relative clock while canonical data and
   subtitle exports retain millisecond precision.
 - Meeting complexity is hidden from ordinary transcript items; the existing
@@ -60,6 +85,15 @@
   guidance and a retry cooldown instead of dumping AppleScript commands.
 
 ### Verified
+
+- RC6 source: 183 Bun tests, 3 Python tests, typecheck, native build, storage
+  recovery, and 100 synthetic meeting lifecycles. Post-merge
+  [source](https://github.com/stupart/seashell/actions/runs/35538629817) and
+  [fresh installation CI](https://github.com/stupart/homebrew-tap/actions/runs/35538519086)
+  passed. Real Meet capture/stop and the microphone test sentence are recorded
+  in the [acceptance report](docs/google-meet-acceptance-2026-09-20.md).
+
+### Earlier development checks
 
 - Full suite: 121 Bun tests, 3 Python tests, strict TypeScript checking, and
   shell syntax/static analysis.

@@ -41,7 +41,7 @@ left running; quitting and reopening `seashell` selects RC5.
 
 [Source CI passed](https://github.com/stupart/seashell/actions/runs/35495817804).
 [Fresh Apple Silicon and Intel installation CI](https://github.com/stupart/homebrew-tap/actions/runs/35495853970)
-is tracked separately. Both PRs remain unmerged:
+is tracked separately. Update, 21 September: both PRs are now merged:
 [source #14](https://github.com/stupart/seashell/pull/14) and
 [formula #1](https://github.com/stupart/homebrew-tap/pull/1).
 
@@ -51,7 +51,9 @@ The requested app is Google Meet. The browser/native computer-control connection
 was unavailable (`Sky Computer Use native pipe startup failed`), so no meeting
 was opened by automation. The user was asked to join a solo call. No browser
 microphone activity had been observed when this report was written; the live
-Meet acceptance test remains pending.
+Meet acceptance test was pending at this RC5 checkpoint. The subsequent real
+test, its findings, and RC6 fixes are recorded in
+[Google Meet acceptance](google-meet-acceptance-2026-09-20.md).
 
 Read-only checks showed launch at login disabled, an existing TUI owning the
 watcher, and Conch's `meeting-autopause` setting already enabled. No settings
