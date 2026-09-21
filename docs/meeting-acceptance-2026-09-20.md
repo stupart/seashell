@@ -106,7 +106,7 @@ so the check correctly returned `ready: false` with input-level guidance.
 Receiving buffers is not proof of intelligible microphone speech. The earlier
 source test above had audible signal on both tracks. Test audio was discarded.
 
-Changes are reviewable in [Seashell #13](https://github.com/stupart/seashell/pull/13)
-and [Homebrew tap #1](https://github.com/stupart/homebrew-tap/pull/1), still
-unmerged. Publishing the formula/main branch is separate from the installed
-local preview.
+Update, 21 September: [Seashell #13](https://github.com/stupart/seashell/pull/13)
+and [Homebrew tap #1](https://github.com/stupart/homebrew-tap/pull/1) are merged.
+This report preserves the RC4 checkpoint; the public package is now RC6. See
+[Google Meet acceptance](google-meet-acceptance-2026-09-20.md) for later results.

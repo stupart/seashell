@@ -1,5 +1,10 @@
 # Sea Shell meeting mode 0.1
 
+Implementation status and open gaps are tracked in
+[meeting intelligence status](meeting-intelligence-status.md). The flow below
+is the design contract; live-draft evidence through final ASR still needs the
+revision handling described there.
+
 ## Product boundary
 
 Humain owns reusable capture/transcription protocol semantics, capability
@@ -53,8 +58,8 @@ when the meeting ends (hybrid/post-session)
   -> derive notes, decisions, actions, resources, and enriched exports
 
 chat
-  -> use frozen transcript + final claims + recent meeting conversation
-  -> require evidence segment IDs in every answer
+  -> use saved transcript + current claims + recent meeting conversation
+  -> validate returned evidence IDs; an abstention may have no citations
 ```
 
 ## UX contract
@@ -91,7 +96,8 @@ chat
 ## Failure and trust rules
 
 - Provisional claims are never presented as final.
-- Every claim and chat answer cites stable transcript segment IDs.
+- Every claim cites supplied transcript segment IDs. Chat citations must also
+  name supplied segments, but an abstention may return an empty list.
 - Missing evidence, unknown claim types, malformed output, or out-of-range
   confidence fails that enrichment run.
 - The observer has a maximum run count and monotonically advancing cursor.

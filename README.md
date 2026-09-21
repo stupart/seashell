@@ -63,7 +63,8 @@ brew install ffmpeg sox cmake git
 Speaker diarization additionally needs Python 3.10+ (3.12 recommended) and
 the Python packages described under [Speaker diarization](#speaker-diarization).
 Meeting intelligence optionally uses the separate
-[Humain engine](https://github.com/stupart/humain-engine); ordinary capture,
+[Humain engine](https://github.com/stupart/humain-engine) (currently a private
+repository; access is required); ordinary capture,
 transcription, diarization, history, and exports do not require it.
 
 ## Installation
@@ -394,10 +395,17 @@ delete records from its TUI or CLI.
 
 ## Meeting mode
 
+Capture and transcription work with the public Homebrew package. AI notes,
+analysis, and meeting chat additionally require Humain and an exact configured
+model route. Humain is currently private and has no published package, so these
+features are not an out-of-the-box part of the public install. See
+[meeting intelligence status](docs/meeting-intelligence-status.md) for the
+implemented features, setup requirements, test coverage, and remaining work.
+
 A meeting is a companion artifact, not a replacement transcript. Marking a
 transcript creates `meeting.json` beside the authoritative `transcript.json`.
 The normal Sea Shell screen remains unchanged for ordinary recordings. Meeting
-tabs appear only when the selected history item has a meeting artifact.
+tabs appear when the live recording or selected history item has a meeting artifact.
 
 Sea Shell chooses the model route for each product job; Humain pins and executes
 that exact instruction. A shared route remains the simplest setup and is used
@@ -430,7 +438,9 @@ seashell meeting setup \
 ```
 
 Humain must be installed as `humain`, or `HUMAIN_CLI` can point to its built
-`dist/cli.js`. Codex and Claude Code routes use Humain's verified subscription
+`dist/cli.js` (requires Node.js 22.13 or later). Current source discovers only
+the configured executable or `humain` on PATH; RC6 still has the legacy
+development-folder fallback noted in the status guide. Codex and Claude Code routes use Humain's subscription
 adapters. OpenRouter uses the API key configured in Humain and keeps exact
 model, token, and cost provenance in its private run store.
 
@@ -482,9 +492,15 @@ The three enrichment modes share one artifact contract:
   meeting, resolving late corrections and reversals before publishing final
   notes.
 
-Every model claim must cite stable transcript segment IDs. Invalid citations
-are rejected. Observer runs are bounded by a durable cursor and maximum run
-count, so a growing transcript is not resent in full on every iteration.
+Live observation runs in the open TUI. The background watcher records without
+live ASR and runs configured enrichment after the meeting ends. `post-session`
+is the simplest starting point for notes on completed recordings; live-draft
+to final-transcript citation handling still needs the hardening described in
+the [status guide](docs/meeting-intelligence-status.md#remaining-work).
+
+Every model claim must cite transcript segment IDs supplied in its request.
+Unknown citations are rejected. Observer runs are bounded by a durable cursor
+and maximum run count, so a growing transcript is not resent in full on every iteration.
 Failures leave the base transcript and exports intact.
 
 ### Interrupted-capture recovery

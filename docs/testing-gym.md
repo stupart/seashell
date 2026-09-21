@@ -106,8 +106,8 @@ remain explicit prerequisites; don't claim an unattended first install there.
 
 ## Homebrew distribution gym
 
-The candidate formula and workflow live in
-[stupart/homebrew-tap#1](https://github.com/stupart/homebrew-tap/pull/1).
+The published RC6 formula and workflow live on
+[stupart/homebrew-tap's default branch](https://github.com/stupart/homebrew-tap).
 CI checks the exact formula checkout on fresh Apple Silicon and Intel macOS
 runners. It downloads checksum-pinned source, Bun, Whisper, and models, compiles
 the native helpers, installs the package, and runs `brew test` and
@@ -124,7 +124,16 @@ without autostart, doctor, actual transcription of Whisper's pinned speech
 fixture, and package-aware update guidance. Using the source fixture avoids
 depending on `say` voices, which can yield empty audio in a headless test account.
 
-Register a review checkout, then exercise its formula:
+To test the published package on a fresh test account:
+
+```bash
+brew install stupart/tap/seashell
+HOMEBREW_TEST_TIMEOUT_SECS=600 brew test stupart/tap/seashell
+brew linkage --test stupart/tap/seashell
+```
+
+For formula development, register a review checkout instead. Use a separate
+test account: Homebrew cannot install the same formula from both taps at once.
 
 ```bash
 brew tap stupart/seashell-preview /absolute/path/to/homebrew-tap-checkout
@@ -138,7 +147,7 @@ Use a disposable test account for installation experiments. Unlike the source
 bootstrap, the Homebrew package does not configure a login watcher at install
 time; `seashell` works with defaults, and `seashell setup` explicitly opts into
 the watcher. See the [acceptance report](distribution-acceptance-2026-09-20.md)
-for results and the distinction between candidate and published commands.
+for results and the distinction between historical previews and the public RC6.
 
 ## Device acceptance and soak
 

@@ -58,7 +58,7 @@ import {
   meetingLaunchAtLoginStatus,
 } from './launch-at-login.ts';
 import { MEETING_SIGNALS_HELPER, readMeetingSignalSnapshot } from './meeting-automation.ts';
-import { loadMeetingContextFiles } from './meeting-context.ts';
+import { buildMeetingContext, loadMeetingContextFiles } from './meeting-context.ts';
 import { writeMeetingConsent } from './meeting-consent.ts';
 import { initializeFirstInstall } from './first-install.ts';
 
@@ -529,9 +529,13 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       const reconciliationRoute = mode === 'streaming'
         ? undefined
         : meetingRoute(command.action, config, 'reconciliation');
+      const existingMeeting = loadMeetingArtifact(libraryDir, command.action.id);
       const context = command.action.contextPath
         ? readJsonFile(command.action.contextPath, 'meeting context')
-        : undefined;
+        : {
+            ...buildMeetingContext(config.meeting?.contextFiles, existingMeeting?.calendar),
+            attendees: existingMeeting?.attendees ?? [],
+          };
       const artifact = await enrichMeeting(libraryDir, command.action.id, {
         routes: {
           ...(observerRoute === undefined ? {} : { observer: observerRoute }),

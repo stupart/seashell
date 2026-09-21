@@ -1,24 +1,27 @@
 # Seashell distribution acceptance — 20 September 2026
 
-## Publication status
+## Publication status — updated 21 September 2026
 
-The reliability changes are pushed as stacked Seashell PRs
-[#2–#12](https://github.com/stupart/seashell/pulls). `main` still points to
-`2ca0b3ad18effcc5e514ffb50b20a5386a7bb1a9`; no GitHub release has been published.
-An install from public `main` therefore does not yet contain the reviewed fixes.
+The reliability and meeting UI changes in Seashell PRs #2–#16 are merged into
+`main`, along with the public installation instructions in #17.
+[Post-merge source CI passed](https://github.com/stupart/seashell/actions/runs/35538629817).
 
-The Homebrew candidate is
-[stupart/homebrew-tap#1](https://github.com/stupart/homebrew-tap/pull/1), version
-`1.1.0-rc3`, pinned to Seashell commit
-`efd178d9ee105518611622d277538f97031f6f43`. This includes the reliability stack
-and [#12's package integration](https://github.com/stupart/seashell/pull/12).
-It is not merged into the tap's `trunk` branch. After that merge, the public
-installation command will be:
+[Homebrew tap #1](https://github.com/stupart/homebrew-tap/pull/1) is merged into
+`trunk`. Its public release candidate is **1.1.0-rc6**, pinned to Seashell commit
+`b8e812c4213f51cb2953d750646b22326efab3d3`.
+[Post-merge fresh installs passed on Apple Silicon and Intel](https://github.com/stupart/homebrew-tap/actions/runs/35538519086).
+The public installation command is:
 
 ```bash
 brew install stupart/tap/seashell
 seashell
 ```
+
+The acceptance details below preserve the earlier RC3 experiments. For the
+subsequent real Meet test and RC6 results, see
+[Google Meet acceptance](google-meet-acceptance-2026-09-20.md). For the current
+portability and optional Humain limitations, see
+[meeting intelligence status](meeting-intelligence-status.md).
 
 The npm name `seashell` belongs to the unrelated `heineiuo/seashell` message
 framework. `@stupart/seashell` was not registered when checked, and this repo's
@@ -163,8 +166,9 @@ hit the ten-minute test deadline with the same runtime. The successful RC3 run
 therefore does not establish consistent hosted latency; the narrow test margin
 and thread-count/model benchmark remain explicit follow-ups.
 
-Before advertising the final public install command, merge the reviewed Seashell
-stack and tap PR, select the release revision, and move the formula from
-this explicit candidate to the intended release revision. CI should rerun for
-every formula update. Once the public tap contains the formula, replace the
-local preview tap installation with `stupart/tap/seashell` for normal upgrades.
+The public formula remains an explicit release candidate. Every formula update
+needs fresh installation CI before promotion to a stable release. Installations
+from the earlier `stupart/seashell-preview` tap retain that tap's ownership;
+Homebrew refuses to install the same formula from `stupart/tap` alongside it.
+Moving such an installation requires quitting Seashell and replacing the preview
+package with the public package. Fresh users should use only `stupart/tap`.
