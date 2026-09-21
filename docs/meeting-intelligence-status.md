@@ -122,7 +122,10 @@ model-executable fixture. It proves protocol behavior, not answer quality.
 See [the gym runbook](testing-gym.md) for reproducible commands.
 
 A real remote model has not been evaluated end to end on a scored set of meeting
-fixtures in this audit. Citation validation confirms that an ID exists; it
+fixtures in this audit. The [changelog](../CHANGELOG.md#earlier-development-checks)
+records an earlier live OpenRouter enrichment canary and a separate STT canary;
+those small smoke checks are not a meeting-analysis quality benchmark and were
+not rerun here. Citation validation confirms that an ID exists; it
 does not establish that the cited words support the model's conclusion. Chat
 also permits an empty citation list for abstention. A green core `doctor` result
 does not currently attest Humain/provider readiness.

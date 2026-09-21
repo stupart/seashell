@@ -1,7 +1,17 @@
 # Sea Shell roadmap
 
-## Shipped on the staging branch
+Current feature readiness, prerequisites, and prioritized analysis work are in
+[meeting intelligence status](docs/meeting-intelligence-status.md).
 
+## Implemented on main
+
+The public Homebrew package is RC6. Optional AI features still require the
+separately installed, currently private Humain engine and a configured route.
+
+- Homebrew distribution with a bundled runtime/models, fresh Apple Silicon and
+  Intel installation CI, the MIT license, and a repeatable reliability gym.
+- Capture startup/shutdown and journal recovery fixes, recording clocks that
+  start with capture, and a live reader that follows incoming speech.
 - Universal audio/video import with deterministic FFmpeg media preparation.
 - Canonical timestamps, speaker diarization, editable speaker names, SRT/VTT,
   and a folder-based transcript library.
@@ -49,6 +59,10 @@
 
 ## Next hardening checkpoints
 
+- Preserve or invalidate live claim evidence when draft/final transcription
+  changes segment identity, and bound final/chat input by token size.
+- Humain distribution, compatibility checks, and visible provider readiness;
+  core `doctor` currently does not establish meeting-intelligence readiness.
 - Add hardware-clock drift measurement/correction, device-change recovery,
   automatic route restart, and microphone/system acoustic echo
   cancellation beyond conservative transcript deduplication.
@@ -67,9 +81,9 @@
 - HIPAA-oriented deployment profile: organizational identity/RBAC, audit log,
   retention/deletion policy, managed encryption, BAA-backed provider allow-list,
   incident operations, and external risk/security validation.
-- Native macOS notifications and a one-click consent surface for ambiguous
-  meetings detected by the headless login watcher.
-- Packaging Humain and Sea Shell so the optional engine dependency installs and
-  updates without a development checkout.
+- A one-click consent surface for ambiguous meetings detected by the headless
+  login watcher; native notifications and CLI approval already exist.
+- Packaging Humain so the optional engine installs and updates without a
+  development checkout; Seashell itself is available through Homebrew.
 - macOS app projection over the same transcript and meeting contracts after the
   terminal workflow is stable.
