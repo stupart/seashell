@@ -1,8 +1,6 @@
 name: Reliability gym
 on:
-  pull_request:
-  push:
-    branches: [main]
+  # Local CI is the default. Hosted execution must be explicitly requested.
   workflow_dispatch:
 permissions:
   contents: read
@@ -20,14 +18,15 @@ jobs:
           node-version: '24'
       - name: Media dependencies
         run: brew install ffmpeg
-      - run: bun install --frozen-lockfile
       - name: Typecheck, regressions, media, native compilation, capture storage and repeated meetings
-        run: bun run gym -- --native --capture-soak --meeting-soak
+        run: bun run ci
       - name: Preserve test evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: seashell-gym-${{ github.run_id }}
-          path: .gym-results/
+          path: |
+            .ci-results/
+            .gym-results/
           include-hidden-files: true
           retention-days: 14

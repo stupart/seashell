@@ -51,3 +51,6 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Local codebase-analysis notes
 docs/codebase-analysis/
 .gym-results/
+
+# Private local CI receipts and logs
+.ci-results/
