@@ -76,14 +76,23 @@ async function command(name: string, argv: string[], timeoutMs = 120_000, overri
       const killGroup = (signal: NodeJS.Signals) => {
         if (child.pid) { try { process.kill(-child.pid, signal); } catch {} }
       };
-      const timer = setTimeout(() => {
-        failure = new Error(`${name} exceeded ${timeoutMs} ms`);
+      const stop = (error: Error) => {
+        failure ??= error;
         killGroup('SIGTERM');
-        killTimer = setTimeout(() => killGroup('SIGKILL'), 2_000);
-      }, timeoutMs);
+        killTimer ??= setTimeout(() => killGroup('SIGKILL'), 2_000);
+      };
+      // The local CI parent can be interrupted while this command owns a
+      // separate process group. Forward cancellation before leaving the gym.
+      const interrupt = () => stop(new Error(`${name} interrupted by SIGINT`));
+      const terminate = () => stop(new Error(`${name} interrupted by SIGTERM`));
+      process.once('SIGINT', interrupt);
+      process.once('SIGTERM', terminate);
+      const timer = setTimeout(() => stop(new Error(`${name} exceeded ${timeoutMs} ms`)), timeoutMs);
       child.once('error', (error) => { failure = error; });
       child.once('close', (code) => {
         clearTimeout(timer);
+        process.removeListener('SIGINT', interrupt);
+        process.removeListener('SIGTERM', terminate);
         if (killTimer) { clearTimeout(killTimer); killGroup('SIGKILL'); }
         if (failure || code !== 0) reject(failure ?? new Error(`${name} exited ${code}; inspect its logs`));
         else resolvePromise();

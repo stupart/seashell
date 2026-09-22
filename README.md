@@ -1,5 +1,8 @@
 # Sea Shell
 
+Local CI: `bun run ci`. See [local CI](docs/local-ci.md) for prerequisites,
+saved reports and the optional pre-push check. Pushes and PRs do not start hosted CI.
+
 For optional summaries and meeting chat, press **P** in Seashell or run
 `seashell ai setup` to choose models and supported effort levels for live analysis,
 final notes and chat. Each role can use Claude Code, Codex, a local model, or OpenRouter.

@@ -14,7 +14,11 @@
     "test": "bun test ./test && python3 -m unittest discover -s test -p '*_test.py'",
     "typecheck": "bunx tsc --noEmit",
     "gym": "bun run scripts/gym.ts",
-    "benchmark:live-asr": "bun run scripts/benchmark-live-asr.ts"
+    "benchmark:live-asr": "bun run scripts/benchmark-live-asr.ts",
+    "ci": "node scripts/local-ci.mjs",
+    "ci:quick": "node scripts/local-ci.mjs --quick",
+    "ci:verify": "node scripts/local-ci.mjs --verify",
+    "ci:hook": "node scripts/local-ci.mjs --install-hook"
   },
   "devDependencies": {
     "@types/bun": "latest",

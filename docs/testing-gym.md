@@ -7,6 +7,10 @@ set of fixes. A green synthetic run does not establish real-device reliability.
 
 ## Automatic checks
 
+Run the complete local CI gate with `bun run ci`; see [local CI](local-ci.md)
+for source-bound reports and an optional pre-push check. The commands below are
+useful for focused investigations.
+
 ```bash
 bun install --frozen-lockfile
 brew install ffmpeg
@@ -37,9 +41,10 @@ The regression suite includes:
   long meeting IDs, changed observer requests, and window-scoped evidence.
 - Login-agent configuration, private logs, and failed shutdown reporting.
 
-The macOS GitHub Actions workflow runs the default gym plus native compilation
-and the accelerated capture-storage and repeated-meeting exercises for each PR and keeps evidence for
-14 days. It requires no private Humain repo,
+Local CI runs the default gym plus native compilation and the accelerated
+capture-storage and repeated-meeting exercises, retaining evidence locally.
+GitHub Actions is disabled; its manual-only fallback calls the same runner if
+explicitly enabled. The local gate requires no private Humain repo,
 model download, microphone, Calendar permission, or cloud credentials.
 
 `--capture-soak` accelerates a 90-minute, two-track capture clock through 1,079
