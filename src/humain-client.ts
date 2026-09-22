@@ -13,6 +13,7 @@ export type HumainMeetingAction = 'observe' | 'reconcile' | 'chat';
 export type HumainBackend = 'codex' | 'claude-code' | 'openrouter' | 'local-openai';
 
 export interface HumainMeetingRoute {
+  effort?: ModelEffort;
   backend: HumainBackend;
   model: string;
   maxOutputTokens?: number;
@@ -257,6 +258,7 @@ export async function runHumainMeeting(
 
 export function humainRouteRequest(route: HumainMeetingRoute) {
   return {
+    ...(route.effort === undefined ? {} : { effort: route.effort }),
     backend: route.backend,
     model: route.model,
     ...(route.maxOutputTokens === undefined ? {} : { maxOutputTokens: route.maxOutputTokens }),
@@ -281,4 +283,35 @@ export async function discoverHumainProviders(env?: NodeJS.ProcessEnv, options: 
     throw new Error('Humain returned incompatible provider discovery data');
   }
   return value;
+}
+
+export const MODEL_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type ModelEffort = typeof MODEL_EFFORTS[number];
+export interface HumainModelOption {
+  id: string;
+  name: string;
+  description: string;
+  efforts: ModelEffort[];
+  defaultEffort?: ModelEffort;
+  isDefault?: boolean;
+}
+
+/** Catalog metadata only; never submit a prompt to discover a model. */
+export async function discoverHumainModels(backend: HumainBackend, options: { signal?: AbortSignal; env?: NodeJS.ProcessEnv } = {}): Promise<HumainModelOption[]> {
+  const stdout = await runHumainCommand(['models', 'list', '--provider', backend, '--limit', '100', '--json'],
+    { env: options.env, signal: options.signal, timeoutMs: 25_000 }, 2_000_000);
+  const value = JSON.parse(stdout);
+  const rows = backend === 'local-openai' ? (Array.isArray(value?.modelIds) ? value.modelIds.map((id: unknown) => ({ id })) : undefined) : value?.models;
+  if (!Array.isArray(rows) || rows.length > 1000) throw new Error('Humain returned an incompatible model catalog. Update Humain or enter a custom model.');
+  const clean = (s: string) => s.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').slice(0, 500);
+  const seen = new Set<string>();
+  return rows.flatMap((row: any) => {
+    if (typeof row?.id !== 'string' || !row.id.trim() || row.id.length > 200 || /[\u0000-\u001f\u007f-\u009f]/.test(row.id) || seen.has(row.id)) return [];
+    seen.add(row.id);
+    const native = backend === 'codex' || backend === 'claude-code';
+    const efforts = native && Array.isArray(row.efforts) ? row.efforts.filter((e: ModelEffort) => MODEL_EFFORTS.includes(e)) : [];
+    return [{ id: row.id, name: typeof row.name === 'string' ? clean(row.name) : row.id,
+      description: typeof row.description === 'string' ? clean(row.description) : '', efforts,
+      ...(efforts.includes(row.defaultEffort) ? { defaultEffort: row.defaultEffort } : {}), isDefault: row.isDefault === true }];
+  });
 }

@@ -84,7 +84,9 @@ chat
   so approval cannot leak into a later call.
 - The TUI never silently chooses a model. Sea Shell selects separate exact
   observer, reconciliation, and chat routes from settings; Humain pins them in
-  compiled runs and receipts. A shared backend/model remains the fallback.
+  compiled runs and receipts. Press P to select discovered models and supported
+  effort levels per role, review a suggested draft, and choose the analysis mode.
+  A shared backend/model remains the legacy fallback.
 - “Works with,” “detects,” and “integrates with” Google Meet are separate
   capabilities. Local mic + system capture and browser process detection are
   implemented. Participant-tile and active-speaker inspection remain future,

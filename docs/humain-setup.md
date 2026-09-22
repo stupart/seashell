@@ -29,23 +29,39 @@ seashell ai providers
 The provider list reports local CLI authentication and configured endpoints, with
 next steps when something is missing. It does not send transcripts for a test.
 Readiness is not a guarantee of model quality or of every native harness feature.
-Choose inside the TUI with **P → AI provider**, or open the same picker directly:
+Choose inside the TUI with **P → Meeting AI**, or open the same picker directly:
 
 ```sh
 seashell ai setup
 ```
 
-The picker shows Claude Code, Codex, a local model server and OpenRouter, with
-readiness and missing setup steps from Humain. Use arrows and Enter to select a
-provider, then enter its supported model ID and press Enter to save. Claude Code
-starts with `sonnet`; other routes require an explicit model ID rather than a
-guessed model list. Escape leaves the current choice unchanged. Discovery and
-saving do not make model calls. Recording keeps running while the picker is open.
+Choose **Live analysis**, **Final notes**, or **Meeting chat**, then use **↑/↓**
+and **Enter** to choose its provider, model, and supported reasoning effort.
+Each role can use a different provider. Humain reads model lists from your native
+Codex/Claude CLI or configured local/OpenRouter catalog. Missing authentication
+shows the relevant setup step. If discovery fails, update Humain/the provider CLI
+or use **Enter a custom model ID**. Custom IDs use provider-default effort.
 
-Saving applies the provider/model to all meeting roles, enables post-session
-notes and chat, preserves compatible budgets, and retains calendar/capture
-settings. The picker shows where meeting text goes before saving. Advanced
-per-role routes and streaming/hybrid modes remain available through `meeting setup`.
+**Suggest models for all roles** fills an editable draft using models the chosen
+provider advertises: a fast family for live observations, a detailed family for
+final notes, and a balanced family for chat. For example, Claude can offer Haiku,
+Fable/Opus, and Sonnet respectively. These are family-based starting points, not
+quality or latency benchmarks, and account/model availability can change. Fable
+may use paid credits under your Claude plan. No model or provider is selected
+silently. Check the choices and press **Save choices** to apply them; Escape from
+the role screen discards the draft.
+
+The **Mode** row controls whether live analysis is enabled. New setups start with
+**Final notes only**; select **Live analysis + final notes** for both stages, or
+**Live analysis only**. Chat is available in every mode. Suggestions preserve
+your selected mode. Existing shared-model settings continue to work.
+
+Effort options come from the selected model's capabilities. Haiku currently
+advertises no effort control. Local/OpenRouter structured meeting adapters use
+provider-default effort until Humain supports their effort contracts. Discovery
+and saving make no inference calls, and recording keeps running while the picker
+is open. Saving preserves compatible per-role budgets and calendar/capture settings.
+Cloud roles send meeting text through the account shown in the picker.
 
 For scripted setup, choose an explicit model using the provider you want:
 

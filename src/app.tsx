@@ -1740,7 +1740,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       } }));
       setAiSetupOpen(false);
       setError(null);
-      setNotice(`Meeting AI: ${patch.backend} · ${patch.model} · notes after meetings`);
+      setNotice(`Meeting AI roles saved · ${patch.mode}`);
     }} />;
 
   const title = view === 'live' ? liveRecord.title : selectedRecord?.title ?? 'Transcript';
@@ -2024,7 +2024,7 @@ export default function App(props: { libraryDir?: string } = {}) {
             <Text dimColor>C copy · E export · O folder · D trash · DEL clear live</Text>
             <Text dimColor>[/] choose speaker · R rename · ↑↓ scroll · L live · Q quit</Text>
             <Text dimColor>M mark meeting · 1-4 meeting views · G enrich/finalize · A ask</Text>
-            <Text dimColor>P choose AI provider and model (Claude Code, Codex, local, OpenRouter)</Text>
+            <Text dimColor>P choose AI models and effort for live analysis, notes and chat</Text>
             <Text dimColor>Automatic meeting prompt: M record · X ignore</Text>
           </>
         ) : !historyOpen && currentRecord?.transcript.length ? (
