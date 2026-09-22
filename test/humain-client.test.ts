@@ -2,9 +2,23 @@ import { afterEach, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { runHumainMeeting, runHumainTranscription, type HumainTranscriptionRoute } from '../src/humain-client.ts';
+import { discoverHumainModels, humainRouteRequest, runHumainMeeting, runHumainTranscription, type HumainTranscriptionRoute } from '../src/humain-client.ts';
 
 const roots: string[] = [];
+
+test('model discovery normalizes catalogs without prompts and only exposes supported native effort', async () => {
+  const f=fixture();
+  const models=[{id:'sonnet',name:'Sonnet\u001b',efforts:['low','high','ultracode'],defaultEffort:'high'},
+    {id:'sonnet'},{id:'bad\nmodel'}];
+  const env={...f.options.env,FIXTURE_RESULT:JSON.stringify({models})};
+  const found=await discoverHumainModels('claude-code',{env});
+  expect(found).toEqual([{id:'sonnet',name:'Sonnet ',description:'',efforts:['low','high'],defaultEffort:'high',isDefault:false}]);
+  expect(JSON.parse(readFileSync(f.argsPath,'utf8'))).toEqual(['models','list','--provider','claude-code','--limit','100','--json']);
+  expect((await discoverHumainModels('openrouter',{env}))[0]?.efforts).toEqual([]);
+  expect((await discoverHumainModels('local-openai',{env:{...env,FIXTURE_RESULT:JSON.stringify({modelIds:['local-model']})}}))[0]?.id).toBe('local-model');
+  await expect(discoverHumainModels('codex',{env:{...env,FIXTURE_RESULT:'null'}})).rejects.toThrow('incompatible model catalog');
+  expect(humainRouteRequest({backend:'codex',model:'m',effort:'high'})).toEqual({backend:'codex',model:'m',effort:'high'});
+});
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const route: HumainTranscriptionRoute = { model: 'test/exact-model', uploadConsent: true };
 function fixture(change: (result: any) => void = () => {}) {

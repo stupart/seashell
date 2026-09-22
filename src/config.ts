@@ -11,7 +11,7 @@ import { homedir } from 'os';
 import { dirname, isAbsolute, join, resolve } from 'path';
 import type { MeetingCapturePolicy } from './calendar.ts';
 import type { MeetingAutomationConfig } from './meeting-automation.ts';
-import type { HumainBackend, HumainMeetingRoute } from './humain-client.ts';
+import { MODEL_EFFORTS, type ModelEffort, type HumainBackend, type HumainMeetingRoute } from './humain-client.ts';
 import type { MeetingEnrichmentMode } from './meeting-artifact.ts';
 import {
   DEFAULT_TRANSCRIPTION_ROUTING,
@@ -62,7 +62,13 @@ function parseRoute(value: unknown, label: string): HumainMeetingRoute | undefin
   if (typeof route.model !== 'string' || !route.model.trim()) {
     throw new Error(`Sea Shell config ${label}.model must be a non-empty string`);
   }
+  if (route.effort !== undefined && (!MODEL_EFFORTS.includes(route.effort as ModelEffort) ||
+    !['codex', 'claude-code'].includes(route.backend as string) ||
+    (route.backend === 'claude-code' && ['none', 'minimal'].includes(route.effort as string)))) {
+    throw new Error(`Sea Shell config ${label}.effort is not supported`);
+  }
   return {
+    ...(route.effort === undefined ? {} : { effort: route.effort as ModelEffort }),
     backend: route.backend as HumainBackend,
     model: route.model.trim(),
     ...(optionalPositiveInteger(route.maxOutputTokens, `${label}.maxOutputTokens`) === undefined
@@ -473,6 +479,7 @@ export function resolveMeetingRoute(
   }
   if (!backend || !model) return undefined;
   return {
+    ...(!override && exact?.effort !== undefined ? { effort: exact.effort } : {}),
     backend,
     model,
     ...(exact?.maxOutputTokens ?? config?.maxOutputTokens) === undefined
