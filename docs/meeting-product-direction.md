@@ -20,6 +20,11 @@ models need an explicit choice, and missing fast options disable automatic live
 analysis. These are versioned code heuristics, not proven price/performance tiers.
 They do not solve long-context admission or total meeting budgets.
 
+Fable is available as an Advanced override, not an automatic default: a real
+native-provider check found it advertised while the account lacked usage credits.
+Claude recommendations therefore prefer Opus (or a balanced fallback). Catalog
+discovery is metadata-only and cannot certify available quota for any model.
+
 No account is needed for local audio, transcription, storage and exports. AI still
 requires a compatible Humain package and a connected provider or local server.
 The private Humain release/package boundary currently prevents a fully public,

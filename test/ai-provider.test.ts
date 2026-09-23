@@ -70,9 +70,10 @@ test('suggestions use discovered models and only supported effort levels', () =>
     {id:'haiku',name:'Haiku',description:'',efforts:[]},
     {id:'sonnet',name:'Sonnet',description:'',efforts:['low','medium','high']},
     {id:'fable',name:'Fable',description:'',efforts:['low','high']},
+    {id:'opus[1m]',name:'Opus',description:'',efforts:['low','high']},
   ],{});
   expect(routes.observer).toEqual({backend:'claude-code',model:'haiku'});
-  expect(routes.reconciliation).toEqual({backend:'claude-code',model:'fable',effort:'high'});
+  expect(routes.reconciliation).toEqual({backend:'claude-code',model:'opus[1m]',effort:'high'});
   expect(routes.chat).toEqual({backend:'claude-code',model:'sonnet',effort:'medium'});
   expect(()=>suggestedMeetingRoutes('codex',[],{})).toThrow();
 });
@@ -94,6 +95,10 @@ test('automatic setup keeps expensive defaults out of live analysis and never gu
   expect(meetingModelClass(unknown)).toBe('unknown');
   expect(() => recommendedMeetingSetup(undefined, 'openrouter', [unknown])).toThrow('Advanced');
   expect(recommendedMeetingSetup(undefined, 'local-openai', [unknown]).routes?.observer).toBeUndefined();
+  expect(recommendedMeetingSetup(undefined, 'claude-code', [
+    { id: 'claude-fable-5-1[1m]', name: 'Fable', description: '', efforts: [] },
+    { id: 'sonnet', name: 'Sonnet', description: '', efforts: [] },
+  ]).routes?.reconciliation?.model).toBe('sonnet');
 });
 
 test('provider recommendation prefers configured local and native logins, while skipping unavailable routes', () => {

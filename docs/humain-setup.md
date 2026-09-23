@@ -48,7 +48,9 @@ The UI shows the chosen account and models before confirmation.
 
 Model selection uses discovered IDs: fast families for live observations, deep
 families for final notes, and balanced families for chat. Examples are Luna/Astra/Sol
-or Haiku/Fable-or-Opus/Sonnet. These family labels are routing policy, not measured
+or Haiku/Opus/Sonnet. Fable stays an explicit Advanced choice because its presence
+in a catalog does not establish that separate usage credits are available.
+These family labels are routing policy, not measured
 latency, price, context-window or quality guarantees. A provider's default model is
 never assumed suitable for continuous analysis. If no fast family is recognized,
 recommended setup disables live analysis. Unknown cloud models require Advanced;

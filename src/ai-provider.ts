@@ -48,9 +48,10 @@ export function preferredAIProvider(statuses: { id: string; ready: boolean }[]):
 export function meetingModelClass(model: import('./humain-client.ts').HumainModelOption): 'fast' | 'balanced' | 'deep' | 'unknown' {
   // Classify exact catalog IDs, not free-form descriptions or provider defaults.
   // Unknown models remain available in Advanced; they are never assumed cheap.
-  if (/(?:^|[-/_.])(?:astra|fable|opus|pro|ultra|deep)(?:$|[-/_.\d])/i.test(model.id)) return 'deep';
-  if (/(?:^|[-/_.])(?:haiku|luna|mini|nano|flash)(?:$|[-/_.\d])/i.test(model.id)) return 'fast';
-  if (/(?:^|[-/_.])(?:sonnet|sol|terra)(?:$|[-/_.\d])/i.test(model.id)) return 'balanced';
+  const id = model.id.replace(/\[[^\]]+\]$/, '');
+  if (/(?:^|[-/_.])(?:astra|fable|opus|pro|ultra|deep)(?:$|[-/_.\d])/i.test(id)) return 'deep';
+  if (/(?:^|[-/_.])(?:haiku|luna|mini|nano|flash)(?:$|[-/_.\d])/i.test(id)) return 'fast';
+  if (/(?:^|[-/_.])(?:sonnet|sol|terra)(?:$|[-/_.\d])/i.test(id)) return 'balanced';
   return 'unknown';
 }
 
@@ -79,7 +80,9 @@ export function suggestedMeetingRoutes(backend: HumainBackend, models: import('.
   if (!models.length) throw new Error('No models discovered. Choose each role manually.');
   const fast = models.find((m) => meetingModelClass(m) === 'fast');
   const ordinary = models.find((m) => meetingModelClass(m) === 'balanced') ?? fast;
-  const detailed = models.find((m) => meetingModelClass(m) === 'deep') ?? ordinary
+  // Fable can be advertised even when separate usage credits are unavailable.
+  // Keep it an explicit advanced choice rather than a first-run default.
+  const detailed = models.find((m) => meetingModelClass(m) === 'deep' && !/fable/i.test(m.id)) ?? ordinary
     ?? (backend === 'local-openai' ? models.find((m) => m.isDefault) ?? models[0] : undefined);
   if (!detailed) throw new Error('No recognized meeting models. Open Advanced to choose a model.');
   const chat = ordinary ?? detailed;

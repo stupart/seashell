@@ -62,7 +62,7 @@ try{
   const saved=JSON.parse(readFileSync(config,'utf8'));
   const codexSaved=saved.meeting.routes.chat.backend==='codex'&&saved.meeting.routes.chat.model==='fixture-codex'&&saved.meeting.routes.chat.effort==='high';
   assert.equal(saved.meeting.routes.observer.model,'haiku');assert.equal(saved.meeting.routes.observer.effort,undefined);
-  assert.equal(saved.meeting.routes.reconciliation.model,'fable');assert.equal(saved.meeting.routes.reconciliation.effort,'high');
+  assert.equal(saved.meeting.routes.reconciliation.model,'sonnet');assert.equal(saved.meeting.routes.reconciliation.effort,'high');
   assert.equal(saved.meeting.mode,'hybrid');
   assert.deepEqual(saved.transcription,JSON.parse(original).transcription);
   console.log(JSON.stringify({listedBoth,unavailablePreservedConfig,codexSaved,captureStarts:starts,captureStops:stops}));
