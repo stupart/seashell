@@ -38,7 +38,10 @@ const until=async(check:()=>boolean)=>{const end=Date.now()+3000;while(!check()&
 const type=async(text:string)=>{input.write(text);await Bun.sleep(80);};
 try{
   await until(()=>starts===1);
-  await type('p');await until(()=>/models by role/.test(stripVTControlCharacters(rendered)));
+  await type('p');await until(()=>rendered.includes('Advanced · models and effort'));
+  // Existing power-user flow remains available behind Advanced.
+  await type('\x1b[B');await type('\x1b[B');await type('\r');
+  await until(()=>/models by role/.test(stripVTControlCharacters(rendered)));
   await type('\r');await until(()=>/Codex · Ready/.test(stripVTControlCharacters(rendered)));
   const listedBoth=/Claude Code · Ready/.test(stripVTControlCharacters(rendered));
   await type('\x1b[B');await type('\x1b[B');await type('\r');

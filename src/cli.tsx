@@ -2,7 +2,7 @@
 import React from 'react';
 import { render } from 'ink';
 import App from './app.tsx';
-import AIProviderPicker from './AIProviderPicker.tsx';
+import AIProviderPicker from './AISettings.tsx';
 import { loadConfig, updateMeetingConfig } from './config.ts';
 import { CLI_HELP, parseCliArgs } from './cli-args.ts';
 import { executeCliCommand } from './cli-runtime.ts';

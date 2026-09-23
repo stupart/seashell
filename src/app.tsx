@@ -70,7 +70,7 @@ import {
   selectCanonicalTranscriptionRoute,
   type TranscriptionRoute,
 } from './transcription-routing.ts';
-import AIProviderPicker from './AIProviderPicker.tsx';
+import AIProviderPicker from './AISettings.tsx';
 import { runHumainTranscription } from './humain-client.ts';
 import {
   DEFAULT_WHISPER_MODEL_FILENAME,
@@ -187,6 +187,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const { exit } = useApp();
   const [config, setConfig] = useState(() => loadConfig());
   const [aiSetupOpen, setAiSetupOpen] = useState(false);
+  const [aiSetupIntent, setAiSetupIntent] = useState<'notes' | 'chat' | null>(null);
   const libraryRoot = useMemo(
     () => resolveLibraryDir(props.libraryDir, process.env, config),
     [props.libraryDir, config],
@@ -902,6 +903,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     const missingObserver = mode !== 'post-session' && !configuredMeetingRoutes.observer;
     const missingReconciliation = mode !== 'streaming' && !configuredMeetingRoutes.reconciliation;
     if ((missingObserver || missingReconciliation) && !finishLive) {
+      setAiSetupIntent('notes');
       setAiSetupOpen(true);
       return;
     }
@@ -960,7 +962,9 @@ export default function App(props: { libraryDir?: string } = {}) {
         saveTranscriptRecord(libraryRoot, record);
         if (missingObserver || missingReconciliation) {
           refreshLibrary();
-          setNotice('Meeting capture and final transcript are saved. Configure Humain later for notes and analysis.');
+          setNotice('Meeting saved. Connect AI for notes, or return to your transcript.');
+          setAiSetupIntent('notes');
+          setAiSetupOpen(true);
           return;
         }
         const artifact = await enrichMeeting(libraryRoot, record.id, {
@@ -1020,6 +1024,19 @@ export default function App(props: { libraryDir?: string } = {}) {
     setListeningPaused,
     view,
   ]);
+
+  useEffect(() => {
+    if (aiSetupOpen || !aiSetupIntent || processing) return;
+    if (aiSetupIntent === 'chat' && configuredMeetingRoutes.chat) {
+      setAiSetupIntent(null);
+      setMeetingView('chat');
+      setChatInputState({ input: '' });
+    } else if (aiSetupIntent === 'notes' && (config.meeting?.mode === 'streaming'
+      ? configuredMeetingRoutes.observer : configuredMeetingRoutes.reconciliation)) {
+      setAiSetupIntent(null);
+      runCurrentMeetingEnrichment();
+    }
+  }, [aiSetupOpen, aiSetupIntent, processing, config.meeting?.mode, configuredMeetingRoutes, runCurrentMeetingEnrichment]);
 
   const submitMeetingQuestion = useCallback((question: string) => {
     if (!currentRecord || !currentMeeting || !configuredMeetingRoutes.chat || processing) return;
@@ -1556,7 +1573,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
     if (processing) return;
-    if (input === 'p') { setAiSetupOpen(true); return; }
+    if (input === 'p') { setAiSetupIntent(null); setAiSetupOpen(true); return; }
     if (key.tab || input === '\t' || input === 'h') {
       toggleHistory();
       return;
@@ -1607,6 +1624,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
     if (input === 'a' && currentMeeting) {
       if (!configuredMeetingRoutes.chat) {
+        setAiSetupIntent('chat');
         setAiSetupOpen(true);
       } else {
         setMeetingView('chat');
@@ -1732,7 +1750,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   }, { isActive: !aiSetupOpen });
 
   if (aiSetupOpen) return <AIProviderPicker current={config.meeting} recording={!paused && !listenerDisabled}
-    onClose={() => setAiSetupOpen(false)}
+    onClose={() => { setAiSetupIntent(null); setAiSetupOpen(false); }}
     onSave={(patch) => {
       const saved = updateMeetingConfig(patch);
       // Keep capture settings and their object identities stable while changing AI routes.
@@ -1741,7 +1759,8 @@ export default function App(props: { libraryDir?: string } = {}) {
       } }));
       setAiSetupOpen(false);
       setError(null);
-      setNotice(`Meeting AI roles saved · ${patch.mode}`);
+      const names = [...new Set(Object.values(patch.routes ?? {}).flatMap((route) => route ? [route.backend] : []))];
+      setNotice(`AI ready · ${names.join(' + ')} · P for settings`);
     }} />;
 
   const title = view === 'live' ? liveRecord.title : selectedRecord?.title ?? 'Transcript';

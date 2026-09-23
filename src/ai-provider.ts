@@ -38,6 +38,22 @@ export const MEETING_ROLES = [
 export type MeetingRole = typeof MEETING_ROLES[number]['id'];
 export type MeetingRoutes = Partial<Record<MeetingRole, HumainMeetingRoute>>;
 
+export function preferredAIProvider(statuses: { id: string; ready: boolean }[]): HumainBackend | undefined {
+  // An explicitly configured local server takes precedence; otherwise reuse a
+  // native login before a separately billed API. Never fail over after a call.
+  return (['local-openai', 'codex', 'claude-code', 'openrouter'] as const)
+    .find((id) => statuses.some((status) => status.id === id && status.ready));
+}
+
+export function meetingModelClass(model: import('./humain-client.ts').HumainModelOption): 'fast' | 'balanced' | 'deep' | 'unknown' {
+  // Classify exact catalog IDs, not free-form descriptions or provider defaults.
+  // Unknown models remain available in Advanced; they are never assumed cheap.
+  if (/(?:^|[-/_.])(?:astra|fable|opus|pro|ultra|deep)(?:$|[-/_.\d])/i.test(model.id)) return 'deep';
+  if (/(?:^|[-/_.])(?:haiku|luna|mini|nano|flash)(?:$|[-/_.\d])/i.test(model.id)) return 'fast';
+  if (/(?:^|[-/_.])(?:sonnet|sol|terra)(?:$|[-/_.\d])/i.test(model.id)) return 'balanced';
+  return 'unknown';
+}
+
 export function currentMeetingRoutes(current?: SeashellMeetingConfig): MeetingRoutes {
   return Object.fromEntries(MEETING_ROLES.map(({ id }) => [id, resolveMeetingRoute(current, id)]));
 }
@@ -61,10 +77,23 @@ export function meetingRolesPatch(current: SeashellMeetingConfig | undefined, ro
 export function suggestedMeetingRoutes(backend: HumainBackend, models: import('./humain-client.ts').HumainModelOption[],
   current: MeetingRoutes): MeetingRoutes {
   if (!models.length) throw new Error('No models discovered. Choose each role manually.');
-  const ordinary = models.find((m) => /sonnet|terra/i.test(m.id)) ?? models.find((m) => m.isDefault) ?? models[0]!;
-  const fast = models.find((m) => /haiku|luna|mini|flash/i.test(m.id)) ?? ordinary;
-  const detailed = models.find((m) => /fable|astra/i.test(m.id)) ?? models.find((m) => /opus/i.test(m.id)) ?? ordinary;
+  const fast = models.find((m) => meetingModelClass(m) === 'fast');
+  const ordinary = models.find((m) => meetingModelClass(m) === 'balanced') ?? fast;
+  const detailed = models.find((m) => meetingModelClass(m) === 'deep') ?? ordinary
+    ?? (backend === 'local-openai' ? models.find((m) => m.isDefault) ?? models[0] : undefined);
+  if (!detailed) throw new Error('No recognized meeting models. Open Advanced to choose a model.');
+  const chat = ordinary ?? detailed;
   const make = (role: MeetingRole, model: import('./humain-client.ts').HumainModelOption, preferred: import('./humain-client.ts').ModelEffort) =>
     roleRoute(current[role], backend, model.id, model.efforts.includes(preferred) ? preferred : model.defaultEffort);
-  return { observer: make('observer', fast, 'low'), reconciliation: make('reconciliation', detailed, 'high'), chat: make('chat', ordinary, 'medium') };
+  return { observer: fast ? make('observer', fast, 'low') : undefined,
+    reconciliation: make('reconciliation', detailed, 'high'), chat: make('chat', chat, 'medium') };
+}
+
+export function recommendedMeetingSetup(current: SeashellMeetingConfig | undefined, backend: HumainBackend,
+  models: import('./humain-client.ts').HumainModelOption[]): SeashellMeetingConfig {
+  const routes = suggestedMeetingRoutes(backend, models, currentMeetingRoutes(current));
+  // Recording/transcription stay real-time. Continuous LLM analysis is opt-in;
+  // when no fast model is known it stays off even if the old provider had one.
+  const mode = routes.observer ? current?.mode ?? 'post-session' : 'post-session';
+  return { ...meetingRolesPatch(current, routes, mode), modelSelection: 'automatic' };
 }

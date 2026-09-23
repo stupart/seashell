@@ -21,6 +21,7 @@ import {
 } from './transcription-routing.ts';
 
 export interface SeashellMeetingConfig {
+  modelSelection?: 'automatic' | 'custom';
   mode?: MeetingEnrichmentMode;
   backend?: HumainBackend;
   model?: string;
@@ -104,6 +105,9 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
     throw new Error('Sea Shell config meeting must be an object');
   }
   const meeting = value as Record<string, unknown>;
+  if (meeting.modelSelection !== undefined && !['automatic', 'custom'].includes(meeting.modelSelection as string)) {
+    throw new Error('Sea Shell config meeting.modelSelection is invalid');
+  }
   const modes: MeetingEnrichmentMode[] = ['streaming', 'post-session', 'hybrid'];
   const backends: HumainBackend[] = ['codex', 'claude-code', 'openrouter', 'local-openai'];
   if (meeting.mode !== undefined && !modes.includes(meeting.mode as MeetingEnrichmentMode)) {
@@ -233,6 +237,7 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
     };
   }
   return {
+    ...(meeting.modelSelection === undefined ? {} : { modelSelection: meeting.modelSelection as 'automatic' | 'custom' }),
     ...(meeting.mode === undefined ? {} : { mode: meeting.mode as MeetingEnrichmentMode }),
     ...(meeting.backend === undefined ? {} : { backend: meeting.backend as HumainBackend }),
     ...(meeting.model === undefined ? {} : { model: meeting.model as string }),
