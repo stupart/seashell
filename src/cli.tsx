@@ -18,7 +18,7 @@ try {
       onClose={() => ui.unmount()}
       onSave={(patch) => {
         updateMeetingConfig(patch);
-        saved = `Meeting AI saved: ${patch.backend} · ${patch.model} (post-session)`;
+        saved = `Meeting AI roles saved · ${patch.mode === 'hybrid' ? 'Live analysis + final notes' : patch.mode === 'streaming' ? 'Live analysis only' : 'Final notes only'}`;
         ui.unmount();
       }} />);
     await ui.waitUntilExit();

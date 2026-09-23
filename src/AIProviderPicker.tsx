@@ -93,6 +93,7 @@ export default function AIProviderPicker(props: {
       return;
     }
     if (key.upArrow || key.downArrow || key.pageUp || key.pageDown) {
+      setError(undefined);
       const delta = key.upArrow ? -1 : key.downArrow ? 1 : key.pageUp ? -7 : 7;
       setIndex((value) => (value + delta % count + count) % count); return;
     }
@@ -154,7 +155,7 @@ export default function AIProviderPicker(props: {
         <Text dimColor>Cloud roles send meeting text to that provider. Usage depends on your plan; Fable may use paid credits.</Text>
       </> : <>
         <Text>{selectedProvider.privacy}</Text>
-        {screen === 'providers' && <Text dimColor>{providers?.find((p) => p.id === selectedProvider.id)?.nextStep ?? providers?.find((p) => p.id === selectedProvider.id)?.detail}</Text>}
+        {screen === 'providers' && !error && <Text dimColor>{providers?.find((p) => p.id === selectedProvider.id)?.nextStep ?? providers?.find((p) => p.id === selectedProvider.id)?.detail}</Text>}
         {screen === 'models' && <Text dimColor>{models[index]?.description.slice(0, 140) || 'Keep an exact model ID if it is not listed. Account limits still apply.'}</Text>}
         {screen === 'effort' && <Text dimColor>Higher effort can take longer and use more tokens.</Text>}
       </>}

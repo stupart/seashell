@@ -760,14 +760,15 @@ export default function App(props: { libraryDir?: string } = {}) {
       setHistoryOpen(false);
       return;
     }
+    const freshEntries = listTranscriptRecords(libraryRoot);
+    setLibraryEntries(freshEntries);
+    const entries = searchQuery.trim() ? searchTranscriptRecords(libraryRoot, searchQuery) : freshEntries;
     const currentIndex = view === 'record' && selectedRecord
-      ? navigationItems.findIndex((item) => (
-        item.kind === 'record' && item.entry.id === selectedRecord.id
-      ))
+      ? entries.findIndex((entry) => entry.id === selectedRecord.id) + 1
       : 0;
     setSelectionIndex(currentIndex >= 0 ? currentIndex : 0);
     setHistoryOpen(true);
-  }, [historyOpen, navigationItems, selectedRecord, view]);
+  }, [historyOpen, libraryRoot, searchQuery, selectedRecord, view]);
 
   const currentRecord = view === 'live' ? liveRecord : selectedRecord;
   const currentMeeting = view === 'live' ? liveMeeting : selectedMeeting;
@@ -1162,9 +1163,9 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   const auxiliaryMeetingLines = useMemo(() => (
     currentMeeting && meetingView !== 'transcript'
-      ? meetingViewLines(currentMeeting, meetingView)
+      ? meetingViewLines(currentMeeting, meetingView, currentRecord ?? undefined)
       : []
-  ), [currentMeeting, meetingView]);
+  ), [currentMeeting, meetingView, currentRecord]);
   const visibleAuxiliaryMeetingLines = auxiliaryMeetingLines.slice(
     transcriptScroll,
     transcriptScroll + layout.visibleTranscriptRows,
@@ -1764,7 +1765,9 @@ export default function App(props: { libraryDir?: string } = {}) {
         ? terminal.columns < 56
           ? `[SPC] ${paused ? 'Rec' : 'Pause'} [G] End [P] AI [Q] Quit`
           : `[SPACE] ${paused ? 'Record' : 'Pause'}  [A] Ask  [G] Finish  [H] History  [P] AI  [?] Help  [Q] Quit`
-        : '[A] Ask  [G] Enrich  [H] History  [P] AI  [?] Help  [Q] Quit'
+        : terminal.columns < 56
+          ? '[A] Ask [G] Notes [H] List [P] AI [Q] Quit'
+          : '[A] Ask  [G] Enrich  [H] History  [P] AI  [?] Help  [Q] Quit'
     : view === 'live'
       ? terminal.columns < 56
         ? `[SPC] ${paused ? 'Rec' : 'Pause'} [H] History [P] AI [Q] Quit`
