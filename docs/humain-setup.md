@@ -2,8 +2,9 @@
 
 Seashell records and transcribes without an AI provider. Optional summaries,
 action items, identity suggestions and meeting chat run through Humain, a reusable
-Node engine shared by other apps. You choose the backend and model; Seashell does
-not silently change privacy or billing routes.
+Node engine shared by other apps. Seashell finds connected providers and proposes
+suitable models; confirm the provider once. It never switches accounts after a
+failed call or requires a Seashell account to record or use an existing AI login.
 
 ## Install a packaged engine
 
@@ -35,26 +36,40 @@ Choose inside the TUI with **P → Meeting AI**, or open the same picker directl
 seashell ai setup
 ```
 
-Choose **Live analysis**, **Final notes**, or **Meeting chat**, then use **↑/↓**
-and **Enter** to choose its provider, model, and supported reasoning effort.
-Each role can use a different provider. Humain reads model lists from your native
-Codex/Claude CLI or configured local/OpenRouter catalog. Missing authentication
-shows the relevant setup step. If discovery fails, update Humain/the provider CLI
-or use **Enter a custom model ID**. Custom IDs use provider-default effort.
+The first screen proposes a connected provider and its recommended models. Press
+**Enter** to use it, **Change provider** to choose another, or **Advanced** for
+individual roles and reasoning effort. When setup was opened by Ask or Generate
+notes, saving resumes that action. Discovery and cancelling never change config.
 
-**Suggest models for all roles** fills an editable draft using models the chosen
-provider advertises: a fast family for live observations, a detailed family for
-final notes, and a balanced family for chat. For example, Claude can offer Haiku,
-Fable/Opus, and Sonnet respectively. These are family-based starting points, not
-quality or latency benchmarks, and account/model availability can change. Fable
-may use paid credits under your Claude plan. No model or provider is selected
-silently. Check the choices and press **Save choices** to apply them; Escape from
-the role screen discards the draft.
+An explicitly configured local server is preferred; otherwise a ready Codex login,
+then Claude Code, then OpenRouter. Existing saved choices are preserved. A failed
+catalog fetch is surfaced instead of quietly sending data to another provider.
+The UI shows the chosen account and models before confirmation.
+
+Model selection uses discovered IDs: fast families for live observations, deep
+families for final notes, and balanced families for chat. Examples are Luna/Astra/Sol
+or Haiku/Opus/Sonnet. Fable stays an explicit Advanced choice because its presence
+in a catalog does not establish that separate usage credits are available.
+These family labels are routing policy, not measured
+latency, price, context-window or quality guarantees. A provider's default model is
+never assumed suitable for continuous analysis. If no fast family is recognized,
+recommended setup disables live analysis. Unknown cloud models require Advanced;
+an explicitly configured local model may serve final notes/chat without live AI.
+Models are pinned when saved; they do not silently change on subsequent launches.
+**Use recommended models** refreshes an existing configuration explicitly.
+
+In Advanced, choose **Live analysis**, **Final notes**, or **Meeting chat**, then
+use **↑/↓** and **Enter** to choose provider, model and supported effort. Each role
+can use a different provider. Missing authentication shows setup guidance; custom
+IDs use provider-default effort. **Save choices** applies the draft. Escape returns
+to the simple settings screen without applying those advanced edits.
 
 The **Mode** row controls whether live analysis is enabled. New setups start with
 **Final notes only**; select **Live analysis + final notes** for both stages, or
 **Live analysis only**. Chat is available in every mode. Suggestions preserve
-your selected mode. Existing shared-model settings continue to work.
+your selected mode when a fast model is available. Existing shared-model settings
+continue to work. Advanced edits remain explicit overrides, including any choice
+to use a large model for live analysis.
 
 Effort options come from the selected model's capabilities. Haiku currently
 advertises no effort control. Local/OpenRouter structured meeting adapters use
@@ -62,6 +77,10 @@ provider-default effort until Humain supports their effort contracts. Discovery
 and saving make no inference calls, and recording keeps running while the picker
 is open. Saving preserves compatible per-role budgets and calendar/capture settings.
 Cloud roles send meeting text through the account shown in the picker.
+Advanced models, including Fable, may consume paid credits depending on your plan.
+
+The complete current workflow, exact prompt roles and proposed context/action
+integration are described in [the meeting product direction](meeting-product-direction.md).
 
 For scripted setup, choose an explicit model using the provider you want:
 

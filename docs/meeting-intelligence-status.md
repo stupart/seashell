@@ -1,17 +1,17 @@
 # Meeting intelligence and portability status
 
-Last audited: 21 September 2026. This describes implemented behavior and open
+Last updated: 23 September 2026; installation evidence below dates to 21 September. This describes implemented behavior and open
 work, rather than a promise that every optional integration is configured.
 
 ## Public installation and portability
 
 The public macOS install is `brew install stupart/tap/seashell`, then `seashell`.
-The tap currently distributes **1.1.0-rc6**, including its own Bun runtime,
+The tap currently distributes **1.1.0-rc9**, including its own Bun runtime,
 Whisper executables, local models, and native helpers. Homebrew and Apple
 developer tools are prerequisites; native builds and model downloads take time.
 The app is macOS-only. Live computer audio needs macOS 14.2 or later.
 
-[Post-merge source CI passed](https://github.com/stupart/seashell/actions/runs/35538629817).
+[Historical hosted source CI passed](https://github.com/stupart/seashell/actions/runs/35538629817).
 [Fresh Apple Silicon and Intel installations also passed](https://github.com/stupart/homebrew-tap/actions/runs/35538519086),
 including repeatable setup, diagnostics, actual known-phrase transcription, and
 library linkage. The formula tests with an isolated library/config and system
@@ -27,8 +27,8 @@ dependency.
 
 One implicit development shortcut was found: Humain discovery tried
 `~/Developer/humain-engine/dist/cli.js`. The audit fix removes it. Use an installed
-`humain` on PATH or an explicit `HUMAIN_CLI` instead. This source fix is separate
-from the pinned RC6 formula and will enter the package at its next revision.
+`humain` on PATH or an explicit `HUMAIN_CLI` instead. This fallback removal is included in the pinned RC9 formula. Newer source-only
+UI fixes and the provider-first setup need a subsequent release.
 
 Remaining platform limits: Intel installation correctness is established, but
 smooth real-time Intel performance is not. The source bootstrap still enables
@@ -38,6 +38,9 @@ switching, sleep/wake behavior, or a full-length physical meeting soak. The
 [real Meet test](google-meet-acceptance-2026-09-20.md) verified microphone speech,
 automatic stop, and storage; it did not validate a remote participant's speech
 or model-generated notes.
+
+GitHub Actions is now disabled to avoid hosted CI charges. Current changes use
+[local CI receipts](local-ci.md); the dated hosted runs above are historical evidence.
 
 ## What exists
 
