@@ -4,7 +4,7 @@ import React from 'react';
 import { render } from 'ink';
 import { PassThrough, Writable } from 'stream';
 import { stripVTControlCharacters } from 'util';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 const root = mkdtempSync(join(tmpdir(), 'seashell-speakers-ui-'));
@@ -16,7 +16,8 @@ let starts = 0, stops = 0, setups = 0, ready = false;
 const mic = { ...await import('../../src/live-microphone.ts') };
 const environment = { ...await import('../../src/diarization-environment.ts') };
 const meet = { ...await import('../../src/meet-speakers.ts') };
-mock.module('../../src/meet-speakers.ts', () => ({ ...meet, async probeMeetSpeakers() {
+mock.module('../../src/meet-speakers.ts', () => ({ ...meet, async probeMeetSpeakers(mode: string) {
+  assert.equal(mode, 'auto', 'Connection checks both browsers without asking which to use');
   return { state: 'permission', detail: 'Enable Allow JavaScript from Apple Events.' };
 } }));
 mock.module('../../src/live-microphone.ts', () => ({ ...mic, startMicrophoneCapture(options: any) {
@@ -45,13 +46,14 @@ try {
   await until(() => starts === 1);
   await type('v'); await until(() => plain().includes('Optional setup'));
   await type('\r'); await until(() => plain().includes('Allow JavaScript from Apple Events'));
+  assert.equal(JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.speakerBrowser, 'auto');
   assert.equal(starts, 1, 'Connecting Meet preserves the running microphone');
-  for (let n = 0; n < 4; n++) await type('\x1b[B');
+  for (let n = 0; n < 3; n++) await type('\x1b[B');
   await type('\r'); assert.equal(setups, 0, 'Do not install while recording');
   assert.equal(stops, 0, 'Opening speaker settings preserves capture');
   await type('\x1b'); await type(' '); await until(() => stops === 1);
   await type('F'); await until(() => plain().includes('Optional setup'));
-  for (let n = 0; n < 5; n++) await type('\x1b[B');
+  for (let n = 0; n < 4; n++) await type('\x1b[B');
   await until(() => plain().includes('contact sharing'));
   await type('\r'); await until(() => plain().includes('Model verified offline'));
   assert.equal(setups, 1);

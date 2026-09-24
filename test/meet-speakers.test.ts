@@ -1,9 +1,10 @@
 import { expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { CaptureSessionStore } from '../src/capture-session.ts';
-import { meetBrowserMatchesApp, meetSpeakerForSegment, parseMeetSnapshot, readMeetSamples, startMeetSpeakerReader, type MeetSample, type MeetSnapshot } from '../src/meet-speakers.ts';
+import { MEET_CALL_URL_GUARD, meetBrowserMatchesApp, meetSpeakerForSegment, parseMeetSnapshot, probeMeetSpeakers, readMeetSamples, startMeetSpeakerReader, type MeetProbe, type MeetSample, type MeetSnapshot } from '../src/meet-speakers.ts';
 import { finalizeCaptureTranscript, saveFinalizedCapture } from '../src/capture-finalizer.ts';
 import { pcmS16leToWav } from '../src/live-system-audio.ts';
 import { parseCliArgs } from '../src/cli-args.ts';
@@ -20,6 +21,63 @@ const snapshot = (name: string): MeetSnapshot => ({ meeting, joined: true, parti
 ] });
 const cleanup = (root: string) => rmSync(root, { recursive: true, force: true });
 
+const connected = (): MeetProbe => ({ state: 'connected', detail: 'Meet hint: Alice', snapshot: snapshot('Alice') });
+const idle: MeetProbe = { state: 'idle', detail: 'No call' };
+test.skipIf(process.platform !== 'darwin')('browser guard ignores Meet landing pages before requesting JavaScript permission', () => {
+  const urls = ['https://meet.google.com/', 'https://meet.google.com/landing', 'https://meet.google.com/abc-defg-hij',
+    'https://meet.google.com/abc-defg-hij?authuser=1', 'https://meet.google.com/abc-defg-hij#test',
+    'https://meet.google.com.evil.test/abc-defg-hij', 'https://meet.google.com/abc-defg-hij/extra',
+    'https://meet.google.com/123-4567-890'];
+  const script = MEET_CALL_URL_GUARD + '\nreturn {' + urls.map(url => `my isMeetCall("${url}")`).join(', ') + '}';
+  expect(execFileSync('/usr/bin/osascript', ['-e', script], { encoding: 'utf8', timeout: 3000 }).trim())
+    .toBe('false, false, true, true, true, false, false, false');
+});
+for (const activeBrowser of ['chrome', 'safari'] as const) {
+  test(`automatic Meet reader finds ${activeBrowser} without a browser selection`, async () => {
+    const visited: string[] = [];
+    const result = await probeMeetSpeakers('auto', undefined, async browser => {
+      visited.push(browser); return browser === activeBrowser ? connected() : idle;
+    });
+    expect(visited).toEqual(['chrome', 'safari']);
+    expect(result).toMatchObject({ state: 'connected', browser: activeBrowser, snapshot: snapshot('Alice') });
+    expect(meetBrowserMatchesApp('auto', activeBrowser === 'chrome' ? 'com.google.Chrome' : 'com.apple.Safari')).toBe(true);
+  });
+}
+
+test('automatic Meet reader refuses two joined calls, including the same call in both browsers', async () => {
+  expect((await probeMeetSpeakers('auto', undefined, async () => connected())).state).toBe('ambiguous');
+  expect((await probeMeetSpeakers('auto', undefined, async browser => browser === 'chrome' ? connected()
+    : { state: 'unavailable', detail: 'Tiles hidden', snapshot: { ...snapshot('Alice'), participants: [] } })).state).toBe('ambiguous');
+  expect(meetBrowserMatchesApp('auto', 'us.zoom.xos')).toBe(false);
+});
+
+for (const state of ['permission', 'unavailable', 'ambiguous'] as const) {
+  test(`an unreadable second browser (${state}) never masquerades as an absent call`, async () => {
+    const result = await probeMeetSpeakers('auto', undefined, async browser => browser === 'chrome' ? connected()
+      : { state, detail: 'Safari needs attention' });
+    expect(result.state).toBe(state);
+    expect(result.snapshot).toBeUndefined();
+    if (state !== 'ambiguous') expect(result.detail).toContain('Safari');
+  });
+}
+
+test('automatic browser checks run concurrently, share cancellation and preserve explicit overrides', async () => {
+  const controller = new AbortController();
+  const resolvers: Array<(value: MeetProbe) => void> = [];
+  const result = probeMeetSpeakers('auto', controller.signal, async (_browser, signal) => {
+    expect(signal).toBe(controller.signal);
+    return new Promise(resolve => resolvers.push(resolve));
+  });
+  expect(resolvers).toHaveLength(2);
+  controller.abort(); resolvers.forEach(resolve => resolve(connected()));
+  expect((await result).snapshot).toBeUndefined();
+  let count = 0;
+  await probeMeetSpeakers('safari', undefined, async browser => { count++; expect(browser).toBe('safari'); return idle; });
+  expect(count).toBe(1);
+  expect((await probeMeetSpeakers('auto', undefined, async () => idle)).state).toBe('idle');
+  expect((await probeMeetSpeakers('auto', undefined, async () => { throw new Error('reader failed'); })).state).toBe('unavailable');
+});
+
 test('speaker hints never bridge overlap, an outage, two people, a changed call, or a name change', () => {
   expect(meetSpeakerForSegment([sample(0), sample(.5), sample(1)], { start: .1, end: .9 })).toEqual(alice);
   for (const samples of [
@@ -28,6 +86,7 @@ test('speaker hints never bridge overlap, an outage, two people, a changed call,
     [sample(0), sample(.5), sample(1, bob), sample(1.5, bob)],
     [sample(0), { ...sample(1), meeting: '/xyz-abcd-efg' }],
     [sample(0), sample(1, { ...alice, label: 'Different name' })],
+    [{ ...sample(0), browser: 'chrome' as const }, { ...sample(1), browser: 'safari' as const }],
   ]) expect(meetSpeakerForSegment(samples, { start: .1, end: .9 })).toBeUndefined();
   expect(meetSpeakerForSegment([sample(0), sample(1)], { start: 1, end: 2 })).toBeUndefined();
   expect(meetSpeakerForSegment([sample(0), sample(1)], { start: .1, end: .1 })).toBeUndefined();
@@ -56,27 +115,32 @@ test('Meet setup is opt-in, persisted without replacing AI settings and has a pr
     expect(loadConfig(path).meeting?.speakerBrowser).toBeUndefined();
     updateMeetingConfig({ speakerBrowser: 'safari' }, path);
     expect(loadConfig(path).meeting).toMatchObject({ speakerBrowser: 'safari', model: 'fixture' });
+    updateMeetingConfig({ speakerBrowser: 'auto' }, path);
+    expect(loadConfig(path).meeting).toMatchObject({ speakerBrowser: 'auto', model: 'fixture' });
+    expect(parseCliArgs(['meeting', 'speakers', 'auto'])).toMatchObject({ action: { kind: 'speakers', browser: 'auto' } });
     expect(parseCliArgs(['meeting', 'speakers', 'chrome'])).toMatchObject({ action: { kind: 'speakers', browser: 'chrome' } });
     expect(parseCliArgs(['meeting', 'speakers', '--json'])).toMatchObject({ action: { kind: 'speakers', browser: 'check' }, json: true });
     expect(() => parseCliArgs(['meeting', 'speakers', 'other'])).toThrow('Usage');
   } finally { cleanup(root); }
 });
 
-test('resuming preserves the call binding and refuses a different Meet even with the same participant name', async () => {
+for (const change of ['call', 'browser']) test(`resuming preserves the ${change} binding even with the same participant name`, async () => {
   const root = mkdtempSync(join(tmpdir(), 'seashell-meet-resume-'));
   const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'resume', startedAtUnixMs: 1000 });
   const sidecar = join(store.root, 'meet-speakers.jsonl');
-  writeFileSync(sidecar, [JSON.stringify({ version: 1, sessionId: 'resume', origin: 1000 }), JSON.stringify(sample(0)),
+  const original = { ...sample(0), browser: 'chrome' as const };
+  writeFileSync(sidecar, [JSON.stringify({ version: 1, sessionId: 'resume', origin: 1000 }), JSON.stringify(original),
     JSON.stringify({ at: .1, meeting: '' }), ''].join('\n'));
   let finish!: (state: string) => void;
   const done = new Promise<string>(resolve => { finish = resolve; });
   const reader = startMeetSpeakerReader({ browser: 'chrome', store, now: () => 2000,
-    probe: async () => ({ state: 'connected', detail: 'fixture', snapshot: { ...snapshot('Alice'), meeting: '/xyz-abcd-efg' } }),
+    probe: async () => ({ state: 'connected', detail: 'fixture', browser: change === 'browser' ? 'safari' : 'chrome',
+      snapshot: { ...snapshot('Alice'), meeting: change === 'call' ? '/xyz-abcd-efg' : meeting } }),
     onStatus: status => finish(status.state),
   });
   try {
     expect(await done).toBe('ambiguous'); reader.stop();
-    expect(readMeetSamples(store.manifestPath, store.manifest).filter(s => s.speaker)).toEqual([sample(0)]);
+    expect(readMeetSamples(store.manifestPath, store.manifest).filter(s => s.speaker)).toEqual([original]);
   } finally { reader.stop(); cleanup(root); }
 });
 

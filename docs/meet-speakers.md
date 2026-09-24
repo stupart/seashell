@@ -6,20 +6,22 @@ without a Hugging Face account, a model download, a bot, or a Seashell login.
 
 ## Connect once
 
-In Seashell press **V**, then **Connect Google Meet · Chrome** (or Safari).
-Alternatively run `seashell meeting speakers chrome` or
-`seashell meeting speakers safari`, then reopen Seashell.
+In Seashell press **V**, then **Connect Google Meet · automatic**.
+Alternatively run `seashell meeting speakers auto`, then reopen Seashell.
+Seashell finds the call in Chrome or Safari; there is no browser choice to make.
+The status shows which browser is connected. Explicit `chrome` and `safari` CLI
+overrides remain available for troubleshooting.
 
-Enable your browser's **Allow JavaScript from Apple Events** setting:
+Enable **Allow JavaScript from Apple Events** in each browser you use for Meet:
 
 - Chrome: **View → Developer → Allow JavaScript from Apple Events**.
 - Safari: **Settings → Advanced → Show features for web developers**, then
   **Develop → Allow JavaScript from Apple Events**.
-- If macOS asks, allow your terminal app to control the chosen browser.
+- If macOS asks, allow your terminal app to control the browser.
   Review this permission in **System Settings → Privacy & Security → Automation**.
 
 This browser setting permits local automation to execute JavaScript in webpages.
-Seashell uses it only to read existing Google Meet tabs in the browser you chose,
+Seashell uses it only to read existing Google Meet tabs in running Chrome/Safari,
 while recording or when you explicitly check the connection. It does not change
 browser security settings itself, click meeting controls, or send page data to a
 new service. Display names become part of your transcript and can therefore be
@@ -61,8 +63,12 @@ The adapter samples every 500 ms after the previous read completes. A segment is
 named only when at least 90% of its time is covered by adjacent observations of
 the same participant. It never fills a gap over 1.75 seconds. Multiple active remote
 speakers, unnamed active tiles, missing tiles, read failures, slow reads, and
-transitions remain source/anonymous labels. It refuses multiple joined Meet tabs
-and pins one meeting code per recording. Start a new recording for a new call.
+transitions remain source/anonymous labels. It refuses multiple joined Meet tabs,
+including calls in both browsers, and pins one browser and meeting code per
+recording. If a second running browser cannot be checked, names pause rather than
+assuming it has no call; follow its permission guidance or close that browser.
+Closed or uninstalled browsers are ignored without launching them.
+Start a new recording for a new call or when moving the call to another browser.
 Two people with the same display name still have distinct participant IDs.
 
 The optional `capture/meet-speakers.jsonl` sidecar is saved with the audio bundle.

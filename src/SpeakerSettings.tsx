@@ -2,13 +2,13 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { diarizationEnvironment, diarizationStatus } from './diarization-environment.ts';
 import { setupDiarization, type SpeakerSetupResult } from './diarization-setup.ts';
-import { probeMeetSpeakers, meetPermissionHelp, type MeetBrowser, type MeetProbe } from './meet-speakers.ts';
+import { probeMeetSpeakers, meetPermissionHelp, type MeetBrowserMode, type MeetProbe } from './meet-speakers.ts';
 
 export default function SpeakerSettings(props: {
   recording: boolean;
-  browser: MeetBrowser | 'off';
+  browser: MeetBrowserMode | 'off';
   meetStatus?: MeetProbe;
-  onBrowser: (browser: MeetBrowser | 'off') => void;
+  onBrowser: (browser: MeetBrowserMode | 'off') => void;
   canIdentify: boolean;
   onIdentify: () => void;
   onClose: () => void;
@@ -20,9 +20,9 @@ export default function SpeakerSettings(props: {
   const [result, setResult] = useState<SpeakerSetupResult>();
   const request = useRef<AbortController | undefined>(undefined);
   useEffect(() => () => request.current?.abort(), []);
-  const entries = ['Connect Google Meet · Chrome', 'Connect Google Meet · Safari', 'Check Meet connection', 'Turn off Meet reader',
+  const entries = ['Connect Google Meet · automatic', 'Check Meet connection', 'Turn off Meet reader',
     'Set up / repair local voice model', 'Check offline model readiness', 'Identify saved recording · review copy', 'Done'];
-  const checkMeet = async (browser: MeetBrowser) => {
+  const checkMeet = async (browser: MeetBrowserMode) => {
     const controller = new AbortController(); request.current = controller;
     setBusy(true); setResult(undefined);
     try {
@@ -47,41 +47,41 @@ export default function SpeakerSettings(props: {
     if (key.upArrow) setIndex((value) => Math.max(0, value - 1));
     else if (key.downArrow) setIndex((value) => Math.min(entries.length - 1, value + 1));
     else if (key.return) {
-      if (index === 7) { props.onClose(); return; }
-      if (index < 2) {
-        const browser = index === 0 ? 'chrome' : 'safari';
-        props.onBrowser(browser); void checkMeet(browser); return;
+      if (index === 6) { props.onClose(); return; }
+      if (index === 0) {
+        props.onBrowser('auto'); void checkMeet('auto'); return;
       }
-      if (index === 2) {
-        if (props.browser === 'off') { setMessage('Choose your Meet browser first.'); return; }
+      if (index === 1) {
+        if (props.browser === 'off') { setMessage('Connect Google Meet first. Chrome and Safari are detected automatically.'); return; }
         void checkMeet(props.browser); return;
       }
-      if (index === 3) { props.onBrowser('off'); setMessage('Meet reader off. Audio recording continues.'); return; }
+      if (index === 2) { props.onBrowser('off'); setMessage('Meet reader off. Audio recording continues.'); return; }
       if (props.recording) { setMessage('Pause recording and return here to set up or process speakers.'); return; }
-      if (index === 6) {
+      if (index === 5) {
         if (!ready) { setMessage('Set up the local model first.'); return; }
         if (!props.canIdentify) { setMessage('Open a saved recording from History first.'); return; }
         props.onIdentify(); return;
       }
-      void setup(index === 5);
+      void setup(index === 4);
     }
   });
   return <Box flexDirection="column" paddingX={1}>
     <Text bold>Speakers</Text>
-    <Text>Meet · {props.browser} | Local voices · {ready ? 'Ready' : 'Optional setup'}</Text>
+    <Text>Meet · {props.browser === 'auto' ? 'Automatic' : props.browser} | Local voices · {ready ? 'Ready' : 'Optional setup'}</Text>
     <Box flexDirection="column" marginY={1}>
       {entries.map((entry, i) => <Text key={entry} color={i === index ? 'cyan' : undefined}>{i === index ? '❯' : ' '} {entry}</Text>)}
     </Box>
-    {index < 4 && <>
+    {index < 3 && <>
+      <Text dimColor>Works with Chrome and Safari.</Text>
       <Text dimColor>Reads visible Meet tiles locally. No model needed.</Text>
       <Text dimColor>Names are timing hints; avoid other audio playback.</Text>
       {!message && props.browser !== 'off' && <Text>{props.meetStatus?.detail ?? meetPermissionHelp(props.browser)}</Text>}
     </>}
-    {index >= 4 && index < 7 && ready && <>
+    {index >= 3 && index < 6 && ready && <>
       <Text>Numbers are not names. Use [ / ] then R to rename.</Text>
       <Text dimColor>Shared microphones and overlap need review.</Text>
     </>}
-    {index >= 4 && index < 7 && !ready && <>
+    {index >= 3 && index < 6 && !ready && <>
       <Text>Downloads a model; requires Hugging Face access and publisher contact sharing.</Text>
       <Text color="cyan">{diarizationEnvironment().model.startsWith('/') ? diarizationEnvironment().model : `https://huggingface.co/${diarizationEnvironment().model}`}</Text>
       <Text color="yellow">seashell setup --speakers --login</Text>

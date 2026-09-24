@@ -6,13 +6,16 @@ import type { CaptureSessionStore, CaptureSessionManifest } from './capture-sess
 import type { Speaker, TranscriptSegment } from './transcript-types.ts';
 
 export type MeetBrowser = 'chrome' | 'safari';
-export function meetBrowserMatchesApp(browser: MeetBrowser | 'off' | undefined, bundleId?: string): boolean {
-  return Boolean(browser && browser !== 'off' && (!bundleId || bundleId === (browser === 'chrome' ? 'com.google.Chrome' : 'com.apple.Safari')));
+export type MeetBrowserMode = MeetBrowser | 'auto';
+export function meetBrowserMatchesApp(browser: MeetBrowserMode | 'off' | undefined, bundleId?: string): boolean {
+  return Boolean(browser && browser !== 'off' && (!bundleId ||
+    (browser === 'auto' ? ['com.google.Chrome', 'com.apple.Safari'].includes(bundleId)
+      : bundleId === (browser === 'chrome' ? 'com.google.Chrome' : 'com.apple.Safari'))));
 }
 export interface MeetParticipant { id: string; name: string; self: boolean; speaking: boolean }
 export interface MeetSnapshot { meeting: string; joined: boolean; participants: MeetParticipant[] }
-export interface MeetProbe { state: 'connected' | 'idle' | 'permission' | 'ambiguous' | 'unavailable'; detail: string; snapshot?: MeetSnapshot }
-export interface MeetSample { at: number; meeting: string; speaker?: Speaker }
+export interface MeetProbe { state: 'connected' | 'idle' | 'permission' | 'ambiguous' | 'unavailable'; detail: string; snapshot?: MeetSnapshot; browser?: MeetBrowser }
+export interface MeetSample { at: number; meeting: string; speaker?: Speaker; browser?: MeetBrowser }
 const MAX_BYTES = 16 * 1024 * 1024;
 const MAX_GAP = 1.75;
 
@@ -64,7 +67,8 @@ export function parseMeetSnapshot(value: unknown): MeetSnapshot | undefined {
   return { meeting: v.meeting, joined: v.joined, participants: [...participants.values()] };
 }
 
-export function meetPermissionHelp(browser: MeetBrowser): string {
+export function meetPermissionHelp(browser: MeetBrowserMode): string {
+  if (browser === 'auto') return 'Chrome and Safari are detected automatically. Join a call and check the connection for browser-specific permission instructions.';
   return browser === 'chrome'
     ? 'Chrome: View → Developer → Allow JavaScript from Apple Events. Also allow your terminal to control Chrome in macOS Privacy & Security → Automation.'
     : 'Safari: Settings → Advanced → Show features for web developers; Develop → Allow JavaScript from Apple Events. Also allow your terminal to control Safari in macOS Privacy & Security → Automation.';
@@ -72,20 +76,49 @@ export function meetPermissionHelp(browser: MeetBrowser): string {
 
 function appleString(value: string): string { return `"${value.replaceAll('\\', '\\\\').replaceAll('"', '\\"').replaceAll('\n', '\\n')}"`; }
 
-/** Only inspect existing Meet tabs in the explicitly selected browser. */
-export async function probeMeetSpeakers(browser: MeetBrowser, signal?: AbortSignal): Promise<MeetProbe> {
+// Filter landing/help pages before requesting JavaScript access in that browser.
+export const MEET_CALL_URL_GUARD = `on isMeetCall(candidateURL)
+ if candidateURL does not start with "https://meet.google.com/" then return false
+ if (length of candidateURL) < 36 then return false
+ set code to text 25 thru 36 of candidateURL
+ repeat with i from 1 to 12
+  set c to character i of code
+  if i is 4 or i is 9 then
+   if c is not "-" then return false
+  else
+   if "abcdefghijklmnopqrstuvwxyz" does not contain c then return false
+  end if
+ end repeat
+ if (length of candidateURL) > 36 then
+  if character 37 of candidateURL is not "?" and character 37 of candidateURL is not "#" then return false
+ end if
+ return true
+end isMeetCall`;
+
+/** Only inspect existing Meet tabs; never launch a browser. */
+async function probeMeetBrowser(browser: MeetBrowser, signal?: AbortSignal): Promise<MeetProbe> {
   if (process.platform !== 'darwin') return { state: 'unavailable', detail: 'Meet names currently require macOS.' };
   const app = browser === 'chrome' ? 'Google Chrome' : 'Safari';
+  // Check without loading an application dictionary: on Safari-only Macs,
+  // compiling a Chrome AppleScript can otherwise ask the user to locate Chrome.
+  const running = await new Promise<boolean | undefined>((resolve) => {
+    execFile('/usr/bin/pgrep', ['-x', app], { timeout: 500, maxBuffer: 16 * 1024, signal },
+      (error, stdout) => resolve(!error ? Boolean(stdout.trim()) : error.code === 1 ? false : undefined));
+  });
+  if (signal?.aborted) return { state: 'unavailable', detail: 'Meet connection check cancelled.' };
+  if (running === undefined) return { state: 'unavailable', detail: `Could not check whether ${app} is running; names are paused.` };
+  if (!running) return { state: 'idle', detail: `Join a Google Meet call in ${app} to check speaker names.` };
   const command = browser === 'chrome' ? `execute t javascript ${appleString(MEET_SPEAKER_SCRIPT)}`
     : `do JavaScript ${appleString(MEET_SPEAKER_SCRIPT)} in t`;
-  const script = `with timeout of 2 seconds
+  const script = `${MEET_CALL_URL_GUARD}
+with timeout of 2 seconds
 if application "${app}" is not running then return ""
 set output to ""
 set countRead to 0
 tell application "${app}"
  repeat with w in windows
   repeat with t in tabs of w
-   if URL of t starts with "https://meet.google.com/" then
+   if my isMeetCall(URL of t) then
     set countRead to countRead + 1
     if countRead > 8 then return "TOO_MANY_TABS"
     set value to ${command}
@@ -111,7 +144,7 @@ end timeout`;
     if (snapshots.length > 1) return { state: 'ambiguous', detail: 'More than one joined Meet tab; names paused until only one remains.' };
     const snapshot = snapshots[0];
     if (!snapshot) return { state: 'idle', detail: 'Join a Google Meet call to check speaker names.' };
-    if (!snapshot.participants.length) return { state: 'unavailable', detail: 'Meet tiles not readable. Show participant tiles; source labels remain available.' };
+    if (!snapshot.participants.length) return { state: 'unavailable', snapshot, detail: 'Meet tiles not readable. Show participant tiles; source labels remain available.' };
     const active = snapshot.participants.filter(p => !p.self && p.speaking);
     return { state: 'connected', snapshot, detail: active.length === 1 && active[0]!.name
       ? `Meet hint: ${active[0]!.name}` : active.length > 1 ? 'Meet connected · overlapping speakers'
@@ -124,10 +157,38 @@ end timeout`;
   }
 }
 
-function sampleAt(snapshot: MeetSnapshot | undefined, at: number): MeetSample {
+/** Check both browsers concurrently. An unreadable second browser is not proof
+ * that it has no call; fail closed instead of attaching its mixed audio to a name. */
+export async function probeMeetSpeakers(
+  mode: MeetBrowserMode,
+  signal?: AbortSignal,
+  read: (browser: MeetBrowser, signal?: AbortSignal) => Promise<MeetProbe> = probeMeetBrowser,
+): Promise<MeetProbe> {
+  if (signal?.aborted) return { state: 'unavailable', detail: 'Meet connection check cancelled.' };
+  const browsers: MeetBrowser[] = mode === 'auto' ? ['chrome', 'safari'] : [mode];
+  const results = await Promise.all(browsers.map(async browser => {
+    try { return { ...await read(browser, signal), browser }; }
+    catch { return { state: 'unavailable' as const, browser, detail: `${browser === 'chrome' ? 'Chrome' : 'Safari'} reader unavailable; audio recording continues.` }; }
+  }));
+  if (signal?.aborted) return { state: 'unavailable', detail: 'Meet connection check cancelled.' };
+  const active = results.filter(result => result.snapshot?.joined);
+  if (results.some(result => result.state === 'ambiguous') || active.length > 1) return {
+    state: 'ambiguous', detail: 'Multiple Meet calls detected. Keep only the call you want to record open; names are paused.',
+  };
+  const blocked = results.find(result => result.state !== 'idle' && result !== active[0]);
+  if (active.length === 1 && !blocked) return {
+    ...active[0]!, detail: `${active[0]!.detail} · ${active[0]!.browser === 'chrome' ? 'Chrome' : 'Safari'}`,
+  };
+  if (blocked) return { ...blocked, snapshot: undefined, detail: active.length
+    ? `Meet names paused until the other browser can be checked. ${blocked.detail}` : blocked.detail };
+  return { state: 'idle', detail: mode === 'auto'
+    ? 'Join a Google Meet call in Chrome or Safari to check speaker names.' : results[0]!.detail };
+}
+
+function sampleAt(snapshot: MeetSnapshot | undefined, at: number, browser?: MeetBrowser): MeetSample {
   const remote = snapshot?.participants.filter(p => p.speaking && !p.self) ?? [];
   const one = remote.length === 1 && remote[0]!.name ? remote[0] : undefined;
-  return { at, meeting: snapshot?.meeting ?? '', ...(one ? { speaker: {
+  return { at, meeting: snapshot?.meeting ?? '', ...(snapshot && browser ? { browser } : {}), ...(one ? { speaker: {
     id: `MEET_${createHash('sha256').update(`${snapshot!.meeting}\0${one.id}`).digest('hex').slice(0, 20)}`,
     label: one.name,
   } } : {}) };
@@ -149,7 +210,7 @@ export function meetSpeakerForSegment(samples: readonly MeetSample[], segment: P
     const overlap = Math.min(segment.end, b.at) - Math.max(segment.start, a.at);
     if (overlap <= 0) continue;
     if (b.at - a.at > MAX_GAP || b.at <= a.at || !a.speaker || !b.speaker ||
-        a.meeting !== b.meeting || a.speaker.id !== b.speaker.id || a.speaker.label !== b.speaker.label) return;
+        a.meeting !== b.meeting || a.browser !== b.browser || a.speaker.id !== b.speaker.id || a.speaker.label !== b.speaker.label) return;
     if (matched && matched.id !== a.speaker.id) return;
     matched = a.speaker; coverage += overlap;
   }
@@ -171,7 +232,9 @@ export function readMeetSamples(manifestPath: string, manifest: CaptureSessionMa
       if (!Number.isFinite(raw.at) || raw.at < 0 || raw.at <= (samples.at(-1)?.at ?? -1) ||
           typeof raw.meeting !== 'string' || (raw.meeting !== '' && !/^\/[a-z]{3}-[a-z]{4}-[a-z]{3}$/u.test(raw.meeting))) return [];
       if (raw.speaker && (!/^MEET_[a-f0-9]{20}$/u.test(raw.speaker.id) || clean(raw.speaker.label, 100) !== raw.speaker.label)) return [];
-      samples.push({ at: raw.at, meeting: raw.meeting, ...(raw.speaker ? { speaker: { id: raw.speaker.id, label: raw.speaker.label } } : {}) });
+      if (raw.browser !== undefined && !['chrome', 'safari'].includes(raw.browser)) return [];
+      samples.push({ at: raw.at, meeting: raw.meeting, ...(raw.browser ? { browser: raw.browser } : {}),
+        ...(raw.speaker ? { speaker: { id: raw.speaker.id, label: raw.speaker.label } } : {}) });
       if (samples.length > 100_000) return [];
     }
     return samples;
@@ -180,7 +243,7 @@ export function readMeetSamples(manifestPath: string, manifest: CaptureSessionMa
 
 export interface MeetSpeakerReader { stop(): void; speakerFor(segment: TranscriptSegment): Speaker | undefined }
 export function startMeetSpeakerReader(options: {
-  browser: MeetBrowser; store: CaptureSessionStore; onStatus?: (probe: MeetProbe) => void;
+  browser: MeetBrowserMode; store: CaptureSessionStore; onStatus?: (probe: MeetProbe) => void;
   probe?: typeof probeMeetSpeakers; now?: () => number; pollMs?: number;
 }): MeetSpeakerReader {
   const now = options.now ?? Date.now;
@@ -188,6 +251,7 @@ export function startMeetSpeakerReader(options: {
   const origin = options.store.manifest.startedAtUnixMs;
   const samples: MeetSample[] = [];
   let pinned: string | undefined;
+  let pinnedBrowser: MeetBrowser | undefined;
   let stopped = false, bytes = 0, count = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const controller = new AbortController();
@@ -216,6 +280,7 @@ export function startMeetSpeakerReader(options: {
     if (header.sessionId !== options.store.manifest.sessionId || header.origin !== origin || header.version !== 1 ||
         lines.length !== prior.length + 1) throw new Error('Invalid Meet evidence');
     pinned = prior.find(s => s.meeting)?.meeting;
+    pinnedBrowser = prior.find(s => s.browser)?.browser;
     count = prior.length; samples.push(...prior.slice(-600));
   } catch {
     stopped = true;
@@ -234,12 +299,13 @@ export function startMeetSpeakerReader(options: {
     };
     if (snapshot) {
       pinned ??= snapshot.meeting;
-      if (snapshot.meeting !== pinned) {
+      pinnedBrowser ??= probe.browser;
+      if (snapshot.meeting !== pinned || probe.browser !== pinnedBrowser) {
         snapshot = undefined;
-        probe = { state: 'ambiguous', detail: 'Meet call changed. Finish this recording before capturing another call’s names.' };
+        probe = { state: 'ambiguous', detail: 'Meet call or browser changed. Finish this recording before capturing another call’s names.' };
       }
     }
-    try { write(sampleAt(snapshot, (end - origin) / 1000)); }
+    try { write(sampleAt(snapshot, (end - origin) / 1000, probe.browser)); }
     catch { stop(); probe = { state: 'unavailable', detail: 'Meet evidence could not be saved; audio recording continues.' }; }
     options.onStatus?.(probe);
     if (!stopped) { timer = setTimeout(poll, probe.state === 'connected' ? options.pollMs ?? 500 : 5000); timer.unref(); }

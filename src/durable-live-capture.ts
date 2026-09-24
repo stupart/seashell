@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { unlinkSync } from 'fs';
-import { startMeetSpeakerReader, type MeetBrowser, type MeetProbe } from './meet-speakers.ts';
+import { startMeetSpeakerReader, type MeetBrowserMode, type MeetProbe } from './meet-speakers.ts';
 import {
   CaptureSessionStore,
   type CaptureSessionManifest,
@@ -33,7 +33,7 @@ export interface DurableLiveCaptureHandle {
 }
 
 export interface StartDurableLiveCaptureOptions {
-  readonly speakerBrowser?: MeetBrowser | 'off';
+  readonly speakerBrowser?: MeetBrowserMode | 'off';
   readonly onMeetStatus?: (status: MeetProbe) => void;
   readonly libraryDir: string;
   readonly sessionId?: string;
