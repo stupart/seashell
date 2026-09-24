@@ -53,8 +53,11 @@ def prepare(directory):
                 while chunk := response.read(1024 * 1024):
                     output.write(chunk)
             temporary.replace(target)
+        digest = hashlib.sha256()
         with target.open('rb') as fixture:
-            actual_checksum = hashlib.file_digest(fixture, 'sha256').hexdigest()
+            for chunk in iter(lambda: fixture.read(1024 * 1024), b''):
+                digest.update(chunk)
+        actual_checksum = digest.hexdigest()
         if actual_checksum != checksum:
             raise ValueError(f'Fixture checksum differs: {target}. Remove it and retry; do not score changed sources.')
     video = directory / 'ami-es2002a-180-360.mov'
