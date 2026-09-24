@@ -48,10 +48,11 @@ export function reconcileLiveEcho(
 ): readonly TranscriptSegment[] {
   if (
     incoming.speaker === 'LOCAL' &&
-    existing.some((segment) => isLikelySystemAudioLeak(incoming, segment))
+    existing.some((segment) => isLikelySystemAudioLeak(incoming,
+      segment.speaker?.startsWith('MEET_') ? { ...segment, speaker: 'SYSTEM' } : segment))
   ) return existing;
-  const retained = incoming.speaker === 'SYSTEM'
-    ? existing.filter((segment) => !isLikelySystemAudioLeak(segment, incoming))
+  const retained = incoming.speaker === 'SYSTEM' || incoming.speaker?.startsWith('MEET_')
+    ? existing.filter((segment) => !isLikelySystemAudioLeak(segment, { ...incoming, speaker: 'SYSTEM' }))
     : [...existing];
   return [...retained, incoming].toSorted((left, right) =>
     left.start - right.start || left.end - right.end);

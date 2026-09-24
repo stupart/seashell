@@ -71,6 +71,7 @@ import {
 } from './transcription-routing.ts';
 import AIProviderPicker from './AISettings.tsx';
 import SpeakerSettings from './SpeakerSettings.tsx';
+import { startMeetSpeakerReader, meetBrowserMatchesApp, type MeetSpeakerReader, type MeetProbe } from './meet-speakers.ts';
 import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { runHumainTranscription } from './humain-client.ts';
@@ -187,6 +188,8 @@ export default function App(props: { libraryDir?: string } = {}) {
   const { exit } = useApp();
   const [config, setConfig] = useState(() => loadConfig());
   const [speakerSetupOpen, setSpeakerSetupOpen] = useState(false);
+  const [meetSpeakerStatus, setMeetSpeakerStatus] = useState<MeetProbe>();
+  const [captureAppBundle, setCaptureAppBundle] = useState<string>();
   const [aiSetupOpen, setAiSetupOpen] = useState(false);
   const [aiSetupIntent, setAiSetupIntent] = useState<'notes' | 'chat' | null>(null);
   const libraryRoot = useMemo(
@@ -268,6 +271,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const microphoneCapture = useRef<MicrophoneCaptureHandle | null>(null);
   const systemAudioCapture = useRef<SystemAudioCaptureHandle | null>(null);
   const captureSessionStore = useRef<CaptureSessionStore | null>(null);
+  const meetSpeakerReader = useRef<MeetSpeakerReader | null>(null);
   const localAsrServer = useRef<OwnedWhisperServer | null>(null);
   const localAsrScheduler = useRef<LiveAsrScheduler | null>(null);
   const cloudAsrScheduler = useRef<LiveAsrScheduler | null>(null);
@@ -348,6 +352,8 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   const appendLiveSegment = useCallback((segment: TranscriptRecord['transcript'][number]) => {
     if (!/[\p{L}\p{N}]/u.test(segment.text)) return;
+    const meetSpeaker = meetSpeakerReader.current?.speakerFor(segment);
+    if (meetSpeaker) segment = { ...segment, speaker: meetSpeaker.id, speakerSource: 'google-meet-dom' };
     const current = liveRecordRef.current;
     const nextSpeakers = segment.speaker && !current.speakers.some(
       (speaker) => speaker.id === segment.speaker,
@@ -356,11 +362,11 @@ export default function App(props: { libraryDir?: string } = {}) {
           ...current.speakers,
           {
             id: segment.speaker,
-            label: segment.speaker === 'LOCAL'
+            label: meetSpeaker?.label ?? (segment.speaker === 'LOCAL'
               ? 'Microphone'
               : segment.speaker === 'SYSTEM'
                 ? 'System audio'
-                : segment.speaker,
+                : segment.speaker),
           },
         ]
       : current.speakers;
@@ -368,6 +374,8 @@ export default function App(props: { libraryDir?: string } = {}) {
       ...current,
       updatedAt: new Date().toISOString(),
       speakers: nextSpeakers,
+      ...(meetSpeaker ? { speakerAnalysis: { status: 'platform-hints' as const,
+        detail: 'Names suggested by Google Meet speaking indicators; review speaker changes and overlap.' } } : {}),
       transcript: [...reconcileLiveEcho(current.transcript, segment)],
     };
     liveRecordRef.current = next;
@@ -652,10 +660,22 @@ export default function App(props: { libraryDir?: string } = {}) {
     };
   }, [startSystemListener, systemAudioDisabled]);
 
+  useEffect(() => {
+    const browser = config.meeting?.speakerBrowser;
+    if (paused || systemAudioDisabled || !browser || browser === 'off' || !meetBrowserMatchesApp(browser, captureAppBundle)) return;
+    const store = ensureCaptureStore(liveSessionGeneration.current);
+    if (!store) return;
+    setMeetSpeakerStatus(undefined);
+    const reader = startMeetSpeakerReader({ browser, store, onStatus: setMeetSpeakerStatus });
+    meetSpeakerReader.current = reader;
+    return () => { reader.stop(); if (meetSpeakerReader.current === reader) meetSpeakerReader.current = null; };
+  }, [paused, systemAudioDisabled, config.meeting?.speakerBrowser, captureAppBundle, liveRecord.id, ensureCaptureStore]);
+
   const setListeningPaused = useCallback((nextPaused: boolean) => {
     pausedRef.current = nextPaused;
     setPaused(nextPaused);
     if (nextPaused) {
+      meetSpeakerReader.current?.stop();
       const captureHandles = [microphoneCapture.current, systemAudioCapture.current]
         .filter((handle): handle is MicrophoneCaptureHandle | SystemAudioCaptureHandle => Boolean(handle));
       microphoneCapture.current?.stop();
@@ -851,6 +871,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   }, []);
 
   const completeCaptureSession = useCallback(async (reason: string, alreadyFinalized = false) => {
+    meetSpeakerReader.current?.stop();
     const store = captureSessionStore.current;
     if (!store) return;
     try {
@@ -1249,6 +1270,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     microphoneCapture.current = null;
     systemAudioCapture.current?.stop();
     systemAudioCapture.current = null;
+    meetSpeakerReader.current?.stop();
     try {
       await Promise.all(captureHandles.map((handle) => handle.done));
       await captureSessionStore.current?.drainCommits();
@@ -1261,6 +1283,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       setLiveRecord(next);
       liveMeetingRef.current = null;
       setLiveMeeting(null);
+      setCaptureAppBundle(undefined);
       setMeetingView('transcript');
       setTranscriptScroll(0);
       setNotice('Started a fresh live transcript.');
@@ -1285,6 +1308,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       captureSessionStore.current !== null
     );
     if (needsFreshSession) await resetLiveSession();
+    setCaptureAppBundle(candidate.bundleId);
     ensureLiveSessionStartedAt();
     const base = liveRecordRef.current;
     const record: TranscriptRecord = {
@@ -1775,6 +1799,13 @@ export default function App(props: { libraryDir?: string } = {}) {
   }, { isActive: !aiSetupOpen && !speakerSetupOpen });
 
   if (speakerSetupOpen) return <SpeakerSettings recording={!paused && !listenerDisabled}
+    browser={config.meeting?.speakerBrowser ?? 'off'}
+    meetStatus={meetSpeakerStatus}
+    onBrowser={(browser) => {
+      updateMeetingConfig({ speakerBrowser: browser });
+      setConfig(current => ({ ...current, meeting: { ...current.meeting, speakerBrowser: browser } }));
+      setMeetSpeakerStatus(undefined);
+    }}
     canIdentify={view === 'record' && Boolean(selectedRecord)}
     onClose={() => setSpeakerSetupOpen(false)}
     onIdentify={() => {
@@ -2042,10 +2073,14 @@ export default function App(props: { libraryDir?: string } = {}) {
       </Box>
 
       <Box flexDirection="column" marginTop={1} flexShrink={0}>
+        {showingLiveTranscript && !paused && !historyOpen && meetBrowserMatchesApp(config.meeting?.speakerBrowser, captureAppBundle) && (
+          <Text dimColor>{meetSpeakerStatus?.state === 'permission' ? 'Meet names need browser permission · [V] Setup'
+            : meetSpeakerStatus?.detail ?? 'Connecting Meet speaker names…'}</Text>
+        )}
         {currentMeeting && meetingView === 'transcript' && showSpeakers && !historyOpen &&
           currentRecord?.speakers.some((speaker) => speaker.id === 'SYSTEM') && (
           <Text dimColor>{currentRecord.speakerAnalysis?.detail ?? (showingLiveTranscript
-            ? 'Source labels while recording · voices separated on finish when ready · [V] Setup'
+            ? 'Source labels · [V] Connect Meet names or set up voice separation'
             : 'Source labels only · [V] Set up or identify speakers')}</Text>
         )}
         {showingLiveTranscript && !followLiveTranscript && !historyOpen && (

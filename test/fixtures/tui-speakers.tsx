@@ -15,6 +15,10 @@ writeFileSync(process.env.SEASHELL_CONFIG, JSON.stringify({ meeting: { automatio
 let starts = 0, stops = 0, setups = 0, ready = false;
 const mic = { ...await import('../../src/live-microphone.ts') };
 const environment = { ...await import('../../src/diarization-environment.ts') };
+const meet = { ...await import('../../src/meet-speakers.ts') };
+mock.module('../../src/meet-speakers.ts', () => ({ ...meet, async probeMeetSpeakers() {
+  return { state: 'permission', detail: 'Enable Allow JavaScript from Apple Events.' };
+} }));
 mock.module('../../src/live-microphone.ts', () => ({ ...mic, startMicrophoneCapture(options: any) {
   starts++; options.onState({ state: 'active' });
   return { done: Promise.resolve(), startup: Promise.resolve(), stop() { stops++; } };
@@ -39,12 +43,17 @@ const until = async (check: () => boolean) => { const end = Date.now() + 3000; w
 const type = async (text: string) => { input.write(text); await Bun.sleep(80); };
 try {
   await until(() => starts === 1);
-  await type('v'); await until(() => plain().includes('Setup required'));
+  await type('v'); await until(() => plain().includes('Optional setup'));
+  await type('\r'); await until(() => plain().includes('Allow JavaScript from Apple Events'));
+  assert.equal(starts, 1, 'Connecting Meet preserves the running microphone');
+  for (let n = 0; n < 4; n++) await type('\x1b[B');
   await type('\r'); assert.equal(setups, 0, 'Do not install while recording');
   assert.equal(stops, 0, 'Opening speaker settings preserves capture');
   await type('\x1b'); await type(' '); await until(() => stops === 1);
-  await type('F'); await until(() => plain().includes('contact details'));
-  await type('\x1b[B'); await type('\r'); await until(() => plain().includes('Model verified offline'));
+  await type('F'); await until(() => plain().includes('Optional setup'));
+  for (let n = 0; n < 5; n++) await type('\x1b[B');
+  await until(() => plain().includes('contact sharing'));
+  await type('\r'); await until(() => plain().includes('Model verified offline'));
   assert.equal(setups, 1);
   assert.ok(stripVTControlCharacters(rendered).includes('Ready'));
   await type('\x1b[B'); await type('\r');

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — Google Meet names
+
+- Opt-in Chrome/Safari reader for visible Meet participant names and speaking
+  indicators. Connect or check permissions in V, or `meeting speakers`.
+- Save bounded, timestamped speaker evidence alongside capture audio; apply
+  conservative names to live drafts and smaller final ASR units. Overlap,
+  transitions, stale reads, multiple calls and unknown tiles retain source labels.
+- Distinguish platform timing hints from voice separation and verified identity.
+  No model, browser extension, extra login or audio upload is required.
+
 ## Unreleased — local speaker separation
 
 - V opens speaker setup/readiness and saved-recording reprocessing; Shift+F
