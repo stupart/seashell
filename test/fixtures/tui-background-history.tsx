@@ -1,0 +1,47 @@
+import { mock } from 'bun:test';
+import assert from 'node:assert/strict';
+import React from 'react';
+import { render } from 'ink';
+import { PassThrough, Writable } from 'stream';
+import { stripVTControlCharacters } from 'util';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { createTranscriptRecord } from '../../src/transcript-record.ts';
+import { saveTranscriptRecord } from '../../src/transcript-library.ts';
+import { createMeetingArtifact, saveMeetingArtifact } from '../../src/meeting-artifact.ts';
+import { writeBackgroundMeetingState } from '../../src/background-meeting-status.ts';
+const root = mkdtempSync(join(tmpdir(), 'seashell-background-ui-'));
+const library = join(root, 'library');
+process.env.SEASHELL_CONFIG = join(root, 'config.json');
+process.env.SEASHELL_LIBRARY_DIR = library;
+delete process.env.SEASHELL_DISABLE_LISTENER;
+writeFileSync(process.env.SEASHELL_CONFIG, '{}');
+Object.defineProperty(process.stdout, 'columns', { value: 110 });
+Object.defineProperty(process.stdout, 'rows', { value: 28 });
+mock.module('../../src/watch-lock.ts', () => ({ acquireMeetingWatchLock: () => undefined }));
+const first = createTranscriptRecord({ transcript: [], speakers: [] }, { id: 'background-call', title: 'Design meeting' });
+const saved = saveTranscriptRecord(library, first);
+saveMeetingArtifact(library, createMeetingArtifact(first));
+writeBackgroundMeetingState(saved.directory, 'recording');
+const { default: App } = await import('../../src/app.tsx');
+const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
+let rendered = '';
+const output = Object.assign(new Writable({ write(chunk, _enc, cb) { rendered += chunk.toString(); cb(); } }), { columns: 110, rows: 28 });
+const app = render(<App />, { stdin: input as any, stdout: output as any, stderr: output as any,
+  debug: true, patchConsole: false, exitOnCtrlC: false });
+const screen = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('🐚 Sea Shell')));
+const type = async (key: string) => { input.write(key); await Bun.sleep(100); };
+try {
+  await Bun.sleep(200);
+  assert(screen().includes('History'), 'background mode opens History without a key press');
+  assert(screen().includes('Design'), screen());
+  await type('\x1b[B'); await type('\r');
+  assert(screen().includes('Recording in the background'));
+  saveTranscriptRecord(library, { ...first, transcript: [{ id: 's1', start: 0, end: 1, text: 'Automatically refreshed transcript.' }] });
+  writeBackgroundMeetingState(saved.directory, 'ready');
+  const deadline = Date.now() + 6_000;
+  while (!screen().includes('Automatically refreshed transcript.') && Date.now() < deadline) await Bun.sleep(100);
+  assert(screen().includes('Automatically refreshed transcript.'), 'open record refreshes after background finalization');
+  process.stdout.write(JSON.stringify({ sidebar: true, recordingState: true, refreshed: true }) + '\n');
+} finally { app.unmount(); input.destroy(); output.destroy(); rmSync(root, { recursive: true, force: true }); }

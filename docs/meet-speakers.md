@@ -91,3 +91,19 @@ For other meeting apps or hidden/unreadable tiles, optional local voice separati
 remains available through **V**. It separates anonymous remote voices after
 recording; it does not invent names. Meet's official Media API has a different
 access/authorization model and is not used by this adapter.
+
+## Automatic call boundaries
+
+Connecting the reader also gives automatic meeting mode a joined-call signal.
+A muted Chrome or Safari Meet still starts capture; prejoin previews do not
+automatically start it. Meeting IDs distinguish consecutive rooms in the same
+browser. A confirmed departure stops at the next poll; permission errors and
+ambiguous pages use the configured end grace before stopping. Other meeting
+apps continue to use process-audio detection.
+
+Enable persistent background capture with `seashell meeting autostart enable`.
+It records without live inference, publishes one History entry per call at
+capture start, and prepares the transcript after departure while watching for
+the next meeting. This requires the Mac to be awake and the login service active.
+New browser permission prompts may need approval when the login service first
+reads a Meet tab. Real Meet DOM compatibility remains experimental.

@@ -1,7 +1,9 @@
 import { setTimeout as sleep } from 'timers/promises';
 import { finalizeCaptureTranscript } from './capture-finalizer.ts';
 import { readMacCalendarEventsAsync, suggestCalendarMeeting } from './calendar.ts';
-import { meetBrowserMatchesApp } from './meet-speakers.ts';
+import { meetBrowserMatchesApp, probeMeetSpeakers } from './meet-speakers.ts';
+import { writeBackgroundMeetingState, type BackgroundMeetingState } from './background-meeting-status.ts';
+import { createTranscriptRecord } from './transcript-record.ts';
 import {
   loadConfig,
   resolveLibraryDir,
@@ -17,6 +19,7 @@ import {
   MeetingSignalMonitor,
   MeetingAutomationController,
   resolveMeetingCandidate,
+  hasConfirmedMeetingEnd,
   type MeetingAutomationAction,
   type MeetingCandidate,
   type MeetingSignalSnapshot,
@@ -50,6 +53,7 @@ export type AutomaticMeetingWatchEvent =
 export interface AutomaticMeetingWatchDependencies {
   readonly now?: () => Date;
   readonly readSignals?: () => MeetingSignalSnapshot | Promise<MeetingSignalSnapshot>;
+  readonly readMeet?: typeof probeMeetSpeakers;
   readonly readCalendar?: typeof readMacCalendarEventsAsync;
   readonly startCapture?: typeof startDurableLiveCapture;
   readonly finalizeCapture?: typeof finalizeCaptureTranscript;
@@ -81,13 +85,14 @@ export class AutomaticMeetingWatchService {
   readonly #onEvent?: (event: AutomaticMeetingWatchEvent) => void;
   readonly #dependencies: Required<AutomaticMeetingWatchDependencies>;
   readonly #signalMonitor?: MeetingSignalMonitor;
-  #active?: { candidate: MeetingCandidate; capture: DurableLiveCaptureHandle };
+  #active?: { candidate: MeetingCandidate; capture: DurableLiveCaptureHandle; directory: string };
   #finalizationTail: Promise<void> = Promise.resolve();
   #calendarCache?: { readAtUnixMs: number; events: Awaited<ReturnType<typeof readMacCalendarEventsAsync>> };
   #calendarRead?: Promise<void>;
   #calendarRetryAtUnixMs = 0;
   #calendarAbort = new AbortController();
   #shuttingDown = false;
+  #meetWarning?: string;
 
   constructor(options: AutomaticMeetingWatchOptions = {}) {
     this.#config = options.config ?? loadConfig();
@@ -102,6 +107,7 @@ export class AutomaticMeetingWatchService {
     this.#dependencies = {
       now: options.dependencies?.now ?? (() => new Date()),
       readSignals: options.dependencies?.readSignals ?? (() => this.#signalMonitor!.waitForSnapshot()),
+      readMeet: options.dependencies?.readMeet ?? probeMeetSpeakers,
       readCalendar: options.dependencies?.readCalendar ?? readMacCalendarEventsAsync,
       startCapture: options.dependencies?.startCapture ?? startDurableLiveCapture,
       finalizeCapture: options.dependencies?.finalizeCapture ?? finalizeCaptureTranscript,
@@ -116,22 +122,31 @@ export class AutomaticMeetingWatchService {
 
   async pollOnce(): Promise<MeetingAutomationAction> {
     const now = this.#dependencies.now();
+    const automation = this.#config.meeting?.automation;
+    const browser = automation?.enabled === false || automation?.mode === 'off'
+      ? undefined : this.#config.meeting?.speakerBrowser;
+    const meet = browser && browser !== 'off'
+      ? await this.#dependencies.readMeet(browser, this.#calendarAbort.signal).catch(() => ({
+        state: 'unavailable' as const, detail: 'Could not check Google Meet. Check the connection in Speakers.',
+      })) : undefined;
+    if (meet && ['permission', 'ambiguous', 'unavailable'].includes(meet.state)) {
+      if (this.#meetWarning !== meet.detail) this.emit({ type: 'watch.warning', at: now.toISOString(), message: meet.detail });
+      this.#meetWarning = meet.detail;
+    } else this.#meetWarning = undefined;
     let snapshot: MeetingSignalSnapshot;
     try {
       snapshot = await this.#dependencies.readSignals();
     } catch (error) {
       this.emit({ type: 'watch.warning', at: now.toISOString(), message: errorMessage(error) });
-      // A broken detector is lost evidence, not permission to record indefinitely.
-      const action = this.#controller.step(undefined, now.getTime());
-      if (action.kind === 'finish') await this.finish(action.candidate, action.reason);
-      return action;
+      snapshot = { schemaVersion: 1, capturedAtUnixMs: now.getTime(), supported: false, inputProcesses: [] };
     }
     if (this.#shuttingDown) {
       return { kind: 'none' };
     }
     const calendar = this.currentCalendar(now);
-    const candidate = resolveMeetingCandidate(snapshot, calendar, this.#config.meeting?.automation);
-    const action = this.#controller.step(candidate, now.getTime());
+    const candidate = resolveMeetingCandidate(snapshot, calendar, this.#config.meeting?.automation, meet);
+    const action = this.#controller.step(candidate, now.getTime(),
+      hasConfirmedMeetingEnd(this.#controller.state.candidate, meet));
     if (action.kind === 'suggest') {
       this.emit({ type: 'meeting.suggested', at: now.toISOString(), candidate: action.candidate });
     } else if (action.kind === 'start') {
@@ -226,7 +241,24 @@ export class AutomaticMeetingWatchService {
       this.emit({ type: 'watch.error', at: now.toISOString(), message: `Could not start capture: ${errorMessage(error)}` });
       return false;
     }
-    this.#active = { candidate, capture };
+    let directory: string;
+    try {
+      const record = createTranscriptRecord({ transcript: [], speakers: [] }, {
+        id: capture.sessionId, now, title: candidate.title,
+        source: { filename: 'Live capture session', format: 'capture-session/0.1' },
+      });
+      directory = saveTranscriptRecord(this.#libraryDir, record).directory;
+      saveMeetingArtifact(this.#libraryDir, createMeetingArtifact(record, {
+        mode: this.#config.meeting?.mode ?? 'hybrid', calendar: candidate.calendar,
+      }));
+      writeBackgroundMeetingState(directory, 'recording');
+    } catch (error) {
+      void capture.stop('library-start-failed').catch(() => {});
+      this.#controller.reset();
+      this.emit({ type: 'watch.error', at: now.toISOString(), message: `Could not save meeting: ${errorMessage(error)}` });
+      return false;
+    }
+    this.#active = { candidate, capture, directory };
     this.emit({
       type: 'meeting.started',
       at: now.toISOString(),
@@ -242,6 +274,7 @@ export class AutomaticMeetingWatchService {
     this.#active = undefined;
     try {
       await active.capture.stop(reason);
+      this.markCapture(active.directory, 'processing');
       this.emit({
         type: 'meeting.capture-finished',
         at: this.#dependencies.now().toISOString(),
@@ -250,6 +283,7 @@ export class AutomaticMeetingWatchService {
       });
       const task = async () => this.finalize(active.candidate, active.capture);
       this.#finalizationTail = this.#finalizationTail.then(task, task).catch((error: unknown) => {
+        this.markCapture(active.directory, 'failed');
         this.emit({
           type: 'watch.error',
           at: this.#dependencies.now().toISOString(),
@@ -257,6 +291,7 @@ export class AutomaticMeetingWatchService {
         });
       });
     } catch (error) {
+      this.markCapture(active.directory, 'failed');
       this.emit({
         type: 'watch.error',
         at: this.#dependencies.now().toISOString(),
@@ -337,6 +372,7 @@ export class AutomaticMeetingWatchService {
         message: `Meeting ${record.id} is saved; enrichment failed: ${errorMessage(error)}`,
       });
     }
+    this.markCapture(saved.directory, 'ready');
     this.emit({
       type: 'meeting.ready',
       at: this.#dependencies.now().toISOString(),
@@ -344,6 +380,14 @@ export class AutomaticMeetingWatchService {
       transcriptId: artifact.transcriptId,
       directory: saved.directory,
     });
+  }
+
+  private markCapture(directory: string, state: BackgroundMeetingState): void {
+    try { writeBackgroundMeetingState(directory, state); }
+    catch (error) {
+      this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(),
+        message: `Could not update capture display: ${errorMessage(error)}` });
+    }
   }
 
   private emit(value: AutomaticMeetingWatchEvent): void {

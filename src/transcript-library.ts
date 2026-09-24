@@ -14,6 +14,7 @@ import { basename, dirname, extname, join } from 'path';
 import { renderText, renderTranscript } from './transcript-renderer.ts';
 import type { TranscriptFormat, TranscriptRecord } from './transcript-types.ts';
 import { archiveMeetingTranscript, synchronizeMeetingTranscript } from './meeting-artifact.ts';
+import { readBackgroundMeetingState, type BackgroundMeetingState } from './background-meeting-status.ts';
 
 export interface TranscriptLibraryEntry {
   id: string;
@@ -26,6 +27,7 @@ export interface TranscriptLibraryEntry {
   segmentCount: number;
   kind: 'transcript' | 'meeting';
   directory: string;
+  captureState?: BackgroundMeetingState;
 }
 
 export interface SavedTranscript {
@@ -209,6 +211,7 @@ function toEntry(path: string, record: TranscriptRecord): TranscriptLibraryEntry
     segmentCount: record.transcript.length,
     kind: existsSync(join(directory, 'meeting.json')) ? 'meeting' : 'transcript',
     directory,
+    captureState: readBackgroundMeetingState(directory),
   };
 }
 
@@ -301,6 +304,10 @@ export function writeTranscriptExport(
 export function trashTranscriptRecord(libraryDir: string, transcriptId: string): string {
   const { path } = findTranscriptRecord(libraryDir, transcriptId);
   const sourceDirectory = dirname(path);
+  const captureState = readBackgroundMeetingState(sourceDirectory);
+  if (captureState === 'recording' || captureState === 'processing') {
+    throw new Error('This meeting is still recording or processing. Wait for it to finish before removing it.');
+  }
   const trashDirectory = join(libraryDir, '_Trash');
   mkdirSync(trashDirectory, { recursive: true, mode: 0o700 });
   const target = join(

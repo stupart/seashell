@@ -71,7 +71,8 @@ import {
 } from './transcription-routing.ts';
 import AIProviderPicker from './AISettings.tsx';
 import SpeakerSettings from './SpeakerSettings.tsx';
-import { startMeetSpeakerReader, meetBrowserMatchesApp, type MeetSpeakerReader, type MeetProbe } from './meet-speakers.ts';
+import { startMeetSpeakerReader, meetBrowserMatchesApp, probeMeetSpeakers, type MeetSpeakerReader, type MeetProbe } from './meet-speakers.ts';
+import { backgroundMeetingMessage } from './background-meeting-status.ts';
 import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { runHumainTranscription } from './humain-client.ts';
@@ -86,6 +87,7 @@ import {
 } from './tui-state.ts';
 import {
   DEFAULT_MEETING_AUTOMATION,
+  hasConfirmedMeetingEnd,
   MeetingAutomationController,
   MeetingSignalMonitor,
   resolveMeetingCandidate,
@@ -241,6 +243,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [automaticCandidate, setAutomaticCandidate] = useState<MeetingCandidate | null>(null);
   const [automationPhase, setAutomationPhase] = useState<MeetingAutomationPhase>('watching');
   const [automaticFinishRequested, setAutomaticFinishRequested] = useState(false);
+  const automaticTransition = useRef(false);
   const [watchOwnership, setWatchOwnership] = useState<WatchOwnership>(
     automaticMeetingEnabled ? 'checking' : 'disabled',
   );
@@ -308,6 +311,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     const lock = acquireMeetingWatchLock();
     if (!lock) {
       setWatchOwnership('external');
+      if (!layout.compact) setHistoryOpen(true);
       setNotice('Background meeting watch is active; this window is showing its transcript library.');
       const interval = setInterval(refreshLibrary, 5_000);
       return () => clearInterval(interval);
@@ -335,10 +339,21 @@ export default function App(props: { libraryDir?: string } = {}) {
     },
     ...visibleEntries.map((entry) => ({
       kind: 'record' as const,
-      label: entry.kind === 'meeting' ? `M · ${entry.title}` : entry.title,
+      label: entry.kind === 'meeting'
+        ? `${entry.captureState === 'recording' ? '●' : entry.captureState === 'processing' ? '◐' : 'M'} ${new Date(entry.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · ${entry.title}`
+        : entry.title,
       entry,
     })),
   ], [paused, visibleEntries]);
+
+  // Reload an open background transcript when the watcher publishes it.
+  useEffect(() => {
+    if (watchOwnership !== 'external' || view !== 'record' || !selectedRecord || processing) return;
+    try {
+      setSelectedRecord(findTranscriptRecord(libraryRoot, selectedRecord.id).record);
+      setSelectedMeeting(loadMeetingArtifact(libraryRoot, selectedRecord.id) ?? null);
+    } catch { /* The user may have just removed this entry. */ }
+  }, [libraryEntries, libraryRoot, watchOwnership, view, selectedRecord?.id, processing]);
 
   useEffect(() => {
     setSelectionIndex((current) => moveSelection(current, 0, navigationItems.length));
@@ -802,6 +817,9 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   const currentRecord = view === 'live' ? liveRecord : selectedRecord;
   const currentMeeting = view === 'live' ? liveMeeting : selectedMeeting;
+  const backgroundMessage = view === 'record'
+    ? backgroundMeetingMessage(libraryEntries.find(entry => entry.id === selectedRecord?.id)?.captureState)
+    : undefined;
   const drawerOnly = historyOpen && layout.compact;
   const mainPanelColumns = historyOpen && !drawerOnly
     ? terminal.columns - layout.sidebarWidth - 7
@@ -929,7 +947,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       setAiSetupOpen(true);
       return;
     }
-    const wasListening = view === 'live' && !pausedRef.current;
+    const wasListening = (finishLive || view === 'live') && !pausedRef.current;
     const captureHandles = [microphoneCapture.current, systemAudioCapture.current]
       .filter((handle): handle is MicrophoneCaptureHandle | SystemAudioCaptureHandle => Boolean(handle));
     if (wasListening) setListeningPaused(true);
@@ -985,8 +1003,6 @@ export default function App(props: { libraryDir?: string } = {}) {
         if (missingObserver || missingReconciliation) {
           refreshLibrary();
           setNotice('Meeting saved. Connect AI for notes, or return to your transcript.');
-          setAiSetupIntent('notes');
-          setAiSetupOpen(true);
           return;
         }
         const artifact = await enrichMeeting(libraryRoot, record.id, {
@@ -1028,6 +1044,7 @@ export default function App(props: { libraryDir?: string } = {}) {
           }
         }
       } finally {
+        if (finishLive) automaticTransition.current = false;
         setProcessing(null);
         if (wasListening && !finishLive) setListeningPaused(false);
       }
@@ -1349,12 +1366,15 @@ export default function App(props: { libraryDir?: string } = {}) {
   useEffect(() => {
     if (!automaticMeetingEnabled || listenerDisabled || watchOwnership !== 'owned') return;
     let cancelled = false;
+    let polling = false;
+    const abort = new AbortController();
     const detectorFailed = (signalError: unknown) => {
-      if (cancelled || isExiting.current) return;
+      if (cancelled || isExiting.current || automaticTransition.current) return;
       const action = meetingAutomationController.current.step(undefined, Date.now());
       setAutomationPhase(meetingAutomationController.current.state.phase);
       const message = signalError instanceof Error ? signalError.message : String(signalError);
       if (action.kind === 'finish') {
+        automaticTransition.current = true;
         setAutomaticFinishRequested(true);
         setNotice(`Meeting signals unavailable · finishing ${action.candidate.title}.`);
       } else if (meetingSignalFailure.current !== message) {
@@ -1362,33 +1382,41 @@ export default function App(props: { libraryDir?: string } = {}) {
       }
       meetingSignalFailure.current = message;
     };
-    const poll = (snapshot: MeetingSignalSnapshot) => {
-      if (cancelled || isExiting.current) return;
+    const poll = async (snapshot: MeetingSignalSnapshot) => {
+      if (polling || cancelled || isExiting.current || automaticTransition.current) return;
+      polling = true;
       try {
+        const browser = config.meeting?.speakerBrowser;
+        const meet = browser && browser !== 'off' ? await probeMeetSpeakers(browser, abort.signal) : undefined;
+        if (cancelled || isExiting.current) return;
         const candidate = resolveMeetingCandidate(
           snapshot,
           calendarSuggestionRef.current ?? undefined,
           meetingAutomation,
+          meet,
         );
-        const action = meetingAutomationController.current.step(candidate, snapshot.capturedAtUnixMs);
+        const action = meetingAutomationController.current.step(candidate, Date.now(),
+          hasConfirmedMeetingEnd(meetingAutomationController.current.state.candidate, meet));
         setAutomationPhase(meetingAutomationController.current.state.phase);
         meetingSignalFailure.current = null;
         if (action.kind === 'suggest') {
           setAutomaticCandidate(action.candidate);
           setNotice(`Possible ${action.candidate.appName} meeting · press M to record or X to ignore.`);
         } else if (action.kind === 'start') {
+          automaticTransition.current = true;
           void beginAutomaticMeeting(action.candidate).catch((automationError: unknown) => {
             meetingAutomationController.current.reset();
             setAutomationPhase(meetingAutomationController.current.state.phase);
             setError(automationError instanceof Error ? automationError.message : String(automationError));
-          });
+          }).finally(() => { automaticTransition.current = false; });
         } else if (action.kind === 'finish') {
+          automaticTransition.current = true;
           setAutomaticFinishRequested(true);
           setNotice(`Meeting audio ended · finishing ${action.candidate.title}.`);
         }
       } catch (signalError) {
         detectorFailed(signalError);
-      }
+      } finally { polling = false; }
     };
     const monitor = new MeetingSignalMonitor(
       undefined,
@@ -1399,6 +1427,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     monitor.start();
     return () => {
       cancelled = true;
+      abort.abort();
       unsubscribe();
       unsubscribeError();
       monitor.stop();
@@ -1409,12 +1438,13 @@ export default function App(props: { libraryDir?: string } = {}) {
     listenerDisabled,
     meetingAutomation,
     watchOwnership,
+    config.meeting?.speakerBrowser,
   ]);
 
   useEffect(() => {
     if (!automaticFinishRequested || processing || observerActiveRef.current) return;
     setAutomaticFinishRequested(false);
-    if (!liveMeetingRef.current) return;
+    if (!liveMeetingRef.current) { automaticTransition.current = false; return; }
     runCurrentMeetingEnrichment(true);
   }, [automaticFinishRequested, processing, runCurrentMeetingEnrichment]);
 
@@ -1952,7 +1982,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         view === 'live' && paused ? null : (
           <Text dimColor>{view === 'live'
             ? transcribingCount > 0 ? 'Preparing transcript…' : 'Speak to transcribe · the first words take a moment'
-            : 'No transcript text'}</Text>
+            : backgroundMessage ?? 'No transcript text'}</Text>
         )
       ) : (
         <Box flexDirection="column">

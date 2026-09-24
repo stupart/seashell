@@ -217,7 +217,16 @@ only data written to stdout, so piping remains reliable.
 
 ### Automatic meetings and Google Meet
 
-Sea Shell detects which macOS process is actively using audio input. A
+With **V → Connect Google Meet · automatic** enabled, Sea Shell reads joined-call
+state in Chrome and Safari. It starts after two confirming polls (normally about
+3–6 seconds), continues while you are muted, and stops on the next check after
+you leave. A different Meet room creates a separate transcript, including when
+you move directly between calls. Browser permissions are required once per
+browser; an unreadable page falls back to a consent prompt, never guessed call
+identity. The saved start time is when capture begins, not a retroactive calendar
+start time. Audio from before capture cannot be recovered.
+
+For other apps, Sea Shell detects which macOS process is actively using audio input. A
 dedicated meeting app such as Zoom, Teams, Webex, or FaceTime starts
 automatically after two confirming polls. Browser audio from Chrome, Safari,
 Arc, Edge, Brave, or Firefox also starts automatically when a current Calendar
@@ -229,8 +238,9 @@ recording.
 
 Once started, Sea Shell atomically commits microphone and system-audio WAV
 chunks on one session clock. The background watcher deliberately keeps Whisper
-and diarization unloaded during the call. After 20 seconds without the meeting
-signal, it stops capture quickly and queues final transcription, optional local
+and diarization unloaded during the call. A confirmed Meet departure stops
+capture immediately at the next poll. Other app signals and unreadable Meet
+pages use a 20-second grace period before stopping. Sea Shell queues final transcription, optional local
 diarization and attendee-backed speaker labeling, and optional Humain notes.
 The watcher can re-arm while prior post-processing finishes. If system audio
 permission fails, useful microphone-only capture continues; a model failure
@@ -238,7 +248,12 @@ cannot delete already committed audio.
 
 The TUI and background watcher share one per-user lock. Opening Sea Shell while
 the login watcher owns capture gives a live library view without starting a
-second recorder. Logs live under `~/Library/Application Support/Sea Shell/Logs`.
+second recorder. In a wide terminal, History opens on the left automatically.
+Each call appears as soon as capture starts, with its time and a recording (●)
+or processing (◐) indicator. Open entries refresh when transcription completes.
+Press **H** to show or hide History; narrow terminals use a drawer.
+The login watcher continues after the TUI closes and re-arms for the next call.
+Logs live under `~/Library/Application Support/Sea Shell/Logs`.
 An optional Google Meet reader now supplies participant names and speaking
 indicators in Chrome or Safari. Press **V → Connect Google Meet · automatic**, or
 run `seashell meeting speakers auto` and reopen Seashell. The reader discovers
