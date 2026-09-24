@@ -2,6 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import type { MeetingCalendarEvent } from './meeting-artifact.ts';
+import type { MeetProbe } from './meet-speakers.ts';
 import { terminateManagedChild } from './process-lifecycle.ts';
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -63,7 +64,7 @@ export interface MeetingCandidate {
   readonly kind: MeetingApplicationKind;
   readonly title: string;
   readonly calendar?: MeetingCalendarEvent;
-  readonly evidence: readonly ('audio-input-process' | 'calendar' | 'frontmost')[];
+  readonly evidence: readonly ('audio-input-process' | 'calendar' | 'frontmost' | 'joined-meet')[];
   readonly requiresConsent: boolean;
 }
 
@@ -390,13 +391,38 @@ function patternFor(bundleId: string): AppPattern | undefined {
   ));
 }
 
-/** Resolve one audio-backed candidate. Calendar data can strengthen it but can never create it. */
+/** Positive page evidence can end a Meet call immediately. Reader failures cannot. */
+export function hasConfirmedMeetingEnd(candidate: MeetingCandidate | undefined, meet?: MeetProbe): boolean {
+  if (!candidate?.evidence.includes('joined-meet') || !meet) return false;
+  return meet.state === 'idle' || Boolean(meet.snapshot?.joined && meet.browser &&
+    candidate.id !== `meet:${meet.browser}:${meet.snapshot.meeting}`);
+}
+
+/** Calendar alone never starts capture. A joined Meet call also works with the mic muted. */
 export function resolveMeetingCandidate(
   snapshot: MeetingSignalSnapshot,
   calendar?: MeetingCalendarEvent,
   automation: MeetingAutomationConfig = DEFAULT_MEETING_AUTOMATION,
+  meet?: MeetProbe,
 ): MeetingCandidate | undefined {
-  if (!snapshot.supported || automation.enabled === false || automation.mode === 'off') return undefined;
+  if (automation.enabled === false || automation.mode === 'off') return undefined;
+  if (meet?.snapshot?.joined && meet.browser) {
+    const bundleId = meet.browser === 'chrome' ? 'com.google.Chrome' : 'com.apple.Safari';
+    // Only attach a calendar event when its URL identifies this call.
+    const matchingCalendar = calendar?.joinUrl?.includes(`meet.google.com${meet.snapshot.meeting}`)
+      ? calendar : undefined;
+    return Object.freeze({
+      id: `meet:${meet.browser}:${meet.snapshot.meeting}`,
+      appName: 'Google Meet', bundleId,
+      pid: snapshot.inputProcesses.find(p => bundleMatches(p.bundleId, bundleId))?.pid ?? 0,
+      kind: 'browser' as const,
+      title: matchingCalendar?.title?.trim() || 'Google Meet',
+      ...(matchingCalendar ? { calendar: matchingCalendar } : {}),
+      evidence: Object.freeze(['joined-meet' as const, ...(matchingCalendar ? ['calendar' as const] : [])]),
+      requiresConsent: automation.mode === 'ask',
+    });
+  }
+  if (!snapshot.supported) return undefined;
   const mapped = snapshot.inputProcesses.flatMap((process) => {
     const pattern = patternFor(process.bundleId);
     return pattern ? [{ process, pattern }] : [];
@@ -416,7 +442,10 @@ export function resolveMeetingCandidate(
   if (!calendar && selected.pattern.kind === 'browser' && browserPolicy === 'off') return undefined;
   const frontmost = snapshot.frontmostBundleId !== undefined &&
     bundleMatches(selected.process.bundleId, snapshot.frontmostBundleId);
-  const requiresConsent = automation.mode === 'ask' || (!calendar && (
+  // A connected reader seeing no joined call must not auto-record a prejoin
+  // preview or a voice form, even if a calendar event happens to overlap.
+  const requiresConsent = automation.mode === 'ask' || Boolean(meet &&
+    selected.pattern.kind === 'browser' && ['chrome', 'safari'].includes(selected.pattern.id)) || (!calendar && (
     selected.pattern.kind === 'ambiguous' ||
     (selected.pattern.kind === 'browser' && browserPolicy !== 'automatic')
   ));
@@ -484,16 +513,22 @@ export class MeetingAutomationController {
     return this.#state;
   }
 
-  step(candidate: MeetingCandidate | undefined, nowUnixMs = Date.now()): MeetingAutomationAction {
+  step(candidate: MeetingCandidate | undefined, nowUnixMs = Date.now(), confirmedEnd = false): MeetingAutomationAction {
     if (!this.#config.enabled || this.#config.mode === 'off') {
       this.#state = Object.freeze({ phase: 'watching', confirmations: 0 });
       return NONE;
     }
     if (this.#state.phase === 'cooldown') {
-      if (nowUnixMs < (this.#state.cooldownUntilUnixMs ?? 0)) return NONE;
+      if (nowUnixMs < (this.#state.cooldownUntilUnixMs ?? 0) &&
+          (!candidate || candidate.id === this.#state.candidate?.id)) return NONE;
       this.#state = Object.freeze({ phase: 'watching', confirmations: 0 });
     }
     if (this.#state.phase === 'recording' || this.#state.phase === 'ending') {
+      if (confirmedEnd && this.#state.candidate) {
+        const ending = this.#state.candidate;
+        this.reset();
+        return Object.freeze({ kind: 'finish', candidate: ending, reason: 'signal-ended' });
+      }
       const active = candidate?.id === this.#state.candidate?.id;
       const startedAt = this.#state.recordingStartedAtUnixMs ?? nowUnixMs;
       if (nowUnixMs - startedAt >= this.#config.maxDurationMinutes * 60_000) {
@@ -524,7 +559,7 @@ export class MeetingAutomationController {
     if (this.#state.phase === 'awaiting-consent') {
       if (candidate?.id === this.#state.candidate?.id) {
         this.#state = Object.freeze({ ...this.#state, candidate });
-      } else if (!candidate) {
+      } else {
         this.#state = Object.freeze({ phase: 'watching', confirmations: 0 });
       }
       return NONE;
@@ -576,6 +611,7 @@ export class MeetingAutomationController {
   private beginCooldown(nowUnixMs: number): void {
     this.#state = Object.freeze({
       phase: 'cooldown',
+      candidate: this.#state.candidate,
       confirmations: 0,
       cooldownUntilUnixMs: nowUnixMs + this.#config.cooldownSeconds * 1_000,
     });

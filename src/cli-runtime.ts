@@ -634,6 +634,15 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
           signal: controller.signal,
           once,
           onEvent: (event) => {
+            // The login agent uses JSON logging; prompts must still be visible.
+            if (event.type === 'meeting.suggested' && !once) {
+              spawnSync('osascript', [
+                '-e', 'on run argv',
+                '-e', 'display notification (item 1 of argv) with title "Sea Shell"',
+                '-e', 'end run',
+                `Possible ${event.candidate.appName} meeting. Run seashell meeting consent approve to record.`,
+              ], { stdio: 'ignore', timeout: 2_000 });
+            }
             if (command.json) {
               print(JSON.stringify(event));
               return;
@@ -644,14 +653,6 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
             else if (event.type === 'meeting.ready') print(`Meeting ready: ${event.directory}`);
             else if (event.type === 'meeting.suggested') {
               print(`Possible ${event.candidate.appName} meeting detected; run \`seashell meeting consent approve\` to record it.`);
-              if (!once) {
-                spawnSync('osascript', [
-                  '-e', 'on run argv',
-                  '-e', 'display notification (item 1 of argv) with title "Sea Shell"',
-                  '-e', 'end run',
-                  `Possible ${event.candidate.appName} meeting. Run seashell meeting consent approve to record.`,
-                ], { stdio: 'ignore' });
-              }
             }
             else process.stderr.write(`${event.type}: ${event.message}\n`);
           },

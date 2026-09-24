@@ -214,3 +214,60 @@ describe('automatic meeting controller', () => {
     });
   });
 });
+
+// Page state, unlike microphone ownership, identifies muted and back-to-back calls.
+import { hasConfirmedMeetingEnd } from '../src/meeting-automation.ts';
+import type { MeetProbe } from '../src/meet-speakers.ts';
+const joined = (meeting = '/abc-defg-hij', browser: 'chrome' | 'safari' = 'chrome'): MeetProbe => ({
+  state: 'connected', detail: 'Joined', browser,
+  snapshot: { meeting, joined: true, participants: [] },
+});
+const silent = { schemaVersion: 1 as const, capturedAtUnixMs: 0, supported: true, inputProcesses: [] };
+
+test('joined Meet records while muted and distinguishes calls and browsers', () => {
+  const first = resolveMeetingCandidate(silent, undefined, {}, joined())!;
+  expect(first.requiresConsent).toBe(false);
+  expect(first.evidence).toContain('joined-meet');
+  expect(resolveMeetingCandidate(silent, undefined, { mode: 'ask' }, joined())?.requiresConsent).toBe(true);
+  expect(resolveMeetingCandidate(silent, undefined, { mode: 'off' }, joined())).toBeUndefined();
+  expect(resolveMeetingCandidate(silent, calendar, {}, joined())?.calendar).toBeUndefined();
+  expect(hasConfirmedMeetingEnd(first, joined())).toBe(false);
+  expect(hasConfirmedMeetingEnd(first, joined('/klm-nopq-rst'))).toBe(true);
+  expect(hasConfirmedMeetingEnd(first, joined('/abc-defg-hij', 'safari'))).toBe(true);
+  expect(hasConfirmedMeetingEnd(first, { state: 'idle', detail: 'Left' })).toBe(true);
+  expect(hasConfirmedMeetingEnd(first, { state: 'permission', detail: 'Blocked' })).toBe(false);
+});
+
+test('connected Meet reader never automatically captures a prejoin microphone preview', () => {
+  const snapshot = { ...silent, inputProcesses: [{ pid: 1, bundleId: 'com.google.Chrome', name: 'Chrome' }] };
+  const candidate = resolveMeetingCandidate(snapshot, calendar, {}, { state: 'idle', detail: 'Not joined' });
+  expect(candidate?.requiresConsent).toBe(true);
+});
+
+test('confirmed departure finishes immediately and permits an immediate rejoin', () => {
+  const call = resolveMeetingCandidate(silent, undefined, {}, joined())!;
+  const controller = new MeetingAutomationController({ confirmationPolls: 1 });
+  expect(controller.step(call, 0).kind).toBe('start');
+  expect(controller.step(undefined, 1_000, true).kind).toBe('finish');
+  expect(controller.step(call, 2_000).kind).toBe('start');
+});
+
+test('cooldown suppresses a declined call but not a different meeting', () => {
+  const controller = new MeetingAutomationController({ confirmationPolls: 1 });
+  const first = resolveMeetingCandidate(silent, undefined, { mode: 'ask' }, joined())!;
+  const next = resolveMeetingCandidate(silent, undefined, {}, joined('/klm-nopq-rst'))!;
+  expect(controller.step(first, 0).kind).toBe('suggest');
+  controller.decline(0);
+  expect(controller.step(first, 1_000).kind).toBe('none');
+  expect(controller.step(next, 2_000).kind).toBe('start');
+});
+
+test('pending consent for a departed meeting cannot start that old meeting', () => {
+  const controller = new MeetingAutomationController({ confirmationPolls: 1 });
+  const first = resolveMeetingCandidate(silent, undefined, { mode: 'ask' }, joined())!;
+  const next = resolveMeetingCandidate(silent, undefined, {}, joined('/klm-nopq-rst'))!;
+  controller.step(first, 0);
+  controller.step(next, 1_000);
+  expect(controller.approve()).toBeUndefined();
+  expect(controller.step(next, 2_000).kind).toBe('start');
+});

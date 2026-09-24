@@ -242,3 +242,98 @@ test('a short-lived consent command can approve an ambiguous background browser 
   expect(captureStarts).toBe(1);
   await service.shutdown();
 });
+
+import { listTranscriptRecords } from '../src/transcript-library.ts';
+import type { MeetProbe } from '../src/meet-speakers.ts';
+
+test('muted, back-to-back Meet calls become separate history entries while earlier ASR is pending', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-consecutive-meet-'));
+  roots.push(root);
+  let now = 0;
+  let room = '/abc-defg-hij';
+  let joined = false;
+  let starts = 0;
+  let stops = 0;
+  let unblock!: () => void;
+  const pending = new Promise<void>(resolve => { unblock = resolve; });
+  const service = new AutomaticMeetingWatchService({
+    config: { libraryDir: root, meeting: { speakerBrowser: 'auto', automation: { confirmationPolls: 2 } } },
+    dependencies: {
+      now: () => new Date(now),
+      readSignals: () => ({ schemaVersion: 1, capturedAtUnixMs: now, supported: true, inputProcesses: [] }),
+      readMeet: async () => joined
+        ? { state: 'connected', detail: 'Joined', browser: 'chrome', snapshot: { meeting: room, joined, participants: [] } }
+        : { state: 'idle', detail: 'Not joined' },
+      startCapture: options => {
+        const id = `call-${++starts}`;
+        const store = new CaptureSessionStore({ libraryDir: root, sessionId: id,
+          startedAtUnixMs: options.startedAt!.getTime(), createdAt: options.startedAt!.toISOString() });
+        return { store, sessionId: id, manifestPath: store.manifestPath,
+          async stop() { stops++; return store.setStatus('captured'); } };
+      },
+      finalizeCapture: async path => {
+        await pending;
+        const id = path.includes('call-1') ? 'call-1' : 'call-2';
+        return createTranscriptRecord({ transcript: [{ start: 0, end: 1, text: id }], speakers: [] },
+          { id, now: new Date(id === 'call-1' ? 6_000 : 15_000), title: 'Google Meet' });
+      },
+    },
+  });
+  const poll = async () => { now += 3_000; return service.pollOnce(); };
+  try {
+    await poll();
+    expect(starts).toBe(0);
+    joined = true;
+    await poll();
+    await poll();
+    const first = listTranscriptRecords(root)[0]!;
+    expect(first.captureState).toBe('recording');
+    expect(first.createdAt).toBe(new Date(9_000).toISOString());
+    room = '/klm-nopq-rst';
+    expect((await poll()).kind).toBe('finish');
+    expect(stops).toBe(1);
+    expect(listTranscriptRecords(root)[0]?.captureState).toBe('processing');
+    await poll();
+    expect((await poll()).kind).toBe('start');
+    expect(starts).toBe(2);
+    expect(listTranscriptRecords(root).map(r => r.id)).toEqual(['call-2', 'call-1']);
+    joined = false;
+    expect((await poll()).kind).toBe('finish');
+    expect(stops).toBe(2);
+  } finally { unblock(); await service.shutdown(); }
+  expect(listTranscriptRecords(root)).toHaveLength(2);
+  expect(listTranscriptRecords(root).every(r => r.captureState === 'ready' && r.segmentCount === 1)).toBe(true);
+});
+
+test('permission loss ends an existing Meet after grace instead of recording forever', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-meet-permission-'));
+  roots.push(root);
+  let now = 0;
+  let stops = 0;
+  let probe: MeetProbe = { state: 'connected', detail: 'Joined', browser: 'safari',
+    snapshot: { meeting: '/abc-defg-hij', joined: true, participants: [] } };
+  const service = new AutomaticMeetingWatchService({
+    config: { libraryDir: root, meeting: { speakerBrowser: 'auto', automation: { confirmationPolls: 1, endGraceSeconds: 1 } } },
+    dependencies: {
+      now: () => new Date(now), readMeet: async () => probe,
+      readSignals: () => ({ schemaVersion: 1, capturedAtUnixMs: now, supported: true,
+        inputProcesses: [{ pid: 2, name: 'Safari', bundleId: 'com.apple.Safari' }] }),
+      startCapture: () => {
+        const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'lost-permission', startedAtUnixMs: now });
+        return { store, sessionId: 'lost-permission', manifestPath: store.manifestPath,
+          async stop() { stops++; return store.setStatus('captured'); } };
+      },
+      finalizeCapture: async () => { throw new Error('Unavailable ASR'); },
+    },
+  });
+  await service.pollOnce();
+  probe = { state: 'permission', detail: 'Permission revoked' };
+  now = 1_000;
+  await service.pollOnce();
+  expect(stops).toBe(0);
+  now = 2_001;
+  expect((await service.pollOnce()).kind).toBe('finish');
+  await service.shutdown();
+  expect(stops).toBe(1);
+  expect(listTranscriptRecords(root)[0]?.captureState).toBe('failed');
+});
