@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import { unlinkSync } from 'fs';
+import { startMeetSpeakerReader, type MeetBrowser, type MeetProbe } from './meet-speakers.ts';
 import {
   CaptureSessionStore,
   type CaptureSessionManifest,
@@ -32,6 +33,8 @@ export interface DurableLiveCaptureHandle {
 }
 
 export interface StartDurableLiveCaptureOptions {
+  readonly speakerBrowser?: MeetBrowser | 'off';
+  readonly onMeetStatus?: (status: MeetProbe) => void;
   readonly libraryDir: string;
   readonly sessionId?: string;
   readonly startedAt?: Date;
@@ -146,12 +149,16 @@ export function startDurableLiveCapture(
   }
   status();
 
+  const meetReader = options.systemAudio !== false && options.speakerBrowser && options.speakerBrowser !== 'off'
+    ? startMeetSpeakerReader({ browser: options.speakerBrowser, store, onStatus: options.onMeetStatus }) : undefined;
+
   return Object.freeze({
     sessionId: store.manifest.sessionId,
     manifestPath: store.manifestPath,
     store,
     stop(reason = 'meeting-signal-ended') {
       if (stopping) return stopping;
+      meetReader?.stop();
       microphone?.stop();
       systemAudio?.stop();
       stopping = Promise.all([microphone?.done, systemAudio?.done]).then(async () => {

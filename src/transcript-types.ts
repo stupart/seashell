@@ -22,6 +22,8 @@ export interface TranscriptSegment {
   end: number;
   /** Stable diarization cluster ID. Human-readable names live in speakers. */
   speaker?: string;
+  /** Meet UI timing is a hint, not isolated participant audio or verified identity. */
+  speakerSource?: 'google-meet-dom';
   text: string;
 }
 
@@ -42,7 +44,7 @@ export interface TranscriptInsights {
 }
 
 export interface SpeakerAnalysis {
-  status: 'complete' | 'unavailable' | 'failed' | 'source-only';
+  status: 'complete' | 'unavailable' | 'failed' | 'source-only' | 'platform-hints';
   model?: string;
   /** User-facing explanation, never raw provider errors or credentials. */
   detail: string;

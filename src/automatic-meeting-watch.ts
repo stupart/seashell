@@ -1,6 +1,7 @@
 import { setTimeout as sleep } from 'timers/promises';
 import { finalizeCaptureTranscript } from './capture-finalizer.ts';
 import { readMacCalendarEventsAsync, suggestCalendarMeeting } from './calendar.ts';
+import { meetBrowserMatchesApp } from './meet-speakers.ts';
 import {
   loadConfig,
   resolveLibraryDir,
@@ -212,6 +213,8 @@ export class AutomaticMeetingWatchService {
       capture = this.#dependencies.startCapture({
       libraryDir: this.#libraryDir,
       startedAt: now,
+      speakerBrowser: meetBrowserMatchesApp(this.#config.meeting?.speakerBrowser, candidate.bundleId)
+        ? this.#config.meeting?.speakerBrowser : 'off',
       onError: (error) => this.emit({
         type: 'watch.warning',
         at: this.#dependencies.now().toISOString(),

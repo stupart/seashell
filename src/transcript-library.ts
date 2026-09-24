@@ -123,7 +123,8 @@ export function parseTranscriptRecord(value: unknown, path = 'transcript.json'):
     segment.end >= segment.start &&
     typeof segment.text === 'string' &&
     (segment.id === undefined || (typeof segment.id === 'string' && segment.id.length > 0)) &&
-    (segment.speaker === undefined || typeof segment.speaker === 'string')
+    (segment.speaker === undefined || typeof segment.speaker === 'string') &&
+    (segment.speakerSource === undefined || segment.speakerSource === 'google-meet-dom')
   ));
   const validSpeakers = record.speakers.every((speaker) => (
     Boolean(speaker) &&
@@ -135,7 +136,7 @@ export function parseTranscriptRecord(value: unknown, path = 'transcript.json'):
   ));
   if (record.speakerAnalysis !== undefined && (
     !record.speakerAnalysis || typeof record.speakerAnalysis !== 'object' ||
-    !['complete', 'unavailable', 'failed', 'source-only'].includes(record.speakerAnalysis.status) ||
+    !['complete', 'unavailable', 'failed', 'source-only', 'platform-hints'].includes(record.speakerAnalysis.status) ||
     typeof record.speakerAnalysis.detail !== 'string' ||
     (record.speakerAnalysis.model !== undefined && typeof record.speakerAnalysis.model !== 'string')
   )) throw new Error(`${path} contains invalid speaker analysis`);

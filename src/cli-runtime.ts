@@ -1,4 +1,5 @@
 import { installHumainPackage, requireHumainNode } from './humain-install.ts';
+import { probeMeetSpeakers, meetPermissionHelp } from './meet-speakers.ts';
 import { discoverHumainProviders, resolveHumainExecutable } from './humain-client.ts';
 import { randomUUID } from 'crypto';
 import { spawnSync } from 'child_process';
@@ -470,6 +471,24 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
   const config = loadConfig();
   const libraryDir = resolveLibraryDir(command.libraryDir, process.env, config);
   switch (command.action.kind) {
+    case 'speakers': {
+      const selected = command.action.browser;
+      if (selected !== 'check') updateMeetingConfig({ speakerBrowser: selected });
+      const browser = selected === 'check' ? config.meeting?.speakerBrowser ?? 'off' : selected;
+      if (browser === 'off') {
+        print(command.json ? JSON.stringify({ state: 'off' }) : 'Meet reader off. Choose a browser: seashell meeting speakers chrome (or safari).');
+        return 0;
+      }
+      const result = await probeMeetSpeakers(browser);
+      // Preflight output does not dump participant identifiers or meeting URLs.
+      print(command.json ? JSON.stringify({ browser, state: result.state, detail: result.detail }) : [
+        `Meet names · ${browser} · ${result.state}`, result.detail,
+        ...(result.state === 'permission' ? [] : [meetPermissionHelp(browser)]),
+        'Reopen Seashell after changing the browser. In the app, V also connects/checks names.',
+        'Timing hints only: keep participant tiles visible and avoid other audio playback.',
+      ].join('\n'));
+      return result.state === 'connected' || result.state === 'idle' ? 0 : 2;
+    }
     case 'setup': {
       const contextFiles = command.action.contextFiles?.map((path) => resolve(path));
       if (contextFiles) loadMeetingContextFiles(contextFiles);

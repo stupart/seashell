@@ -31,7 +31,7 @@ export async function identifySavedSpeakers(library: string, id: string, options
   } else {
     throw new Error('Original audio is unavailable. Open the original recording or import it with Shift+F.');
   }
-  if (result.speakerAnalysis?.status !== 'complete') {
+  if (!['complete', 'platform-hints'].includes(result.speakerAnalysis?.status ?? '')) {
     throw new Error('No remote voices were available to separate. Your original transcript is unchanged.');
   }
   // New evidence IDs and a new meeting identity; no stale analysis or guessed names.

@@ -21,6 +21,7 @@ import {
 } from './capture-session.ts';
 import { diarizationEnvironment, diarizationStatus } from './diarization-environment.ts';
 import { isLikelySystemAudioLeak } from './live-echo.ts';
+import { meetSpeakerForSegment, readMeetSamples } from './meet-speakers.ts';
 import { amplifyPcm, hasAudiblePcmSignal, pcmS16leSignalLevel, pcmS16leToWav, quietAudioGain } from './live-system-audio.ts';
 import { createTranscriptRecord } from './transcript-record.ts';
 import { saveTranscriptRecord } from './transcript-library.ts';
@@ -130,14 +131,15 @@ export function assembleCaptureTrack(
 function trackSegments(
   units: Awaited<ReturnType<typeof transcribeWithTimestamps>>,
   speaker: 'LOCAL' | 'SYSTEM',
+  label: (segments: TranscriptSegment[]) => TranscriptSegment[] = segments => segments,
 ): TranscriptSegment[] {
   return coalesceTranscriptSegments({
-    transcript: units.map((unit) => ({
+    transcript: label(units.map((unit) => ({
       start: unit.start,
       end: unit.end,
       text: unit.text,
       speaker,
-    })),
+    }))),
     speakers: [],
   });
 }
@@ -213,6 +215,7 @@ async function remoteTrackSegments(
   route: HumainTranscriptionRoute,
   transcriber: typeof runHumainTranscription,
   onStatus?: (message: string) => void,
+  label: (segments: TranscriptSegment[]) => TranscriptSegment[] = segments => segments,
 ): Promise<TranscriptSegment[]> {
   const chunks = manifest.chunks.filter((chunk) => chunk.trackId === trackId && chunk.audible)
     .toSorted((left, right) => left.startMs - right.startMs || left.sequence - right.sequence);
@@ -230,7 +233,7 @@ async function remoteTrackSegments(
       speaker,
     })));
   }
-  return coalesceTranscriptSegments({ transcript: segments, speakers: [] });
+  return coalesceTranscriptSegments({ transcript: label(segments), speakers: [] });
 }
 
 /** Re-run ASR over each complete source track and publish one canonical record. */
@@ -240,6 +243,15 @@ export async function finalizeCaptureTranscript(
 ): Promise<TranscriptRecord> {
   const absoluteManifest = resolve(manifestPath);
   const manifest = loadCaptureSession(absoluteManifest);
+  const meetSamples = readMeetSamples(absoluteManifest, manifest);
+  const meetSpeakers = new Map<string, { id: string; label: string }>();
+  const labelMeet = (segments: TranscriptSegment[]): TranscriptSegment[] => segments.map(segment => {
+    if (segment.speaker === 'LOCAL') return segment;
+    const speaker = meetSpeakerForSegment(meetSamples, segment);
+    if (!speaker) return segment;
+    meetSpeakers.set(speaker.id, speaker);
+    return { ...segment, speaker: speaker.id, speakerSource: 'google-meet-dom' };
+  });
   const temporaryTracks: string[] = [];
   try {
     const hasMicrophone = manifest.chunks.some((chunk) => chunk.trackId === 'microphone');
@@ -298,9 +310,9 @@ export async function finalizeCaptureTranscript(
             : await transcribeMedia(system, { speakers: true, title: options.title, onStatus: options.onStatus });
           const speakerIds = new Map(document.speakers.map((speaker) => [speaker.id, remoteSpeakerId(speaker.id)]));
           // The final combined timeline needs fresh evidence IDs. Per-track IDs can collide.
-          segments.push(...document.transcript.map(({ id: _id, ...segment }) => ({ ...segment,
+          segments.push(...labelMeet(document.transcript.map(({ id: _id, ...segment }) => ({ ...segment,
             speaker: speakerIds.get(segment.speaker ?? '') ?? remoteSpeakerId('UNKNOWN'),
-          })));
+          }))));
           separated = true;
           speakerAnalysis = { status: 'complete', model: diarizationEnvironment().model,
             detail: 'Remote voices separated locally. Microphone is a separate source; names need confirmation.' };
@@ -316,11 +328,11 @@ export async function finalizeCaptureTranscript(
         if (options.remoteRoute) {
           segments.push(...await remoteTrackSegments(
             absoluteManifest, manifest, 'system-audio', 'SYSTEM', options.remoteRoute,
-            options.remoteTranscriber ?? runHumainTranscription, options.onStatus,
+            options.remoteTranscriber ?? runHumainTranscription, options.onStatus, labelMeet,
           ));
         } else if (system) {
           options.onStatus?.('Final system-audio transcription…');
-          segments.push(...trackSegments(await (options.localTranscriber ?? transcribeWithTimestamps)(system), 'SYSTEM'));
+          segments.push(...trackSegments(await (options.localTranscriber ?? transcribeWithTimestamps)(system), 'SYSTEM', labelMeet));
         }
       }
     }
@@ -332,6 +344,8 @@ export async function finalizeCaptureTranscript(
       segment.speaker?.startsWith('REMOTE_') ? [segment.speaker] : []
     )))];
     const duration = Math.max(0, ...manifest.chunks.map((chunk) => chunk.endMs)) / 1_000;
+    if (meetSpeakers.size > 0) speakerAnalysis = { status: 'platform-hints',
+      detail: 'Names suggested by Google Meet speaking indicators. Review overlap and speaker changes; other computer audio may be misattributed.' };
     return createTranscriptRecord({
       speakerAnalysis,
       transcript: [...reconciled],
@@ -339,11 +353,10 @@ export async function finalizeCaptureTranscript(
         ...(hasMicrophone
           ? [{ id: 'LOCAL', label: 'Microphone' }]
           : []),
-        ...(hasSystem
-          ? remoteSpeakerIds.length > 0
-            ? remoteSpeakerIds.map((id, index) => ({ id, label: id === 'REMOTE_UNKNOWN' ? 'Unknown remote speaker' : `Remote speaker ${index + 1}` }))
-            : [{ id: 'SYSTEM', label: 'System audio' }]
-          : []),
+        ...remoteSpeakerIds.map((id, index) => ({ id, label: id === 'REMOTE_UNKNOWN' ? 'Unknown remote speaker' : `Remote speaker ${index + 1}` })),
+        ...[...meetSpeakers.values()].filter(speaker => reconciled.some(segment => segment.speaker === speaker.id)),
+        ...(hasSystem && (reconciled.some(s => s.speaker === 'SYSTEM') || !reconciled.length)
+          ? [{ id: 'SYSTEM', label: 'System audio' }] : []),
       ],
     }, {
       id: manifest.sessionId,

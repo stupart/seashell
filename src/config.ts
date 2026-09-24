@@ -21,6 +21,8 @@ import {
 } from './transcription-routing.ts';
 
 export interface SeashellMeetingConfig {
+  /** Optional, read-only Google Meet DOM hints. Off until a browser is chosen. */
+  speakerBrowser?: 'chrome' | 'safari' | 'off';
   modelSelection?: 'automatic' | 'custom';
   mode?: MeetingEnrichmentMode;
   backend?: HumainBackend;
@@ -105,6 +107,9 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
     throw new Error('Sea Shell config meeting must be an object');
   }
   const meeting = value as Record<string, unknown>;
+  if (meeting.speakerBrowser !== undefined && !['chrome', 'safari', 'off'].includes(meeting.speakerBrowser as string)) {
+    throw new Error('Sea Shell config meeting.speakerBrowser must be chrome, safari, or off');
+  }
   if (meeting.modelSelection !== undefined && !['automatic', 'custom'].includes(meeting.modelSelection as string)) {
     throw new Error('Sea Shell config meeting.modelSelection is invalid');
   }
@@ -237,6 +242,7 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
     };
   }
   return {
+    ...(meeting.speakerBrowser === undefined ? {} : { speakerBrowser: meeting.speakerBrowser as SeashellMeetingConfig['speakerBrowser'] }),
     ...(meeting.modelSelection === undefined ? {} : { modelSelection: meeting.modelSelection as 'automatic' | 'custom' }),
     ...(meeting.mode === undefined ? {} : { mode: meeting.mode as MeetingEnrichmentMode }),
     ...(meeting.backend === undefined ? {} : { backend: meeting.backend as HumainBackend }),

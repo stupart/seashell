@@ -239,9 +239,13 @@ cannot delete already committed audio.
 The TUI and background watcher share one per-user lock. Opening Sea Shell while
 the login watcher owns capture gives a live library view without starting a
 second recorder. Logs live under `~/Library/Application Support/Sea Shell/Logs`.
-Google Meet participant tiles and active-speaker state are not inspected yet;
+An optional Google Meet reader now supplies participant names and speaking
+indicators in Chrome or Safari. Press **V** to connect your browser, or run
+`seashell meeting speakers chrome` (or `safari`) and reopen Seashell.
+Browser permission is required; use `seashell meeting speakers check` before
+recording. These are fallible timing hints; see the [Meet setup and test guide](docs/meet-speakers.md).
 Calendar attendees, self-identification, explicit handoffs, and supplied
-timestamp evidence are the current identity sources. Use headphones when
+timestamp evidence remain additional identity sources. Use headphones when
 possible, and review attribution when laptop-speaker echo or people in the same
 physical room make sources ambiguous.
 
@@ -493,10 +497,10 @@ The complete Local/Cloud/Adaptive example is in
 The current build imports Meet recordings, captures live microphone plus macOS
 system audio, and detects a browser that is actively using audio input. A
 current Calendar event can corroborate that browser signal and supply the title
-and attendee roster. It does not yet read Meet participant tiles or
-active-speaker state.
+and attendee roster. The optional macOS Chrome/Safari reader adds timestamped
+names from visible Meet participant tiles and active-speaker indicators.
 
-The planned stages are deliberately separate:
+The integration has separate layers:
 
 - **Works with Meet:** shipped as local mic/system capture on one durable
   session clock, with independently recoverable raw tracks and a full-track
@@ -504,7 +508,7 @@ The planned stages are deliberately separate:
 - **Detects Meet:** shipped process-audio detection. A calendar-corroborated
   browser call starts automatically by default; browser audio without that
   evidence asks unless the user explicitly changes its policy.
-- **Integrates with Meet:** an optional browser adapter contributes timestamped
+- **Integrates with Meet:** an experimental, opt-in browser adapter contributes timestamped
   participant/active-speaker evidence. It is fallible enrichment, not a capture
   dependency.
 
@@ -903,9 +907,12 @@ seashell doctor
 
 ## Speaker separation in meetings
 
-Press **V** for local speaker setup and readiness. Once verified, voices in
-computer audio are separated when the recording finishes; live labels describe
-audio sources. Use **[ / ]** then **R** to name a speaker. Shared microphones
+Press **V** to connect Google Meet names or set up local voice separation.
+Meet names need browser permission, but no voice model; see [setup and limitations](docs/meet-speakers.md).
+Once the local model is verified, voices in
+computer audio are separated when the recording finishes. Live labels show
+Meet hints where a whole draft chunk has a consistent speaker, otherwise audio
+sources. Use **[ / ]** then **R** to name a speaker. Shared microphones
 and overlapping speech can still need correction.
 
 For an existing saved meeting, choose **Identify saved recording** in that
