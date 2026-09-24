@@ -68,6 +68,7 @@ export type LibraryAction =
   | { kind: 'show'; id: string }
   | { kind: 'search'; query: string }
   | { kind: 'export'; id: string }
+  | { kind: 'speakers-identify'; id: string }
   | { kind: 'speakers-set'; id: string; speakerId: string; label: string }
   | { kind: 'open'; id?: string }
   | { kind: 'trash'; id: string; confirmed: boolean };
@@ -104,6 +105,7 @@ export type CliCommand =
   | { kind: 'capabilities'; json: boolean }
   | { kind: 'doctor'; json: boolean }
   | { kind: 'setup'; autostart: boolean; json: boolean }
+  | { kind: 'speaker-setup'; login: boolean; check: boolean; json: boolean }
   | { kind: 'update'; check: boolean; json: boolean }
   | { kind: 'transcribe'; files: string[]; options: TranscribeCommandOptions }
   | CaptureCommand
@@ -316,8 +318,12 @@ function parseLibrary(args: string[]): LibraryCommand {
       action = { kind: 'export', id: positional[0] };
       break;
     case 'speakers':
+      if (positional.length === 2 && positional[1] === 'identify') {
+        action = { kind: 'speakers-identify', id: positional[0]! };
+        break;
+      }
       if (positional[1] !== 'set' || !positional[0] || !positional[2] || !positional[3]) {
-        throw new Error('Usage: seashell library speakers <id> set <speaker-id> <name>');
+        throw new Error('Usage: seashell library speakers <id> identify | set <speaker-id> <name>');
       }
       action = {
         kind: 'speakers-set',
@@ -685,6 +691,14 @@ export function parseCliArgs(args: string[]): CliCommand {
     return { kind: 'doctor', json: args.includes('--json') };
   }
   if (args[0] === 'setup') {
+    if (args.includes('--speakers')) {
+      const unknown = args.slice(1).filter((arg) => !['--speakers', '--login', '--check', '--json'].includes(arg));
+      if (unknown.length) throw new Error(`Unknown speaker setup option: ${unknown[0]}`);
+      if (args.includes('--login') && (args.includes('--json') || args.includes('--check'))) {
+        throw new Error('--login cannot be combined with --json or --check');
+      }
+      return { kind: 'speaker-setup', login: args.includes('--login'), check: args.includes('--check'), json: args.includes('--json') };
+    }
     const unknown = args.slice(1).filter((arg) => arg !== '--no-autostart' && arg !== '--json');
     if (unknown.length) throw new Error(`Unknown setup option: ${unknown[0]}`);
     return {
@@ -723,6 +737,9 @@ Usage:
   seashell ai setup                       Choose meeting AI interactively
   seashell ai providers [--json]          Discover providers and login/setup steps
   seashell setup [--no-autostart] [--json]  Apply safe defaults on a true first install
+  seashell library speakers <id> identify   Separate saved voices into a review copy
+  seashell setup --speakers [--login]       Set up optional local speaker identification
+  seashell setup --speakers --check [--json] Verify the cached speaker model offline
   seashell doctor [--json]                  Check dependencies and models
   seashell capabilities [--json]            Describe optional engine capabilities
   seashell update [--check] [--json]        Update Sea Shell or show package-manager guidance

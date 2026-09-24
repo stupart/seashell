@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { existsSync } from 'fs';
+import { diarizationEnvironment, resolveDiarizationPython } from './diarization-environment.ts';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { prepareMedia, type PreparedMedia } from './media-preparation.ts';
@@ -70,6 +70,7 @@ async function runProcess(
   return new Promise((resolve, reject) => {
     const proc = spawn(command, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, HF_HUB_OFFLINE: '1', PYANNOTE_METRICS_ENABLED: '0' },
     });
     const stopTracking = trackChildProcess(proc);
 
@@ -163,17 +164,6 @@ async function transcribePreparedAudio(
   );
 }
 
-function resolvePythonPath(provided?: string): string {
-  if (provided) return provided;
-  if (process.env.SEASHELL_DIARIZATION_PYTHON) {
-    return process.env.SEASHELL_DIARIZATION_PYTHON;
-  }
-  if (process.env.SEASHELL_PYTHON) return process.env.SEASHELL_PYTHON;
-
-  const virtualenvPython = join(PROJECT_ROOT, '.venv-diarization/bin/python');
-  return existsSync(virtualenvPython) ? virtualenvPython : 'python3';
-}
-
 function positiveIntegerArgument(
   args: string[],
   flag: string,
@@ -257,7 +247,7 @@ async function runPythonDiarization(
   positiveIntegerArgument(args, '--max-speakers', options.maxSpeakers);
 
   const result = await runProcess(
-    resolvePythonPath(options.pythonPath),
+    resolveDiarizationPython(options.pythonPath),
     args,
     options.onDiarizationMessage,
   );
@@ -315,9 +305,13 @@ export async function diarizePreparedMedia(
       { roleSpeakers },
     );
 
+    const identities = new Map(diarization.speakers.map((speaker, index) => [speaker.id,
+      speaker.label === speaker.id ? `Speaker ${index + 1}` : speaker.label]));
     let document: StructuredTranscript = {
+      speakerAnalysis: { status: 'complete', model: options.model ?? diarizationEnvironment().model,
+        detail: 'Voices separated locally. Speaker numbers apply to this recording; names need confirmation.' },
       transcript,
-      speakers: completeSpeakerList(diarization.speakers, transcript),
+      speakers: completeSpeakerList(diarization.speakers.map((s) => ({ ...s, label: identities.get(s.id)! })), transcript),
     };
 
     document = await applySpeakerLabels(

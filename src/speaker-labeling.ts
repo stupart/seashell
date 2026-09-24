@@ -108,7 +108,7 @@ function attendeeAliases(attendees: MeetAttendee[]): Map<string, string> {
 
 function anonymousSpeakerLabel(speaker: Speaker): boolean {
   const label = speaker.label.trim();
-  return label === speaker.id || /^(?:SPEAKER|REMOTE)_\d+$|^(?:LOCAL|UNKNOWN)$/i.test(label);
+  return label === speaker.id || /^(?:SPEAKER|REMOTE)[_ ]\d+$|^Remote speaker \d+$|^(?:LOCAL|UNKNOWN|Unknown remote speaker)$/i.test(label);
 }
 
 function speakerAt(

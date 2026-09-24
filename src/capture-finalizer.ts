@@ -19,7 +19,7 @@ import {
   type CaptureSessionManifest,
   type CaptureTrackId,
 } from './capture-session.ts';
-import { seashellCapabilityManifest } from './capabilities.ts';
+import { diarizationEnvironment, diarizationStatus } from './diarization-environment.ts';
 import { isLikelySystemAudioLeak } from './live-echo.ts';
 import { amplifyPcm, hasAudiblePcmSignal, pcmS16leSignalLevel, pcmS16leToWav, quietAudioGain } from './live-system-audio.ts';
 import { createTranscriptRecord } from './transcript-record.ts';
@@ -167,20 +167,13 @@ export function reconcileCaptureEcho(
     left.start - right.start || left.end - right.end);
 }
 
-function diarizationReady(): boolean {
-  const transcription = seashellCapabilityManifest().capabilities.find(
-    (capability) => capability.id === 'transcription.seashell.local',
-  );
-  return transcription?.optionalFeatures.some(
-    (feature) => feature.id === 'speaker-diarization' && feature.ready,
-  ) ?? false;
-}
-
 export interface FinalizeCaptureOptions {
   readonly onStatus?: (message: string) => void;
   readonly title?: string;
   /** Defaults to true only when the fully local pyannote capability is ready. */
   readonly diarizeSystemAudio?: boolean;
+  /** Explicit retry should report a failure; automatic finalization keeps source text. */
+  readonly strictSpeakers?: boolean;
   /** Test/provider seam; output timing must use the supplied track's clock. */
   readonly systemDiarizer?: (path: string) => Promise<StructuredTranscript>;
   readonly localTranscriber?: typeof transcribeWithTimestamps;
@@ -279,6 +272,9 @@ export async function finalizeCaptureTranscript(
     }
 
     const segments: TranscriptSegment[] = [];
+    let speakerAnalysis: NonNullable<StructuredTranscript['speakerAnalysis']> = {
+      status: 'source-only', detail: 'Labels identify audio sources, not individual people.',
+    };
     if (audibleMicrophone) {
       if (options.remoteRoute) {
         segments.push(...await remoteTrackSegments(
@@ -292,32 +288,40 @@ export async function finalizeCaptureTranscript(
     }
     if (audibleSystem) {
       const useDiarization = options.remoteRoute === undefined &&
-        (options.diarizeSystemAudio ?? diarizationReady());
+        (options.diarizeSystemAudio ?? diarizationStatus().ready);
+      let separated = false;
       if (useDiarization && system) {
         options.onStatus?.('Separating remote speakers…');
-        const document = options.systemDiarizer
-          ? await options.systemDiarizer(system)
-          : await transcribeMedia(system, {
-              speakers: true,
-              title: options.title,
-              onStatus: options.onStatus,
-            });
-        const speakerIds = new Map(document.speakers.map((speaker) => [
-          speaker.id,
-          remoteSpeakerId(speaker.id),
-        ]));
-        segments.push(...document.transcript.map((segment) => ({
-          ...segment,
-          speaker: speakerIds.get(segment.speaker ?? '') ?? remoteSpeakerId('UNKNOWN'),
-        })));
-      } else if (options.remoteRoute) {
-        segments.push(...await remoteTrackSegments(
-          absoluteManifest, manifest, 'system-audio', 'SYSTEM', options.remoteRoute,
-          options.remoteTranscriber ?? runHumainTranscription, options.onStatus,
-        ));
-      } else if (system) {
-        options.onStatus?.('Final system-audio transcription…');
-        segments.push(...trackSegments(await (options.localTranscriber ?? transcribeWithTimestamps)(system), 'SYSTEM'));
+        try {
+          const document = options.systemDiarizer
+            ? await options.systemDiarizer(system)
+            : await transcribeMedia(system, { speakers: true, title: options.title, onStatus: options.onStatus });
+          const speakerIds = new Map(document.speakers.map((speaker) => [speaker.id, remoteSpeakerId(speaker.id)]));
+          // The final combined timeline needs fresh evidence IDs. Per-track IDs can collide.
+          segments.push(...document.transcript.map(({ id: _id, ...segment }) => ({ ...segment,
+            speaker: speakerIds.get(segment.speaker ?? '') ?? remoteSpeakerId('UNKNOWN'),
+          })));
+          separated = true;
+          speakerAnalysis = { status: 'complete', model: diarizationEnvironment().model,
+            detail: 'Remote voices separated locally. Microphone is a separate source; names need confirmation.' };
+        } catch (error) {
+          if (options.strictSpeakers) throw error;
+          speakerAnalysis = { status: 'failed', detail: 'Speaker separation failed. Transcript kept with source labels. Press V to check setup or retry.' };
+          options.onStatus?.(speakerAnalysis.detail);
+        }
+      } else if (!options.remoteRoute && options.diarizeSystemAudio !== false) {
+        speakerAnalysis = { status: 'unavailable', detail: 'Source labels only. Press V to set up local speaker separation.' };
+      }
+      if (!separated) {
+        if (options.remoteRoute) {
+          segments.push(...await remoteTrackSegments(
+            absoluteManifest, manifest, 'system-audio', 'SYSTEM', options.remoteRoute,
+            options.remoteTranscriber ?? runHumainTranscription, options.onStatus,
+          ));
+        } else if (system) {
+          options.onStatus?.('Final system-audio transcription…');
+          segments.push(...trackSegments(await (options.localTranscriber ?? transcribeWithTimestamps)(system), 'SYSTEM'));
+        }
       }
     }
     const reconciled = segments.toSorted((left, right) => left.start - right.start)
@@ -329,6 +333,7 @@ export async function finalizeCaptureTranscript(
     )))];
     const duration = Math.max(0, ...manifest.chunks.map((chunk) => chunk.endMs)) / 1_000;
     return createTranscriptRecord({
+      speakerAnalysis,
       transcript: [...reconciled],
       speakers: [
         ...(hasMicrophone
@@ -336,7 +341,7 @@ export async function finalizeCaptureTranscript(
           : []),
         ...(hasSystem
           ? remoteSpeakerIds.length > 0
-            ? remoteSpeakerIds.map((id, index) => ({ id, label: `Remote speaker ${index + 1}` }))
+            ? remoteSpeakerIds.map((id, index) => ({ id, label: id === 'REMOTE_UNKNOWN' ? 'Unknown remote speaker' : `Remote speaker ${index + 1}` }))
             : [{ id: 'SYSTEM', label: 'System audio' }]
           : []),
       ],

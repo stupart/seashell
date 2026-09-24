@@ -70,6 +70,9 @@ import {
   type TranscriptionRoute,
 } from './transcription-routing.ts';
 import AIProviderPicker from './AISettings.tsx';
+import SpeakerSettings from './SpeakerSettings.tsx';
+import { diarizationStatus } from './diarization-environment.ts';
+import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { runHumainTranscription } from './humain-client.ts';
 import {
   DEFAULT_WHISPER_MODEL_FILENAME,
@@ -183,6 +186,7 @@ function useTerminalSize(): { columns: number; rows: number } {
 export default function App(props: { libraryDir?: string } = {}) {
   const { exit } = useApp();
   const [config, setConfig] = useState(() => loadConfig());
+  const [speakerSetupOpen, setSpeakerSetupOpen] = useState(false);
   const [aiSetupOpen, setAiSetupOpen] = useState(false);
   const [aiSetupIntent, setAiSetupIntent] = useState<'notes' | 'chat' | null>(null);
   const libraryRoot = useMemo(
@@ -719,6 +723,10 @@ export default function App(props: { libraryDir?: string } = {}) {
   }, [config.transcription, libraryRoot, processing, refreshLibrary, setListeningPaused]);
 
   const pickMedia = useCallback((withSpeakers: boolean) => {
+    if (withSpeakers && !diarizationStatus().ready) {
+      setSpeakerSetupOpen(true);
+      return;
+    }
     const script = `
       set theFile to choose file with prompt "Select audio or video to transcribe" of type {"public.audio", "public.movie", "public.mpeg-4"}
       return POSIX path of theFile
@@ -1425,7 +1433,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const { stdin } = useStdin();
   const { stdout } = useStdout();
   const mouseDecoder = useRef(new MouseScrollDecoder());
-  const mouseEnabled = !aiSetupOpen && !chatInputState && !renameState && !searchMode && !exportMode && !confirmTrashId;
+  const mouseEnabled = !speakerSetupOpen && !aiSetupOpen && !chatInputState && !renameState && !searchMode && !exportMode && !confirmTrashId;
   useEffect(() => {
     if (!mouseEnabled || !stdin.isTTY || !stdout.isTTY) return;
     stdout.write('\x1b[?1000h\x1b[?1006h');
@@ -1589,6 +1597,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
     if (processing) return;
+    if (input === 'v') { setSpeakerSetupOpen(true); return; }
     if (input === 'p') { setAiSetupIntent(null); setAiSetupOpen(true); return; }
     if (key.tab || input === '\t' || input === 'h') {
       toggleHistory();
@@ -1763,7 +1772,24 @@ export default function App(props: { libraryDir?: string } = {}) {
       showNavigationItem(navigationItems[selectionIndex]);
       setHistoryOpen(false);
     }
-  }, { isActive: !aiSetupOpen });
+  }, { isActive: !aiSetupOpen && !speakerSetupOpen });
+
+  if (speakerSetupOpen) return <SpeakerSettings recording={!paused && !listenerDisabled}
+    canIdentify={view === 'record' && Boolean(selectedRecord)}
+    onClose={() => setSpeakerSetupOpen(false)}
+    onIdentify={() => {
+      if (view !== 'record' || !selectedRecord) return;
+      setSpeakerSetupOpen(false);
+      setProcessing({ label: 'Separating speakers…' });
+      setError(null);
+      void identifySavedSpeakers(libraryRoot, selectedRecord.id, { onStatus: (label) => setProcessing({ label }) })
+        .then((record) => {
+          setSelectedRecord(record); setSelectedMeeting(null); setMeetingView('transcript');
+          setTranscriptScroll(0); setSpeakerSelection(0); setHistoryOpen(false); refreshLibrary();
+          setNotice('Speaker review copy saved. Original transcript and notes unchanged. [ / ] choose a speaker · R rename.');
+        }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
+        .finally(() => setProcessing(null));
+    }} />;
 
   if (aiSetupOpen) return <AIProviderPicker current={config.meeting} recording={!paused && !listenerDisabled}
     onClose={() => { setAiSetupIntent(null); setAiSetupOpen(false); }}
@@ -2018,7 +2044,9 @@ export default function App(props: { libraryDir?: string } = {}) {
       <Box flexDirection="column" marginTop={1} flexShrink={0}>
         {currentMeeting && meetingView === 'transcript' && showSpeakers && !historyOpen &&
           currentRecord?.speakers.some((speaker) => speaker.id === 'SYSTEM') && (
-          <Text dimColor>Source labels only · individual speakers not separated</Text>
+          <Text dimColor>{currentRecord.speakerAnalysis?.detail ?? (showingLiveTranscript
+            ? 'Source labels while recording · voices separated on finish when ready · [V] Setup'
+            : 'Source labels only · [V] Set up or identify speakers')}</Text>
         )}
         {showingLiveTranscript && !followLiveTranscript && !historyOpen && (
           <Text dimColor>Reading earlier text · [L] Latest</Text>
@@ -2036,7 +2064,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         ) : helpMode ? (
           <>
             <Text color="yellow">Keyboard help · [?] or [Esc] close</Text>
-            <Text dimColor>F import · ⇧F import + speakers · T timestamps · S speaker labels</Text>
+            <Text dimColor>F import · ⇧F import + speakers · V speaker setup · T timestamps · S labels</Text>
             <Text dimColor>C copy · E export · O folder · D trash · DEL clear live</Text>
             <Text dimColor>[/] choose speaker · R rename · ↑↓ / wheel scroll · L live · Q quit</Text>
             <Text dimColor>M mark meeting · 1-4 meeting views · G enrich/finalize · A ask</Text>

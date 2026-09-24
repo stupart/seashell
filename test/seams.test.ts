@@ -177,3 +177,15 @@ test('enrichment cannot overwrite the core transcript or speaker tables', async 
   expect(enriched.transcript).toEqual(base.transcript);
   expect(enriched.speakers).toEqual(base.speakers);
 });
+
+
+test('friendly numbered voice labels accept identity evidence without overwriting user names', async () => {
+  const labeled = await applySpeakerLabels({
+    transcript: [{ start: 0, end: 3, speaker: 'REMOTE_A', text: 'Hello.' },
+      { start: 3, end: 6, speaker: 'REMOTE_B', text: 'My answer.' }],
+    speakers: [{ id: 'REMOTE_A', label: 'Remote speaker 1' }, { id: 'REMOTE_B', label: 'My corrected name' }],
+  }, new EvidenceSpeakerLabeler(), { attendees: [{ name: 'Ada' }, { name: 'Grace' }], screenshots: [],
+    activeSpeakers: [{ capturedAt: 1, name: 'Ada' }, { capturedAt: 4, name: 'Grace' }],
+  });
+  expect(labeled.speakers).toEqual([{ id: 'REMOTE_A', label: 'Ada' }, { id: 'REMOTE_B', label: 'My corrected name' }]);
+});
