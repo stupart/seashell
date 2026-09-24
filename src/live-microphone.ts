@@ -36,6 +36,10 @@ export interface StartMicrophoneOptions {
   readonly commandArgs?: readonly string[];
   /** Deadline for reporting a source that never supplies PCM. */
   readonly startupTimeoutMs?: number;
+  readonly quietWarningMs?: number;
+  readonly stalledTimeoutMs?: number;
+  readonly maxRestarts?: number;
+  readonly restartDelayMs?: number;
 }
 
 export interface MicrophoneCaptureHandle {
@@ -51,6 +55,39 @@ export interface MicrophoneCaptureHandle {
  * the sample count, not transcription completion or wall-clock polling.
  */
 export function startMicrophoneCapture(options: StartMicrophoneOptions): MicrophoneCaptureHandle {
+  const maximumRestarts = options.maxRestarts ?? 2;
+  let restarts = 0;
+  let stopped = false;
+  let cancelDelay: (() => void) | undefined;
+  const start = () => startMicrophoneAttempt({ ...options, onState(update) {
+    if (update.state === 'unavailable' && !stopped && restarts < maximumRestarts) {
+      options.onState({ state: 'starting', code: 'microphone_reconnecting',
+        message: 'Microphone disconnected · reconnecting…' });
+    } else options.onState(update);
+  } });
+  let current = start();
+  const startup = current.startup;
+  const done = (async () => {
+    while (true) {
+      await current.done;
+      if (stopped || restarts >= maximumRestarts) return;
+      restarts++;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => { cancelDelay = undefined; resolve(); }, options.restartDelayMs ?? 1000);
+        cancelDelay = () => { clearTimeout(timer); cancelDelay = undefined; resolve(); };
+      });
+      if (stopped) { options.onState({ state: 'stopped' }); return; }
+      current = start();
+    }
+  })();
+  return {
+    get process() { return current.process; },
+    startup, done,
+    stop() { stopped = true; cancelDelay?.(); current.stop(); },
+  };
+}
+
+function startMicrophoneAttempt(options: StartMicrophoneOptions): MicrophoneCaptureHandle {
   const chunker = new PcmS16leChunker(
     LIVE_CAPTURE_SAMPLE_RATE,
     options.chunkMilliseconds ?? LIVE_CAPTURE_CHUNK_MILLISECONDS,
@@ -61,6 +98,10 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
   let requestedStop = false;
   let lastLevelUpdate = 0;
   let failure: string | undefined;
+  let lastDataAt = captureStartedAtUnixMs;
+  let lastAudibleAt = captureStartedAtUnixMs;
+  let quietWarning = false;
+  let stalled = false;
   let resolveDone: () => void = () => {};
   const done = new Promise<void>((resolve) => { resolveDone = resolve; });
   let settleStartup = () => {};
@@ -70,6 +111,20 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
       message: 'No microphone audio received. Check System Settings → Privacy & Security → Microphone for your terminal app, and Sound → Input. Then press Space twice to retry.' });
   }, options.startupTimeoutMs ?? 8_000);
   startupTimer.unref();
+  const watchdog = setInterval(() => {
+    if (!clock || requestedStop || stalled) return;
+    const now = Date.now();
+    if (now - lastDataAt >= (options.stalledTimeoutMs ?? 8000)) {
+      stalled = true;
+      failure = 'Microphone stopped delivering audio. Check Sound → Input and reconnect your microphone.';
+      void terminateManagedChild(child);
+    } else if (!quietWarning && now - lastAudibleAt >= (options.quietWarningMs ?? 30000)) {
+      quietWarning = true;
+      options.onState({ state: 'active', code: 'microphone_quiet',
+        message: 'Microphone is very quiet. If you’re speaking, check Sound → Input and its input level.' });
+    }
+  }, Math.max(10, Math.min(1000, options.quietWarningMs ?? 30000, options.stalledTimeoutMs ?? 8000)));
+  watchdog.unref();
 
   const publish = (chunk: ReturnType<PcmS16leChunker['flush']>) => {
     if (!chunk || clock === undefined) return;
@@ -80,6 +135,14 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
     const startSeconds = (originOffset + chunk.startFrame * 1_000 / LIVE_CAPTURE_SAMPLE_RATE) / 1_000;
     const endSeconds = (originOffset + chunk.endFrame * 1_000 / LIVE_CAPTURE_SAMPLE_RATE) / 1_000;
     const level = pcmS16leSignalLevel(chunk.pcm);
+    const audible = hasAudiblePcmSignal(chunk.pcm);
+    if (audible) {
+      lastAudibleAt = Date.now();
+      if (quietWarning) {
+        quietWarning = false;
+        options.onState({ state: 'active', message: 'Microphone active' });
+      }
+    }
     const path = writeLivePcmChunk(chunk, 'microphone');
     try {
       options.onChunk(Object.freeze({
@@ -88,7 +151,7 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
         endSeconds,
         sequence: chunk.sequence,
         source: 'microphone' as const,
-        audible: hasAudiblePcmSignal(chunk.pcm),
+        audible,
         level,
         clock,
       }));
@@ -116,6 +179,7 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
   let stderr = '';
   child.stderr?.on('data', (data: Buffer) => { stderr = (stderr + data.toString()).slice(-2_000); });
   child.stdout?.on('data', (data: Buffer) => {
+    lastDataAt = Date.now();
     if (clock === undefined) {
       clearTimeout(startupTimer);
       settleStartup();
@@ -138,6 +202,7 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
   child.on('error', (error) => { failure = error.message; });
   child.on('close', (code, signal) => {
     clearTimeout(startupTimer);
+    clearInterval(watchdog);
     settleStartup();
     publish(chunker.flush());
     const state: SystemAudioCaptureState = requestedStop ? 'stopped' : 'unavailable';
@@ -163,6 +228,7 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
       if (requestedStop) return;
       requestedStop = true;
       clearTimeout(startupTimer);
+      clearInterval(watchdog);
       child.kill('SIGINT');
       const terminate = setTimeout(() => {
         void terminateManagedChild(child);

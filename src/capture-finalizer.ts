@@ -21,7 +21,7 @@ import {
 } from './capture-session.ts';
 import { seashellCapabilityManifest } from './capabilities.ts';
 import { isLikelySystemAudioLeak } from './live-echo.ts';
-import { pcmS16leToWav } from './live-system-audio.ts';
+import { amplifyPcm, hasAudiblePcmSignal, pcmS16leSignalLevel, pcmS16leToWav, quietAudioGain } from './live-system-audio.ts';
 import { createTranscriptRecord } from './transcript-record.ts';
 import { saveTranscriptRecord } from './transcript-library.ts';
 import { coalesceTranscriptSegments } from './transcript-renderer.ts';
@@ -74,10 +74,19 @@ export function assembleCaptureTrack(
   manifest: CaptureSessionManifest,
   trackId: CaptureTrackId,
   destination?: string,
+  options: { normalizeQuiet?: boolean } = {},
 ): string | undefined {
   const chunks = manifest.chunks.filter((chunk) => chunk.trackId === trackId)
     .toSorted((left, right) => left.startMs - right.startMs || left.sequence - right.sequence);
   if (chunks.length === 0) return undefined;
+  let peak = 0;
+  if (options.normalizeQuiet) {
+    for (const chunk of chunks) {
+      const pcm = wavPcm(readVerifiedCaptureChunk(manifestPath, chunk), captureChunkPath(manifestPath, chunk));
+      peak = Math.max(peak, pcmS16leSignalLevel(pcm).peak);
+    }
+  }
+  const gain = options.normalizeQuiet ? quietAudioGain(peak) : 1;
   const output = destination ?? join(
     tmpdir(),
     `seashell-final-${manifest.sessionId}-${trackId}-${randomUUID()}.wav`,
@@ -94,7 +103,7 @@ export function assembleCaptureTrack(
         writeZeros(descriptor, (desiredStartFrame - writtenFrames) * BYTES_PER_FRAME);
         writtenFrames = desiredStartFrame;
       }
-      const pcm = wavPcm(readVerifiedCaptureChunk(manifestPath, chunk), captureChunkPath(manifestPath, chunk));
+      const pcm = amplifyPcm(wavPcm(readVerifiedCaptureChunk(manifestPath, chunk), captureChunkPath(manifestPath, chunk)), gain);
       const overlapFrames = Math.max(0, writtenFrames - desiredStartFrame);
       const offset = Math.min(pcm.length, overlapFrames * BYTES_PER_FRAME);
       if (offset < pcm.length) {
@@ -174,6 +183,7 @@ export interface FinalizeCaptureOptions {
   readonly diarizeSystemAudio?: boolean;
   /** Test/provider seam; output timing must use the supplied track's clock. */
   readonly systemDiarizer?: (path: string) => Promise<StructuredTranscript>;
+  readonly localTranscriber?: typeof transcribeWithTimestamps;
   /** Explicit pinned remote canonical route. Omit to keep the final fully local. */
   readonly remoteRoute?: HumainTranscriptionRoute;
   /** Test/provider seam. Production defaults to the Humain CLI boundary. */
@@ -241,8 +251,12 @@ export async function finalizeCaptureTranscript(
   try {
     const hasMicrophone = manifest.chunks.some((chunk) => chunk.trackId === 'microphone');
     const hasSystem = manifest.chunks.some((chunk) => chunk.trackId === 'system-audio');
-    const audibleMicrophone = manifest.chunks.some((chunk) =>
-      chunk.trackId === 'microphone' && chunk.audible);
+    // Older captures used a whole-chunk average that dropped quiet/short speech.
+    // Re-evaluate local raw audio instead of treating that old draft flag as truth.
+    const audibleMicrophone = manifest.chunks.some((chunk) => chunk.trackId === 'microphone' &&
+      (chunk.audible || (!options.remoteRoute && hasAudiblePcmSignal(wavPcm(
+        readVerifiedCaptureChunk(absoluteManifest, chunk), captureChunkPath(absoluteManifest, chunk),
+      )))));
     const audibleSystem = manifest.chunks.some((chunk) =>
       chunk.trackId === 'system-audio' && chunk.audible);
     if (!hasMicrophone && !hasSystem) throw new Error('Capture session has no audio chunks');
@@ -257,7 +271,7 @@ export async function finalizeCaptureTranscript(
     let system: string | undefined;
     if (!options.remoteRoute) {
       options.onStatus?.('Assembling microphone track…');
-      microphone = assembleCaptureTrack(absoluteManifest, manifest, 'microphone');
+      microphone = assembleCaptureTrack(absoluteManifest, manifest, 'microphone', undefined, { normalizeQuiet: true });
       if (microphone) temporaryTracks.push(microphone);
       options.onStatus?.('Assembling system-audio track…');
       system = assembleCaptureTrack(absoluteManifest, manifest, 'system-audio');
@@ -273,7 +287,7 @@ export async function finalizeCaptureTranscript(
         ));
       } else if (microphone) {
         options.onStatus?.('Final microphone transcription…');
-        segments.push(...trackSegments(await transcribeWithTimestamps(microphone), 'LOCAL'));
+        segments.push(...trackSegments(await (options.localTranscriber ?? transcribeWithTimestamps)(microphone), 'LOCAL'));
       }
     }
     if (audibleSystem) {
@@ -303,7 +317,7 @@ export async function finalizeCaptureTranscript(
         ));
       } else if (system) {
         options.onStatus?.('Final system-audio transcription…');
-        segments.push(...trackSegments(await transcribeWithTimestamps(system), 'SYSTEM'));
+        segments.push(...trackSegments(await (options.localTranscriber ?? transcribeWithTimestamps)(system), 'SYSTEM'));
       }
     }
     const reconciled = segments.toSorted((left, right) => left.start - right.start)
