@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'fs';
-import { homedir } from 'os';
-import { dirname, isAbsolute, join } from 'path';
+import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { diarizationStatus } from './diarization-environment.ts';
 import { DEFAULT_WHISPER_MODEL_ID } from './model-config.ts';
 import { SYSTEM_AUDIO_HELPER } from './live-system-audio.ts';
 import { MEETING_SIGNALS_HELPER } from './meeting-automation.ts';
@@ -21,18 +21,8 @@ export function seashellCapabilityManifest(options: {
   systemAudioReady?: boolean;
   meetingSignalsReady?: boolean;
 } = {}) {
-  const diarizationModel = process.env.SEASHELL_DIARIZATION_MODEL ||
-    'pyannote/speaker-diarization-community-1';
-  const hubRoot = process.env.HF_HUB_CACHE || join(
-    process.env.HF_HOME || join(homedir(), '.cache', 'huggingface'),
-    'hub',
-  );
-  const modelCache = isAbsolute(diarizationModel)
-    ? diarizationModel
-    : join(hubRoot, `models--${diarizationModel.replaceAll('/', '--')}`);
-  const diarizationDependencies = existsSync(join(PROJECT_ROOT, '.venv-diarization/bin/python'));
-  const diarizationModelCached = existsSync(modelCache);
-  const diarizationReady = diarizationDependencies && diarizationModelCached;
+  const speakerSetup = diarizationStatus();
+  const diarizationReady = speakerSetup.ready;
   const systemAudioReady = options.systemAudioReady ?? (
     process.platform === 'darwin' && existsSync(SYSTEM_AUDIO_HELPER)
   );
@@ -67,9 +57,7 @@ export function seashellCapabilityManifest(options: {
             ...(diarizationReady
               ? {}
               : {
-                  nextStep: !diarizationDependencies
-                    ? 'Install the optional diarization environment described in the Sea Shell README'
-                    : 'Download the configured pyannote model once before using offline diarization',
+                  nextStep: speakerSetup.nextStep,
                 }),
           }),
         ]),

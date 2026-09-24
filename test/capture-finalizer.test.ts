@@ -208,3 +208,45 @@ test('remote finalization rebases chunk timestamps without assembling full track
   ]);
   expect(statuses.some((status) => status.startsWith('Assembling'))).toBe(false);
 });
+
+for (const strict of [false, true]) test(`speaker failure ${strict ? 'fails explicit retry' : 'preserves canonical source text'}`, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-speaker-fallback-'));
+  try {
+    const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'speakers-fail', startedAtUnixMs: 1 });
+    store.commitChunk({ sourcePath: wav(root, 'remote.wav', 1000), trackId: 'system-audio', startSeconds: 0, endSeconds: 0.1, audible: true });
+    const result = finalizeCaptureTranscript(store.manifestPath, {
+      diarizeSystemAudio: true, strictSpeakers: strict,
+      systemDiarizer: async () => { throw new Error('cached model deleted'); },
+      localTranscriber: async () => [{ start: 0, end: 0.1, text: 'Words must survive.' }],
+    });
+    if (strict) await expect(result).rejects.toThrow('cached model deleted');
+    else {
+      const record = await result;
+      expect(record.transcript[0]).toMatchObject({ text: 'Words must survive.', speaker: 'SYSTEM' });
+      expect(record.speakerAnalysis?.status).toBe('failed');
+      expect(record.speakerAnalysis?.detail).not.toContain('cached model deleted');
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('two remote voices retain different IDs while quiet microphone remains a separate source', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-speaker-mix-'));
+  try {
+    const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'speakers-mix', startedAtUnixMs: 1 });
+    store.commitChunk({ sourcePath: wav(root, 'remote.wav', 1000), trackId: 'system-audio', startSeconds: 0, endSeconds: 0.1, audible: true });
+    store.commitChunk({ sourcePath: wav(root, 'mic.wav', 80), trackId: 'microphone', startSeconds: 0, endSeconds: 0.1, audible: true });
+    const record = await finalizeCaptureTranscript(store.manifestPath, {
+      diarizeSystemAudio: true,
+      systemDiarizer: async () => ({ speakers: [{ id: 'A', label: 'A' }, { id: 'B', label: 'B' }], transcript: [
+        { start: 0, end: 1, text: 'Remote proposal.', speaker: 'A' },
+        { start: 1, end: 2, text: 'Another remote voice.', speaker: 'B' },
+        { id: 's000003', start: 3, end: 4, text: 'Uncertain voice.', speaker: 'UNKNOWN' },
+      ] }),
+      localTranscriber: async () => [{ start: 2, end: 3, text: 'My local response.' }],
+    });
+    expect(record.transcript.map((s) => s.speaker)).toEqual(['REMOTE_A', 'REMOTE_B', 'LOCAL', 'REMOTE_UNKNOWN']);
+    expect(new Set(record.transcript.map((s) => s.id)).size).toBe(4);
+    expect(record.speakers.find((s) => s.id === 'REMOTE_UNKNOWN')?.label).toBe('Unknown remote speaker');
+    expect(record.speakerAnalysis?.status).toBe('complete');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

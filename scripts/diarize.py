@@ -90,8 +90,8 @@ def load_dependencies() -> tuple[Any, Any, Any]:
         from pyannote.audio import Pipeline
     except ImportError as error:
         raise RuntimeError(
-            "Diarization dependencies are missing. Activate .venv-diarization "
-            "and run: python -m pip install -r scripts/requirements-diarization.txt"
+            "Speaker identification needs setup. Run: seashell setup --speakers. "
+            "For a custom Python, install scripts/requirements-diarization.txt into it."
         ) from error
     return torch, soundfile, Pipeline
 
@@ -359,7 +359,7 @@ def main() -> int:
             or "gated" in message
         ):
             print(
-                "Check HF_TOKEN and accept the model's Hugging Face user conditions.",
+                "Run seashell setup --speakers for model access and local login instructions.",
                 file=sys.stderr,
             )
         return 1

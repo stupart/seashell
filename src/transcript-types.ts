@@ -41,7 +41,15 @@ export interface TranscriptInsights {
   action_items?: ActionItem[];
 }
 
+export interface SpeakerAnalysis {
+  status: 'complete' | 'unavailable' | 'failed' | 'source-only';
+  model?: string;
+  /** User-facing explanation, never raw provider errors or credentials. */
+  detail: string;
+}
+
 export interface StructuredTranscript extends TranscriptInsights {
+  speakerAnalysis?: SpeakerAnalysis;
   transcript: TranscriptSegment[];
   speakers: Speaker[];
 }

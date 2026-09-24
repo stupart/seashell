@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — local speaker separation
+
+- V opens speaker setup/readiness and saved-recording reprocessing; Shift+F
+  directs unconfigured users to setup. Optional Python/model state survives upgrades.
+- `setup --speakers [--login|--check]` verifies the actual model; readiness is
+  shared by doctor, capabilities and automatic meeting finalization.
+- Local finalization separates remote voices when ready. Failure saves source
+  text with an explanation; unknown voices never get a numbered identity.
+- Saved-recording retries produce a review copy, preserving original corrections
+  and notes. Names can be assigned using existing speaker rename controls.
+- Add public AMI video scoring gym and pipeline/UI regressions. Actual model
+  quality remains gated on user model access; fixture tests do not establish accuracy.
+
+
 ## Unreleased — AI provider picker
 
 - Choose meeting AI from the TUI with P or `seashell ai setup`.

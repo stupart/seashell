@@ -62,6 +62,9 @@ import {
 import { MEETING_SIGNALS_HELPER, readMeetingSignalSnapshot } from './meeting-automation.ts';
 import { buildMeetingContext, loadMeetingContextFiles } from './meeting-context.ts';
 import { writeMeetingConsent } from './meeting-consent.ts';
+import { diarizationStatus } from './diarization-environment.ts';
+import { identifySavedSpeakers } from './speaker-reprocessing.ts';
+import { setupDiarization } from './diarization-setup.ts';
 import { initializeFirstInstall } from './first-install.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -195,7 +198,7 @@ function printLibraryEntries(entries: ReturnType<typeof listTranscriptRecords>, 
   }
 }
 
-function executeLibrary(command: LibraryCommand): number {
+async function executeLibrary(command: LibraryCommand): Promise<number> {
   const libraryDir = resolveLibraryDir(command.libraryDir);
   switch (command.action.kind) {
     case 'list':
@@ -220,6 +223,13 @@ function executeLibrary(command: LibraryCommand): number {
         command.output,
       );
       print(command.json ? JSON.stringify({ path }, null, 2) : path);
+      return 0;
+    }
+    case 'speakers-identify': {
+      const record = await identifySavedSpeakers(libraryDir, command.action.id, {
+        onStatus: (message) => process.stderr.write(message + '\n'),
+      });
+      print(command.json ? JSON.stringify(record, null, 2) : `Saved review copy: ${record.title} (${record.id}). Original unchanged.`);
       return 0;
     }
     case 'speakers-set': {
@@ -383,12 +393,13 @@ export function doctorChecks(options: {
       true,
       'Run ./install.sh',
     ),
-    fileCheck(
-      'diarization-python',
-      join(PROJECT_ROOT, '.venv-diarization/bin/python'),
-      false,
-      'See README speaker diarization setup',
-    ),
+    {
+      name: 'speaker-identification',
+      ok: diarizationStatus().ready,
+      required: false,
+      ...(diarizationStatus().ready ? { path: 'Model verified; cached locally' }
+        : { help: diarizationStatus().nextStep }),
+    },
     fileCheck(
       'system-audio-helper',
       systemAudioHelper,
@@ -780,6 +791,19 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
     }
     case 'doctor':
       return executeDoctor(command.json);
+    case 'speaker-setup': {
+      const result = await setupDiarization(command);
+      print(command.json ? JSON.stringify(result, null, 2) : [
+        result.detail,
+        ...(!result.ready ? [
+          'Speaker identification is optional. Recording and transcription still work.',
+          ...(result.modelUrl ? [`1. Accept model access: ${result.modelUrl}`] : []),
+          `2. Sign in locally: ${result.loginCommand}`,
+          `3. ${result.nextStep}`,
+        ] : []),
+      ].join('\n'));
+      return result.ready ? 0 : 1;
+    }
     case 'setup': {
       const result = initializeFirstInstall({ enableAutostart: command.autostart });
       if (command.json) {

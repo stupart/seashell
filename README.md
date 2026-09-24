@@ -337,6 +337,7 @@ until it is closed.
 | `Space` | Pause/resume live microphone + system-audio capture |
 | `F` | Import audio or video |
 | `Shift+F` | Import and run speaker diarization |
+| `V` | Speaker setup, offline readiness, or identify a saved recording |
 | `M` | Mark the current transcript as a meeting; attach a pending calendar suggestion |
 | `1`–`4` | Open meeting Notes, Transcript, Analysis, or Chat |
 | `G` | Finish a live meeting: stop capture, run final ASR, save raw tracks, then run configured enrichment |
@@ -396,6 +397,7 @@ seashell library show <id> --timestamps --speakers
 seashell library show <id> --format json
 seashell library export <id> --format srt
 seashell library speakers <id> set SPEAKER_00 "Tyler"
+seashell library speakers <id> identify  # separate review copy
 seashell library open <id>
 seashell library trash <id> --confirm
 ```
@@ -655,20 +657,44 @@ pipeline. Diarization creates recording-local clusters; it does not inherently
 know human identities. Rename those clusters later through the TUI or library
 CLI.
 
-One-time setup:
+Optional one-time setup (source/main; the pinned RC6 package predates this command):
 
 ```bash
-brew install python@3.12 ffmpeg
-python3.12 -m venv .venv-diarization
-source .venv-diarization/bin/activate
-python -m pip install -r scripts/requirements-diarization.txt
+seashell setup --speakers
 ```
 
-Then accept the Community-1 model conditions, create a Hugging Face read token,
-and use it for the first model download:
+This installs the Python environment in your user application-data directory,
+checks dependencies, and downloads and loads the model. It does not change
+recording permissions, meeting defaults, or launch-at-login settings. If no
+supported Python is available, install `uv` (`brew install uv`) and retry.
+The environment survives Homebrew upgrades; no checkout, activation, or token
+in your shell profile is needed.
+
+The model publisher requires a one-time browser acceptance of its access
+conditions. When prompted:
+
+1. Open the [Community-1 access page](https://huggingface.co/pyannote/speaker-diarization-community-1)
+   and accept access using your Hugging Face account. Review the publisher's
+   contact-sharing terms there.
+2. Run `seashell setup --speakers --login` in an interactive terminal. Sign in
+   through the Hugging Face CLI; if it requests a token, use a read token.
+   Sea Shell does not store the token in its config or transcripts.
+3. Wait for “Speaker identification is ready.” Setup can be rerun after an
+   interruption. `seashell setup --speakers --check` verifies cached loading
+   without network access; add `--json` for automation.
+
+The TUI shows setup guidance when you request **Shift+F** before the model is
+ready, and in **? Help**. Ordinary **F** import and recording remain available.
+A cached folder alone does not count as a working model: automatic meeting
+finalization uses the last successful setup verification.
+
+Advanced installations can set `SEASHELL_DIARIZATION_PYTHON` (or the legacy
+`SEASHELL_PYTHON`) and install `scripts/requirements-diarization.txt` into that
+interpreter. Setup verifies, but does not modify, those custom environments.
+`SEASHELL_DIARIZATION_HOME` overrides Sea Shell's environment/verification data
+location; `HF_HOME` and `HF_HUB_CACHE` control Hugging Face's cache as usual.
 
 ```bash
-export HF_TOKEN=hf_your_read_token
 seashell transcribe meeting.m4a --speakers --format json
 ```
 
@@ -859,7 +885,7 @@ seashell doctor
 - **Metal initialization crashes:** Sea Shell automatically retries file and
   live transcription on CPU. Set `SEASHELL_DISABLE_GPU=1` to skip the Metal
   attempt entirely while diagnosing the local whisper.cpp build.
-- **Speaker setup failure:** activate `.venv-diarization`, verify the pyannote
+- **Speaker setup failure:** run `seashell setup --speakers`, verify the pyannote
   packages, accept the model terms, and provide `HF_TOKEN` for the first run.
 - **Aggregate channel mismatch:** verify the channel count and physical routing
   before using `--channel-roles`.
@@ -874,6 +900,19 @@ seashell doctor
   itself with `afplay /System/Library/Sounds/Glass.aiff`. If that also fails,
   reconnect or change the output device before debugging Sea Shell.
 - **Malformed config:** validate the JSON at the config path printed above.
+
+## Speaker separation in meetings
+
+Press **V** for local speaker setup and readiness. Once verified, voices in
+computer audio are separated when the recording finishes; live labels describe
+audio sources. Use **[ / ]** then **R** to name a speaker. Shared microphones
+and overlapping speech can still need correction.
+
+For an existing saved meeting, choose **Identify saved recording** in that
+panel, or run `seashell library speakers <id> identify`. Seashell creates a
+review copy and preserves the original transcript and notes. If the model fails
+during automatic finalization, the source-labeled transcript is still saved.
+See [speaker setup and the public-video gym](docs/speaker-identification.md).
 
 ## Development
 

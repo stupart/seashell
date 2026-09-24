@@ -94,6 +94,13 @@ describe('update CLI parsing', () => {
 });
 
 describe('first-install CLI parsing', () => {
+  test('speaker setup is separate from first-install defaults and rejects noninteractive login', () => {
+    expect(parseCliArgs(['setup', '--speakers'])).toEqual({ kind: 'speaker-setup', login: false, check: false, json: false });
+    expect(parseCliArgs(['setup', '--speakers', '--login'])).toEqual({ kind: 'speaker-setup', login: true, check: false, json: false });
+    expect(parseCliArgs(['setup', '--speakers', '--check', '--json'])).toEqual({ kind: 'speaker-setup', login: false, check: true, json: true });
+    expect(() => parseCliArgs(['setup', '--speakers', '--login', '--json'])).toThrow('cannot be combined');
+    expect(() => parseCliArgs(['setup', '--speakers', '--no-autostart'])).toThrow('Unknown speaker setup option');
+  });
   test('defaults to automatic launch and supports an explicit opt-out', () => {
     expect(parseCliArgs(['setup'])).toEqual({
       kind: 'setup', autostart: true, json: false,
@@ -321,5 +328,12 @@ describe('library CLI parsing', () => {
       format: 'srt',
       action: { kind: 'export', id: 'record-1' },
     });
+  });
+});
+
+
+test('saved speaker identification creates an explicit library action', () => {
+  expect(parseCliArgs(['library', 'speakers', 'meeting-1', 'identify', '--json'])).toMatchObject({
+    kind: 'library', action: { kind: 'speakers-identify', id: 'meeting-1' }, json: true,
   });
 });

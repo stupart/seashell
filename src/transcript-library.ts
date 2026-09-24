@@ -133,6 +133,12 @@ export function parseTranscriptRecord(value: unknown, path = 'transcript.json'):
     typeof speaker.label === 'string' &&
     speaker.label.length > 0
   ));
+  if (record.speakerAnalysis !== undefined && (
+    !record.speakerAnalysis || typeof record.speakerAnalysis !== 'object' ||
+    !['complete', 'unavailable', 'failed', 'source-only'].includes(record.speakerAnalysis.status) ||
+    typeof record.speakerAnalysis.detail !== 'string' ||
+    (record.speakerAnalysis.model !== undefined && typeof record.speakerAnalysis.model !== 'string')
+  )) throw new Error(`${path} contains invalid speaker analysis`);
   if (!validSegments || !validSpeakers) {
     throw new Error(`${path} contains invalid transcript segments or speakers`);
   }

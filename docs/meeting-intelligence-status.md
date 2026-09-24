@@ -1,12 +1,12 @@
 # Meeting intelligence and portability status
 
-Last updated: 23 September 2026; installation evidence below dates to 21 September. This describes implemented behavior and open
+Last updated: 24 September 2026; installation evidence below dates to 21 September. This describes implemented behavior and open
 work, rather than a promise that every optional integration is configured.
 
 ## Public installation and portability
 
 The public macOS install is `brew install stupart/tap/seashell`, then `seashell`.
-The tap currently distributes **1.1.0-rc9**, including its own Bun runtime,
+The tap currently distributes **1.1.0-rc10**, including its own Bun runtime,
 Whisper executables, local models, and native helpers. Homebrew and Apple
 developer tools are prerequisites; native builds and model downloads take time.
 The app is macOS-only. Live computer audio needs macOS 14.2 or later.
@@ -54,7 +54,7 @@ GitHub Actions is now disabled to avoid hosted CI charges. Current changes use
 | Final analysis | A reconciliation pass over the complete saved transcript and provisional claims | `post-session` or `hybrid`; whole-transcript input |
 | Meeting chat | Question, transcript, current claims and ten recent chat messages; answers and evidence IDs saved | Humain chat route; no cross-meeting retrieval |
 | Project context | Explicit file allow-list, 512 KiB per file and 2 MiB total, plus Calendar/attendee context | No automatic Atlas/Blueprint search |
-| Speaker labeling | Source labels, optional local diarization, evidence-based identity hints | Pyannote setup is separate; no Meet participant-tile adapter |
+| Speaker labeling | Source labels live; verified local diarization after capture; V setup/review copy; manual renaming | Optional model access; no Meet participant connector. See [speaker status](speaker-identification.md) |
 
 The Notes and Analysis tabs are generated views. `documents/*.md` files are
 regenerated from the artifact; they are not an editable notebook with protected
