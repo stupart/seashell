@@ -476,15 +476,15 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       if (selected !== 'check') updateMeetingConfig({ speakerBrowser: selected });
       const browser = selected === 'check' ? config.meeting?.speakerBrowser ?? 'off' : selected;
       if (browser === 'off') {
-        print(command.json ? JSON.stringify({ state: 'off' }) : 'Meet reader off. Choose a browser: seashell meeting speakers chrome (or safari).');
+        print(command.json ? JSON.stringify({ state: 'off' }) : 'Meet reader off. Connect both browsers automatically: seashell meeting speakers auto.');
         return 0;
       }
       const result = await probeMeetSpeakers(browser);
       // Preflight output does not dump participant identifiers or meeting URLs.
-      print(command.json ? JSON.stringify({ browser, state: result.state, detail: result.detail }) : [
+      print(command.json ? JSON.stringify({ browser, detectedBrowser: result.browser, state: result.state, detail: result.detail }) : [
         `Meet names · ${browser} · ${result.state}`, result.detail,
         ...(result.state === 'permission' ? [] : [meetPermissionHelp(browser)]),
-        'Reopen Seashell after changing the browser. In the app, V also connects/checks names.',
+        'Reopen Seashell after changing the connection setting. In the app, V also connects/checks names.',
         'Timing hints only: keep participant tiles visible and avoid other audio playback.',
       ].join('\n'));
       return result.state === 'connected' || result.state === 'idle' ? 0 : 2;

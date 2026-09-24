@@ -2,6 +2,10 @@
 
 ## Unreleased — Google Meet names
 
+- One automatic connection discovers Chrome and Safari without a browser
+  selection. Report the connected browser, reject simultaneous calls or an
+  unreadable second browser, and preserve browser identity across pause/resume.
+
 - Opt-in Chrome/Safari reader for visible Meet participant names and speaking
   indicators. Connect or check permissions in V, or `meeting speakers`.
 - Save bounded, timestamped speaker evidence alongside capture audio; apply

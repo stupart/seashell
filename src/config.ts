@@ -21,8 +21,8 @@ import {
 } from './transcription-routing.ts';
 
 export interface SeashellMeetingConfig {
-  /** Optional, read-only Google Meet DOM hints. Off until a browser is chosen. */
-  speakerBrowser?: 'chrome' | 'safari' | 'off';
+  /** Optional, read-only Google Meet DOM hints. Off until connected; auto discovers Chrome and Safari. */
+  speakerBrowser?: 'auto' | 'chrome' | 'safari' | 'off';
   modelSelection?: 'automatic' | 'custom';
   mode?: MeetingEnrichmentMode;
   backend?: HumainBackend;
@@ -107,8 +107,8 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
     throw new Error('Sea Shell config meeting must be an object');
   }
   const meeting = value as Record<string, unknown>;
-  if (meeting.speakerBrowser !== undefined && !['chrome', 'safari', 'off'].includes(meeting.speakerBrowser as string)) {
-    throw new Error('Sea Shell config meeting.speakerBrowser must be chrome, safari, or off');
+  if (meeting.speakerBrowser !== undefined && !['auto', 'chrome', 'safari', 'off'].includes(meeting.speakerBrowser as string)) {
+    throw new Error('Sea Shell config meeting.speakerBrowser must be auto, chrome, safari, or off');
   }
   if (meeting.modelSelection !== undefined && !['automatic', 'custom'].includes(meeting.modelSelection as string)) {
     throw new Error('Sea Shell config meeting.modelSelection is invalid');

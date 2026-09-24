@@ -240,8 +240,9 @@ The TUI and background watcher share one per-user lock. Opening Sea Shell while
 the login watcher owns capture gives a live library view without starting a
 second recorder. Logs live under `~/Library/Application Support/Sea Shell/Logs`.
 An optional Google Meet reader now supplies participant names and speaking
-indicators in Chrome or Safari. Press **V** to connect your browser, or run
-`seashell meeting speakers chrome` (or `safari`) and reopen Seashell.
+indicators in Chrome or Safari. Press **V → Connect Google Meet · automatic**, or
+run `seashell meeting speakers auto` and reopen Seashell. The reader discovers
+either browser automatically; each browser needs its own permission once.
 Browser permission is required; use `seashell meeting speakers check` before
 recording. These are fallible timing hints; see the [Meet setup and test guide](docs/meet-speakers.md).
 Calendar attendees, self-identification, explicit handoffs, and supplied
