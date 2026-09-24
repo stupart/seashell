@@ -279,10 +279,45 @@ export function pcmS16leSignalLevel(pcm: Uint8Array): PcmSignalLevel {
   return Object.freeze({ peak, rms, rmsDbfs });
 }
 
-/** Avoid spending Whisper work on digital silence while retaining quiet speech. */
+/** Candidate speech, not VAD: silence elsewhere in a chunk must not dilute a
+ * short utterance. Require two adjacent 20 ms windows to reject single clicks. */
 export function hasAudiblePcmSignal(pcm: Uint8Array): boolean {
-  const level = pcmS16leSignalLevel(pcm);
-  return level.peak >= 128 && level.rmsDbfs >= -55;
+  if (pcm.byteLength % 2 !== 0) throw new Error('PCM signal contains an incomplete sample');
+  let consecutive = 0;
+  for (let offset = 0; offset + 640 <= pcm.byteLength; offset += 640) {
+    const level = pcmS16leSignalLevel(pcm.subarray(offset, offset + 640));
+    consecutive = level.peak >= 64 && level.rmsDbfs >= -60 ? consecutive + 1 : 0;
+    if (consecutive >= 2) return true;
+  }
+  return false;
+}
+
+/** Modest gain for quiet ASR copies; durable capture audio remains untouched. */
+export function quietAudioGain(peak: number): number {
+  return peak > 0 && peak < 4096 ? Math.min(32, 8192 / peak) : 1;
+}
+
+export function amplifyPcm(pcm: Buffer, gain: number): Buffer {
+  if (gain === 1) return pcm;
+  const output = Buffer.alloc(pcm.length);
+  for (let offset = 0; offset < pcm.length; offset += 2) {
+    output.writeInt16LE(Math.max(-32768, Math.min(32767,
+      Math.round(pcm.readInt16LE(offset) * gain))), offset);
+  }
+  return output;
+}
+
+/** Live chunks use our fixed mono, 16-bit WAV header. Leave other formats alone. */
+export function normalizeQuietCaptureWav(wav: Buffer): Buffer {
+  if (wav.length < 44 || wav.toString('ascii', 0, 4) !== 'RIFF' ||
+      wav.toString('ascii', 8, 12) !== 'WAVE' || wav.toString('ascii', 12, 16) !== 'fmt ' ||
+      wav.readUInt32LE(16) !== 16 || wav.readUInt16LE(20) !== 1 ||
+      wav.readUInt16LE(22) !== 1 || wav.readUInt16LE(34) !== 16 ||
+      wav.toString('ascii', 36, 40) !== 'data' || wav.readUInt32LE(40) !== wav.length - 44 ||
+      wav.length % 2 !== 0) return wav;
+  const pcm = wav.subarray(44);
+  const gain = quietAudioGain(pcmS16leSignalLevel(pcm).peak);
+  return gain === 1 ? wav : Buffer.concat([wav.subarray(0, 44), amplifyPcm(pcm, gain)]);
 }
 
 export function writeLivePcmChunk(chunk: PcmChunk, source: string): string {

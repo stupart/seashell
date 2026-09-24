@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'child_process';
 import { readFile } from 'fs/promises';
 import { createServer } from 'net';
+import { normalizeQuietCaptureWav } from './live-system-audio.ts';
 import {
   beginManagedProcessSession,
   trackChildProcess,
@@ -102,7 +103,7 @@ export class OwnedWhisperServer {
     this.activeRequests += 1;
     try {
       const form = new FormData();
-      form.set('file', new Blob([await readFile(audioFile)], { type: 'audio/wav' }), 'chunk.wav');
+      form.set('file', new Blob([normalizeQuietCaptureWav(await readFile(audioFile))], { type: 'audio/wav' }), 'chunk.wav');
       form.set('language', 'en');
       form.set('response_format', 'verbose_json');
       form.set('temperature', '0.0');

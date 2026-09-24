@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Box, Text, measureElement, useApp, useInput, type DOMElement } from 'ink';
+import { Box, Text, measureElement, useApp, useInput, useStdin, useStdout, type DOMElement } from 'ink';
 import { execFileSync, spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { existsSync, statSync, unlinkSync } from 'fs';
@@ -37,10 +37,9 @@ import {
 } from './meeting-artifact.ts';
 import { chatWithMeeting, enrichMeeting } from './meeting-enrichment.ts';
 import { meetingViewLines, type MeetingView } from './meeting-tui.ts';
+import { transcriptRows, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
-  coalesceTranscriptSegments,
   renderText,
-  speakerLabel,
 } from './transcript-renderer.ts';
 import type { TranscriptFormat, TranscriptRecord } from './transcript-types.ts';
 import { transcribeMedia } from './transcription-service.ts';
@@ -79,8 +78,6 @@ import {
   moveSelection,
   moveTranscriptScroll,
   formatTuiClock,
-  SPEAKER_COLORS,
-  speakerColorIndex,
   tuiLayout,
 } from './tui-state.ts';
 import {
@@ -246,9 +243,13 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [followLiveTranscript, setFollowLiveTranscript] = useState(true);
   const transcriptPaneRef = useRef<DOMElement>(null);
   const [transcriptContentRows, setTranscriptContentRows] = useState<number>();
+  const [transcriptContentColumns, setTranscriptContentColumns] = useState<number>();
   useEffect(() => {
     if (!transcriptPaneRef.current) return;
-    const rows = Math.max(1, Math.floor(measureElement(transcriptPaneRef.current).height) - 4);
+    const measured = measureElement(transcriptPaneRef.current);
+    const rows = Math.max(1, Math.floor(measured.height) - 4);
+    const columns = Math.max(1, Math.floor(measured.width) - 6);
+    setTranscriptContentColumns((previous) => previous === columns ? previous : columns);
     setTranscriptContentRows((previous) => previous === rows ? previous : rows);
   });
   const [showTimestamps, setShowTimestamps] = useState(true);
@@ -773,33 +774,25 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   const currentRecord = view === 'live' ? liveRecord : selectedRecord;
   const currentMeeting = view === 'live' ? liveMeeting : selectedMeeting;
-  const displaySegments = useMemo(
-    () => currentRecord ? coalesceTranscriptSegments(currentRecord) : [],
-    [currentRecord],
-  );
   const drawerOnly = historyOpen && layout.compact;
   const mainPanelColumns = historyOpen && !drawerOnly
     ? terminal.columns - layout.sidebarWidth - 7
     : terminal.columns - 4;
-  const segmentRowEstimate = mainPanelColumns < 60
-    ? 4
-    : mainPanelColumns < 90
-      ? 3
-      : 2;
-  const visibleRows = Math.max(
-    1,
-    Math.floor((transcriptContentRows ?? layout.visibleTranscriptRows) / segmentRowEstimate),
-  );
+  const contentColumns = transcriptContentColumns ?? Math.max(1, mainPanelColumns - 6);
+  const displayRows = useMemo(() => currentRecord
+    ? transcriptRows(currentRecord, contentColumns, { timestamps: showTimestamps, speakers: showSpeakers })
+    : [], [currentRecord, contentColumns, showTimestamps, showSpeakers]);
+  const visibleRows = Math.max(1, transcriptContentRows ?? layout.visibleTranscriptRows);
   const sidebarStart = Math.max(
     0,
     selectionIndex - layout.visibleLibraryItems + 1,
   );
   const showingLiveTranscript = view === 'live' && meetingView === 'transcript';
-  const latestTranscriptScroll = Math.max(0, displaySegments.length - visibleRows);
+  const latestTranscriptScroll = Math.max(0, displayRows.length - visibleRows);
   const visibleTranscriptScroll = showingLiveTranscript && followLiveTranscript
     ? latestTranscriptScroll
     : Math.min(transcriptScroll, latestTranscriptScroll);
-  const visibleSegments = displaySegments.slice(
+  const visibleTranscriptRows = displayRows.slice(
     visibleTranscriptScroll,
     visibleTranscriptScroll + visibleRows,
   );
@@ -1180,19 +1173,17 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   const auxiliaryMeetingLines = useMemo(() => (
     currentMeeting && meetingView !== 'transcript'
-      ? meetingViewLines(currentMeeting, meetingView, currentRecord ?? undefined)
+      ? wrappedMeetingRows(meetingViewLines(currentMeeting, meetingView, currentRecord ?? undefined), contentColumns)
       : []
-  ), [currentMeeting, meetingView, currentRecord]);
+  ), [currentMeeting, meetingView, currentRecord, contentColumns]);
   const visibleAuxiliaryMeetingLines = auxiliaryMeetingLines.slice(
     transcriptScroll,
-    transcriptScroll + layout.visibleTranscriptRows,
+    transcriptScroll + visibleRows,
   );
   const scrollItemCount = currentMeeting && meetingView !== 'transcript'
     ? auxiliaryMeetingLines.length
-    : displaySegments.length;
-  const scrollVisibleRows = currentMeeting && meetingView !== 'transcript'
-    ? layout.visibleTranscriptRows
-    : visibleRows;
+    : displayRows.length;
+  const scrollVisibleRows = visibleRows;
   const scrollTranscriptBy = (delta: number) => {
     const next = moveTranscriptScroll(
       meetingView === 'transcript' ? visibleTranscriptScroll : transcriptScroll,
@@ -1431,7 +1422,32 @@ export default function App(props: { libraryDir?: string } = {}) {
     if (exitRequested && !processing) gracefulExit();
   }, [exitRequested, gracefulExit, processing]);
 
+  const { stdin } = useStdin();
+  const { stdout } = useStdout();
+  const mouseDecoder = useRef(new MouseScrollDecoder());
+  const mouseEnabled = !aiSetupOpen && !chatInputState && !renameState && !searchMode && !exportMode && !confirmTrashId;
+  useEffect(() => {
+    if (!mouseEnabled || !stdin.isTTY || !stdout.isTTY) return;
+    stdout.write('\x1b[?1000h\x1b[?1006h');
+    const restore = () => { stdout.write('\x1b[?1006l\x1b[?1000l'); };
+    process.once('exit', restore);
+    return () => { process.removeListener('exit', restore); restore(); };
+  }, [mouseEnabled, stdin, stdout]);
+
   useInput((input, key) => {
+    const mouse = mouseDecoder.current.read(input);
+    if (mouse.consumed) {
+      if (mouseEnabled && mouse.events.length) {
+        const inHistory = historyOpen && (drawerOnly || mouse.events[0]!.column <= layout.sidebarWidth + 2);
+        const delta = mouse.events.reduce((sum, event) => sum + event.delta, 0);
+        if (inHistory) {
+          const next = moveSelection(selectionIndex, delta, navigationItems.length);
+          setSelectionIndex(next);
+          showNavigationItem(navigationItems[next]);
+        } else scrollTranscriptBy(delta);
+      }
+      return;
+    }
     if (chatInputState) {
       if (key.escape) {
         setChatInputState(null);
@@ -1798,10 +1814,6 @@ export default function App(props: { libraryDir?: string } = {}) {
         : terminal.columns < 72
           ? '[L] Live  [H] History  [P] AI  [?] Help  [Q] Quit'
           : '[L] Live  [H] History  [P] AI  [?] Help  [Q] Quit';
-  const plainTranscript = currentRecord && meetingView === 'transcript' && !showTimestamps && !showSpeakers
-    ? renderText({ ...currentRecord, transcript: visibleSegments })
-    : '';
-
   const historyDrawer = (
     <Box
       width={layout.compact ? undefined : layout.sidebarWidth}
@@ -1879,39 +1891,17 @@ export default function App(props: { libraryDir?: string } = {}) {
             </Box>
           ))}
         </Box>
-      ) : visibleSegments.length === 0 ? (
+      ) : visibleTranscriptRows.length === 0 ? (
         view === 'live' && paused ? null : (
           <Text dimColor>{view === 'live'
-            ? transcribingCount > 0
-              ? 'Preparing transcript…'
-              : 'Speak to transcribe · the first words take a moment'
+            ? transcribingCount > 0 ? 'Preparing transcript…' : 'Speak to transcribe · the first words take a moment'
             : 'No transcript text'}</Text>
         )
-      ) : plainTranscript ? (
-        <Text wrap="wrap">{plainTranscript}</Text>
       ) : (
         <Box flexDirection="column">
-          {visibleSegments.map((segment, index) => {
-            const label = showSpeakers
-              ? speakerLabel(currentRecord!, segment.speaker)
-              : undefined;
-            const speakerColor = segment.speaker
-              ? SPEAKER_COLORS[speakerColorIndex(segment.speaker)]
-              : undefined;
-            return (
-              <Text key={`${segment.start}-${segment.end}-${index}`} wrap="wrap">
-                {showTimestamps && <Text dimColor>[{formatTuiClock(segment.start)}] </Text>}
-                {label && (
-                  <Text
-                    color={speakerColor}
-                  >
-                    {label}:{' '}
-                  </Text>
-                )}
-                {segment.text}
-              </Text>
-            );
-          })}
+          {visibleTranscriptRows.map((row, index) => <Box key={index} flexShrink={0} height={1}>
+            <Text wrap="truncate-end">{row || ' '}</Text>
+          </Box>)}
         </Box>
       )}
     </Box>
@@ -2026,6 +2016,10 @@ export default function App(props: { libraryDir?: string } = {}) {
       </Box>
 
       <Box flexDirection="column" marginTop={1} flexShrink={0}>
+        {currentMeeting && meetingView === 'transcript' && showSpeakers && !historyOpen &&
+          currentRecord?.speakers.some((speaker) => speaker.id === 'SYSTEM') && (
+          <Text dimColor>Source labels only · individual speakers not separated</Text>
+        )}
         {showingLiveTranscript && !followLiveTranscript && !historyOpen && (
           <Text dimColor>Reading earlier text · [L] Latest</Text>
         )}
@@ -2044,7 +2038,7 @@ export default function App(props: { libraryDir?: string } = {}) {
             <Text color="yellow">Keyboard help · [?] or [Esc] close</Text>
             <Text dimColor>F import · ⇧F import + speakers · T timestamps · S speaker labels</Text>
             <Text dimColor>C copy · E export · O folder · D trash · DEL clear live</Text>
-            <Text dimColor>[/] choose speaker · R rename · ↑↓ scroll · L live · Q quit</Text>
+            <Text dimColor>[/] choose speaker · R rename · ↑↓ / wheel scroll · L live · Q quit</Text>
             <Text dimColor>M mark meeting · 1-4 meeting views · G enrich/finalize · A ask</Text>
             <Text dimColor>P choose AI models and effort for live analysis, notes and chat</Text>
             <Text dimColor>Automatic meeting prompt: M record · X ignore</Text>
@@ -2058,8 +2052,8 @@ export default function App(props: { libraryDir?: string } = {}) {
                 : currentMeeting && meetingView === 'chat'
                   ? `${Math.floor(currentMeeting.chat.length / 2)} exchanges`
                   : terminal.columns < 56
-                    ? '[T] Time  [S] Speakers'
-                    : `[T] Timestamps  [S] Speakers  ·  ${renderText(currentRecord).length} chars`}
+                    ? '↑↓ / wheel scroll · [?] Help'
+                    : `↑↓ / wheel scroll · [T] Time [S] Speakers · ${visibleTranscriptScroll + 1}–${Math.min(displayRows.length, visibleTranscriptScroll + visibleRows)}/${displayRows.length}`}
           </Text>
         ) : null}
       </Box>

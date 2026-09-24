@@ -5,6 +5,7 @@ import {
   pcmS16leToWav,
   pcmS16leSignalLevel,
   hasAudiblePcmSignal,
+  normalizeQuietCaptureWav,
 } from '../src/live-system-audio.ts';
 
 test('native system-audio events are strict and preserve first-buffer clock evidence', () => {
@@ -30,6 +31,27 @@ test('native system-audio events are strict and preserve first-buffer clock evid
   expect(() => parseNativeSystemAudioEvent(JSON.stringify({
     type: 'first-buffer', capturedAtUnixMs: 1, sampleTime: '0',
   }))).toThrow('finite number');
+});
+
+test('short quiet speech survives ten-second silence; clicks and low noise do not', () => {
+  const pcm = Buffer.alloc(320_000);
+  for (let offset = 160_000; offset < 163_200; offset += 2) {
+    pcm.writeInt16LE(Math.round(100 * Math.sin(offset / 8)), offset);
+  }
+  expect(pcmS16leSignalLevel(pcm).rmsDbfs).toBeLessThan(-55);
+  expect(hasAudiblePcmSignal(pcm)).toBe(true);
+  const click = Buffer.alloc(pcm.length);
+  click.writeInt16LE(20000, 160000);
+  expect(hasAudiblePcmSignal(click)).toBe(false);
+  const noise = Buffer.alloc(pcm.length);
+  for (let offset = 0; offset < noise.length; offset += 2) noise.writeInt16LE(offset % 4 ? 17 : -17, offset);
+  expect(hasAudiblePcmSignal(noise)).toBe(false);
+  const original = pcmS16leToWav(pcm);
+  const normalized = normalizeQuietCaptureWav(original);
+  expect(normalized.length).toBe(original.length);
+  expect(pcmS16leSignalLevel(normalized.subarray(44)).peak).toBe(3200);
+  expect(pcmS16leSignalLevel(original.subarray(44)).peak).toBe(100);
+  expect(normalizeQuietCaptureWav(pcmS16leToWav(Buffer.alloc(3200))).subarray(44)).toEqual(Buffer.alloc(3200));
 });
 
 test('PCM chunking is byte-lossless and carries a monotonic sample clock', () => {

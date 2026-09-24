@@ -9,7 +9,7 @@ import {
   saveFinalizedCapture,
 } from '../src/capture-finalizer.ts';
 import { CaptureSessionStore } from '../src/capture-session.ts';
-import { pcmS16leToWav } from '../src/live-system-audio.ts';
+import { pcmS16leSignalLevel, pcmS16leToWav } from '../src/live-system-audio.ts';
 import { findTranscriptRecord, listTranscriptRecords } from '../src/transcript-library.ts';
 
 function wav(directory: string, name: string, sample: number): string {
@@ -19,6 +19,29 @@ function wav(directory: string, name: string, sample: number): string {
   writeFileSync(path, pcmS16leToWav(pcm));
   return path;
 }
+
+test('canonical local pass recovers quiet microphone audio rejected by an old draft flag', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-quiet-final-'));
+  try {
+    const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'quiet', startedAtUnixMs: 1 });
+    const pcm = Buffer.alloc(320000);
+    for (let offset = 160000; offset < 164800; offset += 2) pcm.writeInt16LE(Math.round(100 * Math.sin(offset / 8)), offset);
+    const source = join(root, 'quiet.wav');
+    writeFileSync(source, pcmS16leToWav(pcm));
+    const committed = store.commitChunk({ sourcePath: source, trackId: 'microphone', startSeconds: 0, endSeconds: 10, audible: false });
+    const original = readFileSync(committed.path);
+    const record = await finalizeCaptureTranscript(store.manifestPath, {
+      localTranscriber: async (path) => {
+        const audio = readFileSync(path);
+        expect(pcmS16leSignalLevel(audio.subarray(44)).peak).toBe(3200);
+        return [{ start: 5, end: 5.15, text: 'Quiet local words.' }];
+      },
+    });
+    expect(record.transcript).toHaveLength(1);
+    expect(record.transcript[0]).toMatchObject({ speaker: 'LOCAL', text: 'Quiet local words.', start: 5 });
+    expect(readFileSync(committed.path)).toEqual(original);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 for (const fails of [false, true]) {
   test(`publishing stopped capture ${fails ? 'retains recoverable audio if final ASR fails' : 'includes the final chunk even without a draft result'}`, async () => {
