@@ -12,14 +12,21 @@ process.env.SEASHELL_CONFIG = join(root, 'config.json');
 process.env.SEASHELL_LIBRARY_DIR = join(root, 'library');
 process.env.SEASHELL_DISABLE_SYSTEM_AUDIO = '1';
 writeFileSync(process.env.SEASHELL_CONFIG, JSON.stringify({ meeting: { automation: { enabled: false } } }));
-let starts = 0, stops = 0, setups = 0, ready = false;
+let starts = 0, stops = 0, setups = 0, ready = false, permissionRequests = 0, connectionChecks = 0;
 const mic = { ...await import('../../src/live-microphone.ts') };
 const environment = { ...await import('../../src/diarization-environment.ts') };
 const meet = { ...await import('../../src/meet-speakers.ts') };
-mock.module('../../src/meet-speakers.ts', () => ({ ...meet, async probeMeetSpeakers(mode: string) {
-  assert.equal(mode, 'auto', 'Connection checks both browsers without asking which to use');
-  return { state: 'permission', detail: 'Enable Allow JavaScript from Apple Events.' };
-} }));
+mock.module('../../src/meet-speakers.ts', () => ({ ...meet,
+  async requestMeetAccessibilityPermission() {
+    permissionRequests++;
+    return { state: 'permission', detail: 'Background meetings: Enable Accessibility for the Seashell background host shown by macOS. A terminal permission alone does not enable background meeting detection.' };
+  },
+  async checkMeetConnection(mode: string) {
+    assert.equal(mode, 'auto', 'Connection selects supported browsers automatically');
+    if (++connectionChecks === 1) return { state: 'permission', detail: 'Enable Accessibility for the app launching this window.' };
+    return { state: 'idle', detail: 'Accessibility enabled. Join a Meet call in Chrome.' };
+  },
+}));
 mock.module('../../src/live-microphone.ts', () => ({ ...mic, startMicrophoneCapture(options: any) {
   starts++; options.onState({ state: 'active' });
   return { done: Promise.resolve(), startup: Promise.resolve(), stop() { stops++; } };
@@ -37,7 +44,13 @@ Object.defineProperty(process.stdout, 'rows', { value: 24 });
 const { default: App } = await import('../../src/app.tsx');
 const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
 let rendered = '';
-const output = Object.assign(new Writable({ write(chunk, _enc, cb) { rendered += chunk.toString(); cb(); } }), { columns, rows: 24 });
+const speakerFrames: string[] = [];
+const output = Object.assign(new Writable({ write(chunk, _enc, cb) {
+  rendered += chunk.toString();
+  const frame = stripVTControlCharacters(chunk.toString());
+  if (frame.includes('Speakers') && frame.includes('↑↓ choose')) speakerFrames.push(frame);
+  cb();
+} }), { columns, rows: 24 });
 const app = render(<App />, { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
 const plain = () => stripVTControlCharacters(rendered).replace(/\s+/g, ' ');
 const until = async (check: () => boolean) => { const end = Date.now() + 3000; while (!check() && Date.now() < end) await Bun.sleep(10); assert.ok(check(), 'UI condition timed out'); };
@@ -45,10 +58,20 @@ const type = async (text: string) => { input.write(text); await Bun.sleep(80); }
 try {
   await until(() => starts === 1);
   await type('v'); await until(() => plain().includes('Optional setup'));
-  await type('\r'); await until(() => plain().includes('Allow JavaScript from Apple Events'));
+  assert.equal(permissionRequests, 0, 'Opening settings does not request permission');
+  await type('\r'); await until(() => plain().includes('Privacy & Security'));
+  assert.ok(plain().includes('Background access missing'));
+  assert.ok(plain().includes('Terminal access alone is not enough'));
+  assert.ok(plain().includes('People panel open'));
+  assert.equal(permissionRequests, 1, 'Only explicit Connect requests Accessibility');
   assert.equal(JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.speakerBrowser, 'auto');
   assert.equal(starts, 1, 'Connecting Meet preserves the running microphone');
-  for (let n = 0; n < 3; n++) await type('\x1b[B');
+  await type('\x1b[B'); await type('\r');
+  await until(() => plain().includes('This window needs access'));
+  await type('\r');
+  await until(() => plain().includes('Accessibility enabled'));
+  assert.equal(permissionRequests, 1, 'Checking permission never requests it again');
+  for (let n = 0; n < 2; n++) await type('\x1b[B');
   await type('\r'); assert.equal(setups, 0, 'Do not install while recording');
   assert.equal(stops, 0, 'Opening speaker settings preserves capture');
   await type('\x1b'); await type(' '); await until(() => stops === 1);
@@ -60,6 +83,8 @@ try {
   assert.ok(stripVTControlCharacters(rendered).includes('Ready'));
   await type('\x1b[B'); await type('\r');
   assert.ok(plain().includes('Open a saved recording'));
+  assert.ok(speakerFrames.length > 0, 'Rendered speaker settings frames were captured');
+  for (const frame of speakerFrames) assert.ok(frame.trimEnd().split('\n').length <= 24, 'Speaker settings fit the 24-row terminal');
   if (process.env.SEASHELL_TUI_EVIDENCE) writeFileSync(process.env.SEASHELL_TUI_EVIDENCE, stripVTControlCharacters(rendered));
   console.log(JSON.stringify({ passed: true }));
 } finally { app.unmount(); rmSync(root, { recursive: true, force: true }); }

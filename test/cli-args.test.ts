@@ -148,6 +148,16 @@ describe('recoverable capture CLI parsing', () => {
 });
 
 describe('meeting CLI parsing', () => {
+  test('separates explicit Accessibility setup from read-only speaker checks', () => {
+    expect(parseCliArgs(['meeting', 'speakers', 'setup', '--json'])).toEqual({
+      kind: 'meeting', action: { kind: 'speakers', browser: 'setup' }, json: true,
+    });
+    expect(parseCliArgs(['meeting', 'speakers'])).toEqual({
+      kind: 'meeting', action: { kind: 'speakers', browser: 'check' }, json: false,
+    });
+    expect(() => parseCliArgs(['meeting', 'speakers', 'setup', 'chrome'])).toThrow('Usage');
+    expect(() => parseCliArgs(['meeting', 'speakers', 'setup', '--automation', 'automatic'])).toThrow('do not apply');
+  });
   test('parses meeting creation and exact enrichment routes', () => {
     expect(parseCliArgs([
       'meeting',

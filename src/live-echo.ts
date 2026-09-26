@@ -17,7 +17,9 @@ function overlapScore(left: string[], right: string[]): { shared: number; contai
       leftCounts.set(word, remaining - 1);
     }
   }
-  return { shared, containment: shared / Math.max(1, Math.min(left.length, right.length)) };
+  // The microphone segment is the one that may be removed. A short remote
+  // phrase contained inside a longer local response must not erase that response.
+  return { shared, containment: shared / Math.max(1, left.length) };
 }
 
 /**
@@ -38,7 +40,7 @@ export function isLikelySystemAudioLeak(
   const systemWords = words(system.text);
   if (Math.min(microphoneWords.length, systemWords.length) < 4) return false;
   const score = overlapScore(microphoneWords, systemWords);
-  return score.shared >= 4 && score.containment >= 0.72;
+  return score.shared >= 4 && score.containment >= 0.9;
 }
 
 /** System capture wins only for near-duplicate overlap; it never merges tracks. */

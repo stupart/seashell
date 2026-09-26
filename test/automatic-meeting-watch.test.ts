@@ -305,7 +305,7 @@ test('muted, back-to-back Meet calls become separate history entries while earli
   expect(listTranscriptRecords(root).every(r => r.captureState === 'ready' && r.segmentCount === 1)).toBe(true);
 });
 
-test('permission loss ends an existing Meet after grace instead of recording forever', async () => {
+test('permission loss with no remaining browser audio ends an existing Meet after grace', async () => {
   const root = mkdtempSync(join(tmpdir(), 'seashell-meet-permission-'));
   roots.push(root);
   let now = 0;
@@ -317,7 +317,7 @@ test('permission loss ends an existing Meet after grace instead of recording for
     dependencies: {
       now: () => new Date(now), readMeet: async () => probe,
       readSignals: () => ({ schemaVersion: 1, capturedAtUnixMs: now, supported: true,
-        inputProcesses: [{ pid: 2, name: 'Safari', bundleId: 'com.apple.Safari' }] }),
+        inputProcesses: probe.state === 'connected' ? [{ pid: 2, name: 'Safari', bundleId: 'com.apple.Safari' }] : [] }),
       startCapture: () => {
         const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'lost-permission', startedAtUnixMs: now });
         return { store, sessionId: 'lost-permission', manifestPath: store.manifestPath,
@@ -336,4 +336,46 @@ test('permission loss ends an existing Meet after grace instead of recording for
   await service.shutdown();
   expect(stops).toBe(1);
   expect(listTranscriptRecords(root)[0]?.captureState).toBe('failed');
+});
+
+test('hidden Meet tree keeps one recording beyond grace with matching browser audio, then ends on departure', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-meet-hidden-'));
+  roots.push(root);
+  let now = 0;
+  let starts = 0;
+  let stops = 0;
+  let probe: MeetProbe = { state: 'connected', detail: 'Joined', browser: 'chrome',
+    snapshot: { meeting: '/abc-defg-hij', joined: true, participants: [] } };
+  const service = new AutomaticMeetingWatchService({
+    config: { libraryDir: root, meeting: { speakerBrowser: 'auto', automation: { confirmationPolls: 1, endGraceSeconds: 1 } } },
+    dependencies: {
+      now: () => new Date(now), readMeet: async () => probe,
+      readSignals: () => ({ schemaVersion: 1, capturedAtUnixMs: now, supported: true,
+        inputProcesses: [{ pid: 2, name: 'Chrome', bundleId: 'com.google.Chrome' }] }),
+      startCapture: () => {
+        starts++;
+        const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'hidden-tree', startedAtUnixMs: now });
+        return { store, sessionId: 'hidden-tree', manifestPath: store.manifestPath,
+          async stop() { stops++; return store.setStatus('captured'); } };
+      },
+      finalizeCapture: async () => createTranscriptRecord({ transcript: [{ start: 0, end: 1, text: 'Still one meeting.' }], speakers: [] },
+        { id: 'hidden-tree', now: new Date(1_000) }),
+    },
+  });
+  try {
+    expect((await service.pollOnce()).kind).toBe('start');
+    for (const state of ['unavailable', 'permission', 'idle'] as const) {
+      probe = { state, detail: 'Meet tree hidden', source: 'google-meet-accessibility', absenceConfirmed: false };
+      now += 30_000;
+      expect((await service.pollOnce()).kind).toBe('none');
+      expect(service.phase).toBe('recording');
+    }
+    expect(starts).toBe(1);
+    expect(stops).toBe(0);
+    expect(listTranscriptRecords(root)).toHaveLength(1);
+    probe = { state: 'idle', detail: 'Call ended', source: 'google-meet-accessibility', absenceConfirmed: true };
+    now += 1_000;
+    expect((await service.pollOnce()).kind).toBe('finish');
+  } finally { await service.shutdown(); }
+  expect(stops).toBe(1);
 });

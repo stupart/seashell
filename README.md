@@ -217,14 +217,16 @@ only data written to stdout, so piping remains reliable.
 
 ### Automatic meetings and Google Meet
 
-With **V → Connect Google Meet · automatic** enabled, Sea Shell reads joined-call
-state in Chrome and Safari. It starts after two confirming polls (normally about
-3–6 seconds), continues while you are muted, and stops on the next check after
-you leave. A different Meet room creates a separate transcript, including when
-you move directly between calls. Browser permissions are required once per
-browser; an unreadable page falls back to a consent prompt, never guessed call
-identity. The saved start time is when capture begins, not a retroactive calendar
-start time. Audio from before capture cannot be recovered.
+With **V → Connect Google Meet · Accessibility** enabled, Sea Shell reads
+joined-call state through native Accessibility (Chrome first; Safari is
+experimental). It starts after two confirming polls, normally about 3–6 seconds,
+and can start while you are muted. Confirmed departure ends capture at the next
+check; a different room creates a separate transcript. An unreadable interface
+never proves departure. An existing call can continue while matching browser
+microphone activity corroborates it; without either signal, the end grace
+applies. Accessibility is enabled through macOS setup, without a browser
+extension or developer setting. The saved start time is when capture begins;
+audio from before capture cannot be recovered.
 
 For other apps, Sea Shell detects which macOS process is actively using audio input. A
 dedicated meeting app such as Zoom, Teams, Webex, or FaceTime starts
@@ -254,16 +256,35 @@ or processing (◐) indicator. Open entries refresh when transcription completes
 Press **H** to show or hide History; narrow terminals use a drawer.
 The login watcher continues after the TUI closes and re-arms for the next call.
 Logs live under `~/Library/Application Support/Sea Shell/Logs`.
-An optional Google Meet reader now supplies participant names and speaking
-indicators in Chrome or Safari. Press **V → Connect Google Meet · automatic**, or
-run `seashell meeting speakers auto` and reopen Seashell. The reader discovers
-either browser automatically; each browser needs its own permission once.
-Browser permission is required; use `seashell meeting speakers check` before
-recording. These are fallible timing hints; see the [Meet setup and test guide](docs/meet-speakers.md).
+An experimental Google Meet reader uses native macOS Accessibility to read
+meeting controls, participant names, and exposed speaking indicators. Start with
+Google Chrome; Safari compatibility is not yet verified. Press **V → Connect
+Google Meet · Accessibility**, or run `seashell meeting speakers setup` and reopen
+Seashell. Setup requests access for both this window and the background host.
+Allow the entries macOS shows in **System Settings → Privacy & Security →
+Accessibility**, then run `seashell meeting speakers check` to verify both scopes.
+Terminal access alone does not enable background meeting detection.
+No extension or browser developer setting is required. Normal launch, background
+watching, and connection checks never request this permission automatically.
+For names while your Meet microphone is unmuted, keep Meet's **People /
+Participants** panel open so Seashell can distinguish you from remote speakers.
+With the Meet microphone muted, that panel is not required. Otherwise naming
+pauses safely while audio recording continues. Safari names are unverified;
+vision-based speaker detection is not implemented.
+These are fallible timing hints, not isolated participant audio; see the
+[Meet setup and test guide](docs/meet-speakers.md).
 Calendar attendees, self-identification, explicit handoffs, and supplied
-timestamp evidence remain additional identity sources. Use headphones when
-possible, and review attribution when laptop-speaker echo or people in the same
-physical room make sources ambiguous.
+timestamp evidence remain additional identity sources. Headphones are optional:
+computer audio is captured directly, independently of what the speakers play.
+With laptop speakers, playback can also reach the microphone. Seashell reduces
+strong transcript duplicates, but this is not acoustic echo cancellation; review
+attribution when echo or people sharing a room make sources ambiguous.
+
+Detected output-device changes trigger bounded reconnection while keeping the
+same meeting and preserving saved audio and timing gaps. Physical unplug/replug
+and speakerphone quality still need device acceptance. If changing an input
+device leaves the old microphone connected, pause and resume to select the new
+default input.
 
 Before the meeting, prove both inputs with a disposable five-second check while
 speaking and playing computer audio:
@@ -924,7 +945,8 @@ seashell doctor
 ## Speaker separation in meetings
 
 Press **V** to connect Google Meet names or set up local voice separation.
-Meet names need browser permission, but no voice model; see [setup and limitations](docs/meet-speakers.md).
+Meet names need macOS Accessibility permission, but no voice model; see
+[setup and limitations](docs/meet-speakers.md).
 Once the local model is verified, voices in
 computer audio are separated when the recording finishes. Live labels show
 Meet hints where a whole draft chunk has a consistent speaker, otherwise audio

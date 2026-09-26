@@ -20,6 +20,7 @@ import {
   MeetingAutomationController,
   resolveMeetingCandidate,
   hasConfirmedMeetingEnd,
+  preserveMeetingCandidateDuringObservationGap,
   type MeetingAutomationAction,
   type MeetingCandidate,
   type MeetingSignalSnapshot,
@@ -144,7 +145,10 @@ export class AutomaticMeetingWatchService {
       return { kind: 'none' };
     }
     const calendar = this.currentCalendar(now);
-    const candidate = resolveMeetingCandidate(snapshot, calendar, this.#config.meeting?.automation, meet);
+    const candidate = preserveMeetingCandidateDuringObservationGap(
+      resolveMeetingCandidate(snapshot, calendar, this.#config.meeting?.automation, meet),
+      this.#controller.state, snapshot, meet,
+    );
     const action = this.#controller.step(candidate, now.getTime(),
       hasConfirmedMeetingEnd(this.#controller.state.candidate, meet));
     if (action.kind === 'suggest') {

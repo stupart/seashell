@@ -249,8 +249,8 @@ export async function finalizeCaptureTranscript(
     if (segment.speaker === 'LOCAL') return segment;
     const speaker = meetSpeakerForSegment(meetSamples, segment);
     if (!speaker) return segment;
-    meetSpeakers.set(speaker.id, speaker);
-    return { ...segment, speaker: speaker.id, speakerSource: 'google-meet-dom' };
+    meetSpeakers.set(speaker.id, { id: speaker.id, label: speaker.label });
+    return { ...segment, speaker: speaker.id, speakerSource: speaker.source ?? 'google-meet-dom' };
   });
   const temporaryTracks: string[] = [];
   try {

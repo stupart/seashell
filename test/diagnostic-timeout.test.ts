@@ -44,3 +44,21 @@ test('meeting signal inspection bounds an unresponsive native helper', () => {
     expect(performance.now() - started).toBeLessThan(1500);
   });
 });
+
+test('doctor checks optional Accessibility helper presence without invoking it', () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-accessibility-diagnostic-'));
+  const helper = join(root, 'accessibility-helper');
+  const marker = join(root, 'invoked');
+  const missing = join(root, 'missing');
+  writeFileSync(helper, `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o700 });
+  try {
+    const present = doctorChecks({ systemAudioHelper: missing, meetingSignalsHelper: missing,
+      meetingAccessibilityHelper: helper }).find(check => check.name === 'meeting-accessibility-helper');
+    expect(present).toMatchObject({ ok: true, required: false, path: helper });
+    expect(existsSync(marker)).toBe(false);
+    const absent = doctorChecks({ systemAudioHelper: missing, meetingSignalsHelper: missing,
+      meetingAccessibilityHelper: missing }).find(check => check.name === 'meeting-accessibility-helper');
+    expect(absent).toMatchObject({ ok: false, required: false });
+    expect(absent?.help).toContain('seashell meeting speakers setup');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

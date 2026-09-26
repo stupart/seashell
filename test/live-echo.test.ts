@@ -38,3 +38,13 @@ test('short generic phrases remain ambiguous and are never suppressed', () => {
   const remote = { start: 21, end: 22, speaker: 'SYSTEM', text: 'Thank you' };
   expect(isLikelySystemAudioLeak(local, remote)).toBe(false);
 });
+
+test('remote playback inside a longer local response does not erase the new local speech', () => {
+  const remote = { start: 1, end: 10, speaker: 'SYSTEM',
+    text: 'The project launch is scheduled for next Thursday morning.' };
+  const local = { start: 2, end: 14, speaker: 'LOCAL',
+    text: 'The project launch is scheduled for next Thursday morning. I disagree because the payment integration is broken and we need another full week of testing.' };
+  expect(isLikelySystemAudioLeak(local, remote)).toBe(false);
+  expect(reconcileLiveEcho([remote], local)).toEqual([remote, local]);
+  expect(reconcileLiveEcho([local], remote)).toEqual([remote, local]);
+});
