@@ -394,8 +394,29 @@ function patternFor(bundleId: string): AppPattern | undefined {
 /** Positive page evidence can end a Meet call immediately. Reader failures cannot. */
 export function hasConfirmedMeetingEnd(candidate: MeetingCandidate | undefined, meet?: MeetProbe): boolean {
   if (!candidate?.evidence.includes('joined-meet') || !meet) return false;
-  return meet.state === 'idle' || Boolean(meet.snapshot?.joined && meet.browser &&
+  return (meet.state === 'idle' && (meet.source !== 'google-meet-accessibility' || meet.absenceConfirmed === true)) || Boolean(meet.snapshot?.joined && meet.browser &&
     candidate.id !== `meet:${meet.browser}:${meet.snapshot.meeting}`);
+}
+
+/** Losing a readable Meet tree is not a new audio-only meeting. Preserve an
+ * already recording call while its browser still owns microphone input. This
+ * never starts capture or overrides a known end. Losing permission to read
+ * names does not revoke permission to keep recording the existing audio.
+ * Without either UI or audio evidence, the controller's normal grace applies. */
+export function preserveMeetingCandidateDuringObservationGap(
+  candidate: MeetingCandidate | undefined,
+  state: MeetingAutomationState,
+  snapshot: MeetingSignalSnapshot,
+  meet?: MeetProbe,
+): MeetingCandidate | undefined {
+  const active = state.candidate;
+  const unobservable = meet?.state === 'unavailable' || meet?.state === 'permission' ||
+    (meet?.state === 'idle' && meet.source === 'google-meet-accessibility' && meet.absenceConfirmed !== true);
+  if ((state.phase !== 'recording' && state.phase !== 'ending') ||
+      !active?.evidence.includes('joined-meet') || !unobservable ||
+      meet?.snapshot?.joined || !snapshot.supported) return candidate;
+  const input = snapshot.inputProcesses.find(process => bundleMatches(process.bundleId, active.bundleId));
+  return input ? Object.freeze({ ...active, pid: input.pid }) : candidate;
 }
 
 /** Calendar alone never starts capture. A joined Meet call also works with the mic muted. */

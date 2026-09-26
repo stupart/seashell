@@ -21,7 +21,7 @@ import {
 } from './transcription-routing.ts';
 
 export interface SeashellMeetingConfig {
-  /** Optional, read-only Google Meet DOM hints. Off until connected; auto discovers Chrome and Safari. */
+  /** Optional, read-only Google Meet Accessibility hints. Off until connected; auto checks browser adapters. */
   speakerBrowser?: 'auto' | 'chrome' | 'safari' | 'off';
   modelSelection?: 'automatic' | 'custom';
   mode?: MeetingEnrichmentMode;

@@ -126,7 +126,7 @@ export function parseTranscriptRecord(value: unknown, path = 'transcript.json'):
     typeof segment.text === 'string' &&
     (segment.id === undefined || (typeof segment.id === 'string' && segment.id.length > 0)) &&
     (segment.speaker === undefined || typeof segment.speaker === 'string') &&
-    (segment.speakerSource === undefined || segment.speakerSource === 'google-meet-dom')
+    (segment.speakerSource === undefined || segment.speakerSource === 'google-meet-dom' || segment.speakerSource === 'google-meet-accessibility')
   ));
   const validSpeakers = record.speakers.every((speaker) => (
     Boolean(speaker) &&

@@ -121,7 +121,13 @@ try {
       });
     });
   }
-  if (native) await check('native-build', async () => { await command('native-build', ['bash', 'scripts/build-native.sh']); });
+  if (native) {
+    await check('native-build', async () => { await command('native-build', ['bash', 'scripts/build-native.sh']); });
+    await check('native-accessibility', async () => {
+      await command('native-accessibility', [process.execPath, 'test', 'test/native-meeting-accessibility.test.ts'], 120_000,
+        { SEASHELL_REQUIRE_NATIVE_TESTS: '1' });
+    });
+  }
   if (captureSoak) await check('capture-storage-soak', async () => {
     await command('capture-storage-soak', [process.execPath, 'scripts/gym-capture-soak.ts', join(output, 'capture-soak')], 180_000);
   });

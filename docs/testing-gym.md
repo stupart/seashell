@@ -156,6 +156,66 @@ for results and the distinction between historical previews and the public RC6.
 
 ## Device acceptance and soak
 
+### Optional live Google Meet guest
+
+`scripts/gym-meet-guest.ts` supplies one reproducible remote test speaker to a
+**test room you own**. It is opt-in and never runs in the default gym or CI.
+Open a Google Meet test room that permits anonymous guests first. Rooms requiring
+sign-in fail with an explanation. Admission requests are refused by default;
+pass **`--allow-lobby`** to permit the observed **Ask to join** button. The host
+must manually admit that named test guest within the 90-second startup deadline.
+The script never admits itself, borrows your account, or changes room settings.
+
+Provide a local RIFF WAV containing only speech you intend to send into that
+test room. For example, create a synthetic fixture on macOS:
+
+```bash
+mkdir -p .gym-results
+say -o .gym-results/guest-fixture.aiff "Seashell speaker test. The next meeting is on Tuesday."
+ffmpeg -nostdin -y -i .gym-results/guest-fixture.aiff -ar 48000 -ac 1 .gym-results/guest-fixture.wav
+bun scripts/gym-meet-guest.ts --url https://meet.google.com/abc-defg-hij \
+  --audio .gym-results/guest-fixture.wav --seconds 90
+```
+
+Replace the example URL with your own test room. `--name` defaults to **Seashell
+Test Speaker**; `--seconds` accepts 5–300 and defaults to 60. Google Meet receives
+the supplied speech through the guest's microphone track. The harness does not
+open your physical microphone. Chrome's fake camera is turned off before the
+guest joins, and guest sound output is muted to avoid feedback.
+
+The harness launches a **visible Chrome window** with a fresh private temporary
+profile. Headless Chrome can be rejected by Meet. It connects only to that
+browser's ephemeral loopback debugger endpoint, injects a looping WebAudio WAV
+stream before navigation, fills the observed **Your name** field, confirms the
+camera-off control, and clicks **Join now** (or **Ask to join** with the explicit
+lobby opt-in). It requires the current English
+Meet controls; a changed layout fails rather than guessing. It does not disable
+the Chrome sandbox, change browser developer settings, install an extension,
+or connect to your existing Chrome profile.
+
+Once joined, type **m** to mute, **u** to unmute, and **q** to leave. The guest
+automatically leaves at the session deadline; startup is also bounded. Normal
+exit and Ctrl-C attempt **Leave call**, close the owned browser, terminate its
+managed process group if necessary, and delete its temporary profile. Private
+Chrome diagnostics and a result receipt remain in `.gym-results/meet-guest/`.
+The receipt excludes the room URL and participant roster.
+
+Use the named guest to compare Seashell's active-speaker evidence during speech,
+mute, and unmute; then inspect the saved transcript for the known phrase and
+speaker name. A successful guest connection is **not** a passing speaker test.
+If hosting and observing on one Mac, inspect ambiguous/multiple-call status
+carefully: the fixture adds a second Chrome meeting window. A second Mac can
+run the guest to leave the observer's meeting interface unambiguous. Separately
+test background/minimized windows, screen sharing, overlapping remote voices,
+and consecutive calls. This single guest is a repeatable input, not a complete
+diarization benchmark.
+
+CDP is used only by this explicit test harness. Production Seashell continues
+to observe meeting UI through native macOS Accessibility. It does not use the
+guest's debugger or page injection to identify speakers.
+
+### Physical device checks
+
 Use an Apple Silicon Mac with actual audio devices as the device gym. A macOS VM
 is useful for clean install/reset testing but does not substitute for physical
 CoreAudio routing. Keep the normal account and test account separate.
@@ -168,6 +228,14 @@ CoreAudio routing. Keep the normal account and test account separate.
    stop grace, mic/system separation, final transcript, and saved raw tracks.
 4. Repeat with mute/unmute, headphones, a changed output device, sleep/wake, and
    a denied system-audio permission. Record the exact device/OS versions.
+   Test laptop speakers as well: remote playback must remain on the system track,
+   microphone echo must not delete distinct local replies, and simultaneous local
+   and remote speech must survive. For output switches, check resumed chunks use
+   a fresh clock and the real gap remains in the same meeting. Current automatic
+   recovery is bounded to two native route resets per capture; permission errors
+   do not trigger retries. A default-input switch while the old input remains
+   connected still needs pause/resume. Fake-helper tests cover recovery behavior,
+   not physical device switching or acoustic echo quality.
 5. Interrupt capture after committed chunks, restart, list/finalize recovery,
    and verify timestamps and playback against the original fixture.
 6. Run a 60–90 minute synthetic meeting and a subsequent meeting. Track peak RSS,

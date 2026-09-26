@@ -88,6 +88,7 @@ import {
 import {
   DEFAULT_MEETING_AUTOMATION,
   hasConfirmedMeetingEnd,
+  preserveMeetingCandidateDuringObservationGap,
   MeetingAutomationController,
   MeetingSignalMonitor,
   resolveMeetingCandidate,
@@ -368,7 +369,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const appendLiveSegment = useCallback((segment: TranscriptRecord['transcript'][number]) => {
     if (!/[\p{L}\p{N}]/u.test(segment.text)) return;
     const meetSpeaker = meetSpeakerReader.current?.speakerFor(segment);
-    if (meetSpeaker) segment = { ...segment, speaker: meetSpeaker.id, speakerSource: 'google-meet-dom' };
+    if (meetSpeaker) segment = { ...segment, speaker: meetSpeaker.id, speakerSource: meetSpeaker.source ?? 'google-meet-dom' };
     const current = liveRecordRef.current;
     const nextSpeakers = segment.speaker && !current.speakers.some(
       (speaker) => speaker.id === segment.speaker,
@@ -1389,11 +1390,9 @@ export default function App(props: { libraryDir?: string } = {}) {
         const browser = config.meeting?.speakerBrowser;
         const meet = browser && browser !== 'off' ? await probeMeetSpeakers(browser, abort.signal) : undefined;
         if (cancelled || isExiting.current) return;
-        const candidate = resolveMeetingCandidate(
-          snapshot,
-          calendarSuggestionRef.current ?? undefined,
-          meetingAutomation,
-          meet,
+        const candidate = preserveMeetingCandidateDuringObservationGap(
+          resolveMeetingCandidate(snapshot, calendarSuggestionRef.current ?? undefined, meetingAutomation, meet),
+          meetingAutomationController.current.state, snapshot, meet,
         );
         const action = meetingAutomationController.current.step(candidate, Date.now(),
           hasConfirmedMeetingEnd(meetingAutomationController.current.state.candidate, meet));

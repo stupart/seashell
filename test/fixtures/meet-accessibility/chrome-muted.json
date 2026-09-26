@@ -1,0 +1,525 @@
+{
+  "_provenance": "Sanitized macOS Chrome Accessibility tree from a real two-person Meet, 2026-09-26. Test guest sent prerecorded JFK audio; local microphone and camera off. Unrelated UI branches pruned; tile and roster anatomy retained. No browser JavaScript used for host inspection. Nonsemantic outer containers collapsed; tile ancestry between identity, name and speaking marker preserved.",
+  "browsers": [
+    {
+      "browser": "chrome",
+      "running": true,
+      "root": {
+        "role": "AXApplication",
+        "children": [
+          {
+            "role": "AXWindow",
+            "children": [
+              {
+                "role": "AXRadioButton",
+                "description": "Meet - abc-defg-hij"
+              },
+              {
+                "identifier": "chrome-1893",
+                "title": "Meet - abc-defg-hij",
+                "documentId": "fixture-document",
+                "role": "AXWebArea",
+                "children": [
+                  {
+                    "role": "AXGroup",
+                    "identifier": "chrome-3496",
+                    "children": [
+                      {
+                        "identifier": "chrome-3499",
+                        "classList": [
+                          "koV58",
+                          "Zi94Db"
+                        ],
+                        "role": "AXGroup",
+                        "children": [
+                          {
+                            "children": [
+                              {
+                                "identifier": "chrome-3504",
+                                "children": [
+                                  {
+                                    "children": [],
+                                    "role": "AXGroup",
+                                    "identifier": "chrome-3506",
+                                    "classList": [
+                                      "DYfzY",
+                                      "cYKTje",
+                                      "gjg47c"
+                                    ]
+                                  }
+                                ],
+                                "classList": [
+                                  "qRU4mf",
+                                  "uSECwd",
+                                  "JTEhGf",
+                                  "iPFm3e"
+                                ],
+                                "role": "AXGroup"
+                              }
+                            ],
+                            "role": "AXGroup",
+                            "identifier": "chrome-3501",
+                            "classList": [
+                              "T4q2od",
+                              "iPFm3e"
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "identifier": "chrome-3510",
+                        "classList": [],
+                        "role": "AXGroup",
+                        "children": [
+                          {
+                            "children": [
+                              {
+                                "identifier": "chrome-3564",
+                                "children": [
+                                  {
+                                    "children": [
+                                      {
+                                        "role": "AXGroup",
+                                        "identifier": "chrome-3571",
+                                        "classList": [],
+                                        "children": [
+                                          {
+                                            "value": "Seashell Test Speaker",
+                                            "identifier": "chrome-3625",
+                                            "children": [],
+                                            "role": "AXStaticText",
+                                            "classList": []
+                                          }
+                                        ]
+                                      }
+                                    ],
+                                    "role": "AXGroup",
+                                    "identifier": "chrome-3565",
+                                    "classList": [
+                                      "XEazBc",
+                                      "adnwBd"
+                                    ]
+                                  }
+                                ],
+                                "classList": [
+                                  "OFfHfd",
+                                  "urlhDe",
+                                  "vLRPrf",
+                                  "iPFm3e"
+                                ],
+                                "role": "AXGroup"
+                              }
+                            ],
+                            "role": "AXGroup",
+                            "identifier": "chrome-3550",
+                            "classList": [
+                              "ZY8hPc",
+                              "iPFm3e"
+                            ]
+                          }
+                        ]
+                      }
+                    ],
+                    "classList": [
+                      "oZRSLe"
+                    ]
+                  },
+                  {
+                    "identifier": "chrome-4829",
+                    "classList": [
+                      "oZRSLe"
+                    ],
+                    "role": "AXGroup",
+                    "children": [
+                      {
+                        "children": [
+                          {
+                            "identifier": "chrome-4834",
+                            "children": [
+                              {
+                                "children": [
+                                  {
+                                    "role": "AXGroup",
+                                    "identifier": "chrome-4839",
+                                    "classList": [
+                                      "DYfzY",
+                                      "cYKTje",
+                                      "gjg47c"
+                                    ],
+                                    "children": []
+                                  }
+                                ],
+                                "role": "AXGroup",
+                                "identifier": "chrome-4837",
+                                "classList": [
+                                  "qRU4mf",
+                                  "uSECwd",
+                                  "JTEhGf",
+                                  "eQJ1qd"
+                                ]
+                              }
+                            ],
+                            "classList": [
+                              "T4q2od",
+                              "eQJ1qd"
+                            ],
+                            "role": "AXGroup"
+                          }
+                        ],
+                        "role": "AXGroup",
+                        "identifier": "chrome-4832",
+                        "classList": [
+                          "koV58",
+                          "Zi94Db"
+                        ]
+                      },
+                      {
+                        "children": [
+                          {
+                            "identifier": "chrome-4887",
+                            "children": [
+                              {
+                                "children": [
+                                  {
+                                    "role": "AXGroup",
+                                    "identifier": "chrome-4902",
+                                    "classList": [
+                                      "XEazBc",
+                                      "adnwBd"
+                                    ],
+                                    "children": [
+                                      {
+                                        "identifier": "chrome-4908",
+                                        "children": [
+                                          {
+                                            "role": "AXStaticText",
+                                            "identifier": "chrome-4947",
+                                            "children": [],
+                                            "value": "Local Tester",
+                                            "classList": []
+                                          }
+                                        ],
+                                        "role": "AXGroup",
+                                        "classList": []
+                                      }
+                                    ]
+                                  }
+                                ],
+                                "role": "AXGroup",
+                                "identifier": "chrome-4901",
+                                "classList": [
+                                  "OFfHfd",
+                                  "urlhDe",
+                                  "vLRPrf",
+                                  "eQJ1qd"
+                                ]
+                              }
+                            ],
+                            "classList": [
+                              "ZY8hPc",
+                              "eQJ1qd"
+                            ],
+                            "role": "AXGroup"
+                          }
+                        ],
+                        "role": "AXGroup",
+                        "identifier": "chrome-4843",
+                        "classList": []
+                      }
+                    ]
+                  },
+                  {
+                    "role": "AXList",
+                    "description": "Participants",
+                    "identifier": "chrome-5059",
+                    "classList": [
+                      "AE8xFb",
+                      "OrqRRb",
+                      "GvcuGe",
+                      "goTdfd"
+                    ],
+                    "children": [
+                      {
+                        "identifier": "chrome-5060",
+                        "children": [
+                          {
+                            "role": "AXGroup",
+                            "identifier": "chrome-5062",
+                            "children": [],
+                            "classList": [
+                              "BEaVse"
+                            ]
+                          },
+                          {
+                            "role": "AXStaticText",
+                            "identifier": "chrome-5210",
+                            "children": [],
+                            "value": "Local Tester",
+                            "classList": []
+                          },
+                          {
+                            "role": "AXStaticText",
+                            "identifier": "chrome-5211",
+                            "children": [],
+                            "value": "(You)",
+                            "classList": []
+                          },
+                          {
+                            "role": "AXGroup",
+                            "identifier": "chrome-5068",
+                            "children": [
+                              {
+                                "identifier": "chrome-5212",
+                                "classList": [],
+                                "role": "AXStaticText",
+                                "value": "Meeting host",
+                                "children": []
+                              }
+                            ],
+                            "classList": [
+                              "d93U2d",
+                              "qrLqp"
+                            ]
+                          },
+                          {
+                            "role": "AXGroup",
+                            "identifier": "chrome-5072",
+                            "children": [
+                              {
+                                "identifier": "chrome-5080",
+                                "description": "Your microphone is off.",
+                                "classList": [
+                                  "SUtDBe",
+                                  "a7Zbzb"
+                                ],
+                                "role": "AXGroup",
+                                "children": []
+                              }
+                            ],
+                            "classList": [
+                              "JHK7jb",
+                              "Nep7Ue",
+                              "FTMc0c",
+                              "I118Fc"
+                            ]
+                          },
+                          {
+                            "role": "AXGroup",
+                            "identifier": "chrome-5101",
+                            "children": [
+                              {
+                                "identifier": "chrome-5102",
+                                "classList": [],
+                                "role": "AXGroup",
+                                "children": [
+                                  {
+                                    "description": "More actions",
+                                    "children": [
+                                      {
+                                        "identifier": "chrome-5109",
+                                        "classList": [
+                                          "VYBDae-Bz112c-RLmnJb"
+                                        ],
+                                        "children": [],
+                                        "role": "AXGroup"
+                                      }
+                                    ],
+                                    "role": "AXPopUpButton",
+                                    "identifier": "chrome-5104",
+                                    "classList": [
+                                      "VYBDae-Bz112c-LgbsSe",
+                                      "VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc",
+                                      "hk9qKe",
+                                      "t2FmWe",
+                                      "mcyM9d",
+                                      "EXoIMe"
+                                    ]
+                                  }
+                                ]
+                              }
+                            ],
+                            "classList": [
+                              "tB5Jxf-xl07Ob-XxIAqe-OWXEXe-oYxtQd"
+                            ]
+                          }
+                        ],
+                        "role": "AXGroup",
+                        "classList": [
+                          "cxdMu",
+                          "KV1GEc"
+                        ],
+                        "description": "Local Tester"
+                      },
+                      {
+                        "identifier": "chrome-5112",
+                        "children": [
+                          {
+                            "role": "AXGroup",
+                            "identifier": "chrome-5114",
+                            "children": [],
+                            "classList": [
+                              "BEaVse"
+                            ]
+                          },
+                          {
+                            "role": "AXStaticText",
+                            "identifier": "chrome-5215",
+                            "children": [],
+                            "value": "Seashell Test Speaker",
+                            "classList": []
+                          },
+                          {
+                            "role": "AXGroup",
+                            "identifier": "chrome-5121",
+                            "children": [
+                              {
+                                "identifier": "chrome-5123",
+                                "description": "You can't unmute someone else",
+                                "classList": [
+                                  "pYTkkf-Bz112c-LgbsSe",
+                                  "pYTkkf-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc",
+                                  "JAUIm",
+                                  "T08Bz",
+                                  "KNDZcf"
+                                ],
+                                "role": "AXButton",
+                                "children": [
+                                  {
+                                    "children": [],
+                                    "role": "AXGroup",
+                                    "identifier": "chrome-5195",
+                                    "classList": []
+                                  },
+                                  {
+                                    "children": [],
+                                    "role": "AXGroup",
+                                    "identifier": "chrome-5154",
+                                    "classList": [
+                                      "pYTkkf-Bz112c-RLmnJb"
+                                    ]
+                                  }
+                                ]
+                              }
+                            ],
+                            "classList": [
+                              "HFJjfe"
+                            ]
+                          },
+                          {
+                            "role": "AXGroup",
+                            "identifier": "chrome-5157",
+                            "children": [
+                              {
+                                "identifier": "chrome-5158",
+                                "classList": [],
+                                "role": "AXGroup",
+                                "children": [
+                                  {
+                                    "description": "More actions",
+                                    "children": [
+                                      {
+                                        "identifier": "chrome-5165",
+                                        "classList": [
+                                          "VYBDae-Bz112c-RLmnJb"
+                                        ],
+                                        "children": [],
+                                        "role": "AXGroup"
+                                      }
+                                    ],
+                                    "role": "AXPopUpButton",
+                                    "identifier": "chrome-5160",
+                                    "classList": [
+                                      "VYBDae-Bz112c-LgbsSe",
+                                      "VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc",
+                                      "hk9qKe",
+                                      "t2FmWe",
+                                      "mcyM9d",
+                                      "EXoIMe"
+                                    ]
+                                  }
+                                ]
+                              }
+                            ],
+                            "classList": [
+                              "tB5Jxf-xl07Ob-XxIAqe-OWXEXe-oYxtQd"
+                            ]
+                          }
+                        ],
+                        "role": "AXGroup",
+                        "classList": [
+                          "cxdMu",
+                          "KV1GEc"
+                        ],
+                        "description": "Seashell Test Speaker"
+                      }
+                    ]
+                  },
+                  {
+                    "children": [
+                      {
+                        "role": "AXGroup",
+                        "identifier": "chrome-3393",
+                        "classList": [],
+                        "children": []
+                      },
+                      {
+                        "role": "AXGroup",
+                        "identifier": "chrome-3246",
+                        "classList": [
+                          "VYBDae-Bz112c-RLmnJb"
+                        ],
+                        "children": []
+                      }
+                    ],
+                    "role": "AXButton",
+                    "identifier": "chrome-3239",
+                    "description": "Turn on microphone",
+                    "classList": [
+                      "VYBDae-Bz112c-LgbsSe",
+                      "VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc",
+                      "hk9qKe",
+                      "EXoIMe",
+                      "Y3DJRd",
+                      "GgyKtd"
+                    ]
+                  },
+                  {
+                    "children": [
+                      {
+                        "identifier": "chrome-3417",
+                        "children": [],
+                        "classList": [],
+                        "role": "AXGroup"
+                      },
+                      {
+                        "identifier": "chrome-3343",
+                        "children": [],
+                        "classList": [
+                          "VYBDae-Bz112c-RLmnJb"
+                        ],
+                        "role": "AXGroup"
+                      }
+                    ],
+                    "description": "Leave call",
+                    "role": "AXButton",
+                    "identifier": "chrome-3338",
+                    "classList": [
+                      "VYBDae-Bz112c-LgbsSe",
+                      "VYBDae-Bz112c-LgbsSe-OWXEXe-SfQLQb-suEOdc",
+                      "hk9qKe",
+                      "RnWvU",
+                      "xCYCgd",
+                      "EXoIMe"
+                    ]
+                  }
+                ],
+                "classList": [],
+                "url": "https://meet.google.com/abc-defg-hij"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

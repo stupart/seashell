@@ -1,5 +1,5 @@
 import { installHumainPackage, requireHumainNode } from './humain-install.ts';
-import { probeMeetSpeakers, meetPermissionHelp } from './meet-speakers.ts';
+import { checkMeetConnection, requestMeetAccessibilityPermission, meetPermissionHelp, MEETING_ACCESSIBILITY_HELPER } from './meet-speakers.ts';
 import { discoverHumainProviders, resolveHumainExecutable } from './humain-client.ts';
 import { randomUUID } from 'crypto';
 import { spawnSync } from 'child_process';
@@ -278,10 +278,12 @@ interface DoctorCheck {
 export function doctorChecks(options: {
   systemAudioHelper?: string;
   meetingSignalsHelper?: string;
+  meetingAccessibilityHelper?: string;
   systemAudioProbeTimeoutMs?: number;
 } = {}): DoctorCheck[] {
   const systemAudioHelper = options.systemAudioHelper ?? SYSTEM_AUDIO_HELPER;
   const meetingSignalsHelper = options.meetingSignalsHelper ?? MEETING_SIGNALS_HELPER;
+  const meetingAccessibilityHelper = options.meetingAccessibilityHelper ?? MEETING_ACCESSIBILITY_HELPER;
   const commandCheck = (
     name: string,
     required: boolean,
@@ -409,6 +411,12 @@ export function doctorChecks(options: {
     ),
     systemAudioPermissionCheck(),
     meetingSignalCheck(),
+    fileCheck(
+      'meeting-accessibility-helper',
+      meetingAccessibilityHelper,
+      false,
+      'Run ./install.sh; optional Meet names use macOS Accessibility. Set up access with seashell meeting speakers setup.',
+    ),
   ];
 }
 
@@ -473,17 +481,21 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
   switch (command.action.kind) {
     case 'speakers': {
       const selected = command.action.browser;
-      if (selected !== 'check') updateMeetingConfig({ speakerBrowser: selected });
-      const browser = selected === 'check' ? config.meeting?.speakerBrowser ?? 'off' : selected;
+      const browser = selected === 'setup' ? 'auto'
+        : selected === 'check' ? config.meeting?.speakerBrowser ?? 'off' : selected;
+      if (selected !== 'check') updateMeetingConfig({ speakerBrowser: browser });
       if (browser === 'off') {
-        print(command.json ? JSON.stringify({ state: 'off' }) : 'Meet reader off. Connect both browsers automatically: seashell meeting speakers auto.');
+        print(command.json ? JSON.stringify({ state: 'off' }) : 'Meet reader off. Connect with Accessibility: seashell meeting speakers setup.');
         return 0;
       }
-      const result = await probeMeetSpeakers(browser);
+      const result = selected === 'setup'
+        ? await requestMeetAccessibilityPermission()
+        : await checkMeetConnection(browser);
       // Preflight output does not dump participant identifiers or meeting URLs.
       print(command.json ? JSON.stringify({ browser, detectedBrowser: result.browser, state: result.state, detail: result.detail }) : [
-        `Meet names · ${browser} · ${result.state}`, result.detail,
-        ...(result.state === 'permission' ? [] : [meetPermissionHelp(browser)]),
+        `Meet names · Accessibility · ${browser} · ${result.state}`, result.detail,
+        ...(result.state === 'permission' && result.detail !== meetPermissionHelp(browser) ? [meetPermissionHelp(browser)] : []),
+        'Experimental Google Meet support in Chrome. No browser extension or developer setting required.',
         'Reopen Seashell after changing the connection setting. In the app, V also connects/checks names.',
         'Timing hints only: keep participant tiles visible and avoid other audio playback.',
       ].join('\n'));

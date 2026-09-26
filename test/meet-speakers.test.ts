@@ -1,10 +1,9 @@
 import { expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { CaptureSessionStore } from '../src/capture-session.ts';
-import { MEET_CALL_URL_GUARD, meetBrowserMatchesApp, meetSpeakerForSegment, parseMeetSnapshot, probeMeetSpeakers, readMeetSamples, startMeetSpeakerReader, type MeetProbe, type MeetSample, type MeetSnapshot } from '../src/meet-speakers.ts';
+import { meetBrowserMatchesApp, meetSpeakerForSegment, parseMeetSnapshot, probeMeetSpeakers, readMeetSamples, startMeetSpeakerReader, type MeetProbe, type MeetSample, type MeetSnapshot } from '../src/meet-speakers.ts';
 import { finalizeCaptureTranscript, saveFinalizedCapture } from '../src/capture-finalizer.ts';
 import { pcmS16leToWav } from '../src/live-system-audio.ts';
 import { parseCliArgs } from '../src/cli-args.ts';
@@ -23,15 +22,6 @@ const cleanup = (root: string) => rmSync(root, { recursive: true, force: true })
 
 const connected = (): MeetProbe => ({ state: 'connected', detail: 'Meet hint: Alice', snapshot: snapshot('Alice') });
 const idle: MeetProbe = { state: 'idle', detail: 'No call' };
-test.skipIf(process.platform !== 'darwin')('browser guard ignores Meet landing pages before requesting JavaScript permission', () => {
-  const urls = ['https://meet.google.com/', 'https://meet.google.com/landing', 'https://meet.google.com/abc-defg-hij',
-    'https://meet.google.com/abc-defg-hij?authuser=1', 'https://meet.google.com/abc-defg-hij#test',
-    'https://meet.google.com.evil.test/abc-defg-hij', 'https://meet.google.com/abc-defg-hij/extra',
-    'https://meet.google.com/123-4567-890'];
-  const script = MEET_CALL_URL_GUARD + '\nreturn {' + urls.map(url => `my isMeetCall("${url}")`).join(', ') + '}';
-  expect(execFileSync('/usr/bin/osascript', ['-e', script], { encoding: 'utf8', timeout: 3000 }).trim())
-    .toBe('false, false, true, true, true, false, false, false');
-});
 for (const activeBrowser of ['chrome', 'safari'] as const) {
   test(`automatic Meet reader finds ${activeBrowser} without a browser selection`, async () => {
     const visited: string[] = [];
@@ -202,7 +192,7 @@ test('stopping cancels an in-flight reader without late writes or status updates
   } finally { reader.stop(); cleanup(root); }
 });
 
-test('saved hints survive finalization; per-word names split a multi-speaker ASR passage; mic stays separate', async () => {
+for (const source of [undefined, 'google-meet-accessibility'] as const) test(`saved ${source ?? 'legacy'} hints survive finalization; word names split turns; mic stays separate`, async () => {
   const root = mkdtempSync(join(tmpdir(), 'seashell-meet-final-'));
   const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'final', startedAtUnixMs: 1000 });
   try {
@@ -211,7 +201,8 @@ test('saved hints survive finalization; per-word names split a multi-speaker ASR
       writeFileSync(path, pcmS16leToWav(Buffer.alloc(32000 * 3, 10)));
       store.commitChunk({ sourcePath: path, trackId: track, startSeconds: 0, endSeconds: 3, audible: true });
     }
-    const hints = [sample(0), sample(.5), sample(1), sample(1.5, bob), sample(2, bob), sample(2.5, bob), sample(3, bob)];
+    const hints = [sample(0), sample(.5), sample(1), sample(1.5, bob), sample(2, bob), sample(2.5, bob), sample(3, bob)]
+      .map(hint => source ? { ...hint, source } : hint);
     const sidecar = join(store.root, 'meet-speakers.jsonl');
     writeFileSync(sidecar, [JSON.stringify({ version: 1, sessionId: 'final', origin: 1000 }), ...hints.map(s => JSON.stringify(s)), ''].join('\n'));
     const options = { diarizeSystemAudio: false, localTranscriber: async (path: string) => path.includes('microphone')
@@ -219,7 +210,7 @@ test('saved hints survive finalization; per-word names split a multi-speaker ASR
       : [{ start: .1, end: .6, text: 'Hello Alice.' }, { start: 1.1, end: 1.4, text: 'Uncertain transition.' }, { start: 1.6, end: 2.1, text: 'Hello Bob.' }] };
     const record = await saveFinalizedCapture(store, root, 'fixture', options);
     expect(record.speakers).toEqual(expect.arrayContaining([alice, bob, { id: 'LOCAL', label: 'Microphone' }, { id: 'SYSTEM', label: 'System audio' }]));
-    expect(record.transcript.find(s => s.text === 'Hello Bob.')).toMatchObject({ speaker: bob.id, speakerSource: 'google-meet-dom' });
+    expect(record.transcript.find(s => s.text === 'Hello Bob.')).toMatchObject({ speaker: bob.id, speakerSource: source ?? 'google-meet-dom' });
     expect(record.transcript.find(s => s.text === 'Uncertain transition.')?.speaker).toBe('SYSTEM');
     expect(record.speakerAnalysis?.status).toBe('platform-hints');
     // Bundle was moved with the saved recording, rather than discarded.

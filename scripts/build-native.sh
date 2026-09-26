@@ -27,3 +27,11 @@ if [ ! -x "$MEETING_SIGNALS_BINARY" ] || \
         -framework AppKit -framework CoreAudio -o "$BUILD_DIR/seashell-meeting-signals"
     mv -f "$BUILD_DIR/seashell-meeting-signals" "$MEETING_SIGNALS_BINARY"
 fi
+MEETING_ACCESSIBILITY_BINARY=native/bin/seashell-meeting-accessibility
+if [ ! -x "$MEETING_ACCESSIBILITY_BINARY" ] || \
+   [ native/macos-meeting-accessibility.swift -nt "$MEETING_ACCESSIBILITY_BINARY" ]; then
+    xcrun swiftc native/macos-meeting-accessibility.swift -O \
+        -framework AppKit -framework ApplicationServices \
+        -o "$BUILD_DIR/seashell-meeting-accessibility"
+    mv -f "$BUILD_DIR/seashell-meeting-accessibility" "$MEETING_ACCESSIBILITY_BINARY"
+fi

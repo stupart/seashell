@@ -79,6 +79,7 @@ export type NativeSystemAudioEvent =
       readonly operation?: string;
       readonly status?: number;
     }
+  | { readonly type: 'warning'; readonly code: string; readonly message: string }
   | { readonly type: 'stop' };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -164,6 +165,10 @@ export function parseNativeSystemAudioEvent(line: string): NativeSystemAudioEven
         : { status: integer(value.status, 'System-audio error status', Number.MIN_SAFE_INTEGER) }),
     });
   }
+  if (value.type === 'warning') return Object.freeze({
+    type: 'warning', code: text(value.code, 'System-audio warning code'),
+    message: text(value.message, 'System-audio warning message'),
+  });
   if (value.type === 'stop') return Object.freeze({ type: 'stop' as const });
   throw new Error(`Unknown system-audio event type: ${String(value.type)}`);
 }
@@ -351,6 +356,9 @@ export interface StartSystemAudioOptions {
   readonly helperPath?: string;
   readonly chunkMilliseconds?: number;
   readonly minimumChunkMilliseconds?: number;
+  /** Bound recovery from native output-device or format resets. */
+  readonly maxRestarts?: number;
+  readonly restartDelayMs?: number;
   readonly onChunk: (chunk: SystemAudioChunk) => void;
   readonly onState: (update: SystemAudioStateUpdate) => void;
   readonly onLevel?: (level: PcmSignalLevel) => void;
@@ -398,6 +406,63 @@ export function startSystemAudioCapture(
       },
     };
   }
+  // Each attempt gets its own sample clock/chunker. Reusing a previous clock
+  // would close a device-switch gap and move later audio earlier in the meeting.
+  const maximumRestarts = options.maxRestarts ?? 2;
+  let restarts = 0;
+  let stopped = false;
+  let retryEligible = false;
+  let cancelDelay: (() => void) | undefined;
+  let lastChunkEnd: number | undefined;
+  let waitingForRestartChunk = false;
+  const start = () => {
+    retryEligible = false;
+    return startSystemAudioAttempt({ ...options, onChunk(chunk) {
+      if (waitingForRestartChunk && lastChunkEnd !== undefined) {
+        const durationFrames = Math.round((chunk.startSeconds - lastChunkEnd) * LIVE_CAPTURE_SAMPLE_RATE);
+        if (durationFrames > 0) options.onDiscontinuity?.({
+          atFrame: Math.round(lastChunkEnd * LIVE_CAPTURE_SAMPLE_RATE),
+          durationFrames, reason: 'device-reset',
+        });
+      }
+      waitingForRestartChunk = false;
+      options.onChunk(chunk);
+      lastChunkEnd = chunk.endSeconds;
+    }, onState(update) {
+      retryEligible = update.state === 'unavailable' && update.code === 'device_changed';
+      if (retryEligible && !stopped && restarts < maximumRestarts) {
+        options.onState({ state: 'starting', code: 'system_audio_reconnecting',
+          message: 'Computer audio device changed · reconnecting…' });
+      } else options.onState(update);
+    } });
+  };
+  let current = start();
+  const done = (async () => {
+    while (true) {
+      await current.done;
+      if (stopped || !retryEligible || restarts >= maximumRestarts) return;
+      restarts++;
+      waitingForRestartChunk = true;
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(() => { cancelDelay = undefined; resolve(); }, options.restartDelayMs ?? 500);
+        cancelDelay = () => { clearTimeout(timer); cancelDelay = undefined; resolve(); };
+      });
+      if (stopped) { options.onState({ state: 'stopped' }); return; }
+      current = start();
+    }
+  })();
+  return {
+    get process() { return current.process; }, done,
+    stop() {
+      if (stopped) return;
+      stopped = true;
+      cancelDelay?.();
+      current.stop();
+    },
+  };
+}
+
+function startSystemAudioAttempt(options: StartSystemAudioOptions): SystemAudioCaptureHandle {
   const helperPath = options.helperPath ?? SYSTEM_AUDIO_HELPER;
   if (!existsSync(helperPath)) {
     options.onState({
@@ -538,6 +603,9 @@ export function startSystemAudioCapture(
         publishDiscontinuity(event);
       } else if (event.type === 'error') {
         nativeError = event;
+      } else if (event.type === 'warning') {
+        options.onState({ state: firstBufferAtUnixMs !== undefined ? 'active' : helperReady ? 'ready' : 'starting',
+          code: event.code, message: event.message });
       }
     } catch (error) {
       nativeError = {

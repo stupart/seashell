@@ -23,7 +23,7 @@ export interface TranscriptSegment {
   /** Stable diarization cluster ID. Human-readable names live in speakers. */
   speaker?: string;
   /** Meet UI timing is a hint, not isolated participant audio or verified identity. */
-  speakerSource?: 'google-meet-dom';
+  speakerSource?: 'google-meet-dom' | 'google-meet-accessibility';
   text: string;
 }
 

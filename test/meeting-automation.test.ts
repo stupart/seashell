@@ -7,6 +7,7 @@ import {
   MeetingAutomationController,
   parseMeetingSignalSnapshot,
   resolveMeetingCandidate,
+  preserveMeetingCandidateDuringObservationGap,
   type MeetingCandidate,
 } from '../src/meeting-automation.ts';
 import type { MeetingCalendarEvent } from '../src/meeting-artifact.ts';
@@ -236,6 +237,9 @@ test('joined Meet records while muted and distinguishes calls and browsers', () 
   expect(hasConfirmedMeetingEnd(first, joined('/abc-defg-hij', 'safari'))).toBe(true);
   expect(hasConfirmedMeetingEnd(first, { state: 'idle', detail: 'Left' })).toBe(true);
   expect(hasConfirmedMeetingEnd(first, { state: 'permission', detail: 'Blocked' })).toBe(false);
+  expect(hasConfirmedMeetingEnd(first, { state: 'idle', detail: 'Hidden', source: 'google-meet-accessibility' })).toBe(false);
+  expect(hasConfirmedMeetingEnd(first, { state: 'idle', detail: 'Hidden', source: 'google-meet-accessibility', absenceConfirmed: false })).toBe(false);
+  expect(hasConfirmedMeetingEnd(first, { state: 'idle', detail: 'Left', source: 'google-meet-accessibility', absenceConfirmed: true })).toBe(true);
 });
 
 test('connected Meet reader never automatically captures a prejoin microphone preview', () => {
@@ -270,4 +274,49 @@ test('pending consent for a departed meeting cannot start that old meeting', () 
   controller.step(next, 1_000);
   expect(controller.approve()).toBeUndefined();
   expect(controller.step(next, 2_000).kind).toBe('start');
+});
+
+test('unreadable Meet preserves only an already recording call with matching browser audio', () => {
+  const snapshot = { ...silent, inputProcesses: [{ pid: 7, bundleId: 'com.google.Chrome', name: 'Chrome' }] };
+  const call = resolveMeetingCandidate(snapshot, undefined, {}, joined())!;
+  const gap: MeetProbe = { state: 'unavailable', detail: 'Meet tab is not readable' };
+  const audio = resolveMeetingCandidate(snapshot, undefined, {}, gap);
+  const controller = new MeetingAutomationController({ confirmationPolls: 1, endGraceSeconds: 1, maxDurationMinutes: 1 });
+  expect(preserveMeetingCandidateDuringObservationGap(audio, controller.state, snapshot, gap)).toBe(audio);
+  controller.step(call, 0);
+  for (const now of [1_000, 10_000, 59_000]) {
+    const candidate = preserveMeetingCandidateDuringObservationGap(audio, controller.state, snapshot, gap);
+    expect(candidate?.id).toBe(call.id);
+    expect(controller.step(candidate, now).kind).toBe('none');
+    expect(controller.state.phase).toBe('recording');
+  }
+  // Sustained input cannot bypass the maximum duration bound.
+  expect(controller.step(preserveMeetingCandidateDuringObservationGap(audio, controller.state, snapshot, gap), 60_000).kind).toBe('finish');
+});
+
+test('observation-gap continuity never overrides ambiguity, another room, or absent browser audio', () => {
+  const snapshot = { ...silent, inputProcesses: [{ pid: 7, bundleId: 'com.google.Chrome', name: 'Chrome' }] };
+  const controller = new MeetingAutomationController({ confirmationPolls: 1 });
+  controller.step(resolveMeetingCandidate(snapshot, undefined, {}, joined()), 0);
+  for (const probe of [
+    { state: 'ambiguous', detail: 'Multiple calls' },
+    { state: 'idle', detail: 'Left' },
+    joined('/klm-nopq-rst'),
+  ] as MeetProbe[]) {
+    const candidate = resolveMeetingCandidate(snapshot, undefined, {}, probe);
+    expect(preserveMeetingCandidateDuringObservationGap(candidate, controller.state, snapshot, probe)).toBe(candidate);
+  }
+  for (const probe of [
+    { state: 'permission', detail: 'Revoked' },
+    { state: 'idle', detail: 'Hidden tab', source: 'google-meet-accessibility', absenceConfirmed: false },
+  ] as MeetProbe[]) {
+    const candidate = resolveMeetingCandidate(snapshot, undefined, {}, probe);
+    expect(preserveMeetingCandidateDuringObservationGap(candidate, controller.state, snapshot, probe)?.id).toBe(controller.state.candidate?.id);
+  }
+  const gap: MeetProbe = { state: 'unavailable', detail: 'Hidden' };
+  for (const missing of [silent, { ...snapshot, supported: false },
+    { ...snapshot, inputProcesses: [{ pid: 8, bundleId: 'com.apple.Safari', name: 'Safari' }] }]) {
+    const candidate = resolveMeetingCandidate(missing, undefined, {}, gap);
+    expect(preserveMeetingCandidateDuringObservationGap(candidate, controller.state, missing, gap)).toBe(candidate);
+  }
 });

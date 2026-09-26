@@ -56,7 +56,7 @@ export type MeetingCommand = {
         contextFiles?: string[];
       }
     | { kind: 'calendar' }
-    | { kind: 'speakers'; browser: 'auto' | 'chrome' | 'safari' | 'off' | 'check' }
+    | { kind: 'speakers'; browser: 'setup' | 'auto' | 'chrome' | 'safari' | 'off' | 'check' }
     | { kind: 'watch'; once: boolean }
     | { kind: 'consent'; decision: 'approve' | 'decline' }
     | { kind: 'autostart'; operation: 'enable' | 'disable' | 'status' };
@@ -468,10 +468,10 @@ function parseMeeting(args: string[]): MeetingCommand {
   switch (actionName) {
     case 'speakers': {
       const browser = positional[0] ?? 'check';
-      if (positional.length > 1 || !['auto', 'chrome', 'safari', 'off', 'check'].includes(browser)) {
-        throw new Error('Usage: seashell meeting speakers [auto|chrome|safari|off|check]');
+      if (positional.length > 1 || !['setup', 'auto', 'chrome', 'safari', 'off', 'check'].includes(browser)) {
+        throw new Error('Usage: seashell meeting speakers [setup|auto|chrome|safari|off|check]');
       }
-      action = { kind: 'speakers', browser: browser as 'auto' | 'chrome' | 'safari' | 'off' | 'check' };
+      action = { kind: 'speakers', browser: browser as 'setup' | 'auto' | 'chrome' | 'safari' | 'off' | 'check' };
       break;
     }
     case 'create':
@@ -800,7 +800,8 @@ Meeting actions:
                 [--observer-backend <backend> --observer-model <model>]
                 [--reconciliation-backend <backend> --reconciliation-model <model>]
                 [--chat-backend <backend> --chat-model <model>]
-  meeting speakers [auto|chrome|safari|off|check] [--json]
+  meeting speakers setup [--json]           Enable Meet names and open Accessibility setup
+  meeting speakers [auto|chrome|safari|off|check] [--json]  Configure/check without permission prompts
   meeting create <id> [--event-json <path>] [--mode streaming|post-session|hybrid]
   meeting enrich <id> [--mode <mode>] [--backend <backend>] [--model <exact-model>]
                       [--context <json>]
@@ -816,5 +817,6 @@ Configuration precedence:
 
 Machine use:
   stdout contains results only; progress and errors use stderr. Library, doctor,
-  and update commands support JSON. Non-interactive commands never prompt.
+  and update commands support JSON. Read-only status commands never prompt. The
+  explicit meeting speakers setup action can open macOS permission UI.
 `;

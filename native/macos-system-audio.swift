@@ -130,6 +130,8 @@ final class SystemAudioCapture {
     private var firstBufferSeen = false
     private var stopping = false
     private var outputFramesProduced: UInt64 = 0
+    private var routeListeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
+    var onDeviceChanged: (() -> Void)?
 
     init(config: CaptureConfig) {
         self.config = config
@@ -166,6 +168,7 @@ final class SystemAudioCapture {
         try createAggregateDevice(tapUID: tapUID, clockDeviceUID: clockDeviceUID)
         try waitForAggregateDevice()
         try configureConverter()
+        if config.probeMilliseconds == nil { observeAudioRoute() }
         guard let sourceFormat else {
             throw captureError("System-audio source format is unavailable", nil, "source_format")
         }
@@ -188,6 +191,10 @@ final class SystemAudioCapture {
     func stop() {
         if stopping { return }
         stopping = true
+        for (object, var address, block) in routeListeners {
+            AudioObjectRemovePropertyListenerBlock(object, &address, .main, block)
+        }
+        routeListeners.removeAll()
         if aggregateDeviceID != 0 {
             AudioDeviceStop(aggregateDeviceID, ioProcID)
         }
@@ -208,6 +215,36 @@ final class SystemAudioCapture {
         }
         if config.probeMilliseconds == nil { flushPendingPCM() }
         emit(["type": "stop"])
+    }
+
+    /** Rebuild the private aggregate and converter when the hardware route or
+     * tap format changes. The parent preserves audio and starts a fresh clock;
+     * it must not keep interpreting new-format packets with the old converter. */
+    private func observeAudioRoute() {
+        let properties: [(AudioObjectID, AudioObjectPropertySelector)] = [
+            (AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultOutputDevice),
+            (AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultSystemOutputDevice),
+            (tapID, kAudioTapPropertyFormat),
+            (aggregateDeviceID, kAudioDevicePropertyDeviceIsAlive),
+        ]
+        var unavailable = false
+        for (object, selector) in properties {
+            var address = AudioObjectPropertyAddress(mSelector: selector,
+                mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                guard let self, !self.stopping else { return }
+                emit(["type": "error", "code": "device_changed",
+                      "message": "Computer audio device changed; reopening capture."])
+                self.onDeviceChanged?()
+            }
+            let status = AudioObjectAddPropertyListenerBlock(object, &address, .main, block)
+            guard status == noErr else { unavailable = true; continue }
+            routeListeners.append((object, address, block))
+        }
+        if unavailable {
+            emit(["type": "warning", "code": "route_watch_unavailable",
+                  "message": "Some audio device changes cannot be monitored. If audio stops after switching devices, pause and resume recording."])
+        }
     }
 
     private func createAggregateDevice(tapUID: String, clockDeviceUID: String) throws {
@@ -582,6 +619,7 @@ if #available(macOS 14.2, *) {
         capture.stop()
         exit(code)
     }
+    capture.onDeviceChanged = { stopAndExit(1) }
 
     signal(SIGINT, SIG_IGN)
     signal(SIGTERM, SIG_IGN)
