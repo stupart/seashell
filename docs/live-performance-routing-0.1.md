@@ -79,10 +79,19 @@ Humain is optional. A cloud route requires its CLI and OpenRouter setup, but a
 missing or failed Humain enrichment never prevents local capture, recovery,
 library storage, or export.
 
+The routing choices above apply to foreground drafts. Background meeting drafts
+currently always use local Whisper, regardless of cloud/adaptive draft settings.
+They start inference only for audible committed chunks, allow at most four
+pending jobs plus the active job, and stop their owned worker before the pinned
+canonical final route runs. Missing local models or queue pressure delay the
+preview; the original audio remains available for finalization. Background AI
+notes still run after capture. See [recording confidence](recording-confidence.md)
+for source health, retained warnings, and the distinction between saved audio
+and displayed text.
+
 ## Measured checkpoint
 
 On the development Mac, the exact installed
 `ggml-large-v3-turbo-q5_0.bin` model transcribed a 3.7518-second fixture with a
 2.030-second median at four threads (real-time factor `0.5411`). This evidence
 is machine- and model-specific; another installation must benchmark itself.
-

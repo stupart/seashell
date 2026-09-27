@@ -224,6 +224,7 @@ type ErrorListener = (error: Error) => void;
  */
 export class MeetingSignalMonitor {
   readonly #helperPath: string;
+  readonly #helperArgs: readonly string[];
   readonly #intervalMs: number;
   #child?: ChildProcess;
   #buffer = '';
@@ -236,8 +237,9 @@ export class MeetingSignalMonitor {
   #lastHeartbeat = 0;
   #stopped = true;
 
-  constructor(helperPath = MEETING_SIGNALS_HELPER, intervalMs = 3_000) {
+  constructor(helperPath = MEETING_SIGNALS_HELPER, intervalMs = 3_000, helperArgs: readonly string[] = []) {
     this.#helperPath = helperPath;
+    this.#helperArgs = [...helperArgs];
     this.#intervalMs = Math.max(250, Math.min(60_000, Math.round(intervalMs)));
   }
 
@@ -250,6 +252,7 @@ export class MeetingSignalMonitor {
     this.#lastHeartbeat = performance.now();
     this.#heartbeatTimer ??= setInterval(() => this.checkHeartbeat(), this.#intervalMs);
     const child = spawn(this.#helperPath, [
+      ...this.#helperArgs,
       '--watch',
       '--interval-ms',
       String(this.#intervalMs),

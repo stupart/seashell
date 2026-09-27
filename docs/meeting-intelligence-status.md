@@ -64,10 +64,13 @@ The enriched JSON combines transcript and meeting data; Markdown/SRT/VTT exports
 currently retain the same transcript content rather than weaving model claims
 into the spoken text.
 
-The background watcher deliberately avoids live ASR. It captures first, then
-transcribes and runs configured enrichment after the meeting. Selecting hybrid
-there processes observer windows after capture; it does not provide live notes
-while the terminal app is closed.
+The background watcher now transcribes committed chunks into local live drafts
+with a bounded queue. It stops that draft worker before final transcription,
+then runs configured enrichment after the meeting. Selecting hybrid there
+processes observer windows after capture; it does not provide live AI notes
+while the terminal app is closed. Draft delays cannot delete durable audio.
+Independent source health and warnings survive finalization; see the
+[recording confidence contract](recording-confidence.md).
 
 ## Relationship with Humain
 

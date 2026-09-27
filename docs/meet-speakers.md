@@ -35,17 +35,23 @@ does not start recording or change launch-at-login settings. Seashell cannot
 approve its own macOS permission.
 
 The background host is a private copy of the Bun runtime at
-`~/Library/Application Support/Sea Shell/Runtime/bun`. Its executable path stays
+`~/Library/Application Support/Sea Shell/Runtime/Seashell Background`. Its executable path stays
 the same across versioned Homebrew installations, while the watcher loads the
 current app through Homebrew's stable `opt` path. Explicit speaker setup or
 `seashell meeting autostart enable` installs or refreshes this runtime; ordinary
-checks do not. This is the current CLI packaging solution. A signed Mac app with
+checks do not. The executable basename is **Seashell Background**, which is the
+expected name to look for in permission settings; the exact displayed name is
+controlled by macOS and still needs platform acceptance. The signed bytes and
+Bun signing identifier remain unchanged; Seashell does not re-sign the runtime.
+This is the current CLI packaging solution. A signed Mac app with
 its own app identity remains the planned onboarding experience.
 
 **Upgrading an older background watcher:** finish any recording, run
 `seashell meeting autostart enable`, then `seashell meeting speakers setup`.
-macOS may require a new grant for the stable host, which can appear as **bun**.
-Enable the entry requested by setup, then check again. Connection checks flag a
+macOS may require a new grant for **Seashell Background**, including when moving
+from an older `Runtime/bun` host. Enable the entry requested by setup, then check
+again. Setup leaves the old runtime file and existing system permission entries
+alone. Connection checks flag a
 legacy watcher registration instead of claiming it uses the new permission.
 Setup never silently restarts a recorder. macOS still controls all grants and
 may require reauthorization after a runtime identity change or permission reset.
@@ -146,9 +152,9 @@ poll; permission errors and ambiguous interfaces use the configured end grace
 before stopping. Other meeting apps continue to use process-audio detection.
 
 Enable persistent background capture with `seashell meeting autostart enable`.
-It records without live inference, publishes one History entry per call at
-capture start, and prepares the transcript after departure while watching for
-the next meeting. This requires the Mac to be awake and the login service
+It publishes one History entry per call at capture start and updates that entry
+with local live transcript drafts during the meeting. After departure, a final
+pass refines the transcript while the watcher listens for the next meeting. This requires the Mac to be awake and the login service
 active. Grant Accessibility from explicit speaker setup before relying on
 automatic boundaries; the background service will not interrupt you with
 permission dialogs. Real-call, background-tab, and minimized-window behavior

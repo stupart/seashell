@@ -10,6 +10,7 @@ interface MeetingConsentCommand {
   readonly id: string;
   readonly decision: MeetingConsentDecision;
   readonly createdAtUnixMs: number;
+  readonly consentId?: string;
 }
 
 export function meetingConsentPath(): string {
@@ -20,6 +21,7 @@ export function writeMeetingConsent(
   decision: MeetingConsentDecision,
   path = meetingConsentPath(),
   nowUnixMs = Date.now(),
+  consentId?: string,
 ): string {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
@@ -28,6 +30,7 @@ export function writeMeetingConsent(
     id: randomUUID(),
     decision,
     createdAtUnixMs: nowUnixMs,
+    ...(consentId === undefined ? {} : { consentId }),
   };
   try {
     writeFileSync(temporary, `${JSON.stringify(command)}\n`, {
@@ -46,6 +49,7 @@ export function consumeMeetingConsent(
   path = meetingConsentPath(),
   nowUnixMs = Date.now(),
   maximumAgeMs = 120_000,
+  expectedConsentId?: string,
 ): MeetingConsentDecision | undefined {
   if (!existsSync(path)) return undefined;
   let value: unknown;
@@ -61,5 +65,6 @@ export function consumeMeetingConsent(
       !Number.isSafeInteger(command.createdAtUnixMs)) return undefined;
   if (nowUnixMs < Number(command.createdAtUnixMs) ||
       nowUnixMs - Number(command.createdAtUnixMs) > maximumAgeMs) return undefined;
+  if (command.consentId !== undefined && (typeof command.consentId !== 'string' || command.consentId !== expectedConsentId)) return undefined;
   return command.decision;
 }

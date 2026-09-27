@@ -354,6 +354,8 @@ export interface StartSystemAudioOptions {
   readonly startupWaitMs?: number;
   readonly sessionStartedAtUnixMs: number;
   readonly helperPath?: string;
+  /** Prefix arguments for running a helper through an explicit interpreter. */
+  readonly helperArgs?: readonly string[];
   readonly chunkMilliseconds?: number;
   readonly minimumChunkMilliseconds?: number;
   /** Bound recovery from native output-device or format resets. */
@@ -520,6 +522,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions): SystemAudioC
 
   options.onState({ state: 'starting', message: 'Requesting system-audio access…' });
   const child = spawn(helperPath, [
+    ...(options.helperArgs ?? []),
     '--sample-rate', String(LIVE_CAPTURE_SAMPLE_RATE),
     '--chunk-ms', '100',
   ], { stdio: ['ignore', 'pipe', 'pipe'] });

@@ -239,20 +239,27 @@ The TUI accepts `M`/`X`; the background watcher posts a notification and accepts
 recording.
 
 Once started, Sea Shell atomically commits microphone and system-audio WAV
-chunks on one session clock. The background watcher deliberately keeps Whisper
-and diarization unloaded during the call. A confirmed Meet departure stops
+chunks on one session clock. The background watcher also creates local live
+transcript drafts from those saved chunks, using one lazily started Whisper
+server and a bounded queue. If transcription falls behind, audio continues to
+save and the final pass fills draft gaps. Diarization runs after capture.
+A confirmed Meet departure stops
 capture immediately at the next poll. Other app signals and unreadable Meet
 pages use a 20-second grace period before stopping. Sea Shell queues final transcription, optional local
 diarization and attendee-backed speaker labeling, and optional Humain notes.
 The watcher can re-arm while prior post-processing finishes. If system audio
-permission fails, useful microphone-only capture continues; a model failure
+permission fails, useful microphone-only capture continues; if the microphone
+fails, available computer audio still saves. A model failure
 cannot delete already committed audio.
 
 The TUI and background watcher share one per-user lock. Opening Sea Shell while
 the login watcher owns capture gives a live library view without starting a
 second recorder. In a wide terminal, History opens on the left automatically.
 Each call appears as soon as capture starts, with its time and a recording (●)
-or processing (◐) indicator. Open entries refresh when transcription completes.
+or processing (◐) indicator. Open entries refresh as draft text arrives, then
+show the refined final transcript. Source health, saved-audio progress, and
+draft status remain separate so a delayed transcript cannot look like a stopped
+recorder.
 Press **H** to show or hide History; narrow terminals use a drawer.
 The login watcher continues after the TUI closes and re-arms for the next call.
 Logs live under `~/Library/Application Support/Sea Shell/Logs`.
@@ -264,8 +271,11 @@ Seashell. Setup requests access for both this window and the background host.
 Allow the entries macOS shows in **System Settings → Privacy & Security →
 Accessibility**, then run `seashell meeting speakers check` to verify both scopes.
 Terminal access alone does not enable background meeting detection.
-The background runtime stays at `~/Library/Application Support/Sea Shell/Runtime/bun`
-so its path does not change with each Homebrew release. Older installations need
+The background runtime stays at
+`~/Library/Application Support/Sea Shell/Runtime/Seashell Background`
+so its path does not change with each Homebrew release. Its executable is named
+**Seashell Background**; macOS controls the name shown in permission settings.
+Older installations need
 one migration: finish recording, run `seashell meeting autostart enable`, then
 `seashell meeting speakers setup` and allow the new entry macOS shows.
 No extension or browser developer setting is required. Normal launch, background
@@ -301,8 +311,12 @@ The test reports microphone and system signal independently and deletes only
 its own test recording. During capture, the status row labels **Microphone** and
 **Computer audio** separately. “Starting…” means the source is still opening;
 computer audio “ready” means the helper opened, and its meter appears after the
-first audio buffer. Readiness alone does not prove an audible signal. Audio is
-still saved durably without exposing storage counters in the normal view.
+first audio buffer. Readiness alone does not prove an audible signal. The
+background recording view shows saved-audio progress separately from live text.
+Quiet input may mean silence or mute; it is not a permission diagnosis. Source
+warnings remain attached to the saved meeting, including after recovery or
+completion. Receiving audio or detecting sound does not prove intelligible
+speech was captured. See the [capture health contract](docs/recording-confidence.md).
 
 With the TUI and login watcher stopped, run one cheap detection probe without
 recording a full meeting (only one watcher can own detection):
@@ -566,8 +580,9 @@ The three enrichment modes share one artifact contract:
   meeting, resolving late corrections and reversals before publishing final
   notes.
 
-Live observation runs in the open TUI. The background watcher records without
-live ASR and runs configured enrichment after the meeting ends. `post-session`
+Live AI observation runs in the open TUI. The background watcher creates local
+transcript drafts during capture and runs configured AI enrichment after the
+meeting ends. Its live drafts do not enable live Humain notes. `post-session`
 is the simplest starting point for notes on completed recordings; live-draft
 to final-transcript citation handling still needs the hardening described in
 the [status guide](docs/meeting-intelligence-status.md#remaining-work).

@@ -76,9 +76,11 @@ chat
 - Automatic meeting detection is on by default. Dedicated meeting apps and
   calendar-corroborated browser calls auto-start; browser microphone use
   without Calendar evidence asks by default. Calendar alone never records.
-- The background login watcher captures durably without running live ASR. The
-  visible TUI may still provide live draft ASR; both surfaces share one lock and
-  can never create duplicate capture sessions.
+- The background login watcher captures durably and publishes local live ASR
+  drafts from committed chunks. The visible TUI follows that saved projection;
+  both surfaces share one lock and cannot create duplicate capture sessions.
+  Live AI enrichment remains a separate TUI feature; background enrichment
+  runs after final transcription.
 - Ambiguous background browser detection posts a macOS notification. A private,
   single-use `meeting consent approve|decline` command expires after two minutes
   so approval cannot leak into a later call.

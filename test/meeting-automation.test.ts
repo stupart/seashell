@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -42,12 +42,12 @@ describe('meeting signal parsing and candidate resolution', () => {
     const root = mkdtempSync(join(tmpdir(), 'seashell-signal-stale-'));
     temporaryRoots.push(root);
     const helper = join(root, 'signal-helper');
-    writeFileSync(helper, `#!${process.execPath}
+    writeFileSync(helper, `
 console.log(JSON.stringify({schemaVersion:1,capturedAtUnixMs:Date.now(),supported:true,
   inputProcesses:[{pid:42,bundleId:'us.zoom.xos',name:'Zoom'}]}));
 setInterval(() => {}, 1000);
-`, { mode: 0o700 });
-    const monitor = new MeetingSignalMonitor(helper, 250);
+`, { mode: 0o600 });
+    const monitor = new MeetingSignalMonitor(process.execPath, 250, [helper]);
     const errors: string[] = [];
     monitor.onError((error) => errors.push(error.message));
     try {
@@ -62,7 +62,7 @@ setInterval(() => {}, 1000);
     const root = mkdtempSync(join(tmpdir(), 'seashell-signal-restart-'));
     temporaryRoots.push(root);
     const helper = join(root, 'signal-helper');
-    writeFileSync(helper, `#!${process.execPath}
+    writeFileSync(helper, `
 import {existsSync,writeFileSync} from 'fs';
 const marker = ${JSON.stringify(join(root, 'started'))};
 if (!existsSync(marker)) {
@@ -71,8 +71,8 @@ if (!existsSync(marker)) {
   console.log(JSON.stringify({schemaVersion:1,capturedAtUnixMs:2000,supported:true,inputProcesses:[]}));
   setInterval(() => {}, 1000);
 }
-`, { mode: 0o700 });
-    const monitor = new MeetingSignalMonitor(helper, 250);
+`, { mode: 0o600 });
+    const monitor = new MeetingSignalMonitor(process.execPath, 250, [helper]);
     let timer: ReturnType<typeof setTimeout>;
     const restarted = new Promise<number>((resolve, reject) => {
       monitor.subscribe((snapshot) => resolve(snapshot.capturedAtUnixMs));
@@ -87,8 +87,8 @@ if (!existsSync(marker)) {
     const root = mkdtempSync(join(tmpdir(), 'seashell-signal-stop-'));
     temporaryRoots.push(root);
     const helper = join(root, 'signal-helper');
-    writeFileSync(helper, `#!${process.execPath}\nsetInterval(() => {}, 1000);\n`, { mode: 0o700 });
-    const monitor = new MeetingSignalMonitor(helper, 250);
+    writeFileSync(helper, 'setInterval(() => {}, 1000);\n', { mode: 0o600 });
+    const monitor = new MeetingSignalMonitor(process.execPath, 250, [helper]);
     const pending = monitor.waitForSnapshot(1_000).catch((error: Error) => error.message);
     const startedAt = Date.now();
     monitor.stop();
@@ -100,31 +100,39 @@ if (!existsSync(marker)) {
     const root = mkdtempSync(join(tmpdir(), 'seashell-signal-monitor-'));
     temporaryRoots.push(root);
     const helper = join(root, 'signal-helper');
-    writeFileSync(helper, `#!/bin/sh
-printf '%s\\n' '{"schemaVersion":1,"capturedAtUnixMs":1000,"supported":true,"inputProcesses":[]}'
-sleep 0.05
-printf '%s\\n' '{"schemaVersion":1,"capturedAtUnixMs":2000,"supported":true,"inputProcesses":[]}'
-sleep 0.05
-`, { mode: 0o700 });
-    chmodSync(helper, 0o700);
-    const monitor = new MeetingSignalMonitor(helper, 250);
+    writeFileSync(helper, `
+console.log(JSON.stringify({schemaVersion:1,capturedAtUnixMs:1000,supported:true,inputProcesses:[]}));
+await Bun.sleep(50);
+console.log(JSON.stringify({schemaVersion:1,capturedAtUnixMs:2000,supported:true,inputProcesses:[]}));
+setInterval(() => {}, 1000);
+`, { mode: 0o600 });
+    const monitor = new MeetingSignalMonitor(process.execPath, 250, [helper]);
     const seen: number[] = [];
     const unsubscribe = monitor.subscribe((snapshot) => seen.push(snapshot.capturedAtUnixMs));
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let removeSecond = () => {};
     const secondSnapshot = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('second streamed snapshot timed out')), 1_000);
-      const remove = monitor.subscribe((snapshot) => {
+      timeout = setTimeout(() => reject(new Error('second streamed snapshot timed out')), 1_000);
+      removeSecond = monitor.subscribe((snapshot) => {
         if (snapshot.capturedAtUnixMs !== 2_000) return;
         clearTimeout(timeout);
-        remove();
+        removeSecond();
         resolve();
       });
     });
-    expect((await monitor.waitForSnapshot(1_000)).capturedAtUnixMs).toBe(1_000);
-    await secondSnapshot;
-    expect(seen).toEqual([1_000, 2_000]);
-    expect(monitor.latest().capturedAtUnixMs).toBe(2_000);
-    unsubscribe();
-    monitor.stop();
+    try {
+      // Observe both rejections immediately so a startup failure cannot leave
+      // the second timeout unhandled or skip detector cleanup.
+      const [first] = await Promise.all([monitor.waitForSnapshot(1_000), secondSnapshot]);
+      expect(first.capturedAtUnixMs).toBe(1_000);
+      expect(seen).toEqual([1_000, 2_000]);
+      expect(monitor.latest().capturedAtUnixMs).toBe(2_000);
+    } finally {
+      clearTimeout(timeout);
+      removeSecond();
+      unsubscribe();
+      monitor.stop();
+    }
   });
 
   test('requires a real audio-input owner; calendar alone never starts recording', () => {
