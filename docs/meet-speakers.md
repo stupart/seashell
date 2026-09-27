@@ -32,8 +32,23 @@ host. **Terminal access alone does not enable background meeting detection.**
 The explicit connection check verifies both scopes without prompting and tells
 you which scope still needs access. It uses a temporary background check; it
 does not start recording or change launch-at-login settings. Seashell cannot
-approve its own macOS permission. A packaged app will need a stable app identity
-for polished one-time onboarding.
+approve its own macOS permission.
+
+The background host is a private copy of the Bun runtime at
+`~/Library/Application Support/Sea Shell/Runtime/bun`. Its executable path stays
+the same across versioned Homebrew installations, while the watcher loads the
+current app through Homebrew's stable `opt` path. Explicit speaker setup or
+`seashell meeting autostart enable` installs or refreshes this runtime; ordinary
+checks do not. This is the current CLI packaging solution. A signed Mac app with
+its own app identity remains the planned onboarding experience.
+
+**Upgrading an older background watcher:** finish any recording, run
+`seashell meeting autostart enable`, then `seashell meeting speakers setup`.
+macOS may require a new grant for the stable host, which can appear as **bun**.
+Enable the entry requested by setup, then check again. Connection checks flag a
+legacy watcher registration instead of claiming it uses the new permission.
+Setup never silently restarts a recorder. macOS still controls all grants and
+may require reauthorization after a runtime identity change or permission reset.
 
 Normal launch, background polling, and **Check Meet connection** never request
 permission or open System Settings. The CLI `auto`, `chrome`, and `safari`

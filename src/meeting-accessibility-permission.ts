@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
+import { inspectMeetingRuntimeHost, prepareMeetingRuntimeHost, type RuntimeHostOptions } from './runtime-host.ts';
 
 export interface BackgroundAccessibilityProbe {
   state: 'permission' | 'idle' | 'unavailable';
@@ -11,7 +12,9 @@ export interface BackgroundAccessibilityProbe {
 }
 interface BackgroundPermissionOptions {
   helperPath: string;
+  /** Explicit host override for isolated tests or managed deployments. */
   bunPath?: string;
+  runtimeHost?: RuntimeHostOptions;
   requestPermission?: boolean;
   signal?: AbortSignal;
 }
@@ -86,7 +89,20 @@ export async function probeBackgroundMeetingAccessibility(
   const unavailable = (detail: string): BackgroundAccessibilityProbe => ({ state: 'unavailable', detail });
   if ((runtime.platform ?? process.platform) !== 'darwin') return unavailable('Background Accessibility requires macOS.');
   if (options.signal?.aborted) return unavailable('Background Accessibility check cancelled.');
-  const bun = options.bunPath ?? process.execPath;
+  let bun = options.bunPath;
+  if (!bun) {
+    try {
+      if (options.requestPermission === true) bun = prepareMeetingRuntimeHost(options.runtimeHost);
+      else {
+        const host = inspectMeetingRuntimeHost(options.runtimeHost);
+        if (!host.ready) return unavailable(host.detail);
+        bun = host.path;
+      }
+    } catch (error) {
+      return unavailable(error instanceof Error ? error.message : 'Could not prepare the Seashell background host.');
+    }
+  }
+  if (options.signal?.aborted) return unavailable('Background Accessibility check cancelled.');
   const uid = runtime.uid ?? process.getuid?.();
   if (!isAbsolute(bun) || !isAbsolute(options.helperPath) || uid === undefined || !Number.isInteger(uid) || uid < 0) {
     return unavailable('Could not locate the Seashell background host.');

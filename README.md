@@ -264,6 +264,10 @@ Seashell. Setup requests access for both this window and the background host.
 Allow the entries macOS shows in **System Settings → Privacy & Security →
 Accessibility**, then run `seashell meeting speakers check` to verify both scopes.
 Terminal access alone does not enable background meeting detection.
+The background runtime stays at `~/Library/Application Support/Sea Shell/Runtime/bun`
+so its path does not change with each Homebrew release. Older installations need
+one migration: finish recording, run `seashell meeting autostart enable`, then
+`seashell meeting speakers setup` and allow the new entry macOS shows.
 No extension or browser developer setting is required. Normal launch, background
 watching, and connection checks never request this permission automatically.
 For names while your Meet microphone is unmuted, keep Meet's **People /

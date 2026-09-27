@@ -13,6 +13,7 @@ import {
 import { homedir } from 'os';
 import { dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { meetingRuntimeHostPath, prepareMeetingRuntimeHost, type RuntimeHostOptions } from './runtime-host.ts';
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const SEASHELL_LAUNCH_AGENT_LABEL = 'com.humain.seashell.meeting-watch';
@@ -32,6 +33,7 @@ export interface LaunchAtLoginOptions {
   readonly runner?: typeof spawnSync;
   readonly logsDir?: string;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly runtimeHost?: RuntimeHostOptions;
 }
 
 function xml(value: string): string {
@@ -53,7 +55,7 @@ function paths(options: LaunchAtLoginOptions = {}) {
     root,
     launchAgentsDir,
     plistPath: join(launchAgentsDir, `${SEASHELL_LAUNCH_AGENT_LABEL}.plist`),
-    executable: join(root, 'seashell'),
+    entrypoint: join(root, 'src', 'cli.tsx'),
     logsDir: resolve(options.logsDir ?? join(support, 'Logs')),
   };
 }
@@ -64,7 +66,7 @@ function launchDomain(options: LaunchAtLoginOptions): string {
 
 function command(options: LaunchAtLoginOptions = {}): readonly string[] {
   const resolved = paths(options);
-  return Object.freeze([resolved.executable, 'meeting', 'watch', '--json']);
+  return Object.freeze([meetingRuntimeHostPath(options.runtimeHost), 'run', resolved.entrypoint, 'meeting', 'watch', '--json']);
 }
 
 function plist(options: LaunchAtLoginOptions = {}): string {
@@ -145,7 +147,8 @@ export function enableMeetingLaunchAtLogin(
   options: LaunchAtLoginOptions = {},
 ): LaunchAtLoginStatus {
   const resolved = paths(options);
-  if (!existsSync(resolved.executable)) throw new Error(`Sea Shell launcher is missing: ${resolved.executable}`);
+  if (!existsSync(resolved.entrypoint)) throw new Error(`Sea Shell entrypoint is missing: ${resolved.entrypoint}`);
+  prepareMeetingRuntimeHost(options.runtimeHost);
   mkdirSync(resolved.launchAgentsDir, { recursive: true, mode: 0o700 });
   mkdirSync(resolved.logsDir, { recursive: true, mode: 0o700 });
   for (const name of ['meeting-watch.jsonl', 'meeting-watch.error.log']) {
@@ -154,16 +157,21 @@ export function enableMeetingLaunchAtLogin(
     chmodSync(log, 0o600);
   }
   const temporary = `${resolved.plistPath}.${process.pid}.tmp`;
+  const runner = options.runner ?? spawnSync;
+  const domain = launchDomain(options);
   try {
     writeFileSync(temporary, plist(options), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    if (loaded(options)) {
+      const stopped = runner('launchctl', ['bootout', `${domain}/${SEASHELL_LAUNCH_AGENT_LABEL}`], { encoding: 'utf8' });
+      if (stopped.error || stopped.status !== 0) {
+        throw new Error(`Could not stop the previous meeting watcher: ${stopped.stderr?.trim() || stopped.error?.message || `exit ${stopped.status}`}`);
+      }
+    }
     renameSync(temporary, resolved.plistPath);
   } catch (error) {
     rmSync(temporary, { force: true });
     throw error;
   }
-  const runner = options.runner ?? spawnSync;
-  const domain = launchDomain(options);
-  if (loaded(options)) runner('launchctl', ['bootout', domain, resolved.plistPath], { stdio: 'ignore' });
   const result = runner('launchctl', ['bootstrap', domain, resolved.plistPath], {
     encoding: 'utf8',
   });

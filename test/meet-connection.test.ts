@@ -6,6 +6,7 @@ test('connection setup checks both permission owners without prompts during chec
   let foreground: MeetProbe = { state: 'idle', detail: 'Join a call', accessibilityTrusted: true };
   let background: BackgroundAccessibilityProbe = { state: 'permission', detail: 'Background host needs access', accessibilityTrusted: false };
   let abortDuringForeground: AbortController | undefined;
+  let registrationWarning: string | undefined;
   const calls: string[] = [];
   const runtime = {
     async read(_mode: unknown, _signal?: AbortSignal, options?: MeetAccessibilityOptions): Promise<MeetProbe> {
@@ -18,6 +19,7 @@ test('connection setup checks both permission owners without prompts during chec
       return background;
     },
     async openSettings() { calls.push('open-settings'); },
+    registrationWarning() { return registrationWarning; },
   };
   expect((await checkMeetConnection('auto', undefined, runtime)).state).toBe('permission');
   expect(calls.splice(0)).toEqual(['check-foreground', 'check-background']);
@@ -35,6 +37,12 @@ test('connection setup checks both permission owners without prompts during chec
   foreground = { state: 'unavailable', detail: 'Unsupported layout', accessibilityTrusted: true };
   await requestMeetAccessibilityPermission(undefined, runtime);
   expect(calls.splice(0)).toEqual(['request-foreground', 'request-background']);
+
+  registrationWarning = 'Finish recording, then migrate the old watcher';
+  expect((await checkMeetConnection('auto', undefined, runtime)).detail).toBe(registrationWarning);
+  expect((await requestMeetAccessibilityPermission(undefined, runtime)).state).toBe('unavailable');
+  expect(calls.splice(0)).toEqual(['check-foreground', 'check-background', 'request-foreground', 'request-background']);
+  registrationWarning = undefined;
   foreground = { state: 'idle', detail: 'No current call', accessibilityTrusted: true };
   expect((await requestMeetAccessibilityPermission(undefined, runtime)).detail).toContain('this window and background');
   expect(calls.splice(0)).toEqual(['request-foreground', 'request-background']);
