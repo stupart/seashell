@@ -45,9 +45,7 @@ import type { TranscriptFormat, TranscriptRecord } from './transcript-types.ts';
 import { transcribeMedia } from './transcription-service.ts';
 import {
   startSystemAudioCapture,
-  type PcmSignalLevel,
   type SystemAudioCaptureHandle,
-  type SystemAudioCaptureState,
   type LiveCaptureClock,
 } from './live-system-audio.ts';
 import {
@@ -73,6 +71,10 @@ import AIProviderPicker from './AISettings.tsx';
 import SpeakerSettings from './SpeakerSettings.tsx';
 import { startMeetSpeakerReader, meetBrowserMatchesApp, probeMeetSpeakers, type MeetSpeakerReader, type MeetProbe } from './meet-speakers.ts';
 import { backgroundMeetingMessage } from './background-meeting-status.ts';
+import { readBackgroundWatchStatus, type BackgroundWatchStatus } from './background-watch-status.ts';
+import { writeMeetingConsent } from './meeting-consent.ts';
+import { CaptureHealthTracker, type CaptureHealthSnapshot } from './capture-health.ts';
+import RecordingStatus, { captureRecordingMode } from './RecordingStatus.tsx';
 import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { runHumainTranscription } from './humain-client.ts';
@@ -164,13 +166,6 @@ function truncate(value: string, width: number): string {
   return value.length <= width ? value : `${value.slice(0, width - 1)}…`;
 }
 
-function levelMeter(level: PcmSignalLevel | null, width = 8): string {
-  const dbfs = level?.rmsDbfs ?? Number.NEGATIVE_INFINITY;
-  const ratio = Number.isFinite(dbfs) ? Math.max(0, Math.min(1, (dbfs + 60) / 54)) : 0;
-  const active = Math.round(ratio * width);
-  return `${'▮'.repeat(active)}${'·'.repeat(width - active)}`;
-}
-
 function useTerminalSize(): { columns: number; rows: number } {
   const read = () => ({
     columns: process.stdout.columns ?? 100,
@@ -214,20 +209,16 @@ export default function App(props: { libraryDir?: string } = {}) {
   );
 
   const [listenerState, setListenerState] = useState<ListenerState>('listening');
-  const [systemAudioState, setSystemAudioState] = useState<SystemAudioCaptureState>(
-    systemAudioDisabled ? 'unavailable' : initiallyPaused ? 'stopped' : 'starting',
-  );
-  const [microphoneState, setMicrophoneState] = useState<SystemAudioCaptureState>(
-    listenerDisabled ? 'unavailable' : initiallyPaused ? 'stopped' : 'starting',
-  );
-  const [microphoneLevel, setMicrophoneLevel] = useState<PcmSignalLevel | null>(null);
-  const [microphoneIssue, setMicrophoneIssue] = useState<string | null>(null);
-  const [systemAudioLevel, setSystemAudioLevel] = useState<PcmSignalLevel | null>(null);
   const [transcribingCount, setTranscribingCount] = useState(0);
-  const [draftTranscriptionRoute, setDraftTranscriptionRoute] = useState<TranscriptionRoute>('local');
   const [paused, setPaused] = useState(initiallyPaused);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [backgroundWatch, setBackgroundWatch] = useState<BackgroundWatchStatus>();
+  const [backgroundApproval, setBackgroundApproval] = useState<string>();
+  const [audioHelpOpen, setAudioHelpOpen] = useState(false);
+  const [statusNow, setStatusNow] = useState(Date.now());
+  const [liveHealth, setLiveHealth] = useState<CaptureHealthSnapshot>();
+  const liveHealthTracker = useRef<CaptureHealthTracker | undefined>(undefined);
   const [copied, setCopied] = useState(false);
   const [processing, setProcessing] = useState<ProcessingState | null>(null);
   const [exitRequested, setExitRequested] = useState(false);
@@ -294,7 +285,13 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   const refreshLibrary = useCallback(() => {
     setLibraryEntries(listTranscriptRecords(libraryRoot));
+    setBackgroundWatch(readBackgroundWatchStatus(libraryRoot));
   }, [libraryRoot]);
+
+  useEffect(() => {
+    const interval = setInterval(() => setStatusNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     refreshLibrary();
@@ -313,8 +310,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     if (!lock) {
       setWatchOwnership('external');
       if (!layout.compact) setHistoryOpen(true);
-      setNotice('Background meeting watch is active; this window is showing its transcript library.');
-      const interval = setInterval(refreshLibrary, 5_000);
+      const interval = setInterval(refreshLibrary, 1_000);
       return () => clearInterval(interval);
     }
     meetingWatchLock.current = lock;
@@ -444,7 +440,6 @@ export default function App(props: { libraryDir?: string } = {}) {
       setError(routeError instanceof Error ? routeError.message : String(routeError));
       selectedRoute = 'local';
     }
-    setDraftTranscriptionRoute(selectedRoute);
     if (selectedRoute === 'local' && !localAsrServer.current) {
       const selected = loadLocalAsrProfile(MODEL_PATH);
       const profile: LocalAsrProfile = {
@@ -581,6 +576,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     if (systemAudioDisabled || isExiting.current || pausedRef.current) return;
     systemAudioCapture.current?.stop();
     const generation = liveSessionGeneration.current;
+    const healthTracker = liveHealthTracker.current;
     const capture = startSystemAudioCapture({
       startAfter: microphoneCapture.current?.startup,
       sessionStartedAtUnixMs: ensureLiveSessionStartedAt(),
@@ -611,10 +607,13 @@ export default function App(props: { libraryDir?: string } = {}) {
           }`);
         });
       },
-      onLevel: setSystemAudioLevel,
+      onLevel: (level) => {
+        if (generation !== liveSessionGeneration.current || healthTracker !== liveHealthTracker.current) return;
+        if (healthTracker) setLiveHealth(healthTracker.pcm('systemAudio', level));
+      },
       onState: (update) => {
-        if (generation !== liveSessionGeneration.current) return;
-        setSystemAudioState(update.state);
+        if (generation !== liveSessionGeneration.current || healthTracker !== liveHealthTracker.current) return;
+        if (healthTracker) setLiveHealth(healthTracker.state('systemAudio', update));
         if (update.state === 'unavailable' && update.message) {
           setNotice(`System audio unavailable; continuing with microphone only. ${update.message}`);
         }
@@ -627,6 +626,9 @@ export default function App(props: { libraryDir?: string } = {}) {
     if (listenerDisabled || isExiting.current || pausedRef.current) return;
     microphoneCapture.current?.stop();
     const sessionGeneration = liveSessionGeneration.current;
+    const healthTracker = new CaptureHealthTracker({ systemAudio: !systemAudioDisabled });
+    liveHealthTracker.current = healthTracker;
+    setLiveHealth(healthTracker.snapshot);
     const capture = startMicrophoneCapture({
       sessionStartedAtUnixMs: ensureLiveSessionStartedAt(),
       onChunk: (chunk) => {
@@ -643,17 +645,17 @@ export default function App(props: { libraryDir?: string } = {}) {
         });
       },
       onLevel: (level) => {
-        setMicrophoneLevel(level);
+        if (sessionGeneration !== liveSessionGeneration.current || healthTracker !== liveHealthTracker.current) return;
+        setLiveHealth(healthTracker.pcm('microphone', level));
         setListenerState(level.rmsDbfs >= -55 ? 'recording' : 'listening');
       },
       onState: (update) => {
-        if (sessionGeneration !== liveSessionGeneration.current) return;
-        setMicrophoneState(update.state);
-        setMicrophoneIssue(update.code && update.message ? update.message : null);
+        if (sessionGeneration !== liveSessionGeneration.current || healthTracker !== liveHealthTracker.current) return;
+        setLiveHealth(healthTracker.state('microphone', update));
       },
     });
     microphoneCapture.current = capture;
-  }, [ensureLiveSessionStartedAt, listenerDisabled, persistLiveChunk, transcribeLiveChunk]);
+  }, [ensureLiveSessionStartedAt, listenerDisabled, persistLiveChunk, systemAudioDisabled, transcribeLiveChunk]);
 
   useEffect(() => {
     if (listenerDisabled) return;
@@ -699,11 +701,6 @@ export default function App(props: { libraryDir?: string } = {}) {
       setListenerState('listening');
       systemAudioCapture.current?.stop();
       systemAudioCapture.current = null;
-      setMicrophoneState('stopped');
-      setMicrophoneIssue(null);
-      setMicrophoneLevel(null);
-      setSystemAudioLevel(null);
-      if (!systemAudioDisabled) setSystemAudioState('stopped');
       void Promise.all(captureHandles.map((handle) => handle.done)).then(async () => {
         await captureSessionStore.current?.drainCommits();
         if (pausedRef.current) captureSessionStore.current?.setStatus('paused');
@@ -782,6 +779,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       setView('record');
       setMeetingView('transcript');
       setTranscriptScroll(0);
+      setFollowLiveTranscript(true);
       setSpeakerSelection(0);
       setError(null);
     } catch (openError) {
@@ -818,8 +816,26 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   const currentRecord = view === 'live' ? liveRecord : selectedRecord;
   const currentMeeting = view === 'live' ? liveMeeting : selectedMeeting;
+  const currentEntry = view === 'record' ? libraryEntries.find(entry => entry.id === selectedRecord?.id) : undefined;
+  const activeBackgroundEntry = watchOwnership === 'external'
+    ? libraryEntries.find(entry => entry.id === backgroundWatch?.sessionId && entry.captureState === 'recording') ??
+      libraryEntries.find(entry => entry.captureState === 'recording') : undefined;
+  const followedBackgroundId = useRef<string | undefined>(undefined);
+  const backgroundEntry = view === 'record' ? currentEntry : activeBackgroundEntry;
+  const currentRecordBusy = currentEntry?.captureState === 'recording' || currentEntry?.captureState === 'processing';
+  const backgroundRecording = backgroundEntry?.captureState === 'recording';
+  const showBackgroundStatus = (watchOwnership === 'external' && view === 'live') || Boolean(currentEntry?.captureState);
+  useEffect(() => {
+    if (watchOwnership !== 'external' || !activeBackgroundEntry || followedBackgroundId.current === activeBackgroundEntry.id) return;
+    if (view === 'live' || selectedRecord?.id === followedBackgroundId.current) {
+      openRecord(activeBackgroundEntry);
+      setSelectionIndex(Math.max(0, navigationItems.findIndex(item => item.kind === 'record' && item.entry.id === activeBackgroundEntry.id)));
+      setFollowLiveTranscript(true);
+    }
+    followedBackgroundId.current = activeBackgroundEntry.id;
+  }, [watchOwnership, view, activeBackgroundEntry?.id, selectedRecord?.id, openRecord, navigationItems]);
   const backgroundMessage = view === 'record'
-    ? backgroundMeetingMessage(libraryEntries.find(entry => entry.id === selectedRecord?.id)?.captureState)
+    ? backgroundMeetingMessage(currentEntry?.captureState)
     : undefined;
   const drawerOnly = historyOpen && layout.compact;
   const mainPanelColumns = historyOpen && !drawerOnly
@@ -834,7 +850,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     0,
     selectionIndex - layout.visibleLibraryItems + 1,
   );
-  const showingLiveTranscript = view === 'live' && meetingView === 'transcript';
+  const showingLiveTranscript = meetingView === 'transcript' && (view === 'live' || currentEntry?.captureState === 'recording');
   const latestTranscriptScroll = Math.max(0, displayRows.length - visibleRows);
   const visibleTranscriptScroll = showingLiveTranscript && followLiveTranscript
     ? latestTranscriptScroll
@@ -1306,8 +1322,6 @@ export default function App(props: { libraryDir?: string } = {}) {
       setTranscriptScroll(0);
       setNotice('Started a fresh live transcript.');
       setFollowLiveTranscript(true);
-      setMicrophoneLevel(null);
-      setSystemAudioLevel(null);
       if (resumeCapture) {
         startListener();
         startSystemListener();
@@ -1622,6 +1636,17 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
 
+    if (audioHelpOpen) {
+      if (input === 'i' || key.escape) { setAudioHelpOpen(false); return; }
+      if (input === 'o' || input === 'p') {
+        const target = input === 'o' ? 'x-apple.systempreferences:com.apple.preference.sound?input'
+          : 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone';
+        const opened = spawnSync('/usr/bin/open', [target], { stdio: 'ignore' });
+        if (opened.error || opened.status !== 0) setError('Open System Settings, then Sound → Input or Privacy & Security → Microphone.');
+      }
+      return;
+    }
+
     if (helpMode) {
       if (input === '?' || key.escape) {
         setHelpMode(false);
@@ -1650,6 +1675,23 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
     if (processing) return;
+    if (input === 'i') { setAudioHelpOpen(true); return; }
+    if (watchOwnership === 'external' && (input === 'm' || input === 'x') && backgroundWatch?.phase === 'awaiting-consent') {
+      const current = readBackgroundWatchStatus(libraryRoot);
+      if (current?.phase !== 'awaiting-consent' || !current.consentId || current.consentId !== backgroundWatch.consentId) {
+        refreshLibrary(); setNotice('The meeting request changed. Check its current status before recording.'); return;
+      }
+      try {
+        writeMeetingConsent(input === 'm' ? 'approve' : 'decline', undefined, Date.now(), current.consentId);
+        setBackgroundApproval(current.consentId);
+        setNotice(input === 'm' ? 'Start requested. Waiting for the recorder to confirm.' : 'Ignore requested.');
+      } catch (cause) { setError(`Could not send the meeting decision: ${cause instanceof Error ? cause.message : String(cause)}`); }
+      return;
+    }
+    if (currentRecordBusy && ['r', 'd', 'g', 'a', 'e', 'm'].includes(input)) {
+      setNotice('This meeting is still recording or finishing. Review and edit it once the final transcript is ready.');
+      return;
+    }
     if (input === 'v') { setSpeakerSetupOpen(true); return; }
     if (input === 'p') { setAiSetupIntent(null); setAiSetupOpen(true); return; }
     if (key.tab || input === '\t' || input === 'h') {
@@ -1662,6 +1704,12 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
     if (input === 'l') {
+      if (activeBackgroundEntry) {
+        openRecord(activeBackgroundEntry);
+        setHistoryOpen(false);
+        setFollowLiveTranscript(true);
+        return;
+      }
       setView('live');
       setMeetingView('transcript');
       setFollowLiveTranscript(true);
@@ -1827,7 +1875,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
   }, { isActive: !aiSetupOpen && !speakerSetupOpen });
 
-  if (speakerSetupOpen) return <SpeakerSettings recording={!paused && !listenerDisabled}
+  if (speakerSetupOpen) return <SpeakerSettings recording={Boolean(activeBackgroundEntry) || (!paused && !listenerDisabled)}
     browser={config.meeting?.speakerBrowser ?? 'off'}
     meetStatus={meetSpeakerStatus}
     onBrowser={(browser) => {
@@ -1835,10 +1883,10 @@ export default function App(props: { libraryDir?: string } = {}) {
       setConfig(current => ({ ...current, meeting: { ...current.meeting, speakerBrowser: browser } }));
       setMeetSpeakerStatus(undefined);
     }}
-    canIdentify={view === 'record' && Boolean(selectedRecord)}
+    canIdentify={view === 'record' && Boolean(selectedRecord) && !currentRecordBusy}
     onClose={() => setSpeakerSetupOpen(false)}
     onIdentify={() => {
-      if (view !== 'record' || !selectedRecord) return;
+      if (view !== 'record' || !selectedRecord || currentRecordBusy) return;
       setSpeakerSetupOpen(false);
       setProcessing({ label: 'Separating speakers…' });
       setError(null);
@@ -1851,7 +1899,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         .finally(() => setProcessing(null));
     }} />;
 
-  if (aiSetupOpen) return <AIProviderPicker current={config.meeting} recording={!paused && !listenerDisabled}
+  if (aiSetupOpen) return <AIProviderPicker current={config.meeting} recording={Boolean(activeBackgroundEntry) || (!paused && !listenerDisabled)}
     onClose={() => { setAiSetupIntent(null); setAiSetupOpen(false); }}
     onSave={(patch) => {
       const saved = updateMeetingConfig(patch);
@@ -1877,7 +1925,11 @@ export default function App(props: { libraryDir?: string } = {}) {
           : transcribingCount > 0
             ? 'yellow'
             : 'green';
-  const primaryCommands = historyOpen
+  const primaryCommands = watchOwnership === 'external' && backgroundWatch?.phase === 'awaiting-consent'
+    ? terminal.columns < 56 ? '[M]Record [X]Ignore [H]History [Q]Quit' : '[M] Record meeting  [X] Ignore  [H] History  [?] Help  [Q] Quit'
+    : watchOwnership === 'external' && view === 'live'
+      ? terminal.columns < 56 ? '[H]History [V]Setup [I]Audio [?] [Q]Quit' : '[H] History  [V] Meet setup  [I] Audio help  [?] Help  [Q] Quit'
+    : historyOpen
     ? terminal.columns < 56
       ? '[↑↓] Browse  [↵] Open  [ESC] Close'
       : '[↑↓] Browse  [ENTER] Open  [/] Search  [H/ESC] Close'
@@ -1886,6 +1938,8 @@ export default function App(props: { libraryDir?: string } = {}) {
         ? terminal.columns < 56
           ? `[SPC] ${paused ? 'Rec' : 'Pause'} [G] End [P] AI [Q] Quit`
           : `[SPACE] ${paused ? 'Record' : 'Pause'}  [A] Ask  [G] Finish  [H] History  [P] AI  [?] Help  [Q] Quit`
+        : currentEntry?.captureState === 'recording'
+          ? terminal.columns < 56 ? '[L]Latest [H]History [I]Audio [?] [Q]Quit' : '[L] Latest  [H] History  [I] Audio help  [?] Help  [Q] Quit'
         : terminal.columns < 56
           ? '[A] Ask [G] Notes [H] List [P] AI [Q] Quit'
           : '[A] Ask  [G] Enrich  [H] History  [P] AI  [?] Help  [Q] Quit'
@@ -2014,64 +2068,61 @@ export default function App(props: { libraryDir?: string } = {}) {
         </Box>
       )}
 
-      {view === 'live' && !paused && microphoneIssue && (
-        <Box marginBottom={1} flexShrink={0}>
-          <Text color="yellow">{microphoneIssue}</Text>
-        </Box>
-      )}
+      {view === 'record' && backgroundWatch?.phase === 'awaiting-consent' && <Box marginBottom={1} flexShrink={0}>
+        <Text color="yellow">Not recording {backgroundWatch.candidate?.title} · [M] Record  [X] Ignore</Text>
+      </Box>}
 
-      {(processing || view === 'record' || !paused || !automaticMeetingEnabled ||
-        watchOwnership === 'external' || watchOwnership === 'checking' ||
-        automationPhase === 'confirming') && (
-        <Box marginBottom={1} flexShrink={0}>
-          {processing ? (
-            <Text color="magenta">
-              ◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}
-            </Text>
-          ) : view === 'record' ? (
-            <Text color="cyan" wrap="truncate-end">
-              {currentMeeting ? 'Meeting · ' : ''}{truncate(title, Math.max(12, terminal.columns - 6))}
-            </Text>
-          ) : paused ? (
-            <Text dimColor>{automaticMeetingEnabled
-              ? watchOwnership === 'external'
-                ? '○ Background meeting watch active'
-                : watchOwnership === 'checking'
-                  ? '○ Starting meeting watch…'
-                  : 'Checking meeting signal…'
-              : '⏸ Paused'}</Text>
-          ) : (
-            <Text>
-              <Text color={microphoneState !== 'active' && systemAudioState !== 'active' && systemAudioState !== 'ready'
-                ? 'yellow' : listenerState === 'recording' ? 'red' : 'green'}>
-                {microphoneState === 'active' || systemAudioState === 'active' || systemAudioState === 'ready'
-                  ? '◉ Recording'
-                  : microphoneState === 'starting' || systemAudioState === 'starting'
-                    ? '◌ Starting recording…'
-                    : 'Audio unavailable · press Space twice to retry'}
-              </Text>
-              {transcribingCount > 0 && (
-                <Text color="yellow">
-                  {' + '}◐ Draft {draftTranscriptionRoute}{transcribingCount > 1 ? ` (${transcribingCount})` : ''}
-                </Text>
-              )}
-            </Text>
-          )}
-        </Box>
-      )}
+      {activeBackgroundEntry && backgroundEntry?.id !== activeBackgroundEntry.id && <Box marginBottom={1} flexShrink={0}>
+        <Text color="yellow">{backgroundWatch?.phase === 'recording' ? 'Another meeting is recording' : 'Another meeting needs attention'} · [L] View current meeting</Text>
+      </Box>}
 
-      {view === 'live' && !paused && (
+      {audioHelpOpen ? <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1} marginBottom={1}>
+        <Text bold>Audio help</Text>
+        <Text>Quiet can mean you are muted or not speaking. It does not prove a permission problem.</Text>
+        <Text>[O] Sound → Input: choose your microphone and check its input level.</Text>
+        <Text>[P] Microphone permission: allow Seashell Background or your terminal, as shown by macOS.</Text>
+        <Text>Background access can differ from terminal access. [I] or [Esc] Back</Text>
+      </Box> : null}
+
+      {showBackgroundStatus ? <RecordingStatus
+        mode={backgroundRecording ? backgroundWatch?.phase === 'recording' && backgroundWatch.sessionId === backgroundEntry?.id ? captureRecordingMode(backgroundEntry?.captureHealth) : 'unavailable'
+          : view === 'live' && backgroundWatch?.phase === 'awaiting-consent' ? 'awaiting-consent'
+          : backgroundEntry?.captureState === 'processing' ? 'processing'
+          : backgroundEntry?.captureState === 'ready' ? 'ready'
+          : backgroundEntry?.captureState === 'failed' || backgroundEntry?.captureState === 'interrupted' ? 'unavailable'
+          : backgroundWatch?.phase === 'watching' ? 'watching' : 'unavailable'}
+        title={view === 'live' && backgroundWatch?.phase === 'awaiting-consent' ? backgroundWatch.candidate?.title : backgroundEntry?.title}
+        health={backgroundEntry?.captureHealth}
+        elapsedSeconds={backgroundEntry ? (statusNow - new Date(backgroundEntry.createdAt).getTime()) / 1000 : undefined}
+        savedThroughSeconds={backgroundEntry?.audioSavedThroughMs === undefined
+          ? backgroundEntry?.captureState === 'ready' ? backgroundEntry.duration : undefined
+          : backgroundEntry.audioSavedThroughMs / 1000}
+        draftLabel={backgroundEntry?.captureState === 'recording'
+          ? backgroundEntry.draftStatus?.stage === 'delayed' ? 'Live transcript delayed · final pass will retry'
+            : backgroundEntry.draftStatus?.stage === 'transcribing' ? 'Live transcript updating…'
+            : backgroundEntry.draftStatus?.stage === 'live' ? 'Live draft · updates as people speak'
+            : 'Live transcript waiting for speech'
+          : backgroundEntry?.captureState === 'processing' ? 'Final transcript in progress' : undefined}
+        warning={backgroundWatch?.phase === 'unavailable' ? backgroundWatch.warning : backgroundRecording && !backgroundWatch ? 'The recorder has not confirmed its status. Check seashell meeting watch status.' : undefined}
+        approvalPending={backgroundWatch?.consentId !== undefined && backgroundApproval === backgroundWatch.consentId}
+        nowUnixMs={statusNow}
+      /> : view === 'live' ? <RecordingStatus
+        mode={paused ? automaticCandidate ? 'awaiting-consent' : automaticMeetingEnabled ? 'watching' : 'paused' : captureRecordingMode(liveHealth)}
+        title={automaticCandidate?.title}
+        health={liveHealth}
+        elapsedSeconds={(statusNow - (liveSessionStartedAt.current ?? statusNow)) / 1000}
+        savedThroughSeconds={Math.max(0, ...(captureSessionStore.current?.manifest.chunks.map(chunk => chunk.endMs / 1000) ?? []))}
+        draftLabel={paused ? undefined : transcribingCount ? 'Live transcript updating…' : liveRecord.transcript.length ? 'Live draft' : 'Live transcript waiting for speech'}
+        nowUnixMs={statusNow}
+      /> : null}
+
+      {(processing || (view === 'record' && !showBackgroundStatus)) && (
         <Box marginBottom={1} flexShrink={0}>
-          <Text>
-            <Text dimColor>Microphone </Text>
-            <Text color={microphoneState === 'active' ? 'green' : 'yellow'}>
-              {microphoneState === 'starting' ? 'starting…' : microphoneState === 'active' ? levelMeter(microphoneLevel) : microphoneState}
-            </Text>
-            <Text dimColor>{terminal.columns < 56 ? '  Computer ' : '  Computer audio '}</Text>
-            <Text color={systemAudioState === 'active' || systemAudioState === 'ready' ? 'cyan' : 'yellow'}>
-              {systemAudioState === 'starting' ? 'starting…' : systemAudioState === 'active' ? levelMeter(systemAudioLevel) : systemAudioState}
-            </Text>
-          </Text>
+          {processing ? <Text color="magenta">
+            ◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}
+          </Text> : <Text color="cyan" wrap="truncate-end">
+            {currentMeeting ? 'Meeting · ' : ''}{truncate(title, Math.max(12, terminal.columns - 6))}
+          </Text>}
         </Box>
       )}
 

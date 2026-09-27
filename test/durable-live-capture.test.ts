@@ -3,7 +3,12 @@ import { spawn, type ChildProcess } from 'child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { startDurableLiveCapture } from '../src/durable-live-capture.ts';
+import { startDurableLiveCapture, type DurableLiveCaptureStatus } from '../src/durable-live-capture.ts';
+import { readCaptureHealth } from '../src/capture-health.ts';
+import { saveFinalizedCapture } from '../src/capture-finalizer.ts';
+import { createTranscriptRecord } from '../src/transcript-record.ts';
+import { listTranscriptRecords } from '../src/transcript-library.ts';
+import { readVerifiedCaptureChunk } from '../src/capture-session.ts';
 import type { StartMicrophoneOptions } from '../src/live-microphone.ts';
 import {
   pcmS16leToWav,
@@ -158,4 +163,58 @@ test('keeps a valid microphone capture when optional system audio is unavailable
   expect(manifest.status).toBe('captured');
   expect(manifest.chunks).toHaveLength(1);
   expect(warnings).toEqual(['Permission missing']);
+});
+
+test('a failed microphone still preserves system capture, committed paths and saved source warnings', async () => {
+  const libraryDir = mkdtempSync(join(tmpdir(), 'seashell-durable-health-'));
+  roots.push(libraryDir);
+  const statuses: DurableLiveCaptureStatus[] = [];
+  const committed: string[] = [];
+  const handle = startDurableLiveCapture({
+    libraryDir, sessionId: 'failed-mic-with-system',
+    microphoneStarter: () => { throw new Error('Input could not open'); },
+    systemAudioStarter: options => {
+      options.onState({ state: 'active' });
+      options.onChunk({ path: fixture(libraryDir, 'remote.wav'), startSeconds: 2, endSeconds: 3,
+        sequence: 1, source: 'system-audio', audible: true,
+        level: { rms: 100, peak: 1000, rmsDbfs: -45 },
+        clock: { kind: 'process-start-estimate', originUnixMs: Date.now(), sampleRate: 16_000, uncertaintyMs: 2 },
+      });
+      return { done: Promise.resolve(), stop() {} };
+    },
+    onStatus: status => statuses.push(status),
+    onCommittedChunk: chunk => {
+      committed.push(chunk.path);
+      expect(readVerifiedCaptureChunk(handle.manifestPath, chunk).length).toBeGreaterThan(44);
+      expect(chunk.path).not.toBe(join(libraryDir, 'remote.wav'));
+    },
+  });
+  expect(statuses.every(status => status.audioSavedThroughMs === 0)).toBe(true);
+  const manifest = await handle.stop();
+  expect(manifest.status).toBe('captured');
+  expect(committed).toHaveLength(1);
+  expect(statuses.at(-1)?.audioSavedThroughMs).toBe(3000);
+  expect(readCaptureHealth(handle.store.root)?.microphone).toMatchObject({ state: 'stopped',
+    warnings: [expect.objectContaining({ kind: 'unavailable', message: 'Input could not open' })] });
+  await saveFinalizedCapture(handle.store, libraryDir, 'test', { finalizedRecord: createTranscriptRecord({ transcript: [], speakers: [] }, { id: handle.sessionId }) });
+  expect(listTranscriptRecords(libraryDir)[0]?.captureHealth?.microphone.warnings[0]?.message).toBe('Input could not open');
+});
+
+test('quiet/reconnecting cautions persist independently of legacy active/stopped state', async () => {
+  const libraryDir = mkdtempSync(join(tmpdir(), 'seashell-durable-quiet-'));
+  roots.push(libraryDir);
+  const handle = startDurableLiveCapture({ libraryDir, systemAudio: false,
+    microphoneStarter: options => {
+      options.onState({ state: 'starting', code: 'microphone_reconnecting', message: 'Input reconnecting, attempt 1' });
+      options.onState({ state: 'active', code: 'microphone_quiet', message: 'Input is quiet; check if speaking.' });
+      return { process: {} as ChildProcess, done: Promise.resolve(), stop() {} };
+    },
+  });
+  expect(handle.health?.microphone.state).toBe('quiet');
+  await handle.stop();
+  const health = readCaptureHealth(handle.store.root)!;
+  expect(health.microphone.state).toBe('stopped');
+  expect(health.systemAudio.state).toBe('disabled');
+  expect(health.microphone.warnings.map(w => w.kind)).toEqual(['reconnecting', 'quiet']);
+  expect(health.microphone.warnings.every(w => w.resolvedAtUnixMs === undefined)).toBe(true);
 });

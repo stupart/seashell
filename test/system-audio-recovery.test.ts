@@ -15,14 +15,14 @@ function helper(root: string, body: string): { path: string; count: () => number
   const path = join(root, 'helper');
   const counter = join(root, 'attempts');
   writeFileSync(counter, '0');
-  writeFileSync(path, `#!${process.execPath}
+  writeFileSync(path, `
 import {readFileSync,writeFileSync} from 'fs';
 const counter=${JSON.stringify(counter)};
 const attempt=Number(readFileSync(counter,'utf8'))+1;
 writeFileSync(counter,String(attempt));
 const event = value => process.stderr.write(JSON.stringify(value)+'\\n');
 ${body}
-`, { mode: 0o755 });
+`, { mode: 0o600 });
   return { path, count: () => Number(readFileSync(counter, 'utf8')) };
 }
 
@@ -37,7 +37,7 @@ setInterval(()=>{},1000);
 `);
   const capture = startDurableLiveCapture({ libraryDir: root, sessionId: 'route-recovery', microphone: false,
     chunkMilliseconds: 100,
-    systemAudioStarter: options => startSystemAudioCapture({ ...options, helperPath: fake.path,
+    systemAudioStarter: options => startSystemAudioCapture({ ...options, helperPath: process.execPath, helperArgs: [fake.path],
       minimumChunkMilliseconds: 20, restartDelayMs: 100 }),
   });
   try {
@@ -62,7 +62,7 @@ test('system audio route recovery has a retry bound and does not retry permissio
     const root = mkdtempSync(join(tmpdir(), 'seashell-route-bound-'));
     const fake = helper(root, `event({type:'error',code:${JSON.stringify(code)},message:'Cannot capture'});`);
     const states: SystemAudioStateUpdate[] = [];
-    const capture = startSystemAudioCapture({ helperPath: fake.path, sessionStartedAtUnixMs: Date.now(),
+    const capture = startSystemAudioCapture({ helperPath: process.execPath, helperArgs: [fake.path], sessionStartedAtUnixMs: Date.now(),
       maxRestarts: 1, restartDelayMs: 10, onState: state => states.push(state), onChunk() {} });
     try {
       await capture.done;
@@ -77,7 +77,7 @@ test('stopping during output route recovery prevents a late capture process', as
   const root = mkdtempSync(join(tmpdir(), 'seashell-route-stop-'));
   const fake = helper(root, `event({type:'error',code:'device_changed',message:'Route changed'});`);
   const states: SystemAudioStateUpdate[] = [];
-  const capture = startSystemAudioCapture({ helperPath: fake.path, sessionStartedAtUnixMs: Date.now(),
+  const capture = startSystemAudioCapture({ helperPath: process.execPath, helperArgs: [fake.path], sessionStartedAtUnixMs: Date.now(),
     restartDelayMs: 500, onState: state => states.push(state), onChunk() {} });
   try {
     await until(() => states.some(state => state.code === 'system_audio_reconnecting'));
@@ -98,7 +98,7 @@ setInterval(()=>{},1000);
 `);
   const states: SystemAudioStateUpdate[] = [];
   let chunks = 0;
-  const capture = startSystemAudioCapture({ helperPath: fake.path, sessionStartedAtUnixMs: Date.now(),
+  const capture = startSystemAudioCapture({ helperPath: process.execPath, helperArgs: [fake.path], sessionStartedAtUnixMs: Date.now(),
     chunkMilliseconds: 100, minimumChunkMilliseconds: 20,
     onState: state => states.push(state), onChunk: chunk => { chunks++; rmSync(chunk.path); } });
   try {

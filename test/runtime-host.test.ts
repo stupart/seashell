@@ -32,7 +32,7 @@ test('read-only status does not create or repair a missing host', () => {
 test('explicit setup copies signed Bun privately and updates with atomic replacement', () => {
   const h = fixture();
   const path = prepareMeetingRuntimeHost(h.options);
-  expect(path).toBe(join(h.options.hostDirectory!, 'bun'));
+  expect(path).toBe(join(h.options.hostDirectory!, 'Seashell Background'));
   expect(readFileSync(path, 'utf8')).toBe('signed runtime version one');
   expect(statSync(path).mode & 0o777).toBe(0o700);
   expect(statSync(h.options.hostDirectory!).mode & 0o777).toBe(0o700);
@@ -43,7 +43,7 @@ test('explicit setup copies signed Bun privately and updates with atomic replace
   prepareMeetingRuntimeHost(h.options);
   expect(statSync(path).ino).not.toBe(inode);
   expect(readFileSync(path, 'utf8')).toBe('signed runtime version two');
-  expect(readdirSync(h.options.hostDirectory!)).toEqual(['bun']);
+  expect(readdirSync(h.options.hostDirectory!)).toEqual(['Seashell Background']);
   expect(inspectMeetingRuntimeHost(h.options).ready).toBe(true);
   expect(h.calls.some(call => call.includes('--sign'))).toBe(false);
 });
@@ -71,7 +71,7 @@ test('bad or ad-hoc signatures cannot install or replace the last working host',
   const adhoc = (() => ({ status: 0, stdout: '', stderr: 'Identifier=bun\nSignature=adhoc\nTeamIdentifier=not set\n' })) as unknown as typeof spawnSync;
   expect(() => prepareMeetingRuntimeHost({ ...h.options, runner: adhoc })).toThrow('developer-signed');
   expect(readFileSync(path, 'utf8')).toBe('signed runtime version one');
-  expect(readdirSync(h.options.hostDirectory!)).toEqual(['bun']);
+  expect(readdirSync(h.options.hostDirectory!)).toEqual(['Seashell Background']);
 });
 
 test('a failed copied signature check leaves the existing executable intact', () => {
@@ -84,7 +84,7 @@ test('a failed copied signature check leaves the existing executable intact', ()
   }) as unknown as typeof spawnSync;
   expect(() => prepareMeetingRuntimeHost({ ...h.options, runner })).toThrow('invalid or missing');
   expect(readFileSync(path, 'utf8')).toBe('signed runtime version one');
-  expect(readdirSync(h.options.hostDirectory!)).toEqual(['bun']);
+  expect(readdirSync(h.options.hostDirectory!)).toEqual(['Seashell Background']);
 });
 
 test('symlink and hardlink destinations are rejected without touching their target', () => {
@@ -113,4 +113,20 @@ test('a symlink host directory is not followed and read-only checks never chmod'
   chmodSync(meetingRuntimeHostPath(h.options), 0o755);
   expect(inspectMeetingRuntimeHost(h.options).ready).toBe(false);
   expect(statSync(meetingRuntimeHostPath(h.options)).mode & 0o777).toBe(0o755);
+});
+
+test('legacy bun is not reused, deleted or changed when installing the named host', () => {
+  const h = fixture();
+  mkdirSync(h.options.hostDirectory!, { recursive: true, mode: 0o700 });
+  const legacy = join(h.options.hostDirectory!, 'bun');
+  writeFileSync(legacy, 'existing legacy runtime', { mode: 0o700 });
+  const legacyInode = statSync(legacy).ino;
+  expect(inspectMeetingRuntimeHost(h.options).ready).toBe(false);
+  const installed = prepareMeetingRuntimeHost(h.options);
+  expect(installed).toBe(join(h.options.hostDirectory!, 'Seashell Background'));
+  expect(readFileSync(installed, 'utf8')).toBe('signed runtime version one');
+  expect(readFileSync(legacy, 'utf8')).toBe('existing legacy runtime');
+  expect(statSync(legacy).ino).toBe(legacyInode);
+  expect(inspectMeetingRuntimeHost(h.options).ready).toBe(true);
+  expect(h.calls.every(call => call[0] === '/usr/bin/codesign' && !call.includes('--sign'))).toBe(true);
 });

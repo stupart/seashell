@@ -1,8 +1,14 @@
 import { setTimeout as sleep } from 'timers/promises';
+import { randomUUID } from 'node:crypto';
+import { claimManagedProcessSignalOwnership } from './process-lifecycle.ts';
 import { finalizeCaptureTranscript } from './capture-finalizer.ts';
 import { readMacCalendarEventsAsync, suggestCalendarMeeting } from './calendar.ts';
 import { meetBrowserMatchesApp, probeMeetSpeakers } from './meet-speakers.ts';
 import { writeBackgroundMeetingState, type BackgroundMeetingState } from './background-meeting-status.ts';
+import { writeBackgroundWatchStatus } from './background-watch-status.ts';
+import { startBackgroundLiveTranscript, type BackgroundLiveTranscriptHandle, type BackgroundLiveTranscriptStatus } from './background-live-transcript.ts';
+import type { CommittedCaptureChunk } from './capture-session.ts';
+import { captureHealthTransitionKey } from './capture-health.ts';
 import { createTranscriptRecord } from './transcript-record.ts';
 import {
   loadConfig,
@@ -13,6 +19,7 @@ import {
 import {
   startDurableLiveCapture,
   type DurableLiveCaptureHandle,
+  type DurableLiveCaptureStatus,
 } from './durable-live-capture.ts';
 import {
   DEFAULT_MEETING_AUTOMATION,
@@ -57,6 +64,7 @@ export interface AutomaticMeetingWatchDependencies {
   readonly readMeet?: typeof probeMeetSpeakers;
   readonly readCalendar?: typeof readMacCalendarEventsAsync;
   readonly startCapture?: typeof startDurableLiveCapture;
+  readonly startLiveTranscript?: typeof startBackgroundLiveTranscript;
   readonly finalizeCapture?: typeof finalizeCaptureTranscript;
   readonly enrich?: typeof enrichMeeting;
   readonly consumeConsent?: typeof consumeMeetingConsent;
@@ -67,6 +75,8 @@ export interface AutomaticMeetingWatchOptions {
   readonly libraryDir?: string;
   readonly signal?: AbortSignal;
   readonly once?: boolean;
+  /** Isolated embedders/tests may supply their own lock; CLI uses the user lock. */
+  readonly lockPath?: string;
   readonly onEvent?: (event: AutomaticMeetingWatchEvent) => void;
   readonly dependencies?: AutomaticMeetingWatchDependencies;
 }
@@ -86,7 +96,7 @@ export class AutomaticMeetingWatchService {
   readonly #onEvent?: (event: AutomaticMeetingWatchEvent) => void;
   readonly #dependencies: Required<AutomaticMeetingWatchDependencies>;
   readonly #signalMonitor?: MeetingSignalMonitor;
-  #active?: { candidate: MeetingCandidate; capture: DurableLiveCaptureHandle; directory: string };
+  #active?: { candidate: MeetingCandidate; capture: DurableLiveCaptureHandle; directory: string; draft?: BackgroundLiveTranscriptHandle };
   #finalizationTail: Promise<void> = Promise.resolve();
   #calendarCache?: { readAtUnixMs: number; events: Awaited<ReturnType<typeof readMacCalendarEventsAsync>> };
   #calendarRead?: Promise<void>;
@@ -94,6 +104,8 @@ export class AutomaticMeetingWatchService {
   #calendarAbort = new AbortController();
   #shuttingDown = false;
   #meetWarning?: string;
+  #consentId?: string;
+  #lastNowUnixMs = Date.now();
 
   constructor(options: AutomaticMeetingWatchOptions = {}) {
     this.#config = options.config ?? loadConfig();
@@ -111,6 +123,7 @@ export class AutomaticMeetingWatchService {
       readMeet: options.dependencies?.readMeet ?? probeMeetSpeakers,
       readCalendar: options.dependencies?.readCalendar ?? readMacCalendarEventsAsync,
       startCapture: options.dependencies?.startCapture ?? startDurableLiveCapture,
+      startLiveTranscript: options.dependencies?.startLiveTranscript ?? startBackgroundLiveTranscript,
       finalizeCapture: options.dependencies?.finalizeCapture ?? finalizeCaptureTranscript,
       enrich: options.dependencies?.enrich ?? enrichMeeting,
       consumeConsent: options.dependencies?.consumeConsent ?? consumeMeetingConsent,
@@ -123,6 +136,7 @@ export class AutomaticMeetingWatchService {
 
   async pollOnce(): Promise<MeetingAutomationAction> {
     const now = this.#dependencies.now();
+    this.#lastNowUnixMs = now.getTime();
     const automation = this.#config.meeting?.automation;
     const browser = automation?.enabled === false || automation?.mode === 'off'
       ? undefined : this.#config.meeting?.speakerBrowser;
@@ -152,32 +166,41 @@ export class AutomaticMeetingWatchService {
     const action = this.#controller.step(candidate, now.getTime(),
       hasConfirmedMeetingEnd(this.#controller.state.candidate, meet));
     if (action.kind === 'suggest') {
+      this.#consentId = randomUUID();
       this.emit({ type: 'meeting.suggested', at: now.toISOString(), candidate: action.candidate });
     } else if (action.kind === 'start') {
-      if (!this.start(action.candidate, now)) return { kind: 'none' };
+      if (!this.start(action.candidate, now)) { this.projectWatch(); return { kind: 'none' }; }
     } else if (action.kind === 'finish') {
       await this.finish(action.candidate, action.reason);
     }
     if (this.#controller.state.phase === 'awaiting-consent') {
-      const decision = this.#dependencies.consumeConsent(undefined, now.getTime());
+      const decision = this.#dependencies.consumeConsent(undefined, now.getTime(), 120_000, this.#consentId);
       if (decision === 'approve') {
         const approved = this.approveSuggestion();
+        this.projectWatch();
         return approved ? { kind: 'start', candidate: approved } : action;
       }
       if (decision === 'decline') this.declineSuggestion();
     }
+    if (this.#controller.state.phase !== 'awaiting-consent') this.#consentId = undefined;
+    this.projectWatch();
     return action;
   }
 
   approveSuggestion(): MeetingCandidate | undefined {
     const now = this.#dependencies.now();
+    this.#lastNowUnixMs = now.getTime();
     const candidate = this.#controller.approve(now.getTime());
-    if (candidate && !this.start(candidate, now)) return undefined;
+    if (candidate && !this.start(candidate, now)) { this.projectWatch(); return undefined; }
+    this.projectWatch();
     return candidate;
   }
 
   declineSuggestion(): void {
-    this.#controller.decline(this.#dependencies.now().getTime());
+    this.#lastNowUnixMs = this.#dependencies.now().getTime();
+    this.#controller.decline(this.#lastNowUnixMs);
+    this.#consentId = undefined;
+    this.projectWatch();
   }
 
   async shutdown(): Promise<void> {
@@ -187,6 +210,8 @@ export class AutomaticMeetingWatchService {
     if (this.#active) await this.finish(this.#active.candidate, 'watch-stopped');
     await this.#calendarRead?.catch(() => {});
     await this.#finalizationTail;
+    this.#consentId = undefined;
+    this.projectWatch();
   }
 
   private currentCalendar(now: Date) {
@@ -227,13 +252,67 @@ export class AutomaticMeetingWatchService {
 
   private start(candidate: MeetingCandidate, now: Date): boolean {
     if (this.#active) return false;
+    this.#consentId = undefined;
     let capture: DurableLiveCaptureHandle;
+    let directory: string | undefined;
+    let latestStatus: DurableLiveCaptureStatus | undefined;
+    let record: TranscriptRecord;
+    let draft: BackgroundLiveTranscriptHandle | undefined;
+    let initializingDraft = true;
+    const pendingDraftChunks: CommittedCaptureChunk[] = [];
+    let draftWarning: string | undefined;
+    const onDraftStatus = (status: BackgroundLiveTranscriptStatus) => {
+      if (directory) {
+        try { writeBackgroundMeetingState(directory, 'recording', { draftStatus: status }); }
+        catch (error) {
+          this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(),
+            message: `Could not save live transcript status: ${errorMessage(error)}` });
+        }
+      }
+      if (status.stage === 'delayed' && status.detail !== draftWarning) this.emit({ type: 'watch.warning',
+        at: this.#dependencies.now().toISOString(), message: status.detail });
+      draftWarning = status.stage === 'delayed' ? status.detail : undefined;
+    };
+    let writtenAt = -Infinity, writtenKey: string | undefined;
+    let warnedKey: string | undefined;
+    const onStatus = (status: DurableLiveCaptureStatus) => {
+      latestStatus = status;
+      const key = status.health ? captureHealthTransitionKey(status.health) : undefined;
+      const at = Date.now();
+      if (directory && (key !== writtenKey || at - writtenAt >= 1000)) {
+        try {
+          writeBackgroundMeetingState(directory, 'recording', {
+            ...(status.health ? { captureHealth: status.health } : {}),
+            ...(status.audioSavedThroughMs === undefined ? {} : { audioSavedThroughMs: status.audioSavedThroughMs }),
+          });
+          writtenKey = key; writtenAt = at;
+        } catch (error) {
+          this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(), message: `Could not save recording status: ${errorMessage(error)}` });
+        }
+      }
+      const warnings = status.health ? [status.health.microphone, status.health.systemAudio]
+        .flatMap(source => source.warnings.filter(w => w.resolvedAtUnixMs === undefined && w.kind !== 'unavailable')) : [];
+      const warningKey = JSON.stringify(warnings.map(w => [w.kind, w.code, w.message]));
+      if (warnings.length && warningKey !== warnedKey) this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(),
+        message: warnings.map(w => w.message).join(' ') });
+      warnedKey = warningKey;
+    };
     try {
       capture = this.#dependencies.startCapture({
       libraryDir: this.#libraryDir,
       startedAt: now,
       speakerBrowser: meetBrowserMatchesApp(this.#config.meeting?.speakerBrowser, candidate.bundleId)
         ? this.#config.meeting?.speakerBrowser : 'off',
+      onStatus,
+      onCommittedChunk: (chunk) => {
+        if (draft) draft.enqueue(chunk);
+        else if (initializingDraft) {
+          // Some injected starters can commit synchronously before returning.
+          // Keep only a small draft backlog; durable audio remains complete.
+          if (pendingDraftChunks.length === 8) pendingDraftChunks.shift();
+          pendingDraftChunks.push(chunk);
+        }
+      },
       onError: (error) => this.emit({
         type: 'watch.warning',
         at: this.#dependencies.now().toISOString(),
@@ -245,9 +324,8 @@ export class AutomaticMeetingWatchService {
       this.emit({ type: 'watch.error', at: now.toISOString(), message: `Could not start capture: ${errorMessage(error)}` });
       return false;
     }
-    let directory: string;
     try {
-      const record = createTranscriptRecord({ transcript: [], speakers: [] }, {
+      record = createTranscriptRecord({ transcript: [], speakers: [] }, {
         id: capture.sessionId, now, title: candidate.title,
         source: { filename: 'Live capture session', format: 'capture-session/0.1' },
       });
@@ -255,14 +333,30 @@ export class AutomaticMeetingWatchService {
       saveMeetingArtifact(this.#libraryDir, createMeetingArtifact(record, {
         mode: this.#config.meeting?.mode ?? 'hybrid', calendar: candidate.calendar,
       }));
-      writeBackgroundMeetingState(directory, 'recording');
+      writeBackgroundMeetingState(directory, 'recording', {
+        ...(latestStatus?.health ? { captureHealth: latestStatus.health } : {}),
+        audioSavedThroughMs: latestStatus?.audioSavedThroughMs ?? 0,
+      });
+      writtenAt = Date.now(); writtenKey = latestStatus?.health ? captureHealthTransitionKey(latestStatus.health) : undefined;
     } catch (error) {
+      initializingDraft = false;
+      pendingDraftChunks.length = 0;
       void capture.stop('library-start-failed').catch(() => {});
       this.#controller.reset();
       this.emit({ type: 'watch.error', at: now.toISOString(), message: `Could not save meeting: ${errorMessage(error)}` });
       return false;
     }
-    this.#active = { candidate, capture, directory };
+    try {
+      draft = this.#dependencies.startLiveTranscript({
+        libraryDir: this.#libraryDir, record, onStatus: onDraftStatus,
+        ...(capture.speakerFor ? { speakerFor: capture.speakerFor } : {}),
+      });
+      for (const chunk of pendingDraftChunks) draft.enqueue(chunk);
+    } catch {
+      onDraftStatus({ stage: 'delayed', detail: 'Live transcript could not start. Audio is saved for final transcription.', queueDepth: 0 });
+    } finally { initializingDraft = false; pendingDraftChunks.length = 0; }
+    this.#active = { candidate, capture, directory, ...(draft ? { draft } : {}) };
+    this.projectWatch();
     this.emit({
       type: 'meeting.started',
       at: now.toISOString(),
@@ -276,8 +370,16 @@ export class AutomaticMeetingWatchService {
     const active = this.#active;
     if (!active) return;
     this.#active = undefined;
+    this.#consentId = undefined;
     try {
-      await active.capture.stop(reason);
+      try { await active.capture.stop(reason); }
+      finally {
+        try { await active.draft?.close(); }
+        catch (error) {
+          this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(),
+            message: `Live transcript cleanup needs attention: ${errorMessage(error)}. Final transcription will continue.` });
+        }
+      }
       this.markCapture(active.directory, 'processing');
       this.emit({
         type: 'meeting.capture-finished',
@@ -302,6 +404,7 @@ export class AutomaticMeetingWatchService {
         message: `Could not stop meeting capture: ${errorMessage(error)}`,
       });
     }
+    this.projectWatch();
   }
 
   private async finalize(
@@ -394,14 +497,33 @@ export class AutomaticMeetingWatchService {
     }
   }
 
+  private projectWatch(): void {
+    const candidate = this.#active?.candidate ?? this.#controller.state.candidate;
+    try {
+      writeBackgroundWatchStatus(this.#libraryDir, {
+        phase: this.#shuttingDown ? 'stopped' : this.#active ? 'recording'
+          : this.#controller.state.phase === 'awaiting-consent' ? 'awaiting-consent' : 'watching',
+        ...(!this.#shuttingDown && candidate ? { candidate: { id: candidate.id, title: candidate.title, appName: candidate.appName } } : {}),
+        ...(this.#active ? { sessionId: this.#active.capture.sessionId } : {}),
+        ...(!this.#shuttingDown && this.#controller.state.phase === 'awaiting-consent' && this.#consentId ? { consentId: this.#consentId } : {}),
+        ...(this.#meetWarning ? { warning: this.#meetWarning } : {}),
+      }, this.#lastNowUnixMs);
+    } catch (error) {
+      this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(), message: `Could not save background recorder status: ${errorMessage(error)}` });
+    }
+  }
+
   private emit(value: AutomaticMeetingWatchEvent): void {
     this.#onEvent?.(event(value));
   }
 }
 
 export async function runAutomaticMeetingWatch(options: AutomaticMeetingWatchOptions = {}): Promise<void> {
-  const lock = acquireMeetingWatchLock();
+  const lock = acquireMeetingWatchLock(options.lockPath === undefined ? {} : { path: options.lockPath });
   if (!lock) throw new Error('Another Sea Shell meeting watcher is already running');
+  // The CLI owns signals and awaits this function. Nested live/final ASR must
+  // never install a competing process.exit handler that skips capture flush.
+  const releaseSignalOwnership = claimManagedProcessSignalOwnership();
   let service: AutomaticMeetingWatchService | undefined;
   try {
     service = new AutomaticMeetingWatchService(options);
@@ -417,6 +539,9 @@ export async function runAutomaticMeetingWatch(options: AutomaticMeetingWatchOpt
       await sleep(pollSeconds * 1_000, undefined, { signal: options.signal }).catch(() => {});
     }
   } finally {
-    try { await service?.shutdown(); } finally { lock.release(); }
+    try { await service?.shutdown(); }
+    finally {
+      try { lock.release(); } finally { releaseSignalOwnership(); }
+    }
   }
 }

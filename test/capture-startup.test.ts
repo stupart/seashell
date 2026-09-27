@@ -9,13 +9,13 @@ test('system capture waits for microphone PCM and both children stop without los
   const root = mkdtempSync(join(tmpdir(), 'seashell-ordered-start-'));
   const marker = join(root, 'microphone-opened');
   const helper = join(root, 'system');
-  writeFileSync(helper, `#!${process.execPath}
+  writeFileSync(helper, `
 import {existsSync} from 'fs';
 if (!existsSync(${JSON.stringify(marker)})) process.exit(42);
 process.stderr.write(JSON.stringify({type:'first-buffer',capturedAtUnixMs:Date.now()})+'\\n');
 process.stdout.write(Buffer.alloc(32000,1));
 setInterval(()=>{},1000);
-`, { mode: 0o755 });
+`, { mode: 0o600 });
   const chunks: string[] = [];
   const options = { sessionStartedAtUnixMs: Date.now(), chunkMilliseconds: 1000,
     onState() {}, onChunk: (chunk: { path: string; source: string }) => {
@@ -23,7 +23,7 @@ setInterval(()=>{},1000);
     } };
   const mic = startMicrophoneCapture({ ...options, command: process.execPath,
     commandArgs: ['-e', `setTimeout(()=>{require('fs').writeFileSync(${JSON.stringify(marker)},'');process.stdout.write(Buffer.alloc(32000,1))},150);setInterval(()=>{},1000)`] });
-  const system = startSystemAudioCapture({ ...options, helperPath: helper, startAfter: mic.startup });
+  const system = startSystemAudioCapture({ ...options, helperPath: process.execPath, helperArgs: [helper], startAfter: mic.startup });
   try {
     expect(system.process).toBeUndefined();
     const deadline = Date.now() + 2000;
@@ -64,7 +64,7 @@ for (const firstBufferBeforeStart of [false, true]) {
     const root = mkdtempSync(join(tmpdir(), 'seashell-audio-ready-'));
     const marker = join(root, 'supply-audio');
     const helper = join(root, 'system');
-    writeFileSync(helper, `#!${process.execPath}
+    writeFileSync(helper, `
 import {existsSync} from 'fs';
 const event = (value) => process.stderr.write(JSON.stringify(value)+'\\n');
 const start = () => event({type:'start',sampleRate:16000,channels:1,bitsPerChannel:16});
@@ -74,11 +74,11 @@ event({type:'first-buffer',capturedAtUnixMs:Date.now()});
 start();
 process.stdout.write(Buffer.alloc(32000,1));
 setInterval(()=>{},1000);
-`, { mode: 0o755 });
+`, { mode: 0o600 });
     const states: string[] = [];
     let chunks = 0;
     const capture = startSystemAudioCapture({
-      helperPath: helper, sessionStartedAtUnixMs: Date.now(), chunkMilliseconds: 1000,
+      helperPath: process.execPath, helperArgs: [helper], sessionStartedAtUnixMs: Date.now(), chunkMilliseconds: 1000,
       onState: (update) => states.push(update.state),
       onChunk: (chunk) => { chunks++; rmSync(chunk.path); },
     });

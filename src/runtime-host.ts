@@ -23,7 +23,9 @@ export interface RuntimeHostStatus {
 }
 
 export function meetingRuntimeHostPath(options: RuntimeHostOptions = {}): string {
-  return join(resolve(options.hostDirectory ?? join(homedir(), 'Library', 'Application Support', 'Sea Shell', 'Runtime')), 'bun');
+  // A recognizable, permanent executable name; the copied binary's signing
+  // identifier remains Bun's original "bun", independently of this basename.
+  return join(resolve(options.hostDirectory ?? join(homedir(), 'Library', 'Application Support', 'Sea Shell', 'Runtime')), 'Seashell Background');
 }
 
 function existing(path: string) {
@@ -112,7 +114,7 @@ export function prepareMeetingRuntimeHost(options: RuntimeHostOptions = {}): str
       return path;
     }
   }
-  const temporary = join(directory, `.bun-${randomUUID()}.tmp`);
+  const temporary = join(directory, `.seashell-background-${randomUUID()}.tmp`);
   try {
     copyFileSync(source, temporary, constants.COPYFILE_EXCL);
     chmodSync(temporary, 0o700);

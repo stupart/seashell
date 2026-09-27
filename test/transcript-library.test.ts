@@ -13,6 +13,7 @@ import {
   writeTranscriptExport,
 } from '../src/transcript-library.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
+import { writeBackgroundMeetingState } from '../src/background-meeting-status.ts';
 
 const temporaryDirectories: string[] = [];
 
@@ -106,6 +107,23 @@ describe('transcript library', () => {
     );
     expect(renamed.speakers).toEqual([{ id: 'SPEAKER_00', label: 'Tyler' }]);
     expect(renamed.transcript[0]?.speaker).toBe('SPEAKER_00');
+  });
+
+  test('speaker renaming waits for live draft and final transcription writers to finish', () => {
+    const root = temporaryDirectory();
+    const original = record();
+    const saved = saveTranscriptRecord(root, original);
+    const before = readFileSync(saved.jsonPath, 'utf8');
+    for (const state of ['recording', 'processing'] as const) {
+      writeBackgroundMeetingState(saved.directory, state);
+      expect(() => renameTranscriptSpeaker(root, original.id, 'SPEAKER_00', 'Updated name'))
+        .toThrow('Wait for it to finish before renaming a speaker');
+      expect(readFileSync(saved.jsonPath, 'utf8')).toBe(before);
+    }
+    writeBackgroundMeetingState(saved.directory, 'ready');
+    expect(renameTranscriptSpeaker(root, original.id, 'SPEAKER_00', 'Updated name').speakers[0]?.label)
+      .toBe('Updated name');
+    expect(findTranscriptRecord(root, original.id).record.speakers[0]?.label).toBe('Updated name');
   });
 
   test('generates exports on demand and moves deletion to recoverable trash', () => {

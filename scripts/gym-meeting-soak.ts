@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import type { ChildProcess } from 'node:child_process';
 import { heapStats } from 'bun:jsc';
 import { AutomaticMeetingWatchService } from '../src/automatic-meeting-watch.ts';
+import { startBackgroundLiveTranscript } from '../src/background-live-transcript.ts';
 import { startDurableLiveCapture, type DurableLiveCaptureHandle } from '../src/durable-live-capture.ts';
 import { startMicrophoneCapture } from '../src/live-microphone.ts';
 import { startSystemAudioCapture, type SystemAudioCaptureHandle } from '../src/live-system-audio.ts';
@@ -20,17 +21,19 @@ assert(Number.isSafeInteger(cycles) && cycles >= 20 && cycles <= 1000);
 const library = join(output, 'library');
 mkdirSync(library, { recursive: true, mode: 0o700 });
 const helper = join(output, 'audio-fixture');
-writeFileSync(helper, `#!${process.execPath}
+writeFileSync(helper, `
 const pcm = Buffer.alloc(48000);
 pcm.fill(Buffer.from([0xD0,0x07])); // marker 2000, 1.5 seconds
 process.stderr.write(JSON.stringify({type:'first-buffer',capturedAtUnixMs:Date.now()})+'\\n');
 process.stdout.write(pcm);
 setInterval(()=>{},1000);
-`, { mode: 0o700 });
+`, { mode: 0o600 });
 const signalListeners = () => [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')];
 const initialListeners = signalListeners();
 const children = new Set<ChildProcess>();
 let spawned = 0;
+let draftTranscribers = 0;
+let remainingDraftTranscribers = 0;
 function track(child: ChildProcess) {
   children.add(child); spawned++;
   child.once('close', () => children.delete(child));
@@ -62,6 +65,26 @@ const service = new AutomaticMeetingWatchService({
     now: () => new Date(now),
     readSignals: () => ({ schemaVersion: 1, capturedAtUnixMs: now, supported: true,
       inputProcesses: signal ? [{ pid: 42, bundleId: 'us.zoom.xos', name: 'Zoom' }] : [] }),
+    // Exercise the real draft scheduler, writer, and shutdown without loading
+    // a local model for every synthetic meeting. Canonical ASR is a fixture too.
+    startLiveTranscript: options => startBackgroundLiveTranscript({ ...options,
+      dependencies: { createTranscriber() {
+        draftTranscribers++;
+        remainingDraftTranscribers++;
+        let stopped = false;
+        return {
+          async transcribe(path, signal) {
+            assert(!stopped && !signal.aborted);
+            const marker = readFileSync(path).readInt16LE(44);
+            assert(marker === 1000 || marker === 2000);
+            return marker === 1000 ? 'Amber orchard harvest.' : 'Zebra mountain rivers.';
+          },
+          async stop() {
+            if (!stopped) { stopped = true; remainingDraftTranscribers--; }
+          },
+        };
+      } },
+    }),
     startCapture(options) {
       active = startDurableLiveCapture({ ...options, sessionId: `cycle-${cycle}`, chunkMilliseconds: 1000,
         microphoneStarter(micOptions) {
@@ -72,7 +95,7 @@ const service = new AutomaticMeetingWatchService({
         },
         systemAudioStarter(systemOptions) {
           let system: SystemAudioCaptureHandle | undefined;
-          system = startSystemAudioCapture({ ...systemOptions, helperPath: helper,
+          system = startSystemAudioCapture({ ...systemOptions, helperPath: process.execPath, helperArgs: [helper],
             onState(update) {
               if (system?.process && !children.has(system.process)) track(system.process);
               systemOptions.onState(update);
@@ -121,6 +144,7 @@ try {
     assert.equal(lastError, '');
     assert.equal(started, cycle);
     assert.equal(children.size, 0, 'no capture process may survive a meeting');
+    assert.equal(remainingDraftTranscribers, 0, 'no draft transcriber may survive a meeting');
     assert.deepEqual(signalListeners(), initialListeners);
     const manifestPath = join(lastDirectory, 'capture', 'manifest.json');
     const manifest = loadCaptureSession(manifestPath);
@@ -157,6 +181,7 @@ try {
   await service.shutdown();
   assert.equal(listTranscriptRecords(library).length, cycles);
   assert.equal(spawned, cycles * 2);
+  assert.equal(draftTranscribers, cycles);
   const baseline = samples[0]!;
   const final = samples.at(-1)!;
   // Coarse regression budgets, not a claim that all leaks are impossible.
@@ -165,7 +190,7 @@ try {
   writeFileSync(join(output, 'metrics.json'), JSON.stringify({ cycles, spawned, ready, committed, verifiedChunks,
     durationMs: Math.round(performance.now() - begin), samples,
     heapGrowthBytes: final.heapSize - baseline.heapSize, rssGrowthBytes: final.rss - baseline.rss,
-    remainingChildren: children.size, signalListeners: signalListeners(),
+    remainingChildren: children.size, draftTranscribers, remainingDraftTranscribers, signalListeners: signalListeners(),
     limits: 'Synthetic signals and ASR; real child streams/storage/finalization. No physical device or long-call ASR soak.' }, null, 2) + '\n');
   passed = true;
 } finally {

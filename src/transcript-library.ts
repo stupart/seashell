@@ -14,7 +14,8 @@ import { basename, dirname, extname, join } from 'path';
 import { renderText, renderTranscript } from './transcript-renderer.ts';
 import type { TranscriptFormat, TranscriptRecord } from './transcript-types.ts';
 import { archiveMeetingTranscript, synchronizeMeetingTranscript } from './meeting-artifact.ts';
-import { readBackgroundMeetingState, type BackgroundMeetingState } from './background-meeting-status.ts';
+import { readBackgroundMeetingState, readBackgroundMeetingStatus, type BackgroundMeetingState, type BackgroundDraftStatus } from './background-meeting-status.ts';
+import { readCaptureHealth, type CaptureHealthSnapshot } from './capture-health.ts';
 
 export interface TranscriptLibraryEntry {
   id: string;
@@ -28,6 +29,9 @@ export interface TranscriptLibraryEntry {
   kind: 'transcript' | 'meeting';
   directory: string;
   captureState?: BackgroundMeetingState;
+  captureHealth?: CaptureHealthSnapshot;
+  audioSavedThroughMs?: number;
+  draftStatus?: BackgroundDraftStatus;
 }
 
 export interface SavedTranscript {
@@ -171,6 +175,7 @@ function existingRecordPath(libraryDir: string, id: string): string | undefined 
 export function saveTranscriptRecord(
   libraryDir: string,
   record: TranscriptRecord,
+  options: { provisional?: boolean } = {},
 ): SavedTranscript {
   assertTranscriptId(record.id);
   const existingPath = existingRecordPath(libraryDir, record.id);
@@ -183,7 +188,7 @@ export function saveTranscriptRecord(
 
   let meetingWarning: string | undefined;
   try {
-    if (existingPath) archiveMeetingTranscript(directory, loadTranscriptPath(existingPath), record);
+    if (existingPath && !options.provisional) archiveMeetingTranscript(directory, loadTranscriptPath(existingPath), record);
   } catch (error) {
     meetingWarning = `Transcript saved; meeting history needs repair: ${error instanceof Error ? error.message : String(error)}`;
   }
@@ -192,7 +197,7 @@ export function saveTranscriptRecord(
     timestamps: true,
     speakers: record.speakers.length > 0,
   })}\n`);
-  try { synchronizeMeetingTranscript(directory, record); } catch (error) {
+  try { if (!options.provisional) synchronizeMeetingTranscript(directory, record); } catch (error) {
     meetingWarning = `Transcript saved; meeting notes need repair: ${error instanceof Error ? error.message : String(error)}`;
   }
   return { directory, jsonPath, textPath, ...(meetingWarning ? { meetingWarning } : {}) };
@@ -200,6 +205,7 @@ export function saveTranscriptRecord(
 
 function toEntry(path: string, record: TranscriptRecord): TranscriptLibraryEntry {
   const directory = dirname(path);
+  const background = readBackgroundMeetingStatus(directory);
   return {
     id: record.id,
     title: record.title,
@@ -211,7 +217,10 @@ function toEntry(path: string, record: TranscriptRecord): TranscriptLibraryEntry
     segmentCount: record.transcript.length,
     kind: existsSync(join(directory, 'meeting.json')) ? 'meeting' : 'transcript',
     directory,
-    captureState: readBackgroundMeetingState(directory),
+    captureState: background?.state,
+    captureHealth: background?.captureHealth ?? readCaptureHealth(join(directory, 'capture')),
+    audioSavedThroughMs: background?.audioSavedThroughMs,
+    draftStatus: background?.draftStatus,
   };
 }
 
@@ -275,7 +284,11 @@ export function renameTranscriptSpeaker(
 ): TranscriptRecord {
   const trimmed = label.trim();
   if (!trimmed) throw new Error('Speaker name cannot be empty');
-  const { record } = findTranscriptRecord(libraryDir, transcriptId);
+  const { path, record } = findTranscriptRecord(libraryDir, transcriptId);
+  const captureState = readBackgroundMeetingState(dirname(path));
+  if (captureState === 'recording' || captureState === 'processing') {
+    throw new Error('This meeting is still recording or processing. Wait for it to finish before renaming a speaker.');
+  }
   const speaker = record.speakers.find((candidate) => candidate.id === speakerId);
   if (!speaker) throw new Error(`Speaker ${speakerId} was not found in transcript ${transcriptId}`);
   speaker.label = trimmed;

@@ -24,17 +24,30 @@ export interface MicrophoneChunk {
   readonly clock: LiveCaptureClock;
 }
 
+export interface MicrophoneAttemptDiagnostic {
+  readonly attempt: number;
+  readonly pid?: number;
+  readonly reason: 'startup-timeout' | 'stalled' | 'spawn-error' | 'chunk-error' | 'process-exit';
+  readonly exitCode: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly stderr?: string;
+}
+
+export interface MicrophoneStateUpdate extends SystemAudioStateUpdate {
+  readonly diagnostic?: MicrophoneAttemptDiagnostic;
+}
+
 export interface StartMicrophoneOptions {
   readonly sessionStartedAtUnixMs: number;
   readonly chunkMilliseconds?: number;
   readonly minimumChunkMilliseconds?: number;
   readonly onChunk: (chunk: MicrophoneChunk) => void;
-  readonly onState: (update: SystemAudioStateUpdate) => void;
+  readonly onState: (update: MicrophoneStateUpdate) => void;
   readonly onLevel?: (level: PcmSignalLevel) => void;
   /** Test/development override; production uses the fixed SoX command below. */
   readonly command?: string;
   readonly commandArgs?: readonly string[];
-  /** Deadline for reporting a source that never supplies PCM. */
+  /** Deadline for releasing startup and terminating an attempt with no PCM. */
   readonly startupTimeoutMs?: number;
   readonly quietWarningMs?: number;
   readonly stalledTimeoutMs?: number;
@@ -61,10 +74,10 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
   let cancelDelay: (() => void) | undefined;
   const start = () => startMicrophoneAttempt({ ...options, onState(update) {
     if (update.state === 'unavailable' && !stopped && restarts < maximumRestarts) {
-      options.onState({ state: 'starting', code: 'microphone_reconnecting',
-        message: 'Microphone disconnected · reconnecting…' });
+      options.onState({ ...update, state: 'starting', code: 'microphone_reconnecting',
+        message: `${update.message ?? 'Microphone capture failed.'} Retrying (${restarts + 1}/${maximumRestarts})…` });
     } else options.onState(update);
-  } });
+  } }, restarts + 1);
   let current = start();
   const startup = current.startup;
   const done = (async () => {
@@ -87,7 +100,7 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
   };
 }
 
-function startMicrophoneAttempt(options: StartMicrophoneOptions): MicrophoneCaptureHandle {
+function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number): MicrophoneCaptureHandle {
   const chunker = new PcmS16leChunker(
     LIVE_CAPTURE_SAMPLE_RATE,
     options.chunkMilliseconds ?? LIVE_CAPTURE_CHUNK_MILLISECONDS,
@@ -98,30 +111,40 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions): MicrophoneCapt
   let requestedStop = false;
   let lastLevelUpdate = 0;
   let failure: string | undefined;
+  let failureReason: MicrophoneAttemptDiagnostic['reason'] = 'process-exit';
   let lastDataAt = captureStartedAtUnixMs;
   let lastAudibleAt = captureStartedAtUnixMs;
   let quietWarning = false;
-  let stalled = false;
+  let endingForFailure = false;
   let resolveDone: () => void = () => {};
   const done = new Promise<void>((resolve) => { resolveDone = resolve; });
   let settleStartup = () => {};
   const startup = new Promise<void>((resolve) => { settleStartup = resolve; });
   const startupTimer = setTimeout(() => {
+    if (clock || requestedStop) return;
+    endingForFailure = true;
+    failureReason = 'startup-timeout';
+    failure = 'No microphone samples arrived before the startup deadline. Check the selected input and microphone access.';
+    // Optional system audio must not wait forever for a microphone that never
+    // opens. Release it before waiting for this child to terminate and retry.
+    settleStartup();
     options.onState({ state: 'starting', code: 'microphone_no_audio',
-      message: 'No microphone audio received. Check System Settings → Privacy & Security → Microphone for your terminal app, and Sound → Input. Then press Space twice to retry.' });
+      message: failure });
+    void terminateManagedChild(child);
   }, options.startupTimeoutMs ?? 8_000);
   startupTimer.unref();
   const watchdog = setInterval(() => {
-    if (!clock || requestedStop || stalled) return;
+    if (!clock || requestedStop || endingForFailure) return;
     const now = Date.now();
     if (now - lastDataAt >= (options.stalledTimeoutMs ?? 8000)) {
-      stalled = true;
+      endingForFailure = true;
+      failureReason = 'stalled';
       failure = 'Microphone stopped delivering audio. Check Sound → Input and reconnect your microphone.';
       void terminateManagedChild(child);
     } else if (!quietWarning && now - lastAudibleAt >= (options.quietWarningMs ?? 30000)) {
       quietWarning = true;
       options.onState({ state: 'active', code: 'microphone_quiet',
-        message: 'Microphone is very quiet. If you’re speaking, check Sound → Input and its input level.' });
+        message: 'No clear microphone signal yet. If you’re speaking, check your selected input, mute control, and input level.' });
     }
   }, Math.max(10, Math.min(1000, options.quietWarningMs ?? 30000, options.stalledTimeoutMs ?? 8000)));
   watchdog.unref();
@@ -138,9 +161,9 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions): MicrophoneCapt
     const audible = hasAudiblePcmSignal(chunk.pcm);
     if (audible) {
       lastAudibleAt = Date.now();
-      if (quietWarning) {
+      if (quietWarning && !endingForFailure && !requestedStop) {
         quietWarning = false;
-        options.onState({ state: 'active', message: 'Microphone active' });
+        options.onState({ state: 'active', message: 'Microphone signal detected' });
       }
     }
     const path = writeLivePcmChunk(chunk, 'microphone');
@@ -157,7 +180,9 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions): MicrophoneCapt
       }));
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
-      child.kill('SIGTERM');
+      failureReason = 'chunk-error';
+      endingForFailure = true;
+      void terminateManagedChild(child);
     }
   };
 
@@ -179,6 +204,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions): MicrophoneCapt
   let stderr = '';
   child.stderr?.on('data', (data: Buffer) => { stderr = (stderr + data.toString()).slice(-2_000); });
   child.stdout?.on('data', (data: Buffer) => {
+    if (endingForFailure) return;
     lastDataAt = Date.now();
     if (clock === undefined) {
       clearTimeout(startupTimer);
@@ -190,7 +216,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions): MicrophoneCapt
         sampleRate: LIVE_CAPTURE_SAMPLE_RATE,
         uncertaintyMs: Math.max(1, firstDataAtUnixMs - captureStartedAtUnixMs),
       });
-      options.onState({ state: 'active', message: 'Microphone active' });
+      options.onState({ state: 'active', message: 'Microphone input connected' });
     }
     const now = Date.now();
     if (options.onLevel && now - lastLevelUpdate >= 500 && data.byteLength >= 2) {
@@ -199,22 +225,26 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions): MicrophoneCapt
     }
     for (const chunk of chunker.append(data)) publish(chunk);
   });
-  child.on('error', (error) => { failure = error.message; });
+  child.on('error', (error) => { failure = error.message; failureReason = 'spawn-error'; });
   child.on('close', (code, signal) => {
     clearTimeout(startupTimer);
     clearInterval(watchdog);
     settleStartup();
     publish(chunker.flush());
     const state: SystemAudioCaptureState = requestedStop ? 'stopped' : 'unavailable';
+    const recordedStderr = stderr.trim();
+    const exitDescription = signal ? `signal ${signal}` : `exit ${code ?? 'unknown'}`;
     options.onState({
       state,
       ...(requestedStop
         ? {}
         : {
-            code: 'microphone_stopped',
-            message: (failure ?? stderr.trim()) || (signal
-              ? `Microphone capture stopped by ${signal}`
-              : `Microphone capture exited ${code}`),
+            code: failureReason === 'startup-timeout' ? 'microphone_no_audio' : 'microphone_stopped',
+            message: `${failure ?? 'Microphone capture ended unexpectedly.'} Attempt ${attempt}: ${exitDescription}.${recordedStderr ? ` Recorder: ${recordedStderr}` : ''}`,
+            diagnostic: Object.freeze({ attempt, ...(child.pid === undefined ? {} : { pid: child.pid }),
+              reason: failureReason, exitCode: code, signal,
+              ...(recordedStderr ? { stderr: recordedStderr } : {}),
+            }),
           }),
     });
     resolveDone();

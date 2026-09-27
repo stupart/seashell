@@ -4,6 +4,8 @@ import { rmSync } from 'fs';
 const activeChildren = new Set<ChildProcess>();
 const activeTempDirectories = new Set<string>();
 let activeSessions = 0;
+let externalSignalOwners = 0;
+let signalHandlersInstalled = false;
 
 function childClosed(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
@@ -60,26 +62,49 @@ async function terminateForSignal(signal: 'SIGINT' | 'SIGTERM'): Promise<never> 
 const onSigint = () => { void terminateForSignal('SIGINT'); };
 const onSigterm = () => { void terminateForSignal('SIGTERM'); };
 
+function synchronizeSignalHandlers(): void {
+  const needed = activeSessions > 0 && externalSignalOwners === 0;
+  if (needed && !signalHandlersInstalled) {
+    process.once('SIGINT', onSigint);
+    process.once('SIGTERM', onSigterm);
+    signalHandlersInstalled = true;
+  } else if (!needed && signalHandlersInstalled) {
+    process.removeListener('SIGINT', onSigint);
+    process.removeListener('SIGTERM', onSigterm);
+    signalHandlersInstalled = false;
+  }
+}
+
+/** The caller already handles process signals and awaits its own shutdown.
+ * Keep resource tracking active, but do not let a nested inference/batch session
+ * exit the process before that owner has flushed capture and closed its workers.
+ * Release only after the owner's asynchronous cleanup has completed. */
+export function claimManagedProcessSignalOwnership(): () => void {
+  externalSignalOwners += 1;
+  synchronizeSignalHandlers();
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    externalSignalOwners -= 1;
+    synchronizeSignalHandlers();
+  };
+}
+
 /**
  * Install signal cleanup only while the opt-in batch pipeline is active.
  * Nested sessions (the orchestrator plus Whisper adapter) share one registry.
  */
 export function beginManagedProcessSession(): () => void {
   activeSessions += 1;
-  if (activeSessions === 1) {
-    process.once('SIGINT', onSigint);
-    process.once('SIGTERM', onSigterm);
-  }
+  synchronizeSignalHandlers();
 
   let ended = false;
   return () => {
     if (ended) return;
     ended = true;
     activeSessions = Math.max(0, activeSessions - 1);
-    if (activeSessions === 0) {
-      process.removeListener('SIGINT', onSigint);
-      process.removeListener('SIGTERM', onSigterm);
-    }
+    synchronizeSignalHandlers();
   };
 }
 
