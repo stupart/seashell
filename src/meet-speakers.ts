@@ -4,6 +4,7 @@ import { appendFileSync, existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { probeBackgroundMeetingAccessibility } from './meeting-accessibility-permission.ts';
+import { meetingHostRegistrationWarning } from './meeting-host-registration.ts';
 import type { CaptureSessionStore, CaptureSessionManifest } from './capture-session.ts';
 import type { Speaker, TranscriptSegment } from './transcript-types.ts';
 
@@ -110,6 +111,7 @@ export async function probeMeetAccessibility(mode: MeetBrowserMode, signal?: Abo
 interface MeetConnectionRuntime {
   read?: typeof probeMeetAccessibility;
   background?: typeof probeBackgroundMeetingAccessibility;
+  registrationWarning?: typeof meetingHostRegistrationWarning;
   openSettings?: (signal?: AbortSignal) => Promise<void>;
 }
 export async function checkMeetConnection(mode: MeetBrowserMode, signal?: AbortSignal, runtime: MeetConnectionRuntime = {}): Promise<MeetProbe> {
@@ -119,6 +121,8 @@ export async function checkMeetConnection(mode: MeetBrowserMode, signal?: AbortS
   if (background.accessibilityTrusted !== true) return {
     ...background, detail: `Background meetings: ${background.detail} Use Connect Google Meet or seashell meeting speakers setup.`,
   };
+  const warning = (runtime.registrationWarning ?? meetingHostRegistrationWarning)();
+  if (warning) return { state: 'unavailable', detail: warning };
   return foreground;
 }
 
@@ -139,9 +143,11 @@ export async function requestMeetAccessibilityPermission(signal?: AbortSignal, r
     await openSettings(signal);
     return { ...result, detail: `${result.detail} Return to Speakers and choose Check.` };
   }
-  if (result.accessibilityTrusted === true) return {
-    ...result, detail: 'Accessibility is enabled for this window and background meetings. Join a Google Meet call, then check the connection.',
-  };
+  if (result.accessibilityTrusted === true) {
+    const warning = (runtime.registrationWarning ?? meetingHostRegistrationWarning)();
+    if (warning) return { state: 'unavailable', detail: warning };
+    return { ...result, detail: 'Accessibility is enabled for this window and background meetings. Join a Google Meet call, then check the connection.' };
+  }
   return result;
 }
 
