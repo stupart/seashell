@@ -121,6 +121,9 @@ try {
       });
     });
   }
+  await check('speaker-attribution-replay', async () => {
+    await command('speaker-attribution-replay', [process.execPath, 'scripts/gym-speaker-attribution.ts']);
+  });
   if (native) {
     await check('native-build', async () => { await command('native-build', ['bash', 'scripts/build-native.sh']); });
     await check('native-accessibility', async () => {
@@ -161,6 +164,12 @@ try {
         assertSpeech(text);
         writeFileSync(join(output, 'warm-transcript.txt'), text, { mode: 0o600 });
       } finally { await server.stop(); }
+    });
+    await check('speaker-asr', async () => {
+      await command('speaker-asr', [process.execPath, 'scripts/gym-speaker-asr.ts'], 400_000);
+    });
+    await check('speaker-asr-long-pauses', async () => {
+      await command('speaker-asr-long-pauses', [process.execPath, 'scripts/gym-speaker-asr.ts', '--long-pauses'], 400_000);
     });
     if (humain) await check('humain-local-transcription', async () => {
       const result = await command('humain-local-transcription', ['env',

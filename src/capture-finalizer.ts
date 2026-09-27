@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import {
   closeSync,
   existsSync,
@@ -244,13 +244,27 @@ export async function finalizeCaptureTranscript(
   const absoluteManifest = resolve(manifestPath);
   const manifest = loadCaptureSession(absoluteManifest);
   const meetSamples = readMeetSamples(absoluteManifest, manifest);
+  // Legacy browser hints can keep a participant ID when its display name
+  // changes. A transcript's speaker table has one label per ID, so preserve
+  // historical names with deterministic aliases only for IDs that conflict.
+  // Do not rewrite the evidence sidecar or disturb stable, unrenamed IDs.
+  const observedMeetLabels = new Map<string, Set<string>>();
+  for (const sample of meetSamples) {
+    if (!sample.speaker) continue;
+    const labels = observedMeetLabels.get(sample.speaker.id) ?? new Set<string>();
+    labels.add(sample.speaker.label);
+    observedMeetLabels.set(sample.speaker.id, labels);
+  }
   const meetSpeakers = new Map<string, { id: string; label: string }>();
   const labelMeet = (segments: TranscriptSegment[]): TranscriptSegment[] => segments.map(segment => {
     if (segment.speaker === 'LOCAL') return segment;
     const speaker = meetSpeakerForSegment(meetSamples, segment);
     if (!speaker) return segment;
-    meetSpeakers.set(speaker.id, { id: speaker.id, label: speaker.label });
-    return { ...segment, speaker: speaker.id, speakerSource: speaker.source ?? 'google-meet-dom' };
+    const id = (observedMeetLabels.get(speaker.id)?.size ?? 0) > 1
+      ? `${speaker.id}_LABEL_${createHash('sha256').update(speaker.label).digest('hex')}`
+      : speaker.id;
+    meetSpeakers.set(id, { id, label: speaker.label });
+    return { ...segment, speaker: id, speakerSource: speaker.source ?? 'google-meet-dom' };
   });
   const temporaryTracks: string[] = [];
   try {

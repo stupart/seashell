@@ -40,6 +40,13 @@ The regression suite includes:
 - Humain consent, receipt/model identity, segment IDs, caller-relative paths,
   long meeting IDs, changed observer requests, and window-scoped evidence.
 - Login-agent configuration, private logs, and failed shutdown reporting.
+- Speaker attribution against independent reference turns, historical display-name
+  changes, and preservation of attribution source when text is combined.
+
+The default gym also runs the [persisted speaker replay evaluation](speaker-attribution-evaluation.md).
+Optional `--asr` adds generated multi-voice speech through actual local Whisper,
+including a long-pause case; see the [timing acceptance report](speaker-timing-acceptance-2026-09-27.md).
+These tests separate missing names from wrong names and do not certify live Meet accuracy.
 
 Local CI runs the default gym plus native compilation and the accelerated
 capture-storage and repeated-meeting exercises, retaining evidence locally.
@@ -111,17 +118,15 @@ remain explicit prerequisites; don't claim an unattended first install there.
 
 ## Homebrew distribution gym
 
-The published RC6 formula and workflow live on
+The published formula and workflow live on
 [stupart/homebrew-tap's default branch](https://github.com/stupart/homebrew-tap).
-CI checks the exact formula checkout on fresh Apple Silicon and Intel macOS
-runners. It downloads checksum-pinned source, Bun, Whisper, and models, compiles
-the native helpers, installs the package, and runs `brew test` and
-`brew linkage --test`. It retains Homebrew logs for 14 days.
-The workflow records timed first-launch diagnostics and gives full-model formula
-acceptance a ten-minute limit, within a twenty-minute job limit; hosted CPU
-inference can exceed Homebrew's default five-minute test allowance.
-During formula acceptance it logs Whisper's elapsed/CPU time and memory, and
-retains a one-second process sample if inference is still active after two minutes.
+Local source installation, `brew test`, and `brew linkage --test` are the default
+release gate. They download checksum-pinned source, Bun, Whisper and models,
+compile native helpers, and exercise the package with isolated configuration.
+The hosted workflow is manual-only; when explicitly dispatched, it runs on fresh
+Apple Silicon and Intel macOS runners and retains Homebrew logs for 14 days.
+Its time limits and resource sampling are defined in the workflow; a local run
+does not certify Intel or an untouched Mac.
 
 The formula test starts with only the system PATH and isolated config/library
 directories. It checks the command wrapper, capabilities, repeatable setup
@@ -152,7 +157,7 @@ Use a disposable test account for installation experiments. Unlike the source
 bootstrap, the Homebrew package does not configure a login watcher at install
 time; `seashell` works with defaults, and `seashell setup` explicitly opts into
 the watcher. See the [acceptance report](distribution-acceptance-2026-09-20.md)
-for results and the distinction between historical previews and the public RC6.
+for the initial package results; later release PRs record their own validation.
 
 ## Device acceptance and soak
 

@@ -8,10 +8,7 @@ import {
   trackChildProcess,
   trackTempDirectory,
 } from './process-lifecycle.ts';
-import {
-  DEFAULT_VAD_MODEL_FILENAME,
-  DEFAULT_WHISPER_MODEL_FILENAME,
-} from './model-config.ts';
+import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
 import type { TimedTranscriptUnit } from './transcript-types.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -20,7 +17,6 @@ const __dirname = dirname(__filename);
 const PROJECT_ROOT = join(__dirname, '..');
 const WHISPER_CLI = join(PROJECT_ROOT, 'whisper.cpp/build/bin/whisper-cli');
 const MODEL_PATH = join(PROJECT_ROOT, 'models', DEFAULT_WHISPER_MODEL_FILENAME);
-const VAD_MODEL_PATH = join(PROJECT_ROOT, 'whisper.cpp/models', DEFAULT_VAD_MODEL_FILENAME);
 
 interface WhisperJsonToken {
   text?: unknown;
@@ -45,7 +41,7 @@ interface WhisperJsonDocument {
 }
 
 function milliseconds(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value / 1000 : undefined;
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value / 1000 : undefined;
 }
 
 function roundSeconds(value: number): number {
@@ -65,6 +61,23 @@ function timedTokens(segment: WhisperJsonSegment): TimedTranscriptUnit[] {
   let missingLexicalTiming = false;
   const segmentStart = milliseconds(segment.offsets?.from) ?? 0;
   const segmentEnd = milliseconds(segment.offsets?.to);
+  // Never clamp a different clock into the segment's start. Some Whisper CLI
+  // versions emit VAD-compressed tokens beside original-timeline segments.
+  // Retain complete segment text if lexical anchors reveal that inconsistency.
+  let previousAnchor = -Infinity;
+  for (const raw of segment.tokens) {
+    if (!raw || typeof raw !== 'object') continue;
+    const token = raw as WhisperJsonToken;
+    if (typeof token.text !== 'string' || isSpecialToken(token.text) || !/[\p{L}\p{N}]/u.test(token.text)) continue;
+    const anchor = typeof token.t_dtw === 'number' && Number.isFinite(token.t_dtw) && token.t_dtw >= 0
+      ? token.t_dtw / 100 : undefined;
+    const from = milliseconds(token.offsets?.from), to = milliseconds(token.offsets?.to);
+    if (anchor !== undefined) {
+      if (anchor < segmentStart - .1 || (segmentEnd !== undefined && anchor > segmentEnd + .1) || anchor < previousAnchor) return [];
+      previousAnchor = anchor;
+    } else if (from !== undefined && to !== undefined &&
+        (from < segmentStart - .1 || (segmentEnd !== undefined && to > segmentEnd + .1))) return [];
+  }
 
   const flush = () => {
     if (current && current.text.trim()) {
@@ -108,7 +121,9 @@ function timedTokens(segment: WhisperJsonSegment): TimedTranscriptUnit[] {
       if (token.text.trim()) missingLexicalTiming = true;
       continue;
     }
-    const dtwAnchor = typeof token.t_dtw === 'number' &&
+    // Punctuation may be aligned far into the following silence. Fold its text
+    // into the word, but only lexical tokens may extend that word's DTW span.
+    const dtwAnchor = /[\p{L}\p{N}]/u.test(token.text) && typeof token.t_dtw === 'number' &&
       Number.isFinite(token.t_dtw) &&
       token.t_dtw >= 0
       ? token.t_dtw / 100
@@ -222,12 +237,13 @@ export async function transcribeWithTimestamps(
       const proc = spawn(WHISPER_CLI, [
         ...(disableGpu ? ['-ng'] : []),
         '-m', MODEL_PATH,
-        ...(existsSync(VAD_MODEL_PATH) ? ['-vm', VAD_MODEL_PATH, '--vad'] : []),
         '-f', filePath,
         '-l', 'en',
         '-t', '6',
-        // DTW anchors stay on the original audio timeline across long pauses.
-        // This whisper.cpp build requires flash attention off for DTW.
+        // Do not combine canonical word timestamps with --vad: our pinned CLI
+        // maps segment times but emits token/DTW times on compressed audio
+        // (ggml-org/whisper.cpp#4046). Live draft VAD is independent of this path.
+        // Keep DTW on original audio; flash attention must be off for this build.
         '-nfa',
         '-dtw', 'large.v3.turbo',
         '-np',

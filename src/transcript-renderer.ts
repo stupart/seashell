@@ -63,6 +63,7 @@ export function coalesceTranscriptSegments(
     const combinedText = previous ? `${previous.text} ${segment.text}` : segment.text;
     const canMerge = previous !== undefined &&
       previous.speaker === segment.speaker &&
+      previous.speakerSource === segment.speakerSource &&
       segment.start - previous.end <= options.maxGap &&
       segment.end - previous.start <= options.maxDuration &&
       combinedText.length <= options.maxCharacters;
