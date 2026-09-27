@@ -1,0 +1,786 @@
+{
+  "_provenance": "Real local whisper.cpp 927cfce full JSON from generated Samantha/Daniel speech, 2026-09-27. VAD enabled; original segment clock and compressed token/DTW clock differ. Tool/model/path metadata removed.",
+  "transcription": [
+    {
+      "timestamps": {
+        "from": "00:00:00,990",
+        "to": "00:00:05,070"
+      },
+      "offsets": {
+        "from": 990,
+        "to": 5070
+      },
+      "text": " The launch review is scheduled for Tuesday. I will prepare the release notes.",
+      "tokens": [
+        {
+          "text": "[_BEG_]",
+          "timestamps": {
+            "from": "00:00:00,000",
+            "to": "00:00:00,000"
+          },
+          "offsets": {
+            "from": 0,
+            "to": 0
+          },
+          "id": 50365,
+          "p": 0.99188,
+          "t_dtw": -1
+        },
+        {
+          "text": " The",
+          "timestamps": {
+            "from": "00:00:00,020",
+            "to": "00:00:00,150"
+          },
+          "offsets": {
+            "from": 20,
+            "to": 150
+          },
+          "id": 440,
+          "p": 0.964006,
+          "t_dtw": 10
+        },
+        {
+          "text": " launch",
+          "timestamps": {
+            "from": "00:00:00,150",
+            "to": "00:00:00,450"
+          },
+          "offsets": {
+            "from": 150,
+            "to": 450
+          },
+          "id": 4025,
+          "p": 0.992195,
+          "t_dtw": 36
+        },
+        {
+          "text": " review",
+          "timestamps": {
+            "from": "00:00:00,450",
+            "to": "00:00:00,750"
+          },
+          "offsets": {
+            "from": 450,
+            "to": 750
+          },
+          "id": 3131,
+          "p": 0.999136,
+          "t_dtw": 70
+        },
+        {
+          "text": " is",
+          "timestamps": {
+            "from": "00:00:00,750",
+            "to": "00:00:00,850"
+          },
+          "offsets": {
+            "from": 750,
+            "to": 850
+          },
+          "id": 307,
+          "p": 0.999518,
+          "t_dtw": 90
+        },
+        {
+          "text": " scheduled",
+          "timestamps": {
+            "from": "00:00:00,850",
+            "to": "00:00:01,310"
+          },
+          "offsets": {
+            "from": 850,
+            "to": 1310
+          },
+          "id": 15678,
+          "p": 0.999703,
+          "t_dtw": 130
+        },
+        {
+          "text": " for",
+          "timestamps": {
+            "from": "00:00:01,310",
+            "to": "00:00:01,400"
+          },
+          "offsets": {
+            "from": 1310,
+            "to": 1400
+          },
+          "id": 337,
+          "p": 0.999241,
+          "t_dtw": 158
+        },
+        {
+          "text": " Tuesday",
+          "timestamps": {
+            "from": "00:00:01,500",
+            "to": "00:00:01,810"
+          },
+          "offsets": {
+            "from": 1500,
+            "to": 1810
+          },
+          "id": 10017,
+          "p": 0.998172,
+          "t_dtw": 198
+        },
+        {
+          "text": ".",
+          "timestamps": {
+            "from": "00:00:01,810",
+            "to": "00:00:02,000"
+          },
+          "offsets": {
+            "from": 1810,
+            "to": 2000
+          },
+          "id": 13,
+          "p": 0.964314,
+          "t_dtw": 236
+        },
+        {
+          "text": " I",
+          "timestamps": {
+            "from": "00:00:02,000",
+            "to": "00:00:02,060"
+          },
+          "offsets": {
+            "from": 2000,
+            "to": 2060
+          },
+          "id": 286,
+          "p": 0.649561,
+          "t_dtw": 254
+        },
+        {
+          "text": " will",
+          "timestamps": {
+            "from": "00:00:02,060",
+            "to": "00:00:02,200"
+          },
+          "offsets": {
+            "from": 2060,
+            "to": 2200
+          },
+          "id": 486,
+          "p": 0.999865,
+          "t_dtw": 268
+        },
+        {
+          "text": " prepare",
+          "timestamps": {
+            "from": "00:00:02,450",
+            "to": "00:00:02,810"
+          },
+          "offsets": {
+            "from": 2450,
+            "to": 2810
+          },
+          "id": 5940,
+          "p": 0.99818,
+          "t_dtw": 308
+        },
+        {
+          "text": " the",
+          "timestamps": {
+            "from": "00:00:02,810",
+            "to": "00:00:03,010"
+          },
+          "offsets": {
+            "from": 2810,
+            "to": 3010
+          },
+          "id": 264,
+          "p": 0.999514,
+          "t_dtw": 328
+        },
+        {
+          "text": " release",
+          "timestamps": {
+            "from": "00:00:03,010",
+            "to": "00:00:03,490"
+          },
+          "offsets": {
+            "from": 3010,
+            "to": 3490
+          },
+          "id": 4374,
+          "p": 0.999436,
+          "t_dtw": 362
+        },
+        {
+          "text": " notes",
+          "timestamps": {
+            "from": "00:00:03,490",
+            "to": "00:00:03,830"
+          },
+          "offsets": {
+            "from": 3490,
+            "to": 3830
+          },
+          "id": 5570,
+          "p": 0.999449,
+          "t_dtw": 404
+        },
+        {
+          "text": ".",
+          "timestamps": {
+            "from": "00:00:03,830",
+            "to": "00:00:03,980"
+          },
+          "offsets": {
+            "from": 3830,
+            "to": 3980
+          },
+          "id": 13,
+          "p": 0.998112,
+          "t_dtw": 428
+        },
+        {
+          "text": "[_TT_204]",
+          "timestamps": {
+            "from": "00:00:04,080",
+            "to": "00:00:04,080"
+          },
+          "offsets": {
+            "from": 4080,
+            "to": 4080
+          },
+          "id": 50569,
+          "p": 0.532365,
+          "t_dtw": -1
+        }
+      ]
+    },
+    {
+      "timestamps": {
+        "from": "00:00:07,210",
+        "to": "00:00:11,790"
+      },
+      "offsets": {
+        "from": 7210,
+        "to": 11790
+      },
+      "text": " We should test the microphone and computer audio. I will check the recording quality.",
+      "tokens": [
+        {
+          "text": " We",
+          "timestamps": {
+            "from": "00:00:04,500",
+            "to": "00:00:04,500"
+          },
+          "offsets": {
+            "from": 4500,
+            "to": 4500
+          },
+          "id": 492,
+          "p": 0.999907,
+          "t_dtw": 460
+        },
+        {
+          "text": " should",
+          "timestamps": {
+            "from": "00:00:04,520",
+            "to": "00:00:04,600"
+          },
+          "offsets": {
+            "from": 4520,
+            "to": 4600
+          },
+          "id": 820,
+          "p": 0.99992,
+          "t_dtw": 482
+        },
+        {
+          "text": " test",
+          "timestamps": {
+            "from": "00:00:04,600",
+            "to": "00:00:04,860"
+          },
+          "offsets": {
+            "from": 4600,
+            "to": 4860
+          },
+          "id": 1500,
+          "p": 0.99995,
+          "t_dtw": 510
+        },
+        {
+          "text": " the",
+          "timestamps": {
+            "from": "00:00:04,860",
+            "to": "00:00:05,040"
+          },
+          "offsets": {
+            "from": 4860,
+            "to": 5040
+          },
+          "id": 264,
+          "p": 0.999994,
+          "t_dtw": 526
+        },
+        {
+          "text": " microphone",
+          "timestamps": {
+            "from": "00:00:05,090",
+            "to": "00:00:05,710"
+          },
+          "offsets": {
+            "from": 5090,
+            "to": 5710
+          },
+          "id": 10952,
+          "p": 0.999947,
+          "t_dtw": 574
+        },
+        {
+          "text": " and",
+          "timestamps": {
+            "from": "00:00:05,710",
+            "to": "00:00:05,900"
+          },
+          "offsets": {
+            "from": 5710,
+            "to": 5900
+          },
+          "id": 293,
+          "p": 0.999971,
+          "t_dtw": 604
+        },
+        {
+          "text": " computer",
+          "timestamps": {
+            "from": "00:00:05,900",
+            "to": "00:00:06,360"
+          },
+          "offsets": {
+            "from": 5900,
+            "to": 6360
+          },
+          "id": 3820,
+          "p": 0.999859,
+          "t_dtw": 650
+        },
+        {
+          "text": " audio",
+          "timestamps": {
+            "from": "00:00:06,450",
+            "to": "00:00:06,690"
+          },
+          "offsets": {
+            "from": 6450,
+            "to": 6690
+          },
+          "id": 6278,
+          "p": 0.999884,
+          "t_dtw": 694
+        },
+        {
+          "text": ".",
+          "timestamps": {
+            "from": "00:00:06,950",
+            "to": "00:00:07,000"
+          },
+          "offsets": {
+            "from": 6950,
+            "to": 7000
+          },
+          "id": 13,
+          "p": 0.999828,
+          "t_dtw": 732
+        },
+        {
+          "text": " I",
+          "timestamps": {
+            "from": "00:00:07,000",
+            "to": "00:00:07,060"
+          },
+          "offsets": {
+            "from": 7000,
+            "to": 7060
+          },
+          "id": 286,
+          "p": 0.930878,
+          "t_dtw": 752
+        },
+        {
+          "text": " will",
+          "timestamps": {
+            "from": "00:00:07,060",
+            "to": "00:00:07,320"
+          },
+          "offsets": {
+            "from": 7060,
+            "to": 7320
+          },
+          "id": 486,
+          "p": 0.999987,
+          "t_dtw": 770
+        },
+        {
+          "text": " check",
+          "timestamps": {
+            "from": "00:00:07,320",
+            "to": "00:00:07,640"
+          },
+          "offsets": {
+            "from": 7320,
+            "to": 7640
+          },
+          "id": 1520,
+          "p": 0.999685,
+          "t_dtw": 796
+        },
+        {
+          "text": " the",
+          "timestamps": {
+            "from": "00:00:07,640",
+            "to": "00:00:07,830"
+          },
+          "offsets": {
+            "from": 7640,
+            "to": 7830
+          },
+          "id": 264,
+          "p": 0.998847,
+          "t_dtw": 814
+        },
+        {
+          "text": " recording",
+          "timestamps": {
+            "from": "00:00:07,830",
+            "to": "00:00:08,400"
+          },
+          "offsets": {
+            "from": 7830,
+            "to": 8400
+          },
+          "id": 6613,
+          "p": 0.997225,
+          "t_dtw": 856
+        },
+        {
+          "text": " quality",
+          "timestamps": {
+            "from": "00:00:08,400",
+            "to": "00:00:08,630"
+          },
+          "offsets": {
+            "from": 8400,
+            "to": 8630
+          },
+          "id": 3125,
+          "p": 0.999662,
+          "t_dtw": 908
+        },
+        {
+          "text": ".",
+          "timestamps": {
+            "from": "00:00:08,990",
+            "to": "00:00:09,080"
+          },
+          "offsets": {
+            "from": 8990,
+            "to": 9080
+          },
+          "id": 13,
+          "p": 0.999866,
+          "t_dtw": 948
+        },
+        {
+          "text": "[_TT_454]",
+          "timestamps": {
+            "from": "00:00:09,080",
+            "to": "00:00:09,080"
+          },
+          "offsets": {
+            "from": 9080,
+            "to": 9080
+          },
+          "id": 50819,
+          "p": 0.178326,
+          "t_dtw": -1
+        }
+      ]
+    },
+    {
+      "timestamps": {
+        "from": "00:00:14,010",
+        "to": "00:00:18,270"
+      },
+      "offsets": {
+        "from": 14010,
+        "to": 18270
+      },
+      "text": " Please create a ticket for the missing speaker names. The follow-up is on Friday.",
+      "tokens": [
+        {
+          "text": " Please",
+          "timestamps": {
+            "from": "00:00:09,600",
+            "to": "00:00:09,600"
+          },
+          "offsets": {
+            "from": 9600,
+            "to": 9600
+          },
+          "id": 2555,
+          "p": 0.999851,
+          "t_dtw": 984
+        },
+        {
+          "text": " create",
+          "timestamps": {
+            "from": "00:00:09,620",
+            "to": "00:00:09,860"
+          },
+          "offsets": {
+            "from": 9620,
+            "to": 9860
+          },
+          "id": 1884,
+          "p": 0.999832,
+          "t_dtw": 1018
+        },
+        {
+          "text": " a",
+          "timestamps": {
+            "from": "00:00:09,860",
+            "to": "00:00:09,920"
+          },
+          "offsets": {
+            "from": 9860,
+            "to": 9920
+          },
+          "id": 257,
+          "p": 0.999996,
+          "t_dtw": 1034
+        },
+        {
+          "text": " ticket",
+          "timestamps": {
+            "from": "00:00:09,920",
+            "to": "00:00:10,310"
+          },
+          "offsets": {
+            "from": 9920,
+            "to": 10310
+          },
+          "id": 10550,
+          "p": 0.999832,
+          "t_dtw": 1060
+        },
+        {
+          "text": " for",
+          "timestamps": {
+            "from": "00:00:10,310",
+            "to": "00:00:10,470"
+          },
+          "offsets": {
+            "from": 10310,
+            "to": 10470
+          },
+          "id": 337,
+          "p": 0.999989,
+          "t_dtw": 1084
+        },
+        {
+          "text": " the",
+          "timestamps": {
+            "from": "00:00:10,620",
+            "to": "00:00:10,690"
+          },
+          "offsets": {
+            "from": 10620,
+            "to": 10690
+          },
+          "id": 264,
+          "p": 0.999968,
+          "t_dtw": 1096
+        },
+        {
+          "text": " missing",
+          "timestamps": {
+            "from": "00:00:10,690",
+            "to": "00:00:11,140"
+          },
+          "offsets": {
+            "from": 10690,
+            "to": 11140
+          },
+          "id": 5361,
+          "p": 0.99939,
+          "t_dtw": 1124
+        },
+        {
+          "text": " speaker",
+          "timestamps": {
+            "from": "00:00:11,140",
+            "to": "00:00:11,590"
+          },
+          "offsets": {
+            "from": 11140,
+            "to": 11590
+          },
+          "id": 8145,
+          "p": 0.998988,
+          "t_dtw": 1168
+        },
+        {
+          "text": " names",
+          "timestamps": {
+            "from": "00:00:11,590",
+            "to": "00:00:11,800"
+          },
+          "offsets": {
+            "from": 11590,
+            "to": 11800
+          },
+          "id": 5288,
+          "p": 0.999847,
+          "t_dtw": 1210
+        },
+        {
+          "text": ".",
+          "timestamps": {
+            "from": "00:00:12,050",
+            "to": "00:00:12,140"
+          },
+          "offsets": {
+            "from": 12050,
+            "to": 12140
+          },
+          "id": 13,
+          "p": 0.999571,
+          "t_dtw": 1236
+        },
+        {
+          "text": " The",
+          "timestamps": {
+            "from": "00:00:12,140",
+            "to": "00:00:12,290"
+          },
+          "offsets": {
+            "from": 12140,
+            "to": 12290
+          },
+          "id": 440,
+          "p": 0.969052,
+          "t_dtw": 1260
+        },
+        {
+          "text": " follow",
+          "timestamps": {
+            "from": "00:00:12,380",
+            "to": "00:00:12,750"
+          },
+          "offsets": {
+            "from": 12380,
+            "to": 12750
+          },
+          "id": 1524,
+          "p": 0.999859,
+          "t_dtw": 1292
+        },
+        {
+          "text": "-",
+          "timestamps": {
+            "from": "00:00:12,750",
+            "to": "00:00:12,810"
+          },
+          "offsets": {
+            "from": 12750,
+            "to": 12810
+          },
+          "id": 12,
+          "p": 0.728305,
+          "t_dtw": 1294
+        },
+        {
+          "text": "up",
+          "timestamps": {
+            "from": "00:00:12,810",
+            "to": "00:00:12,940"
+          },
+          "offsets": {
+            "from": 12810,
+            "to": 12940
+          },
+          "id": 1010,
+          "p": 0.999989,
+          "t_dtw": 1314
+        },
+        {
+          "text": " is",
+          "timestamps": {
+            "from": "00:00:12,940",
+            "to": "00:00:13,070"
+          },
+          "offsets": {
+            "from": 12940,
+            "to": 13070
+          },
+          "id": 307,
+          "p": 0.999945,
+          "t_dtw": 1330
+        },
+        {
+          "text": " on",
+          "timestamps": {
+            "from": "00:00:13,070",
+            "to": "00:00:13,200"
+          },
+          "offsets": {
+            "from": 13070,
+            "to": 13200
+          },
+          "id": 322,
+          "p": 0.999977,
+          "t_dtw": 1348
+        },
+        {
+          "text": " Friday",
+          "timestamps": {
+            "from": "00:00:13,200",
+            "to": "00:00:13,570"
+          },
+          "offsets": {
+            "from": 13200,
+            "to": 13570
+          },
+          "id": 6984,
+          "p": 0.999529,
+          "t_dtw": 1384
+        },
+        {
+          "text": ".",
+          "timestamps": {
+            "from": "00:00:13,680",
+            "to": "00:00:13,750"
+          },
+          "offsets": {
+            "from": 13680,
+            "to": 13750
+          },
+          "id": 13,
+          "p": 0.99874,
+          "t_dtw": 1384
+        },
+        {
+          "text": "[_TT_693]",
+          "timestamps": {
+            "from": "00:00:13,860",
+            "to": "00:00:13,860"
+          },
+          "offsets": {
+            "from": 13860,
+            "to": 13860
+          },
+          "id": 51058,
+          "p": 0.410506,
+          "t_dtw": -1
+        }
+      ]
+    }
+  ]
+}
