@@ -23,6 +23,39 @@ function runtimeHost(root: string): RuntimeHostOptions {
   };
 }
 
+function restartFixture(
+  outcomes: Array<{ status: number | null; stderr?: string; error?: Error }>,
+  initiallyLoaded = true,
+) {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-launch-retry-'));
+  roots.push(root);
+  const project = join(root, 'project');
+  mkdirSync(join(project, 'src'), { recursive: true });
+  writeFileSync(join(project, 'src', 'cli.tsx'), '// fixture');
+  let isLoaded = initiallyLoaded;
+  let bootstraps = 0;
+  let now = 0;
+  const waits: number[] = [];
+  const calls: Array<{ args: readonly string[]; timeout?: number }> = [];
+  const runner = ((_command: string, args: readonly string[], options?: { timeout?: number }) => {
+    calls.push({ args: [...args], timeout: options?.timeout });
+    if (args[0] === 'print') return { status: isLoaded ? 0 : 1, stderr: '' };
+    if (args[0] === 'bootout') { isLoaded = false; return { status: 0, stderr: '' }; }
+    const result = outcomes[Math.min(bootstraps++, outcomes.length - 1)]!;
+    if (result.status === 0 && !result.error) isLoaded = true;
+    return { stderr: '', ...result };
+  }) as unknown as typeof spawnSync;
+  return {
+    calls, waits,
+    options: {
+      projectRoot: project, launchAgentsDir: join(root, 'agents'), logsDir: join(root, 'logs'),
+      runtimeHost: runtimeHost(root), runner, uid: 123,
+      now: () => now,
+      wait: (milliseconds: number) => { waits.push(milliseconds); now += milliseconds; },
+    },
+  };
+}
+
 test('packaged watchers keep the stable opt path across Homebrew upgrades', () => {
   const root = mkdtempSync(join(tmpdir(), 'seashell-packaged-launch-'));
   roots.push(root);
@@ -107,6 +140,61 @@ test('failed migration shutdown preserves the previous registered command', () =
   expect(readFileSync(plist, 'utf8')).toBe('previous legacy registration');
   expect(calls.some(args => args[0] === 'bootstrap')).toBe(false);
   expect(calls.find(args => args[0] === 'bootout')).toEqual(['bootout', 'gui/123/com.humain.seashell.meeting-watch']);
+});
+
+test('replacing a loaded watcher retries transient bootstrap failures until launchd is ready', () => {
+  const fixture = restartFixture([
+    { status: 5, stderr: 'Bootstrap failed: 5: Input/output error' },
+    { status: 5, stderr: 'Bootstrap failed: 5: Input/output error' },
+    { status: 0 },
+  ]);
+  const status = enableMeetingLaunchAtLogin(fixture.options);
+  expect(status.loaded).toBe(true);
+  expect(status.enabled).toBe(true);
+  expect(fixture.waits).toEqual([250, 250]);
+  expect(fixture.calls.filter(call => call.args[0] === 'bootout')).toHaveLength(1);
+  const bootstraps = fixture.calls.filter(call => call.args[0] === 'bootstrap');
+  expect(bootstraps).toHaveLength(3);
+  for (const call of bootstraps) expect(call.args).toEqual(['bootstrap', 'gui/123', status.plistPath]);
+});
+
+test('replacement bootstrap retries stop at the deadline and preserve the final error', () => {
+  const fixture = restartFixture([{ status: 5, stderr: 'launchd is still tearing down the job' }]);
+  expect(() => enableMeetingLaunchAtLogin(fixture.options)).toThrow('launchd is still tearing down the job');
+  expect(fixture.waits.reduce((total, delay) => total + delay, 0)).toBe(10_000);
+  expect(fixture.waits.every(delay => delay > 0 && delay <= 250)).toBe(true);
+  const bootstraps = fixture.calls.filter(call => call.args[0] === 'bootstrap');
+  expect(bootstraps.length).toBeGreaterThan(1);
+  expect(bootstraps.length).toBeLessThanOrEqual(41);
+  expect(bootstraps.slice(1).every(call => call.timeout! > 0 && call.timeout! <= 10_000)).toBe(true);
+  expect(fixture.calls.filter(call => call.args[0] === 'bootout')).toHaveLength(1);
+});
+
+for (const [description, failure] of [
+  ['another exit status', { status: 1, stderr: 'operation denied' }],
+  ['a process error', { status: 5, error: new Error('launchctl could not execute') }],
+] as const) {
+  test(`replacement bootstrap immediately reports ${description}`, () => {
+    const fixture = restartFixture([failure]);
+    expect(() => enableMeetingLaunchAtLogin(fixture.options)).toThrow('Could not enable launch at login');
+    expect(fixture.waits).toEqual([]);
+    expect(fixture.calls.filter(call => call.args[0] === 'bootstrap')).toHaveLength(1);
+  });
+}
+
+test('replacement retries stop immediately when a nontransient failure follows an I/O error', () => {
+  const fixture = restartFixture([{ status: 5 }, { status: 1, stderr: 'operation denied' }, { status: 0 }]);
+  expect(() => enableMeetingLaunchAtLogin(fixture.options)).toThrow('operation denied');
+  expect(fixture.waits).toEqual([250]);
+  expect(fixture.calls.filter(call => call.args[0] === 'bootstrap')).toHaveLength(2);
+});
+
+test('a fresh watcher start does not retry bootstrap I/O errors', () => {
+  const fixture = restartFixture([{ status: 5, stderr: 'invalid registration' }], false);
+  expect(() => enableMeetingLaunchAtLogin(fixture.options)).toThrow('invalid registration');
+  expect(fixture.waits).toEqual([]);
+  expect(fixture.calls.filter(call => call.args[0] === 'bootout')).toHaveLength(0);
+  expect(fixture.calls.filter(call => call.args[0] === 'bootstrap')).toHaveLength(1);
 });
 
 test('status never installs the background host', () => {
