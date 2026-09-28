@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parseMeetAccessibilityProbe, probeMeetAccessibility, meetSpeakerForSegment, type MeetSample } from '../src/meet-speakers.ts';
+import { parseMeetAccessibilityProbe, probeMeetAccessibility, probeMeetSpeakers, meetSpeakerForSegment, type MeetSample } from '../src/meet-speakers.ts';
 
 const snapshot = { meeting: '/abc-defg-hij', joined: true, participants: [
   { id: 'alice', name: 'Alice', self: false, speaking: true },
@@ -23,9 +23,36 @@ test('native boundary accepts validated accessibility provenance, rejects contra
     const probe = parseMeetAccessibilityProbe(raw);
     expect(probe.state).toBe('unavailable');
     expect(probe.snapshot).toBeUndefined();
+    expect(probe.detail).toContain('Meeting detection and speaker names are unavailable');
+    expect(probe.detail).not.toContain('recording');
   }
   expect(parseMeetAccessibilityProbe({ state: 'idle', detail: 'No browser', absenceConfirmed: true }))
     .toMatchObject({ state: 'idle', absenceConfirmed: true });
+});
+
+test('failed injected browser checks do not claim audio is recording', async () => {
+  const result = await probeMeetSpeakers('chrome', undefined, async () => { throw new Error('reader failed'); });
+  expect(result.state).toBe('unavailable');
+  expect(result.detail).toContain('Chrome meeting detection and speaker names are unavailable');
+  expect(result.detail).not.toContain('recording');
+});
+
+test.skipIf(process.platform !== 'darwin')('native timeout, process failure and malformed output do not claim recording or infer permission denial', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-ax-errors-'));
+  const helperPath = join(root, 'probe');
+  try {
+    for (const script of [
+      '#!/bin/sh\nexec /bin/sleep 10\n',
+      '#!/bin/sh\nprintf "permission denied" >&2\nexit 1\n',
+      '#!/bin/sh\nprintf "invalid json"\n',
+    ]) {
+      writeFileSync(helperPath, script, { mode: 0o700 });
+      const result = await probeMeetAccessibility('auto', undefined, { helperPath });
+      expect(result).toEqual({ state: 'unavailable', detail: 'Meeting detection and speaker names could not be checked. Check [V] Speakers.' });
+      expect(result.detail).not.toContain('recording');
+      expect(result.accessibilityTrusted).toBeUndefined();
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('native speaker provenance survives attribution and never bridges legacy evidence', () => {

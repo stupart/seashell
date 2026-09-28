@@ -46,7 +46,11 @@ for (const state of ['permission', 'unavailable', 'ambiguous'] as const) {
     const result = await probeMeetSpeakers('auto', undefined, async browser => browser === 'chrome' ? connected()
       : { state, detail: 'Safari needs attention' });
     expect(result.state).toBe(state);
-    expect(result.snapshot).toBeUndefined();
+    if (state === 'unavailable') {
+      expect(result.browser).toBe('chrome');
+      expect(result.snapshot).toEqual({ ...snapshot('Alice'), participants: [] });
+      expect(result.absenceConfirmed).not.toBe(true);
+    } else expect(result.snapshot).toBeUndefined();
     if (state !== 'ambiguous') expect(result.detail).toContain('Safari');
   });
 }

@@ -51,6 +51,13 @@ approval is scoped to a new token for each suggestion, so an old approval cannot
 authorize a later suggestion from the same browser. The existing explicit CLI
 approval command remains supported.
 
+Meeting detection warnings are visible while watching and on the current
+background recording. They clear when the reader recovers and do not attach to
+an unrelated saved transcript. Observer messages describe detection or naming
+failures; they never assert that audio is recording. Audio recording status
+continues to come from the capture health and saved-progress signals above.
+
+
 ## Bounded local drafts
 
 Background draft transcription currently uses local Whisper even when the

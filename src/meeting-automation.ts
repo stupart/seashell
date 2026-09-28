@@ -394,10 +394,12 @@ function patternFor(bundleId: string): AppPattern | undefined {
   ));
 }
 
-/** Positive page evidence can end a Meet call immediately. Reader failures cannot. */
+/** Only a complete inspection can prove a different call replaced this one.
+ * A positive call on a partial inspection can coexist with an unreadable old
+ * call; it must use the normal grace period instead of proving departure. */
 export function hasConfirmedMeetingEnd(candidate: MeetingCandidate | undefined, meet?: MeetProbe): boolean {
   if (!candidate?.evidence.includes('joined-meet') || !meet) return false;
-  return (meet.state === 'idle' && (meet.source !== 'google-meet-accessibility' || meet.absenceConfirmed === true)) || Boolean(meet.snapshot?.joined && meet.browser &&
+  return (meet.state === 'idle' && (meet.source !== 'google-meet-accessibility' || meet.absenceConfirmed === true)) || Boolean(meet.state === 'connected' && meet.snapshot?.joined && meet.browser &&
     candidate.id !== `meet:${meet.browser}:${meet.snapshot.meeting}`);
 }
 

@@ -26,7 +26,8 @@ Object.defineProperty(process.stdout, 'rows', { value: rows });
 mock.module('../../src/watch-lock.ts', () => ({ acquireMeetingWatchLock: () => undefined }));
 const decisions: unknown[][] = [];
 mock.module('../../src/meeting-consent.ts', () => ({ writeMeetingConsent: (...args: unknown[]) => { decisions.push(args); } }));
-writeBackgroundWatchStatus(library, { phase: 'awaiting-consent', candidate: { id: 'call', title: 'Design meeting', appName: 'Chrome' }, consentId: 'suggestion-1' });
+const meetWarning = 'Meet detection unavailable. Check Speakers.';
+writeBackgroundWatchStatus(library, { phase: 'watching', warning: meetWarning });
 const { default: App } = await import('../../src/app.tsx');
 const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
 let rendered = '';
@@ -41,7 +42,11 @@ const until = async (condition: () => boolean, message: string) => {
   assert(condition(), `${message}\n${screen()}`);
 };
 try {
+  await until(() => screen().includes(meetWarning), 'idle watcher must expose detection failures');
+  assert(screen().includes('Not recording') && !screen().includes('● Recording'), 'detection failure cannot imply capture is active');
+  writeBackgroundWatchStatus(library, { phase: 'awaiting-consent', candidate: { id: 'call', title: 'Design meeting', appName: 'Chrome' }, consentId: 'suggestion-1' });
   await until(() => screen().includes('meeting needs your approval'), 'must explicitly show not recording before consent');
+  assert(!screen().includes(meetWarning), 'recovered detection clears the warning');
   await type('m');
   assert.equal(decisions.length, 1);
   assert.equal(decisions[0]![3], 'suggestion-1', 'approval is scoped to this exact suggestion');
@@ -55,11 +60,12 @@ try {
   health.pcm('systemAudio', { peak: 1000, rms: 500, rmsDbfs: -30 });
   writeBackgroundMeetingState(saved.directory, 'recording', { captureHealth: health.snapshot, audioSavedThroughMs: 110_000,
     draftStatus: { stage: 'waiting', detail: 'Waiting for speech', queueDepth: 0 } });
-  writeBackgroundWatchStatus(library, { phase: 'recording', sessionId: first.id });
+  writeBackgroundWatchStatus(library, { phase: 'recording', sessionId: first.id, warning: meetWarning });
   await until(() => screen().includes('NOT CAPTURING'), 'new meeting opens automatically and exposes microphone failure');
+  assert(screen().includes(meetWarning) && screen().includes('● Recording'), 'observer warning remains visible while confirmed audio capture continues');
   assert(screen().includes('Audio saved through 1:50'), 'saved duration comes from committed audio');
   if (columns >= 80) await type('h'); // close history; compact opens directly in the reader
-  await type('i'); assert(screen().includes('Sound → Input'), 'audio help is reachable');
+  await type('i'); assert(screen().includes('Sound → Input'), `audio help is reachable\n${screen()}`);
   await type('\x1b'); assert(!screen().includes('Sound → Input'), 'Escape closes audio help without quitting');
   const transcript = Array.from({ length: 60 }, (_, i) => ({ id: `s${i}`, start: i, end: i + 1, text: `Live sentence ${String(i).padStart(3, '0')}.`, speaker: 'LOCAL' }));
   saveTranscriptRecord(library, { ...first, transcript }, { provisional: true });
@@ -73,8 +79,9 @@ try {
   assert(!screen().includes('060.'), 'new text does not yank the reader back to the bottom');
   await type('l'); assert(screen().includes('060.'), 'Latest resumes following live text');
   writeBackgroundMeetingState(saved.directory, 'ready', { captureHealth: health.stop() });
-  writeBackgroundWatchStatus(library, { phase: 'watching' });
+  writeBackgroundWatchStatus(library, { phase: 'watching', warning: meetWarning });
   await until(() => screen().includes('Saved · audio needs review'), 'capture failure remains visible after finalization');
+  assert(!screen().includes(meetWarning), 'current detection warning must not attach to a saved transcript');
   writeBackgroundWatchStatus(library, { phase: 'awaiting-consent', candidate: { id: 'next', title: 'Next call', appName: 'Chrome' }, consentId: 'suggestion-2' });
   await until(() => screen().includes('Not recording Next call'), 'next approval is visible separately');
   assert(screen().includes('Design meeting') && screen().includes('Saved · audio needs review'), 'new approval must not relabel the saved transcript');
@@ -90,5 +97,5 @@ try {
   await type('l');
   writeBackgroundWatchStatus(library, { phase: 'recording', sessionId: second.id }, Date.now() - 31_000);
   await until(() => screen().includes('Recording status unconfirmed'), 'stale watcher heartbeat must not claim active recording');
-  process.stdout.write(JSON.stringify({ consent: true, recordingState: true, liveText: true, scroll: true, audioHelp: true, historyIdentity: true, staleStatus: true }) + '\n');
+  process.stdout.write(JSON.stringify({ consent: true, recordingState: true, liveText: true, scroll: true, audioHelp: true, historyIdentity: true, staleStatus: true, observerWarning: true }) + '\n');
 } finally { app.unmount(); input.destroy(); output.destroy(); rmSync(root, { recursive: true, force: true }); }

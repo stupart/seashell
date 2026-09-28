@@ -9,6 +9,6 @@ for (const width of ['wide', 'narrow']) test(`background meeting flow: approval,
       new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
     ]);
     if (code !== 0) throw new Error(err);
-    expect(JSON.parse(out)).toEqual({ consent: true, recordingState: true, liveText: true, scroll: true, audioHelp: true, historyIdentity: true, staleStatus: true });
+    expect(JSON.parse(out)).toEqual({ consent: true, recordingState: true, liveText: true, scroll: true, audioHelp: true, historyIdentity: true, staleStatus: true, observerWarning: true });
   } finally { clearTimeout(timeout); child.kill(); }
 }, 22_000);
