@@ -34,6 +34,9 @@ export interface LaunchAtLoginOptions {
   readonly logsDir?: string;
   readonly environment?: NodeJS.ProcessEnv;
   readonly runtimeHost?: RuntimeHostOptions;
+  /** Injectable synchronous delay and monotonic clock for restart tests. */
+  readonly wait?: (milliseconds: number) => void;
+  readonly now?: () => number;
 }
 
 function xml(value: string): string {
@@ -159,6 +162,7 @@ export function enableMeetingLaunchAtLogin(
   const temporary = `${resolved.plistPath}.${process.pid}.tmp`;
   const runner = options.runner ?? spawnSync;
   const domain = launchDomain(options);
+  let stoppedPreviousWatcher = false;
   try {
     writeFileSync(temporary, plist(options), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
     if (loaded(options)) {
@@ -166,15 +170,36 @@ export function enableMeetingLaunchAtLogin(
       if (stopped.error || stopped.status !== 0) {
         throw new Error(`Could not stop the previous meeting watcher: ${stopped.stderr?.trim() || stopped.error?.message || `exit ${stopped.status}`}`);
       }
+      stoppedPreviousWatcher = true;
     }
     renameSync(temporary, resolved.plistPath);
   } catch (error) {
     rmSync(temporary, { force: true });
     throw error;
   }
-  const result = runner('launchctl', ['bootstrap', domain, resolved.plistPath], {
+  const bootstrapArguments = ['bootstrap', domain, resolved.plistPath];
+  let result = runner('launchctl', bootstrapArguments, {
     encoding: 'utf8',
   });
+  if (stoppedPreviousWatcher && !result.error && result.status === 5) {
+    // bootout can succeed before launchd has finished tearing down the job.
+    // Only that replacement path warrants retrying its transient I/O error.
+    const now = options.now ?? (() => performance.now());
+    const wait = options.wait ?? ((milliseconds: number) => {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+    });
+    const deadline = now() + 10_000;
+    for (let retries = 0; retries < 40 && !result.error && result.status === 5; retries++) {
+      const remaining = deadline - now();
+      if (remaining <= 0) break;
+      wait(Math.min(250, remaining));
+      const retryBudget = deadline - now();
+      if (retryBudget <= 0) break;
+      result = runner('launchctl', bootstrapArguments, {
+        encoding: 'utf8', timeout: Math.max(1, Math.ceil(retryBudget)),
+      });
+    }
+  }
   if (result.error || result.status !== 0) {
     throw new Error(`Could not enable launch at login: ${result.stderr?.trim() || result.error?.message || `exit ${result.status}`}`);
   }

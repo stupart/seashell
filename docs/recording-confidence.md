@@ -51,6 +51,12 @@ approval is scoped to a new token for each suggestion, so an old approval cannot
 authorize a later suggestion from the same browser. The existing explicit CLI
 approval command remains supported.
 
+When replacing an existing login watcher, macOS can acknowledge its removal
+before the service has finished unloading. Seashell retries only that replacement
+path's transient bootstrap error, with a ten-second bound. Other setup failures
+are reported immediately, and a failed shutdown preserves the previous login
+registration. This retry does not change the permanent permission host.
+
 Meeting detection warnings are visible while watching and on the current
 background recording. They clear when the reader recovers and do not attach to
 an unrelated saved transcript. Observer messages describe detection or naming
