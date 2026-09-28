@@ -17,6 +17,7 @@ private struct AXNode: Codable {
     var url: String?
     var children: [AXNode]?
     var incomplete: Bool?
+    var speakerIncomplete: Bool?
 }
 
 private struct BrowserTree: Codable {
@@ -89,14 +90,14 @@ private func walk(_ root: AXNode) -> [AXNode] {
     return output
 }
 
-private func browserScaffold(_ root: AXNode) -> [AXNode] {
+private func browserScaffold(_ root: AXNode, stopAtWindows: Bool = false) -> [AXNode] {
     var result: [AXNode] = [], pending = [root]
     while let node = pending.popLast() {
         result.append(node)
         if result.count > maxNodes { break }
         // In-page radio buttons are not browser tabs; neither their labels nor
         // nested iframe contents may affect the browser's tab inventory.
-        if node.role != "AXWebArea" { pending.append(contentsOf: node.children ?? []) }
+        if node.role != "AXWebArea" && !(stopAtWindows && node.role == "AXWindow") { pending.append(contentsOf: node.children ?? []) }
     }
     return result
 }
@@ -112,6 +113,7 @@ private struct SpeakerEvidence {
 private func chromeSpeakers(_ area: AXNode) -> SpeakerEvidence {
     guard let document = clean(area.documentId) else { return SpeakerEvidence(participants: [], available: false) }
     let nodes = walk(area)
+    guard !nodes.contains(where: { $0.speakerIncomplete == true }) else { return SpeakerEvidence(participants: [], available: false) }
     guard nodes.filter({ $0.role == "AXWebArea" }).count == 1 else { return SpeakerEvidence(participants: [], available: false) }
     let hasClass: (AXNode, String) -> Bool = { ($0.classList ?? []).contains($1) }
     let microphoneMuted = nodes.contains { $0.role == "AXButton" && labels($0).contains { matches("^Turn on microphone(?: \\([^)]*\\))?$", $0) } } &&
@@ -176,21 +178,32 @@ private func chromeSpeakers(_ area: AXNode) -> SpeakerEvidence {
 private func analyze(_ tree: BrowserTree) -> Probe {
     let browser = tree.browser
     guard tree.running else { return Probe(state: "idle", detail: "Browser is not running.", browser: browser, absenceConfirmed: true) }
-    guard let root = tree.root else { return Probe(state: "unavailable", detail: "Browser Accessibility tree is unavailable; audio recording continues.", browser: browser) }
+    guard let root = tree.root else { return Probe(state: "unavailable", detail: "Browser Accessibility tree is unavailable; meeting detection and names are paused.", browser: browser) }
     let nodes = walk(root)
-    guard nodes.count <= maxNodes, !nodes.contains(where: { $0.incomplete == true }) else {
-        return Probe(state: "unavailable", detail: "Browser Accessibility inspection was incomplete; meeting state and names are paused.", browser: browser)
+    guard nodes.count <= maxNodes else {
+        return Probe(state: "unavailable", detail: "Browser Accessibility inspection exceeded its limit; meeting detection and names are paused.", browser: browser)
     }
+    var uncertainty: String? = nodes.contains(where: { $0.incomplete == true })
+        ? "Browser Accessibility inspection was incomplete." : nil
     let scaffold = browserScaffold(root)
-    let windows = scaffold.filter { $0.role == "AXWindow" }
-    guard !windows.isEmpty else { return Probe(state: "idle", detail: "Browser has no open windows.", browser: browser, absenceConfirmed: true) }
-    let webAreas = scaffold.filter { $0.role == "AXWebArea" }
-    guard webAreas.allSatisfy({ clean($0.url) != nil }) else {
-        return Probe(state: "unavailable", detail: "A browser page does not expose its address through Accessibility; meeting state and names are paused.", browser: browser)
+    let windows = browserScaffold(root, stopAtWindows: true).filter { $0.role == "AXWindow" }
+    guard !windows.isEmpty else {
+        if let uncertainty { return Probe(state: "unavailable", detail: uncertainty + " Meeting detection and names are paused.", browser: browser) }
+        return Probe(state: "idle", detail: "Browser has no open windows.", browser: browser, absenceConfirmed: true)
     }
-    let calls = webAreas.compactMap { area -> (AXNode, String)? in
-        guard let path = meetPath(area.url) else { return nil }
-        return (area, path)
+    let webAreas = scaffold.filter { $0.role == "AXWebArea" }
+    if !webAreas.allSatisfy({ clean($0.url) != nil }) {
+        uncertainty = uncertainty ?? "A browser page does not expose its address through Accessibility."
+    }
+    // Only a complete window can establish positive call state. An incomplete
+    // different window must suppress names, not erase that observed call.
+    let calls = windows.flatMap { window -> [(AXNode, String, Bool)] in
+        let contents = walk(window)
+        let complete = contents.count <= maxNodes && !contents.contains { $0.incomplete == true }
+        return browserScaffold(window).compactMap { area in
+            guard area.role == "AXWebArea", let path = meetPath(area.url) else { return nil }
+            return (area, path, complete)
+        }
     }
     let tabs = scaffold.filter { $0.role == "AXRadioButton" || $0.role == "AXTab" }
     let meetTabs = tabs.filter { tab in
@@ -198,15 +211,16 @@ private func analyze(_ tree: BrowserTree) -> Probe {
     }
     // Browsers commonly omit background tab contents from AX. A hidden Meet tab
     // could be another active call; it must not become "left" or a named speaker.
-    guard meetTabs.count <= calls.count else {
-        return Probe(state: "unavailable", detail: "A Google Meet tab is not exposed through Accessibility. Bring that tab into view; audio recording continues.", browser: browser)
+    if meetTabs.count > calls.count {
+        uncertainty = uncertainty ?? "A Google Meet tab is not exposed through Accessibility. Bring that tab into view."
     }
     // A split view or browser sidebar can expose multiple pages in one window;
     // its extra web area must not hide a different window's unreadable content.
-    guard windows.allSatisfy({ window in browserScaffold(window).contains { $0.role == "AXWebArea" } }) else {
-        return Probe(state: "unavailable", detail: "A browser window does not expose its page through Accessibility; meeting state and names are paused.", browser: browser)
+    if !windows.allSatisfy({ window in browserScaffold(window).contains { $0.role == "AXWebArea" } }) {
+        uncertainty = uncertainty ?? "A browser window does not expose its page through Accessibility."
     }
     if calls.isEmpty {
+        if let uncertainty { return Probe(state: "unavailable", detail: uncertainty + " Meeting detection and names are paused.", browser: browser) }
         // Tab titles are useful discovery hints, not authoritative proof that a
         // previously joined meeting ended (custom/hidden tabs can omit them).
         return Probe(state: "idle", detail: "No visible Google Meet call found.", browser: browser, absenceConfirmed: false)
@@ -214,7 +228,8 @@ private func analyze(_ tree: BrowserTree) -> Probe {
     var joined: [Snapshot] = []
     var namesAvailable = false
     var explicitNonCalls = 0
-    for (area, path) in calls {
+    for (area, path, complete) in calls {
+        guard complete else { continue }
         let contents = walk(area)
         let inCall = contents.contains { node in
             node.role == "AXButton" && labels(node).contains { matches("^Leave call(?: \\([^)]*\\))?$", $0) }
@@ -229,14 +244,19 @@ private func analyze(_ tree: BrowserTree) -> Probe {
             namesAvailable = evidence.available
             joined.append(Snapshot(meeting: path, joined: true, participants: evidence.participants))
         } else if notJoined { explicitNonCalls += 1 }
-        else { return Probe(state: "unavailable", detail: "Google Meet is visible but its call state is not readable. Names and automatic meeting boundaries are paused.", browser: browser) }
+        else { uncertainty = uncertainty ?? "A Google Meet page is visible but its call state is not readable." }
     }
     guard joined.count <= 1 else { return Probe(state: "ambiguous", detail: "Multiple joined Google Meet calls; keep only the call you want to record open.", browser: browser) }
-    if let snapshot = joined.first {
+    if var snapshot = joined.first {
+        if let uncertainty {
+            snapshot.participants = []
+            return Probe(state: "unavailable", detail: "Meet detected; speaker names are paused. " + uncertainty, browser: browser, snapshot: snapshot)
+        }
         let remote = snapshot.participants.filter { !$0.`self` && $0.speaking }
         let detail = remote.count == 1 ? "Meet hint: \(remote[0].name)" : remote.count > 1 ? "Meet connected · overlapping speakers" : namesAvailable ? "Meet connected · waiting for a speaker signal" : browser == "chrome" ? "Meet detected · open Meet’s People panel to identify your tile, or mute your microphone for remote speaker names" : "Meet detected · speaker names currently require Google Chrome"
         return Probe(state: "connected", detail: detail, browser: browser, snapshot: snapshot)
     }
+    if let uncertainty { return Probe(state: "unavailable", detail: uncertainty + " Meeting detection and names are paused.", browser: browser) }
     return Probe(state: "idle", detail: "Google Meet is at the join or departure screen.", browser: browser, absenceConfirmed: explicitNonCalls == calls.count)
 }
 
@@ -244,7 +264,15 @@ private func aggregate(_ probes: [Probe]) -> Probe {
     if probes.contains(where: { $0.state == "ambiguous" }) || probes.filter({ $0.snapshot?.joined == true }).count > 1 {
         return Probe(state: "ambiguous", detail: "Multiple Google Meet calls detected; names are paused.")
     }
-    if let blocked = probes.first(where: { !["idle", "connected"].contains($0.state) }) { return blocked }
+    if let blocked = probes.first(where: { !["idle", "connected"].contains($0.state) }) {
+        // Positive call state and confident attribution are separate. Unknown
+        // browser activity can contaminate mixed audio, so never carry names.
+        if blocked.state != "permission", let active = probes.first(where: { $0.snapshot?.joined == true }), var snapshot = active.snapshot {
+            snapshot.participants = []
+            return Probe(state: "unavailable", detail: "Meet detected; speaker names are paused until all browser windows can be checked.", browser: active.browser, snapshot: snapshot)
+        }
+        return blocked
+    }
     if let connected = probes.first(where: { $0.state == "connected" }) { return connected }
     return Probe(state: "idle", detail: "Join a Google Meet call to check speaker names.", absenceConfirmed: probes.allSatisfy { $0.absenceConfirmed == true })
 }
@@ -253,16 +281,26 @@ private final class AXReader {
     private var remaining = maxNodes
     private let deadline: TimeInterval
     private var visited: [CFHashCode: [AXUIElement]] = [:]
-    private(set) var failed = false
+    private var failures = 0
+    private var speakerFailures = 0
+    private let readsSpeakerMetadata: Bool
 
-    init(deadline: TimeInterval) { self.deadline = deadline }
+    init(deadline: TimeInterval, readsSpeakerMetadata: Bool) {
+        self.deadline = deadline
+        self.readsSpeakerMetadata = readsSpeakerMetadata
+    }
 
-    private func read(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
-        guard ProcessInfo.processInfo.systemUptime < deadline else { failed = true; return nil }
+    private func read(_ element: AXUIElement, _ attribute: String, speakerOnly: Bool = false) -> CFTypeRef? {
+        guard ProcessInfo.processInfo.systemUptime < deadline else {
+            if speakerOnly { speakerFailures += 1 } else { failures += 1 }
+            return nil
+        }
         var value: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         if error == .success { return value }
-        if ![AXError.attributeUnsupported, .noValue].contains(error) { failed = true }
+        if ![AXError.attributeUnsupported, .noValue].contains(error) {
+            if speakerOnly { speakerFailures += 1 } else { failures += 1 }
+        }
         return nil
     }
     private func text(_ value: CFTypeRef?) -> String? {
@@ -271,34 +309,39 @@ private final class AXReader {
         return nil
     }
     private func childElements(_ element: AXUIElement) -> [AXUIElement] {
-        guard ProcessInfo.processInfo.systemUptime < deadline else { failed = true; return [] }
+        guard ProcessInfo.processInfo.systemUptime < deadline else { failures += 1; return [] }
         var count = 0
         let status = AXUIElementGetAttributeValueCount(element, kAXChildrenAttribute as CFString, &count)
         if status == .attributeUnsupported || status == .noValue { return [] }
-        guard status == .success, count <= maxChildren else { failed = true; return [] }
+        guard status == .success, count <= maxChildren else { failures += 1; return [] }
         if count == 0 { return [] }
-        guard ProcessInfo.processInfo.systemUptime < deadline else { failed = true; return [] }
+        guard ProcessInfo.processInfo.systemUptime < deadline else { failures += 1; return [] }
         var children: CFArray?
         let error = AXUIElementCopyAttributeValues(element, kAXChildrenAttribute as CFString, 0, count, &children)
-        guard error == .success, let values = children as? [AXUIElement] else { failed = true; return [] }
+        guard error == .success, let values = children as? [AXUIElement] else { failures += 1; return [] }
         return values
     }
 
     func node(_ element: AXUIElement, depth: Int = 0, insideMeet: Bool = false) -> AXNode {
         guard remaining > 0, depth <= maxDepth, ProcessInfo.processInfo.systemUptime < deadline else {
-            failed = true; return AXNode(role: "AXUnknown", incomplete: true)
+            failures += 1; return AXNode(role: "AXUnknown", incomplete: true)
         }
         remaining -= 1
+        let failuresBefore = failures
+        let speakerFailuresBefore = speakerFailures
         let identity = CFHash(element)
         // A repeated object can be a browser AX alias, so skip its descendants.
         guard !(visited[identity] ?? []).contains(where: { CFEqual($0, element) }) else { return AXNode(role: "AXAlias") }
         visited[identity, default: []].append(element)
-        guard let role = text(read(element, kAXRoleAttribute)) else { failed = true; return AXNode(role: "AXUnknown", incomplete: true) }
+        guard let role = text(read(element, kAXRoleAttribute)) else { failures += 1; return AXNode(role: "AXUnknown", incomplete: true) }
         var output = AXNode(role: role)
         if role == "AXWebArea" {
             output.url = text(read(element, kAXURLAttribute))
             // Never descend into other websites or read their text fields.
-            guard meetPath(output.url) != nil else { return output }
+            guard meetPath(output.url) != nil else {
+                if failures > failuresBefore { output.incomplete = true }
+                return output
+            }
             var pid: pid_t = 0
             if AXUIElementGetPid(element, &pid) == .success {
                 output.documentId = "ax-\(pid)-\(CFHash(element))"
@@ -310,23 +353,29 @@ private final class AXReader {
             output.description = text(read(element, kAXDescriptionAttribute))
             if isMeet {
                 output.help = text(read(element, kAXHelpAttribute))
-                let nodeID = read(element, "ChromeAXNodeId")
-                if let value = text(nodeID) ?? (nodeID as? NSNumber)?.stringValue { output.identifier = "chrome-" + value }
-                else { output.identifier = text(read(element, "AXDOMIdentifier")) }
-                if let classes = read(element, "AXDOMClassList") as? [String], classes.count <= 30 {
-                    output.classList = classes.filter { $0.count <= 128 }.compactMap(clean)
+                // Only Chrome group nodes participate in the validated tile adapter.
+                // Avoid several optional cross-process calls on every text/button.
+                if readsSpeakerMetadata && role == "AXGroup" {
+                    let nodeID = read(element, "ChromeAXNodeId", speakerOnly: true)
+                    if let value = text(nodeID) ?? (nodeID as? NSNumber)?.stringValue { output.identifier = "chrome-" + value }
+                    else { output.identifier = text(read(element, "AXDOMIdentifier", speakerOnly: true)) }
+                    if let classes = read(element, "AXDOMClassList", speakerOnly: true) as? [String], classes.count <= 30 {
+                        output.classList = classes.filter { $0.count <= 128 }.compactMap(clean)
+                    }
                 }
                 // Text-only values, never inspect an editable control's contents.
                 if ["AXStaticText", "AXHeading"].contains(role) { output.value = text(read(element, kAXValueAttribute)) }
             }
         }
         output.children = childElements(element).map { node($0, depth: depth + 1, insideMeet: isMeet) }
+        if failures > failuresBefore { output.incomplete = true }
+        if speakerFailures > speakerFailuresBefore { output.speakerIncomplete = true }
         return output
     }
 
     func application(_ element: AXUIElement) -> AXNode {
         guard let windows = read(element, kAXWindowsAttribute) as? [AXUIElement], windows.count <= 20 else {
-            failed = true; return AXNode(role: "AXApplication", incomplete: true)
+            failures += 1; return AXNode(role: "AXApplication", incomplete: true)
         }
         return AXNode(role: "AXApplication", children: windows.map { node($0) })
     }
@@ -337,10 +386,9 @@ private func liveTree(_ browser: String, deadline: TimeInterval) -> BrowserTree 
     let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundle).filter { !$0.isTerminated }
     guard !apps.isEmpty else { return BrowserTree(browser: browser, running: false) }
     guard apps.count <= 4 else { return BrowserTree(browser: browser, running: true) }
-    let reader = AXReader(deadline: deadline)
+    let reader = AXReader(deadline: deadline, readsSpeakerMetadata: browser == "chrome")
     let roots = apps.map { reader.application(AXUIElementCreateApplication($0.processIdentifier)) }
-    var root = AXNode(role: "AXApplication", children: roots.flatMap { $0.children ?? [] })
-    if reader.failed { root.incomplete = true }
+    let root = AXNode(role: "AXApplication", children: roots)
     return BrowserTree(browser: browser, running: true, root: root)
 }
 
@@ -393,8 +441,20 @@ if args.contains("--check-permission") || args.contains("--request-permission") 
 }
 AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), 0.075)
 private let browsers = mode == "auto" ? ["chrome", "safari"] : [mode]
+// Reserve time for each running browser within the original whole-read budget.
+// A busy first browser must not hand the next one an already expired deadline.
+private let runningBrowsers = Set(browsers.filter { browser in
+    let bundle = browser == "chrome" ? "com.google.Chrome" : "com.apple.Safari"
+    return NSRunningApplication.runningApplications(withBundleIdentifier: bundle).contains { !$0.isTerminated }
+})
 private let deadline = ProcessInfo.processInfo.systemUptime + 0.60
-private let trees = browsers.map { liveTree($0, deadline: deadline) }
+private var remainingBrowsers = runningBrowsers.count
+private let trees = browsers.map { browser in
+    let now = ProcessInfo.processInfo.systemUptime
+    let budget = max(0, deadline - now) / Double(max(1, remainingBrowsers))
+    if runningBrowsers.contains(browser) { remainingBrowsers -= 1 }
+    return liveTree(browser, deadline: min(deadline, now + budget))
+}
 if let path = argument("--dump-tree", in: args) {
     // Explicit developer diagnostics only. Production probing never saves UI
     // trees. Remove unrelated browser tab titles/URLs before writing locally.

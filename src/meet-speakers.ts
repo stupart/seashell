@@ -56,7 +56,7 @@ export function meetPermissionHelp(_browser: MeetBrowserMode): string {
 
 /** Validate the native boundary, including states that must never imply a joined call. */
 export function parseMeetAccessibilityProbe(value: unknown): MeetProbe {
-  const unavailable: MeetProbe = { state: 'unavailable', detail: 'Meeting Accessibility returned invalid evidence; audio recording continues.' };
+  const unavailable: MeetProbe = { state: 'unavailable', detail: 'Meeting Accessibility returned invalid evidence. Meeting detection and speaker names are unavailable.' };
   if (!value || typeof value !== 'object') return unavailable;
   const raw = value as Record<string, unknown>;
   if (!['connected', 'idle', 'permission', 'ambiguous', 'unavailable'].includes(String(raw.state))) return unavailable;
@@ -102,7 +102,7 @@ export async function probeMeetAccessibility(mode: MeetBrowserMode, signal?: Abo
   } catch {
     // Process errors include command text. Never infer a permission denial from it.
     return { state: 'unavailable', detail: signal?.aborted ? 'Meet connection check cancelled.'
-      : 'Meeting Accessibility could not be read in time; audio recording continues. Check [V] Speakers.' };
+      : 'Meeting detection and speaker names could not be checked. Check [V] Speakers.' };
   }
 }
 
@@ -151,8 +151,8 @@ export async function requestMeetAccessibilityPermission(signal?: AbortSignal, r
   return result;
 }
 
-/** Check both browsers concurrently. An unreadable second browser is not proof
- * that it has no call; fail closed instead of attaching its mixed audio to a name. */
+/** Check both browsers concurrently. Preserve positive call state separately
+ * from names: an unreadable second browser can contaminate mixed audio. */
 export async function probeMeetSpeakers(
   mode: MeetBrowserMode,
   signal?: AbortSignal,
@@ -163,7 +163,7 @@ export async function probeMeetSpeakers(
   const browsers: MeetBrowser[] = mode === 'auto' ? ['chrome', 'safari'] : [mode];
   const results = await Promise.all(browsers.map(async browser => {
     try { return { ...await read(browser, signal), browser }; }
-    catch { return { state: 'unavailable' as const, browser, detail: `${browser === 'chrome' ? 'Chrome' : 'Safari'} reader unavailable; audio recording continues.` }; }
+    catch { return { state: 'unavailable' as const, browser, detail: `${browser === 'chrome' ? 'Chrome' : 'Safari'} meeting detection and speaker names are unavailable.` }; }
   }));
   if (signal?.aborted) return { state: 'unavailable', detail: 'Meet connection check cancelled.' };
   const active = results.filter(result => result.snapshot?.joined);
@@ -174,8 +174,16 @@ export async function probeMeetSpeakers(
   if (active.length === 1 && !blocked) return {
     ...active[0]!, detail: `${active[0]!.detail} · ${active[0]!.browser === 'chrome' ? 'Chrome' : 'Safari'}`,
   };
-  if (blocked) return { ...blocked, snapshot: undefined, detail: active.length
-    ? `Meet names paused until the other browser can be checked. ${blocked.detail}` : blocked.detail };
+  if (blocked) {
+    // A positively joined call can be recorded even when another browser is
+    // unreadable. Mixed computer audio cannot receive confident names then.
+    if (active.length === 1 && blocked.state !== 'permission') return {
+      ...active[0]!, state: 'unavailable', absenceConfirmed: false,
+      snapshot: { ...active[0]!.snapshot!, participants: [] },
+      detail: `Meet detected; speaker names are paused until all browser windows can be checked. ${blocked.detail}`,
+    };
+    return { ...blocked, snapshot: undefined };
+  }
   return { state: 'idle', detail: mode === 'auto'
     ? 'Join a Google Meet call in Chrome or Safari to check speaker names.' : results[0]!.detail };
 }
@@ -280,13 +288,13 @@ export function startMeetSpeakerReader(options: {
     count = prior.length; samples.push(...prior.slice(-600));
   } catch {
     stopped = true;
-    options.onStatus?.({ state: 'unavailable', detail: 'Could not save Meet speaker evidence; audio recording continues.' });
+    options.onStatus?.({ state: 'unavailable', detail: 'Meet speaker names are unavailable: speaker evidence could not be saved.' });
   }
   const poll = async () => {
     const start = now();
     let probe: MeetProbe;
     try { probe = await (options.probe ?? probeMeetSpeakers)(options.browser, controller.signal); }
-    catch { probe = { state: 'unavailable', detail: 'Meet reader unavailable; audio recording continues.' }; }
+    catch { probe = { state: 'unavailable', detail: 'Meet speaker names are unavailable: the reader could not be checked.' }; }
     if (stopped) return;
     const end = now();
     let snapshot = probe.state === 'connected' && end - start <= 750 ? probe.snapshot : undefined;
@@ -302,7 +310,7 @@ export function startMeetSpeakerReader(options: {
       }
     }
     try { write(sampleAt(snapshot, (end - origin) / 1000, probe.browser, probe.source)); }
-    catch { stop(); probe = { state: 'unavailable', detail: 'Meet evidence could not be saved; audio recording continues.' }; }
+    catch { stop(); probe = { state: 'unavailable', detail: 'Meet speaker names are unavailable: speaker evidence could not be saved.' }; }
     options.onStatus?.(probe);
     if (!stopped) { timer = setTimeout(poll, probe.state === 'connected' ? options.pollMs ?? 500 : 5000); timer.unref(); }
   };

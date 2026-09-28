@@ -81,12 +81,18 @@ audio session can continue within its configured maximum duration.
 
 Native `idle` ends a joined call immediately only when `absenceConfirmed` is
 true. Incomplete reads, timeouts, background tabs, minimized windows, unsupported
-layouts, and traversal limits must not produce confirmed absence. A positively
-identified different joined call ends the old session so the next call gets its
-own transcript. Unknown state cannot start a new recording on its own.
+layouts, and traversal limits must not produce confirmed absence. A different joined call from a complete inspection ends the old session so the
+next call gets its own transcript. A partial inspection of a different call uses
+the normal end grace; it cannot prove that the old call ended. Unknown state
+without a positively observed joined page cannot start a new recording.
 
 The browser inventory uses exposed pages and tab metadata. Known hidden Meet
-tabs and incomplete reads block naming. A fully readable ordinary page in another
+tabs and incomplete reads block naming. A complete window with a joined Meet
+page remains usable for automatic recording even when a different window or
+browser is unreadable. That partial observation carries no participant names
+and cannot confirm absence. Incomplete controls in the Meet window itself,
+conflicting join/departure controls, missing permission, and known simultaneous
+calls still do not establish a single recording candidate. A fully readable ordinary page in another
 browser does not block names merely because it cannot prove a historical meeting
 ended. This bounded inventory cannot rule out a hidden, custom-retitled Meet tab,
 and the system audio track still contains mixed computer audio.
@@ -97,6 +103,13 @@ after that grace. This is an explicit limitation to measure and improve; keeping
 an unobservable session alive indefinitely would also record beyond departure.
 Ambiguous simultaneous calls use the same grace rather than attributing mixed
 audio to one of them. The maximum-duration limit remains active throughout.
+
+AX failures are kept on the affected window instead of invalidating every
+window in its browser. Failures reading speaker-only metadata suppress names
+without discarding complete call controls. Only Chrome group nodes read those
+adapter attributes. Automatic browser checks reserve time for each running
+browser within the 600 ms total traversal budget; the existing 750 ms speaker
+sample freshness check still applies.
 
 An AX messaging failure is not equivalent to permission denial. Helpers need
 per-message and whole-read deadlines, traversal/output limits, cancellation, and

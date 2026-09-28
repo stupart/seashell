@@ -2076,7 +2076,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         <Text color="yellow">{backgroundWatch?.phase === 'recording' ? 'Another meeting is recording' : 'Another meeting needs attention'} · [L] View current meeting</Text>
       </Box>}
 
-      {audioHelpOpen ? <Box flexDirection="column" borderStyle="round" borderColor="yellow" paddingX={1} marginBottom={1}>
+      {audioHelpOpen ? <Box flexDirection="column" flexShrink={0} borderStyle="round" borderColor="yellow" paddingX={1} marginBottom={1}>
         <Text bold>Audio help</Text>
         <Text>Quiet can mean you are muted or not speaking. It does not prove a permission problem.</Text>
         <Text>[O] Sound → Input: choose your microphone and check its input level.</Text>
@@ -2103,7 +2103,8 @@ export default function App(props: { libraryDir?: string } = {}) {
             : backgroundEntry.draftStatus?.stage === 'live' ? 'Live draft · updates as people speak'
             : 'Live transcript waiting for speech'
           : backgroundEntry?.captureState === 'processing' ? 'Final transcript in progress' : undefined}
-        warning={backgroundWatch?.phase === 'unavailable' ? backgroundWatch.warning : backgroundRecording && !backgroundWatch ? 'The recorder has not confirmed its status. Check seashell meeting watch status.' : undefined}
+        warning={(view === 'live' || backgroundRecording) && backgroundWatch?.warning ? backgroundWatch.warning
+          : backgroundRecording && !backgroundWatch ? 'The recorder has not confirmed its status. Check seashell meeting watch status.' : undefined}
         approvalPending={backgroundWatch?.consentId !== undefined && backgroundApproval === backgroundWatch.consentId}
         nowUnixMs={statusNow}
       /> : view === 'live' ? <RecordingStatus

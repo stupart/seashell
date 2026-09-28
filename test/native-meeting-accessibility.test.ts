@@ -13,7 +13,7 @@ afterAll(() => rmSync(directory, { recursive: true, force: true }));
 type AXNode = {
   role: string; title?: string; description?: string; value?: string;
   url?: string; identifier?: string; documentId?: string; classList?: string[];
-  children?: AXNode[]; incomplete?: boolean;
+  children?: AXNode[]; incomplete?: boolean; speakerIncomplete?: boolean;
 };
 const page = (children: AXNode[], url = 'https://meet.google.com/abc-defg-hij'): AXNode => ({ role: 'AXWebArea', url, children });
 const window = (...children: AXNode[]): AXNode => ({ role: 'AXWindow', children });
@@ -157,6 +157,51 @@ describe.skipIf(!available)('native Accessibility classifier', () => {
   });
   test('unreadable second browser prevents mixed audio attribution', () => {
     expect(probe([browser([window(page([leave]))]), { browser: 'safari', running: true }]).state).toBe('unavailable');
+  });
+  test.each(['window', 'partial-window', 'unknown-address', 'hidden-tab', 'other-browser'])('a confirmed call survives %s uncertainty with all names suppressed', (kind) => {
+    const fixture = actualFixture('chrome-speaking');
+    if (kind === 'other-browser') fixture.browsers.push({ browser: 'safari', running: true });
+    else {
+      const root = fixture.browsers[0].root as AXNode;
+      root.children!.push(kind === 'partial-window' ? { role: 'AXWindow', incomplete: true }
+        : kind === 'unknown-address' ? window({ role: 'AXWebArea' })
+        : kind === 'hidden-tab' ? window(page([], 'https://example.com/'), { role: 'AXRadioButton', description: 'Meet - xyz-abcd-efg' })
+        : window());
+    }
+    expect(probe(fixture.browsers)).toMatchObject({ state: 'unavailable', browser: 'chrome',
+      snapshot: { joined: true, participants: [] } });
+    expect(probe(fixture.browsers).absenceConfirmed).not.toBe(true);
+  });
+  test('incomplete Meet controls never establish a joined call or departure', () => {
+    for (const control of [leave, { role: 'AXButton', title: 'Join now' }]) {
+      const result = probe([browser([window(page([control, { role: 'AXUnknown', incomplete: true }]))])]);
+      expect(result.state).toBe('unavailable');
+      expect(result.snapshot).toBeUndefined();
+      expect(result.absenceConfirmed).not.toBe(true);
+    }
+  });
+  test('speaker-only metadata failure preserves call state without trusting names', () => {
+    const fixture = actualFixture('chrome-speaking');
+    allNodes(fixture.browsers[0].root).find(n => n.classList?.includes('oZRSLe'))!.speakerIncomplete = true;
+    expect(probe(fixture.browsers)).toMatchObject({ state: 'connected', snapshot: { joined: true, participants: [] } });
+  });
+  test('unreadable application roots are not flattened into confirmed absence', () => {
+    const result = probe([browser([{ role: 'AXApplication', incomplete: true }])]);
+    expect(result.state).toBe('unavailable');
+    expect(result.absenceConfirmed).not.toBe(true);
+  });
+  test('known simultaneous calls remain ambiguous even with an unreadable third window', () => {
+    const result = probe([browser([window(page([leave])), window(), window(page([leave], 'https://meet.google.com/xyz-abcd-efg'))])]);
+    expect(result.state).toBe('ambiguous');
+    expect(result.snapshot).toBeUndefined();
+  });
+  test('nested windows do not duplicate a call or bypass an incomplete parent', () => {
+    const nested = window(window(page([leave])));
+    expect(probe([browser([nested])])).toMatchObject({ state: 'connected', snapshot: { joined: true } });
+    nested.incomplete = true;
+    const result = probe([browser([nested])]);
+    expect(result.state).toBe('unavailable');
+    expect(result.snapshot).toBeUndefined();
   });
   test('browser selection can explicitly constrain the reader', () => {
     expect(probe([browser([window(page([leave]))]), { browser: 'safari', running: true }], ['--browser', 'chrome']).state).toBe('connected');
