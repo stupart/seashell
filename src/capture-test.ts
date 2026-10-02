@@ -122,7 +122,7 @@ async function captureForDuration(
     ...(microphoneSummary.audibleChunks > 0
       ? []
       : [microphoneMessage ?? (microphoneSummary.chunks === 0
-        ? 'No microphone audio received. Check System Settings → Privacy & Security → Microphone for your terminal app, and Sound → Input.'
+        ? 'No microphone audio received. Run seashell meeting microphone check, then check Sound → Input.'
         : 'Microphone audio arrived but no speech was detected. Speak during the test and check Sound → Input for the selected microphone and input level.')]),
     ...(systemSummary.audibleChunks > 0
       ? []

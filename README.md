@@ -271,6 +271,13 @@ Seashell. Setup requests access for both this window and the background host.
 Allow the entries macOS shows in **System Settings → Privacy & Security →
 Accessibility**, then run `seashell meeting speakers check` to verify both scopes.
 Terminal access alone does not enable background meeting detection.
+Background meetings record your microphone through a small native helper,
+**Seashell Microphone**, which holds its own macOS Microphone permission (the
+background runtime itself cannot be granted one). Run
+`seashell meeting microphone setup` once and choose **Allow**; check it any time
+with `seashell meeting microphone`. If you leave a call and rejoin within three
+minutes, the recording continues in the same History entry. Use
+`seashell meeting merge --auto --dry-run` to find older meetings that were split.
 The background runtime stays at
 `~/Library/Application Support/Sea Shell/Runtime/Seashell Background`
 so its path does not change with each Homebrew release. Its executable is named

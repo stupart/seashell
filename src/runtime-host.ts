@@ -22,10 +22,19 @@ export interface RuntimeHostStatus {
   readonly detail: string;
 }
 
+function runtimeDirectory(options: RuntimeHostOptions): string {
+  return resolve(options.hostDirectory ?? join(homedir(), 'Library', 'Application Support', 'Sea Shell', 'Runtime'));
+}
+
 export function meetingRuntimeHostPath(options: RuntimeHostOptions = {}): string {
   // A recognizable, permanent executable name; the copied binary's signing
   // identifier remains Bun's original "bun", independently of this basename.
-  return join(resolve(options.hostDirectory ?? join(homedir(), 'Library', 'Application Support', 'Sea Shell', 'Runtime')), 'Seashell Background');
+  return join(runtimeDirectory(options), 'Seashell Background');
+}
+
+/** macOS lists this name under Privacy & Security → Microphone. */
+export function microphoneRuntimeHelperPath(options: RuntimeHostOptions = {}): string {
+  return join(runtimeDirectory(options), 'Seashell Microphone');
 }
 
 function existing(path: string) {
@@ -69,7 +78,7 @@ export function inspectMeetingRuntimeHost(options: RuntimeHostOptions = {}): Run
   const path = meetingRuntimeHostPath(options);
   if ((options.platform ?? process.platform) !== 'darwin') return { path, ready: false, detail: 'The Seashell background host requires macOS.' };
   try {
-    const directory = resolve(options.hostDirectory ?? join(homedir(), 'Library', 'Application Support', 'Sea Shell', 'Runtime'));
+    const directory = runtimeDirectory(options);
     if (!existing(directory) || !existing(path)) return {
       path, ready: false, detail: 'The stable Seashell background host is not installed. Run seashell meeting speakers setup to prepare it.',
     };
@@ -99,7 +108,7 @@ function digest(path: string): string {
 export function prepareMeetingRuntimeHost(options: RuntimeHostOptions = {}): string {
   if ((options.platform ?? process.platform) !== 'darwin') throw new Error('The Seashell background host requires macOS.');
   const path = meetingRuntimeHostPath(options);
-  const directory = resolve(options.hostDirectory ?? join(homedir(), 'Library', 'Application Support', 'Sea Shell', 'Runtime'));
+  const directory = runtimeDirectory(options);
   const source = realpathSync(options.runtimeSource ?? process.execPath);
   const sourceInfo = statSync(source);
   if (!sourceInfo.isFile() || (sourceInfo.mode & 0o111) === 0) throw new Error('The Bun runtime source is not an executable file.');
@@ -121,6 +130,33 @@ export function prepareMeetingRuntimeHost(options: RuntimeHostOptions = {}): str
     verifySignedBun(temporary, options);
     // Recheck before rename so an unexpected symlink is never accepted as an
     // existing host. rename itself replaces an entry rather than following it.
+    if (existing(path)) assertOwned(path, false, false);
+    renameSync(temporary, path);
+    return path;
+  } finally { rmSync(temporary, { force: true }); }
+}
+
+/** The microphone helper answers for its own Microphone permission, which
+ * macOS ties to its path and code hash. Keep one stable copy so a package
+ * upgrade asks again only when the helper itself actually changed. */
+export function prepareMicrophoneRuntimeHelper(source: string, options: RuntimeHostOptions = {}): string {
+  if ((options.platform ?? process.platform) !== 'darwin') throw new Error('The Seashell microphone helper requires macOS.');
+  const path = microphoneRuntimeHelperPath(options);
+  const directory = runtimeDirectory(options);
+  const resolvedSource = realpathSync(source);
+  const sourceInfo = statSync(resolvedSource);
+  if (!sourceInfo.isFile() || (sourceInfo.mode & 0o111) === 0) throw new Error('The microphone helper is not an executable file.');
+  if (existing(directory)) assertOwned(directory, true, false);
+  else mkdirSync(directory, { recursive: true, mode: 0o700 });
+  chmodSync(directory, 0o700);
+  if (existing(path)) {
+    assertOwned(path, false, false);
+    if (statSync(path).size === sourceInfo.size && digest(path) === digest(resolvedSource)) return path;
+  }
+  const temporary = join(directory, `.seashell-microphone-${randomUUID()}.tmp`);
+  try {
+    copyFileSync(resolvedSource, temporary, constants.COPYFILE_EXCL);
+    chmodSync(temporary, 0o700);
     if (existing(path)) assertOwned(path, false, false);
     renameSync(temporary, path);
     return path;

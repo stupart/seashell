@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   filterLibraryEntries,
+  meetingEntryLabel,
   formatTuiClock,
   moveSelection,
   moveTranscriptScroll,
@@ -66,4 +67,21 @@ describe('TUI navigation state', () => {
       sidebarWidth: 56,
     });
   });
+});
+
+test('meeting rows lead with day, time and length so same-titled meetings differ', () => {
+  const entry = (createdAt: string, duration?: number, captureState?: 'recording') => ({
+    id: 'm', title: 'Google Meet', createdAt, updatedAt: createdAt, sourceFilename: 'Live capture session',
+    speakerCount: 0, segmentCount: 0, kind: 'meeting' as const, directory: '/tmp/m',
+    ...(duration === undefined ? {} : { duration }), ...(captureState ? { captureState } : {}),
+  });
+  const now = new Date(2026, 9, 2, 15, 0);
+  const time = (date: Date) => date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const earlier = new Date(2026, 9, 1, 9, 28);
+  const today = new Date(2026, 9, 2, 10, 3);
+  expect(meetingEntryLabel(entry(earlier.toISOString(), 2_064), now))
+    .toBe(`M ${earlier.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time(earlier)} · 34m · Google Meet`);
+  expect(meetingEntryLabel(entry(today.toISOString(), 4_400), now)).toBe(`M ${time(today)} · 1h13m · Google Meet`);
+  expect(meetingEntryLabel(entry(today.toISOString(), 3_600), now)).toBe(`M ${time(today)} · 1h · Google Meet`);
+  expect(meetingEntryLabel(entry(today.toISOString(), 300, 'recording'), now)).toBe(`● ${time(today)} · Google Meet`);
 });

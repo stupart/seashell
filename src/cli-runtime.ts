@@ -1,5 +1,7 @@
 import { installHumainPackage, requireHumainNode } from './humain-install.ts';
 import { checkMeetConnection, requestMeetAccessibilityPermission, meetPermissionHelp, MEETING_ACCESSIBILITY_HELPER } from './meet-speakers.ts';
+import { microphonePermission } from './microphone-permission.ts';
+import { mergeMeetingFragments, planMeetingMerges } from './meeting-merge.ts';
 import { discoverHumainProviders, resolveHumainExecutable } from './humain-client.ts';
 import { randomUUID } from 'crypto';
 import { spawnSync } from 'child_process';
@@ -479,6 +481,36 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
   const config = loadConfig();
   const libraryDir = resolveLibraryDir(command.libraryDir, process.env, config);
   switch (command.action.kind) {
+    case 'merge': {
+      const groups = command.action.auto
+        ? planMeetingMerges(libraryDir, { maxGapMinutes: command.action.maxGapMinutes })
+        : [{ ids: command.action.ids }];
+      const time = (iso?: string) => iso ? new Date(iso).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : '';
+      if (command.action.dryRun) {
+        print(command.json ? JSON.stringify(groups, null, 2) : groups.length
+          ? groups.map(group => `${'title' in group ? `${group.title} · ${time(group.startedAt)} → ${time(group.endedAt)}\n  ` : ''}seashell meeting merge ${group.ids.join(' ')}`).join('\n')
+          : 'No split meetings found.');
+        return 0;
+      }
+      const merged = groups.map(group => mergeMeetingFragments(libraryDir, group.ids));
+      print(command.json ? JSON.stringify(merged.map(result => ({
+        id: result.record.id, directory: result.directory, segments: result.record.transcript.length, trashed: result.trashed,
+      })), null, 2) : merged.length
+        ? merged.map(result => `Merged ${result.trashed.length} pieces into ${result.record.id} (${result.record.transcript.length} segments): ${result.directory}`).join('\n')
+        : 'No split meetings found.');
+      return 0;
+    }
+    case 'microphone': {
+      const result = microphonePermission({ request: command.action.operation === 'setup' });
+      if (command.action.operation === 'setup' && result.authorization === 'denied') {
+        spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'], { stdio: 'ignore', timeout: 5_000 });
+      }
+      print(command.json ? JSON.stringify(result) : [
+        `Meeting microphone · ${result.authorization}`, result.detail,
+        ...(result.executable ? [`Permission belongs to: ${result.executable}`] : []),
+      ].join('\n'));
+      return result.authorization === 'authorized' ? 0 : 2;
+    }
     case 'speakers': {
       const selected = command.action.browser;
       const browser = selected === 'setup' ? 'auto'
@@ -661,6 +693,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
             }
             if (event.type === 'watch.ready') print('Sea Shell is watching for meetings.');
             else if (event.type === 'meeting.started') print(`Recording ${event.candidate.title}.`);
+            else if (event.type === 'meeting.resumed') print(`Resumed ${event.candidate.title} after ${event.pausedSeconds}s; it stays one meeting.`);
             else if (event.type === 'meeting.capture-finished') print(`Captured ${event.candidate.title}; finalizing in the background.`);
             else if (event.type === 'meeting.ready') print(`Meeting ready: ${event.directory}`);
             else if (event.type === 'meeting.suggested') {

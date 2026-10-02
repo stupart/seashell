@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased — one meeting, one entry
+
+- Safari Meet calls no longer split when the browser's Accessibility tree is
+  briefly unreadable. Safari captures the microphone in `com.apple.WebKit.GPU`
+  (Chrome in `com.google.Chrome.helper`); the observation-gap rule now compares
+  browser families instead of literal bundle IDs. In real use this bug turned
+  three calls into eleven entries and dropped up to 8½ minutes between pieces.
+- A call that ends and comes back within `meeting.automation.resumeWindowSeconds`
+  (default 180, 0 disables) reopens the same capture bundle on its original clock
+  and continues the same entry; the final transcript runs once, over the whole meeting.
+- Background meetings now record your microphone. The watcher's Bun host uses the
+  hardened runtime without the audio-input entitlement, so macOS gave SoX silent
+  buffers (every background mic track was digital zero). A native
+  `seashell-microphone` helper answers for its own Microphone permission, follows
+  device changes, and keeps the stream on the wall clock. Grant it once with
+  `seashell meeting microphone setup`; check with `seashell meeting microphone`.
+- Microphone failures retry with backoff for the whole meeting instead of
+  giving up after two restarts; a denied permission is reported, not retried.
+- `seashell meeting merge <id>...` and `meeting merge --auto [--dry-run]` join
+  pieces of one meeting into one entry and one capture bundle; pieces go to `_Trash`.
+- History rows show day, start time and length before the title.
+- A full-screen Meet window on another desktop (Space) is no longer read as a
+  confirmed departure; Accessibility cannot see other desktops, so it now counts
+  as unreadable and recording continues while the browser holds the microphone.
+
 ## Unreleased — Google Meet names
 
 - One automatic connection discovers Chrome and Safari without a browser

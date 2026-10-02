@@ -1,5 +1,9 @@
 import { spawn, type ChildProcess } from 'child_process';
+import { existsSync } from 'fs';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
 import { terminateManagedChild } from './process-lifecycle.ts';
+import { prepareMicrophoneRuntimeHelper } from './runtime-host.ts';
 import {
   hasAudiblePcmSignal,
   LIVE_CAPTURE_CHUNK_MILLISECONDS,
@@ -27,7 +31,7 @@ export interface MicrophoneChunk {
 export interface MicrophoneAttemptDiagnostic {
   readonly attempt: number;
   readonly pid?: number;
-  readonly reason: 'startup-timeout' | 'stalled' | 'spawn-error' | 'chunk-error' | 'process-exit';
+  readonly reason: 'startup-timeout' | 'stalled' | 'spawn-error' | 'chunk-error' | 'process-exit' | 'permission';
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
   readonly stderr?: string;
@@ -44,15 +48,53 @@ export interface StartMicrophoneOptions {
   readonly onChunk: (chunk: MicrophoneChunk) => void;
   readonly onState: (update: MicrophoneStateUpdate) => void;
   readonly onLevel?: (level: PcmSignalLevel) => void;
-  /** Test/development override; production uses the fixed SoX command below. */
+  /** Test/development override; production uses defaultMicrophoneRecorder(). */
   readonly command?: string;
   readonly commandArgs?: readonly string[];
   /** Deadline for releasing startup and terminating an attempt with no PCM. */
   readonly startupTimeoutMs?: number;
   readonly quietWarningMs?: number;
   readonly stalledTimeoutMs?: number;
+  /** Defaults to unlimited: a meeting keeps trying to recover its microphone. */
   readonly maxRestarts?: number;
+  /** First retry delay; later retries back off to restartDelayMaxMs. */
   readonly restartDelayMs?: number;
+  readonly restartDelayMaxMs?: number;
+}
+
+export const MICROPHONE_HELPER = join(dirname(fileURLToPath(import.meta.url)), '..', 'native', 'bin', 'seashell-microphone');
+/** The native helper's exit status when macOS Microphone access is off. */
+export const MICROPHONE_PERMISSION_EXIT_CODE = 77;
+
+const SOX_ARGUMENTS = Object.freeze([
+  '-q',
+  '-d',
+  '-t', 'raw',
+  '-r', String(LIVE_CAPTURE_SAMPLE_RATE),
+  '-c', '1',
+  '-b', '16',
+  '-e', 'signed-integer',
+  '-',
+]);
+
+let preparedHelper: string | undefined;
+
+/**
+ * Prefer the native helper on macOS. SoX inherits the Microphone permission of
+ * whatever launched it; under the background watcher that is a hardened Bun
+ * without audio-input entitlement, so macOS silently hands it zeros. SoX's
+ * CoreAudio driver also exits on buffer overruns. SEASHELL_MICROPHONE_RECORDER=sox
+ * restores the old recorder for diagnosis.
+ */
+export function defaultMicrophoneRecorder(): { readonly command: string; readonly args: readonly string[] } {
+  if (process.platform === 'darwin' && process.env.SEASHELL_MICROPHONE_RECORDER !== 'sox' && existsSync(MICROPHONE_HELPER)) {
+    if (!preparedHelper || !existsSync(preparedHelper)) {
+      try { preparedHelper = prepareMicrophoneRuntimeHelper(MICROPHONE_HELPER); }
+      catch { preparedHelper = MICROPHONE_HELPER; }
+    }
+    return { command: preparedHelper, args: ['--sample-rate', String(LIVE_CAPTURE_SAMPLE_RATE)] };
+  }
+  return { command: 'sox', args: SOX_ARGUMENTS };
 }
 
 export interface MicrophoneCaptureHandle {
@@ -68,25 +110,34 @@ export interface MicrophoneCaptureHandle {
  * the sample count, not transcription completion or wall-clock polling.
  */
 export function startMicrophoneCapture(options: StartMicrophoneOptions): MicrophoneCaptureHandle {
-  const maximumRestarts = options.maxRestarts ?? 2;
+  const maximumRestarts = options.maxRestarts ?? Number.POSITIVE_INFINITY;
+  const firstDelay = options.restartDelayMs ?? 1000;
+  const maximumDelay = Math.max(firstDelay, options.restartDelayMaxMs ?? 15_000);
   let restarts = 0;
   let stopped = false;
+  let permissionDenied = false;
   let cancelDelay: (() => void) | undefined;
+  const retryLabel = () => Number.isFinite(maximumRestarts) ? `${restarts + 1}/${maximumRestarts}` : String(restarts + 1);
   const start = () => startMicrophoneAttempt({ ...options, onState(update) {
-    if (update.state === 'unavailable' && !stopped && restarts < maximumRestarts) {
+    if (update.diagnostic?.reason === 'permission') permissionDenied = true;
+    if (update.state === 'unavailable' && !stopped && !permissionDenied && restarts < maximumRestarts) {
       options.onState({ ...update, state: 'starting', code: 'microphone_reconnecting',
-        message: `${update.message ?? 'Microphone capture failed.'} Retrying (${restarts + 1}/${maximumRestarts})…` });
+        message: `${update.message ?? 'Microphone capture failed.'} Retrying (${retryLabel()})…` });
     } else options.onState(update);
   } }, restarts + 1);
   let current = start();
   const startup = current.startup;
   const done = (async () => {
     while (true) {
+      const attemptStartedAt = Date.now();
       await current.done;
-      if (stopped || restarts >= maximumRestarts) return;
+      if (stopped || permissionDenied || restarts >= maximumRestarts) return;
+      // A recorder that ran for a while before failing is a fresh problem.
+      if (Date.now() - attemptStartedAt >= 60_000) restarts = 0;
+      const delay = Math.min(maximumDelay, firstDelay * 2 ** Math.min(restarts, 10));
       restarts++;
       await new Promise<void>((resolve) => {
-        const timer = setTimeout(() => { cancelDelay = undefined; resolve(); }, options.restartDelayMs ?? 1000);
+        const timer = setTimeout(() => { cancelDelay = undefined; resolve(); }, delay);
         cancelDelay = () => { clearTimeout(timer); cancelDelay = undefined; resolve(); };
       });
       if (stopped) { options.onState({ state: 'stopped' }); return; }
@@ -187,17 +238,10 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
   };
 
   options.onState({ state: 'starting', message: 'Opening microphone…' });
-  const defaultArguments = [
-    '-q',
-    '-d',
-    '-t', 'raw',
-    '-r', String(LIVE_CAPTURE_SAMPLE_RATE),
-    '-c', '1',
-    '-b', '16',
-    '-e', 'signed-integer',
-    '-',
-  ];
-  const child = spawn(options.command ?? 'sox', options.commandArgs ?? defaultArguments, {
+  const recorder = options.command
+    ? { command: options.command, args: options.commandArgs ?? SOX_ARGUMENTS }
+    : defaultMicrophoneRecorder();
+  const child = spawn(recorder.command, [...recorder.args], {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
@@ -233,14 +277,20 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
     publish(chunker.flush());
     const state: SystemAudioCaptureState = requestedStop ? 'stopped' : 'unavailable';
     const recordedStderr = stderr.trim();
+    if (!requestedStop && code === MICROPHONE_PERMISSION_EXIT_CODE) {
+      failureReason = 'permission';
+      failure = recordedStderr || 'Microphone access is off for Seashell Microphone. Run seashell meeting microphone setup.';
+    }
     const exitDescription = signal ? `signal ${signal}` : `exit ${code ?? 'unknown'}`;
     options.onState({
       state,
       ...(requestedStop
         ? {}
         : {
-            code: failureReason === 'startup-timeout' ? 'microphone_no_audio' : 'microphone_stopped',
-            message: `${failure ?? 'Microphone capture ended unexpectedly.'} Attempt ${attempt}: ${exitDescription}.${recordedStderr ? ` Recorder: ${recordedStderr}` : ''}`,
+            code: failureReason === 'startup-timeout' ? 'microphone_no_audio'
+              : failureReason === 'permission' ? 'microphone_permission' : 'microphone_stopped',
+            message: failureReason === 'permission' ? failure!
+              : `${failure ?? 'Microphone capture ended unexpectedly.'} Attempt ${attempt}: ${exitDescription}.${recordedStderr ? ` Recorder: ${recordedStderr}` : ''}`,
             diagnostic: Object.freeze({ attempt, ...(child.pid === undefined ? {} : { pid: child.pid }),
               reason: failureReason, exitCode: code, signal,
               ...(recordedStderr ? { stderr: recordedStderr } : {}),

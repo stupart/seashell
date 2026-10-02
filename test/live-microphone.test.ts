@@ -76,3 +76,33 @@ test('microphone sample clock is anchored before delayed stdout delivery', async
   expect(firstStart).toBeLessThan(0.1);
   if (path) await Bun.file(path).delete();
 });
+
+test('a denied microphone permission is reported once instead of retried', async () => {
+  const states: Array<{ state: string; code?: string; message?: string }> = [];
+  const handle = startMicrophoneCapture({
+    sessionStartedAtUnixMs: Date.now(), restartDelayMs: 5,
+    command: process.execPath,
+    commandArgs: ['-e', 'process.stderr.write("Microphone access is off for Seashell Microphone."); process.exit(77)'],
+    onState: (state) => states.push(state), onChunk: (chunk) => { void Bun.file(chunk.path).delete(); },
+  });
+  await handle.done;
+  expect(states.filter((state) => state.state === 'starting' && state.message === 'Opening microphone…')).toHaveLength(1);
+  expect(states.at(-1)).toMatchObject({ state: 'unavailable', code: 'microphone_permission',
+    message: 'Microphone access is off for Seashell Microphone.' });
+});
+
+test('a recorder that keeps exiting is retried for the whole meeting, not twice', async () => {
+  let attempts = 0;
+  const handle = startMicrophoneCapture({
+    sessionStartedAtUnixMs: Date.now(), restartDelayMs: 1, restartDelayMaxMs: 2,
+    command: process.execPath,
+    commandArgs: ['-e', 'process.exit(0)'],
+    onState: (state) => { if (state.message === 'Opening microphone…') attempts++; },
+    onChunk: (chunk) => { void Bun.file(chunk.path).delete(); },
+  });
+  const deadline = Date.now() + 10_000;
+  while (attempts < 6 && Date.now() < deadline) await Bun.sleep(10);
+  handle.stop();
+  await handle.done;
+  expect(attempts).toBeGreaterThanOrEqual(6);
+});

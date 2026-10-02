@@ -29,7 +29,10 @@ There is at most one warning per kind per source: quiet, reconnecting,
 unavailable, and no audio. A repeated warning retains the first occurrence and
 latest diagnostic; recovery adds a resolved time. This is a compact health
 summary, not an attempt-by-attempt log. Microphone retry messages include the
-attempt, exit/signal information, and bounded recorder diagnostics.
+attempt, exit/signal information, and bounded recorder diagnostics. A failing
+microphone recorder is retried with backoff (1 s doubling to 15 s) for the whole
+meeting; the count resets after a minute of healthy capture. A denied macOS
+Microphone permission is reported once as `microphone_permission` and not retried.
 
 Health updates persist at most once per second unless the state or warning
 changes; stopping forces a final write. No growing health journal is created.

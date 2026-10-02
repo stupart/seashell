@@ -201,7 +201,10 @@ describe('automatic meeting controller', () => {
       candidate: zoom,
       reason: 'signal-ended',
     });
-    expect(controller.state.phase).toBe('cooldown');
+    // No cooldown: the watcher resumes a returning call into the same entry.
+    expect(controller.state.phase).toBe('watching');
+    expect(controller.step(zoom, 20_000).kind).toBe('none');
+    expect(controller.step(zoom, 23_000).kind).toBe('start');
   });
 
   test('parks consent without blocking polling and can be approved', () => {
@@ -327,4 +330,43 @@ test('observation-gap continuity never overrides ambiguity, another room, or abs
     const candidate = resolveMeetingCandidate(missing, undefined, {}, gap);
     expect(preserveMeetingCandidateDuringObservationGap(candidate, controller.state, missing, gap)).toBe(candidate);
   }
+});
+
+// Regression: Oct 1 2026 Safari Meet calls split into 11 entries. Safari's
+// microphone belongs to com.apple.WebKit.GPU, never com.apple.Safari.
+test('Safari Meet survives unreadable Accessibility while WebKit owns the microphone', () => {
+  const webkit = { ...silent, inputProcesses: [{ pid: 1594, bundleId: 'com.apple.WebKit.GPU', name: 'Safari Graphics and Media' }] };
+  const call = resolveMeetingCandidate(webkit, undefined, {}, joined('/abc-defg-hij', 'safari'))!;
+  expect(call.pid).toBe(1594);
+  const controller = new MeetingAutomationController({ confirmationPolls: 1, endGraceSeconds: 20 });
+  expect(controller.step(call, 0).kind).toBe('start');
+  for (const gap of [
+    { state: 'unavailable', detail: 'A browser window does not expose its page through Accessibility.' },
+    { state: 'unavailable', detail: 'Browser Accessibility inspection was incomplete.' },
+    { state: 'idle', detail: 'No visible Google Meet call found.', source: 'google-meet-accessibility', absenceConfirmed: false },
+  ] as MeetProbe[]) {
+    for (let now = 3_000; now <= 60_000; now += 3_000) {
+      const candidate = preserveMeetingCandidateDuringObservationGap(
+        resolveMeetingCandidate(webkit, undefined, {}, gap), controller.state, webkit, gap);
+      expect(candidate?.id).toBe(call.id);
+      expect(controller.step(candidate, now, hasConfirmedMeetingEnd(call, gap)).kind).toBe('none');
+    }
+  }
+  expect(controller.state.phase).toBe('recording');
+});
+
+test('a just-ended call is held for resume only by its own browser audio', () => {
+  const webkit = { ...silent, inputProcesses: [{ pid: 1594, bundleId: 'com.apple.WebKit.GPU', name: 'Safari Graphics and Media' }] };
+  const chrome = { ...silent, inputProcesses: [{ pid: 7, bundleId: 'com.google.Chrome.helper', name: 'Chrome Helper' }] };
+  const held = resolveMeetingCandidate(webkit, undefined, {}, joined('/abc-defg-hij', 'safari'))!;
+  const watching = new MeetingAutomationController().state;
+  const gap: MeetProbe = { state: 'unavailable', detail: 'Hidden' };
+  const audio = resolveMeetingCandidate(webkit, undefined, {}, gap);
+  expect(audio?.id).toBe('audio:safari');
+  expect(preserveMeetingCandidateDuringObservationGap(audio, watching, webkit, gap, held)?.id).toBe(held.id);
+  expect(preserveMeetingCandidateDuringObservationGap(audio, watching, webkit, gap)).toBe(audio);
+  const other = resolveMeetingCandidate(chrome, undefined, {}, gap);
+  expect(preserveMeetingCandidateDuringObservationGap(other, watching, chrome, gap, held)).toBe(other);
+  const left: MeetProbe = { state: 'idle', detail: 'Left', source: 'google-meet-accessibility', absenceConfirmed: true };
+  expect(preserveMeetingCandidateDuringObservationGap(undefined, watching, webkit, left, held)).toBeUndefined();
 });

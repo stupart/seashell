@@ -4,7 +4,7 @@ import { claimManagedProcessSignalOwnership } from './process-lifecycle.ts';
 import { finalizeCaptureTranscript } from './capture-finalizer.ts';
 import { readMacCalendarEventsAsync, suggestCalendarMeeting } from './calendar.ts';
 import { meetBrowserMatchesApp, probeMeetSpeakers } from './meet-speakers.ts';
-import { writeBackgroundMeetingState, type BackgroundMeetingState } from './background-meeting-status.ts';
+import { writeBackgroundMeetingState, type BackgroundMeetingState, type BackgroundMeetingStatusOptions } from './background-meeting-status.ts';
 import { writeBackgroundWatchStatus } from './background-watch-status.ts';
 import { startBackgroundLiveTranscript, type BackgroundLiveTranscriptHandle, type BackgroundLiveTranscriptStatus } from './background-live-transcript.ts';
 import type { CommittedCaptureChunk } from './capture-session.ts';
@@ -39,7 +39,7 @@ import {
 } from './meeting-artifact.ts';
 import { enrichMeeting } from './meeting-enrichment.ts';
 import { applySpeakerLabels, EvidenceSpeakerLabeler } from './speaker-labeling.ts';
-import { saveTranscriptRecord } from './transcript-library.ts';
+import { findTranscriptRecord, saveTranscriptRecord } from './transcript-library.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 import {
   DEFAULT_TRANSCRIPTION_ROUTING,
@@ -53,6 +53,7 @@ export type AutomaticMeetingWatchEvent =
   | { readonly type: 'watch.ready'; readonly at: string }
   | { readonly type: 'meeting.suggested'; readonly at: string; readonly candidate: MeetingCandidate }
   | { readonly type: 'meeting.started'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string }
+  | { readonly type: 'meeting.resumed'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string; readonly pausedSeconds: number }
   | { readonly type: 'meeting.capture-finished'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string }
   | { readonly type: 'meeting.ready'; readonly at: string; readonly candidate: MeetingCandidate; readonly transcriptId: string; readonly directory: string }
   | { readonly type: 'watch.warning'; readonly at: string; readonly message: string }
@@ -89,6 +90,14 @@ function event<T extends AutomaticMeetingWatchEvent>(value: T): T {
   return Object.freeze(value);
 }
 
+interface ActiveMeeting {
+  readonly candidate: MeetingCandidate;
+  readonly capture: DurableLiveCaptureHandle;
+  readonly directory: string;
+  readonly startedAt: Date;
+  readonly draft?: BackgroundLiveTranscriptHandle;
+}
+
 export class AutomaticMeetingWatchService {
   readonly #config: SeashellConfig;
   readonly #libraryDir: string;
@@ -96,7 +105,9 @@ export class AutomaticMeetingWatchService {
   readonly #onEvent?: (event: AutomaticMeetingWatchEvent) => void;
   readonly #dependencies: Required<AutomaticMeetingWatchDependencies>;
   readonly #signalMonitor?: MeetingSignalMonitor;
-  #active?: { candidate: MeetingCandidate; capture: DurableLiveCaptureHandle; directory: string; draft?: BackgroundLiveTranscriptHandle };
+  #active?: ActiveMeeting;
+  /** A stopped meeting whose final pass waits briefly in case the call resumes. */
+  #parked?: ActiveMeeting & { readonly parkedAtUnixMs: number; readonly resumeUntilUnixMs: number };
   #finalizationTail: Promise<void> = Promise.resolve();
   #calendarCache?: { readAtUnixMs: number; events: Awaited<ReturnType<typeof readMacCalendarEventsAsync>> };
   #calendarRead?: Promise<void>;
@@ -158,10 +169,11 @@ export class AutomaticMeetingWatchService {
     if (this.#shuttingDown) {
       return { kind: 'none' };
     }
+    this.expireParked(now);
     const calendar = this.currentCalendar(now);
     const candidate = preserveMeetingCandidateDuringObservationGap(
       resolveMeetingCandidate(snapshot, calendar, this.#config.meeting?.automation, meet),
-      this.#controller.state, snapshot, meet,
+      this.#controller.state, snapshot, meet, this.#parked?.candidate,
     );
     const action = this.#controller.step(candidate, now.getTime(),
       hasConfirmedMeetingEnd(this.#controller.state.candidate, meet));
@@ -208,6 +220,7 @@ export class AutomaticMeetingWatchService {
     this.#signalMonitor?.stop();
     this.#calendarAbort.abort();
     if (this.#active) await this.finish(this.#active.candidate, 'watch-stopped');
+    this.finalizeParked();
     await this.#calendarRead?.catch(() => {});
     await this.#finalizationTail;
     this.#consentId = undefined;
@@ -253,6 +266,13 @@ export class AutomaticMeetingWatchService {
   private start(candidate: MeetingCandidate, now: Date): boolean {
     if (this.#active) return false;
     this.#consentId = undefined;
+    const parked = this.#parked;
+    const resumed = parked?.candidate.id === candidate.id && now.getTime() < parked.resumeUntilUnixMs
+      ? parked : undefined;
+    // A different meeting means the parked one is over; finish it first.
+    if (!resumed) this.finalizeParked();
+    const startedAt = resumed?.startedAt ?? now;
+    if (resumed) candidate = Object.freeze({ ...resumed.candidate, pid: candidate.pid });
     let capture: DurableLiveCaptureHandle;
     let directory: string | undefined;
     let latestStatus: DurableLiveCaptureStatus | undefined;
@@ -300,7 +320,10 @@ export class AutomaticMeetingWatchService {
     try {
       capture = this.#dependencies.startCapture({
       libraryDir: this.#libraryDir,
-      startedAt: now,
+      // Resuming reopens the same capture bundle on its original clock, so the
+      // pause appears as a gap in one timeline instead of a second meeting.
+      startedAt,
+      ...(resumed ? { sessionId: resumed.capture.sessionId } : {}),
       speakerBrowser: meetBrowserMatchesApp(this.#config.meeting?.speakerBrowser, candidate.bundleId)
         ? this.#config.meeting?.speakerBrowser : 'off',
       onStatus,
@@ -321,27 +344,41 @@ export class AutomaticMeetingWatchService {
       });
     } catch (error) {
       this.#controller.reset();
+      if (resumed) this.finalizeParked();
       this.emit({ type: 'watch.error', at: now.toISOString(), message: `Could not start capture: ${errorMessage(error)}` });
       return false;
     }
+    if (resumed) this.#parked = undefined;
     try {
-      record = createTranscriptRecord({ transcript: [], speakers: [] }, {
-        id: capture.sessionId, now, title: candidate.title,
-        source: { filename: 'Live capture session', format: 'capture-session/0.1' },
-      });
-      directory = saveTranscriptRecord(this.#libraryDir, record).directory;
-      saveMeetingArtifact(this.#libraryDir, createMeetingArtifact(record, {
-        mode: this.#config.meeting?.mode ?? 'hybrid', calendar: candidate.calendar,
-      }));
+      if (resumed) {
+        // Continue the live draft already shown for this meeting.
+        record = findTranscriptRecord(this.#libraryDir, capture.sessionId).record;
+        directory = resumed.directory;
+      } else {
+        record = createTranscriptRecord({ transcript: [], speakers: [] }, {
+          id: capture.sessionId, now, title: candidate.title,
+          source: { filename: 'Live capture session', format: 'capture-session/0.1' },
+        });
+        directory = saveTranscriptRecord(this.#libraryDir, record).directory;
+        saveMeetingArtifact(this.#libraryDir, createMeetingArtifact(record, {
+          mode: this.#config.meeting?.mode ?? 'hybrid', calendar: candidate.calendar,
+        }));
+      }
       writeBackgroundMeetingState(directory, 'recording', {
         ...(latestStatus?.health ? { captureHealth: latestStatus.health } : {}),
         audioSavedThroughMs: latestStatus?.audioSavedThroughMs ?? 0,
+        meetingKey: candidate.id,
       });
       writtenAt = Date.now(); writtenKey = latestStatus?.health ? captureHealthTransitionKey(latestStatus.health) : undefined;
     } catch (error) {
       initializingDraft = false;
       pendingDraftChunks.length = 0;
-      void capture.stop('library-start-failed').catch(() => {});
+      const stopped = capture.stop('library-start-failed').catch(() => {});
+      // The reopened bundle still holds the earlier part of this meeting.
+      if (resumed) {
+        const reopened = capture;
+        void stopped.then(() => this.enqueueFinalization({ ...resumed, capture: reopened }));
+      }
       this.#controller.reset();
       this.emit({ type: 'watch.error', at: now.toISOString(), message: `Could not save meeting: ${errorMessage(error)}` });
       return false;
@@ -355,14 +392,24 @@ export class AutomaticMeetingWatchService {
     } catch {
       onDraftStatus({ stage: 'delayed', detail: 'Live transcript could not start. Audio is saved for final transcription.', queueDepth: 0 });
     } finally { initializingDraft = false; pendingDraftChunks.length = 0; }
-    this.#active = { candidate, capture, directory, ...(draft ? { draft } : {}) };
+    this.#active = { candidate, capture, directory, startedAt, ...(draft ? { draft } : {}) };
     this.projectWatch();
-    this.emit({
-      type: 'meeting.started',
-      at: now.toISOString(),
-      candidate,
-      sessionId: capture.sessionId,
-    });
+    if (resumed) {
+      this.emit({
+        type: 'meeting.resumed',
+        at: now.toISOString(),
+        candidate,
+        sessionId: capture.sessionId,
+        pausedSeconds: Math.round((now.getTime() - resumed.parkedAtUnixMs) / 1_000),
+      });
+    } else {
+      this.emit({
+        type: 'meeting.started',
+        at: now.toISOString(),
+        candidate,
+        sessionId: capture.sessionId,
+      });
+    }
     return true;
   }
 
@@ -380,22 +427,24 @@ export class AutomaticMeetingWatchService {
             message: `Live transcript cleanup needs attention: ${errorMessage(error)}. Final transcription will continue.` });
         }
       }
-      this.markCapture(active.directory, 'processing');
+      const resumeWindowMs = (this.#config.meeting?.automation?.resumeWindowSeconds ??
+        DEFAULT_MEETING_AUTOMATION.resumeWindowSeconds) * 1_000;
+      const parkedAtUnixMs = this.#dependencies.now().getTime();
+      const park = reason === 'signal-ended' && !this.#shuttingDown && resumeWindowMs > 0;
+      if (park) {
+        this.#parked = { ...active, parkedAtUnixMs, resumeUntilUnixMs: parkedAtUnixMs + resumeWindowMs };
+        this.markCapture(active.directory, 'processing', { draftStatus: {
+          stage: 'stopped', queueDepth: 0,
+          detail: `Meeting paused. If it resumes within ${Math.round(resumeWindowMs / 60_000) || 1} min it continues here; otherwise the final transcript starts.`,
+        } });
+      } else this.markCapture(active.directory, 'processing');
       this.emit({
         type: 'meeting.capture-finished',
         at: this.#dependencies.now().toISOString(),
         candidate,
         sessionId: active.capture.sessionId,
       });
-      const task = async () => this.finalize(active.candidate, active.capture);
-      this.#finalizationTail = this.#finalizationTail.then(task, task).catch((error: unknown) => {
-        this.markCapture(active.directory, 'failed');
-        this.emit({
-          type: 'watch.error',
-          at: this.#dependencies.now().toISOString(),
-          message: `Meeting ${active.capture.sessionId} remains recoverable: ${errorMessage(error)}`,
-        });
-      });
+      if (!park) this.enqueueFinalization(active);
     } catch (error) {
       this.markCapture(active.directory, 'failed');
       this.emit({
@@ -405,6 +454,32 @@ export class AutomaticMeetingWatchService {
       });
     }
     this.projectWatch();
+  }
+
+  private expireParked(now: Date): void {
+    if (this.#parked && now.getTime() >= this.#parked.resumeUntilUnixMs) this.finalizeParked();
+  }
+
+  private finalizeParked(): void {
+    const parked = this.#parked;
+    if (!parked) return;
+    this.#parked = undefined;
+    this.markCapture(parked.directory, 'processing', { draftStatus: {
+      stage: 'stopped', queueDepth: 0, detail: 'Live draft stopped. Preparing the final transcript.',
+    } });
+    this.enqueueFinalization(parked);
+  }
+
+  private enqueueFinalization(meeting: ActiveMeeting): void {
+    const task = async () => this.finalize(meeting.candidate, meeting.capture);
+    this.#finalizationTail = this.#finalizationTail.then(task, task).catch((error: unknown) => {
+      this.markCapture(meeting.directory, 'failed');
+      this.emit({
+        type: 'watch.error',
+        at: this.#dependencies.now().toISOString(),
+        message: `Meeting ${meeting.capture.sessionId} remains recoverable: ${errorMessage(error)}`,
+      });
+    });
   }
 
   private async finalize(
@@ -489,8 +564,8 @@ export class AutomaticMeetingWatchService {
     });
   }
 
-  private markCapture(directory: string, state: BackgroundMeetingState): void {
-    try { writeBackgroundMeetingState(directory, state); }
+  private markCapture(directory: string, state: BackgroundMeetingState, options?: BackgroundMeetingStatusOptions): void {
+    try { writeBackgroundMeetingState(directory, state, options); }
     catch (error) {
       this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(),
         message: `Could not update capture display: ${errorMessage(error)}` });

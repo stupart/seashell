@@ -244,6 +244,7 @@ test('a short-lived consent command can approve an ambiguous background browser 
 });
 
 import { listTranscriptRecords } from '../src/transcript-library.ts';
+import { readBackgroundMeetingStatus } from '../src/background-meeting-status.ts';
 import type { MeetProbe } from '../src/meet-speakers.ts';
 
 test('muted, back-to-back Meet calls become separate history entries while earlier ASR is pending', async () => {
@@ -378,4 +379,136 @@ test('hidden Meet tree keeps one recording beyond grace with matching browser au
     expect((await service.pollOnce()).kind).toBe('finish');
   } finally { await service.shutdown(); }
   expect(stops).toBe(1);
+});
+
+function resumableWatch(root: string, options: { resumeWindowSeconds?: number } = {}) {
+  const state = {
+    now: 0,
+    probe: { state: 'connected', detail: 'Joined', browser: 'safari',
+      snapshot: { meeting: '/abc-defg-hij', joined: true, participants: [] } } as MeetProbe,
+    input: [{ pid: 1594, bundleId: 'com.apple.WebKit.GPU', name: 'Safari Graphics and Media' }],
+    starts: [] as Array<{ sessionId?: string; startedAt?: number }>,
+    finalized: [] as string[],
+    events: [] as AutomaticMeetingWatchEvent[],
+  };
+  let created = 0;
+  const service = new AutomaticMeetingWatchService({
+    config: { libraryDir: root, meeting: { speakerBrowser: 'auto', automation: {
+      confirmationPolls: 1, endGraceSeconds: 20, resumeWindowSeconds: options.resumeWindowSeconds ?? 180,
+    } } },
+    onEvent: value => state.events.push(value),
+    dependencies: {
+      now: () => new Date(state.now),
+      readMeet: async () => state.probe,
+      readSignals: () => ({ schemaVersion: 1, capturedAtUnixMs: state.now, supported: true, inputProcesses: state.input }),
+      startCapture: capture => {
+        state.starts.push({ sessionId: capture.sessionId, startedAt: capture.startedAt?.getTime() });
+        const id = capture.sessionId ?? `call-${++created}`;
+        const store = new CaptureSessionStore({ libraryDir: root, sessionId: id,
+          startedAtUnixMs: capture.startedAt!.getTime(), createdAt: capture.startedAt!.toISOString() });
+        return { store, sessionId: id, manifestPath: store.manifestPath,
+          async stop() { return store.setStatus('captured', 'test'); } };
+      },
+      finalizeCapture: async path => {
+        const id = path.split('/').at(-2)!;
+        state.finalized.push(id);
+        return createTranscriptRecord({ transcript: [{ start: 0, end: 1, text: `final ${id}` }], speakers: [] },
+          { id, now: new Date(0), title: 'Google Meet' });
+      },
+    },
+  });
+  return { state, service };
+}
+
+test('Safari Accessibility gaps keep one recording while WebKit owns the microphone', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-safari-gap-'));
+  roots.push(root);
+  const { state, service } = resumableWatch(root);
+  try {
+    expect((await service.pollOnce()).kind).toBe('start');
+    // The exact warnings that ended each Oct 1 fragment after 20 seconds.
+    for (const detail of [
+      'A browser window does not expose its page through Accessibility. Meeting detection and names are paused.',
+      'Browser Accessibility inspection was incomplete. Meeting detection and names are paused.',
+      'A browser page does not expose its address through Accessibility. Meeting detection and names are paused.',
+    ]) {
+      state.probe = { state: 'unavailable', detail, source: 'google-meet-accessibility' };
+      for (let poll = 0; poll < 20; poll++) {
+        state.now += 3_000;
+        expect((await service.pollOnce()).kind).toBe('none');
+      }
+    }
+    expect(service.phase).toBe('recording');
+    expect(state.starts).toHaveLength(1);
+    expect(listTranscriptRecords(root)).toHaveLength(1);
+  } finally { await service.shutdown(); }
+  expect(state.finalized).toEqual(['call-1']);
+});
+
+test('a call that drops and rejoins within the resume window stays one meeting entry', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-meet-resume-'));
+  roots.push(root);
+  const { state, service } = resumableWatch(root);
+  try {
+    expect((await service.pollOnce()).kind).toBe('start');
+    // Browser released the microphone and the page is unreadable: a real end.
+    state.probe = { state: 'unavailable', detail: 'Hidden', source: 'google-meet-accessibility' };
+    state.input = [];
+    state.now = 60_000;
+    await service.pollOnce();
+    state.now = 81_000;
+    expect((await service.pollOnce()).kind).toBe('finish');
+    expect(listTranscriptRecords(root)[0]?.captureState).toBe('processing');
+    expect(listTranscriptRecords(root)[0]?.draftStatus?.detail).toContain('continues here');
+    // Rejoined 70 seconds later: same capture bundle, same entry, same clock.
+    state.probe = { state: 'connected', detail: 'Joined', browser: 'safari',
+      snapshot: { meeting: '/abc-defg-hij', joined: true, participants: [] } };
+    state.input = [{ pid: 1594, bundleId: 'com.apple.WebKit.GPU', name: 'Safari Graphics and Media' }];
+    state.now = 151_000;
+    expect((await service.pollOnce()).kind).toBe('start');
+    expect(state.starts[1]).toEqual({ sessionId: 'call-1', startedAt: 0 });
+    expect(listTranscriptRecords(root)).toHaveLength(1);
+    expect(listTranscriptRecords(root)[0]?.captureState).toBe('recording');
+    expect(readBackgroundMeetingStatus(listTranscriptRecords(root)[0]!.directory)?.meetingKey).toBe('meet:safari:/abc-defg-hij');
+    expect(state.events.find(e => e.type === 'meeting.resumed')).toMatchObject({ sessionId: 'call-1', pausedSeconds: 70 });
+    state.probe = { state: 'idle', detail: 'You left the meeting', source: 'google-meet-accessibility', absenceConfirmed: true };
+    state.now = 200_000;
+    expect((await service.pollOnce()).kind).toBe('finish');
+    expect(state.finalized).toEqual([]);
+  } finally { await service.shutdown(); }
+  expect(state.finalized).toEqual(['call-1']);
+  expect(listTranscriptRecords(root)).toHaveLength(1);
+  expect(listTranscriptRecords(root)[0]).toMatchObject({ id: 'call-1', captureState: 'ready', segmentCount: 1 });
+  expect(state.events.map(e => e.type).filter(type => type.startsWith('meeting.'))).toEqual([
+    'meeting.started', 'meeting.capture-finished', 'meeting.resumed', 'meeting.capture-finished', 'meeting.ready',
+  ]);
+});
+
+test('a paused meeting finalizes once its resume window passes', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-meet-expire-'));
+  roots.push(root);
+  const { state, service } = resumableWatch(root, { resumeWindowSeconds: 60 });
+  try {
+    await service.pollOnce();
+    state.probe = { state: 'idle', detail: 'You left the meeting', source: 'google-meet-accessibility', absenceConfirmed: true };
+    state.input = [];
+    state.now = 10_000;
+    expect((await service.pollOnce()).kind).toBe('finish');
+    state.now = 69_000;
+    await service.pollOnce();
+    await Bun.sleep(0);
+    expect(state.finalized).toEqual([]);
+    state.now = 70_000;
+    await service.pollOnce();
+    await Bun.sleep(10);
+    expect(state.finalized).toEqual(['call-1']);
+    // Rejoining after the window starts a new entry.
+    state.probe = { state: 'connected', detail: 'Joined', browser: 'safari',
+      snapshot: { meeting: '/abc-defg-hij', joined: true, participants: [] } };
+    state.input = [{ pid: 1594, bundleId: 'com.apple.WebKit.GPU', name: 'Safari Graphics and Media' }];
+    state.now = 80_000;
+    expect((await service.pollOnce()).kind).toBe('start');
+    expect(state.starts[1]?.sessionId).toBeUndefined();
+  } finally { await service.shutdown(); }
+  expect(listTranscriptRecords(root)).toHaveLength(2);
 });

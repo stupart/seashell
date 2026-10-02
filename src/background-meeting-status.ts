@@ -16,8 +16,10 @@ export interface BackgroundMeetingStatus {
   readonly captureHealth?: CaptureHealthSnapshot;
   readonly audioSavedThroughMs?: number;
   readonly draftStatus?: BackgroundDraftStatus;
+  /** What was recorded, e.g. meet:safari:/abc-defg-hij; links pieces of one call. */
+  readonly meetingKey?: string;
 }
-export type BackgroundMeetingStatusOptions = Pick<BackgroundMeetingStatus, 'captureHealth' | 'audioSavedThroughMs' | 'draftStatus'>;
+export type BackgroundMeetingStatusOptions = Pick<BackgroundMeetingStatus, 'captureHealth' | 'audioSavedThroughMs' | 'draftStatus' | 'meetingKey'>;
 
 /** Small UI projection; the capture journal remains the audio authority. */
 export function writeBackgroundMeetingState(directory: string, state: BackgroundMeetingState, options: BackgroundMeetingStatusOptions = {}): void {
@@ -53,6 +55,7 @@ export function readBackgroundMeetingStatus(directory: string): BackgroundMeetin
       ...(health ? { captureHealth: health } : {}),
       ...(Number.isSafeInteger(value.audioSavedThroughMs) && value.audioSavedThroughMs >= 0 ? { audioSavedThroughMs: value.audioSavedThroughMs } : {}),
       ...(draftValid ? { draftStatus: { stage: draft.stage, detail: draft.detail, queueDepth: draft.queueDepth } } : {}),
+      ...(typeof value.meetingKey === 'string' && /^[\w.:/-]{1,200}$/u.test(value.meetingKey) ? { meetingKey: value.meetingKey } : {}),
     };
   } catch { return undefined; }
 }
