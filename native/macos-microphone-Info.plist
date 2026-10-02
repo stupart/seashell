@@ -6,6 +6,10 @@
   <string>com.humain.seashell.microphone</string>
   <key>CFBundleName</key>
   <string>Seashell Microphone</string>
+  <!-- Bump only when the PCM/exit-code contract changes: a new protocol replaces
+       the installed copy, and macOS then asks for Microphone access again. -->
+  <key>SeashellHelperProtocol</key>
+  <string>1</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Seashell records your side of the meetings it captures. Audio stays on this Mac.</string>
 </dict>
