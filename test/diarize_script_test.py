@@ -47,5 +47,45 @@ class SpeakerOptionTests(unittest.TestCase):
             )
 
 
+class _Available:
+    def __init__(self, available):
+        self._available = available
+
+    def is_available(self):
+        return self._available
+
+
+def fake_torch(cuda=False, mps=False):
+    torch = argparse.Namespace(cuda=_Available(cuda), backends=argparse.Namespace(mps=_Available(mps)))
+    return torch
+
+
+class DeviceTests(unittest.TestCase):
+    def test_auto_prefers_cuda_then_the_apple_gpu_then_cpu(self):
+        self.assertEqual(MODULE.resolve_device("auto", fake_torch(cuda=True, mps=True)), "cuda")
+        self.assertEqual(MODULE.resolve_device("auto", fake_torch(mps=True)), "mps")
+        self.assertEqual(MODULE.resolve_device("auto", fake_torch()), "cpu")
+        self.assertEqual(MODULE.resolve_device("cpu", fake_torch(mps=True)), "cpu")
+
+    def test_an_apple_gpu_failure_retries_on_cpu(self):
+        attempts, moved = [], []
+
+        def run():
+            attempts.append(len(moved))
+            if not moved:
+                raise RuntimeError("unsupported MPS operation")
+            return "turns"
+
+        self.assertEqual(MODULE.run_with_cpu_fallback("mps", run, lambda: moved.append(True)), ("cpu", "turns"))
+        self.assertEqual(attempts, [0, 1])
+
+    def test_other_device_failures_are_not_hidden(self):
+        def run():
+            raise RuntimeError("out of memory")
+
+        with self.assertRaises(RuntimeError):
+            MODULE.run_with_cpu_fallback("cpu", run, lambda: None)
+
+
 if __name__ == "__main__":
     unittest.main()

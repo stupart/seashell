@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased — speaker separation on the Apple GPU
+
+- "auto" now uses the Apple GPU (MPS) when CUDA is absent. A real 36-minute
+  meeting on an M5 Max: 48 s instead of 14.8 min, ~150× less CPU time and
+  1.8 GB instead of 4.2 GB peak memory, with byte-identical speaker turns.
+- A GPU failure retries the whole separation on the CPU; unsupported
+  operations fall back individually (`PYTORCH_ENABLE_MPS_FALLBACK`).
+
 ## Unreleased — calendar titles that work in the background
 
 - Meeting titles and attendees come from a native "Seashell Calendar" helper
