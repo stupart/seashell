@@ -1,6 +1,7 @@
 import { installHumainPackage, requireHumainNode } from './humain-install.ts';
 import { checkMeetConnection, requestMeetAccessibilityPermission, meetPermissionHelp, MEETING_ACCESSIBILITY_HELPER } from './meet-speakers.ts';
 import { microphonePermission } from './microphone-permission.ts';
+import { readFeatureStatuses, renderFeatureStatusTable } from './feature-status.ts';
 import { mergeMeetingFragments, planMeetingMerges } from './meeting-merge.ts';
 import { discoverHumainProviders, resolveHumainExecutable } from './humain-client.ts';
 import { randomUUID } from 'crypto';
@@ -501,7 +502,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       return 0;
     }
     case 'microphone': {
-      const result = microphonePermission({ request: command.action.operation === 'setup' });
+      const result = await microphonePermission({ request: command.action.operation === 'setup' });
       if (command.action.operation === 'setup' && result.authorization === 'denied') {
         spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'], { stdio: 'ignore', timeout: 5_000 });
       }
@@ -856,6 +857,12 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
     }
     case 'doctor':
       return executeDoctor(command.json);
+    case 'status': {
+      const config = loadConfig();
+      const statuses = await readFeatureStatuses({ config, libraryDir: resolveLibraryDir(undefined, process.env, config) });
+      print(command.json ? JSON.stringify(statuses, null, 2) : renderFeatureStatusTable(statuses));
+      return statuses.some((status) => !status.optional && status.state === 'broken') ? 2 : 0;
+    }
     case 'speaker-setup': {
       const result = await setupDiarization(command);
       print(command.json ? JSON.stringify(result, null, 2) : [

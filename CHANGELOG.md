@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased — Settings: what works, at a glance
+
+- Press `,` for Settings: features on the left, details and one-key fixes on the
+  right. The Overview lists every capability as working, needs attention, off or
+  broken. It is judged from permissions, the running recorder, and what your
+  last meeting actually captured, not from configuration alone.
+- Enter fixes what Seashell can fix itself: start the background recorder,
+  connect Google Meet, allow the microphone, or open speaker and AI setup.
+- The header says "Setup needed" when something required for recording is broken.
+- `seashell status [--json]` prints the same table with a command for each fix.
+
 ## Unreleased — one meeting, one entry
 
 - Safari Meet calls no longer split when the browser's Accessibility tree is

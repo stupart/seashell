@@ -107,6 +107,7 @@ export type CliCommand =
   | { kind: 'tui'; libraryDir?: string }
   | { kind: 'capabilities'; json: boolean }
   | { kind: 'doctor'; json: boolean }
+  | { kind: 'status'; json: boolean }
   | { kind: 'setup'; autostart: boolean; json: boolean }
   | { kind: 'speaker-setup'; login: boolean; check: boolean; json: boolean }
   | { kind: 'update'; check: boolean; json: boolean }
@@ -721,6 +722,11 @@ export function parseCliArgs(args: string[]): CliCommand {
     }
     throw new Error('Usage: seashell ai install <trusted-package.tgz> | seashell ai setup | status | providers [--json]');
   }
+  if (args[0] === 'status') {
+    const unknown = args.slice(1).filter((arg) => arg !== '--json');
+    if (unknown.length) throw new Error(`Unknown status option: ${unknown[0]}`);
+    return { kind: 'status', json: args.includes('--json') };
+  }
   if (args[0] === 'doctor') {
     const unknown = args.slice(1).filter((arg) => arg !== '--json');
     if (unknown.length) throw new Error(`Unknown doctor option: ${unknown[0]}`);
@@ -776,6 +782,7 @@ Usage:
   seashell library speakers <id> identify   Separate saved voices into a review copy
   seashell setup --speakers [--login]       Set up optional local speaker identification
   seashell setup --speakers --check [--json] Verify the cached speaker model offline
+  seashell status [--json]                  What works, what is off, and the next step for each
   seashell doctor [--json]                  Check dependencies and models
   seashell capabilities [--json]            Describe optional engine capabilities
   seashell update [--check] [--json]        Update Sea Shell or show package-manager guidance

@@ -69,6 +69,8 @@ import {
 } from './transcription-routing.ts';
 import AIProviderPicker from './AISettings.tsx';
 import SpeakerSettings from './SpeakerSettings.tsx';
+import SettingsScreen from './SettingsScreen.tsx';
+import { readFeatureStatuses } from './feature-status.ts';
 import { startMeetSpeakerReader, meetBrowserMatchesApp, probeMeetSpeakers, type MeetSpeakerReader, type MeetProbe } from './meet-speakers.ts';
 import { backgroundMeetingMessage } from './background-meeting-status.ts';
 import { readBackgroundWatchStatus, type BackgroundWatchStatus } from './background-watch-status.ts';
@@ -190,6 +192,10 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [meetSpeakerStatus, setMeetSpeakerStatus] = useState<MeetProbe>();
   const [captureAppBundle, setCaptureAppBundle] = useState<string>();
   const [aiSetupOpen, setAiSetupOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  // Speakers and AI open from Settings return there when closed.
+  const [returnToSettings, setReturnToSettings] = useState(false);
+  const [setupNeeded, setSetupNeeded] = useState(false);
   const [aiSetupIntent, setAiSetupIntent] = useState<'notes' | 'chat' | null>(null);
   const libraryRoot = useMemo(
     () => resolveLibraryDir(props.libraryDir, process.env, config),
@@ -1691,6 +1697,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       setNotice('This meeting is still recording or finishing. Review and edit it once the final transcript is ready.');
       return;
     }
+    if (input === ',') { setSettingsOpen(true); return; }
     if (input === 'v') { setSpeakerSetupOpen(true); return; }
     if (input === 'p') { setAiSetupIntent(null); setAiSetupOpen(true); return; }
     if (key.tab || input === '\t' || input === 'h') {
@@ -1872,7 +1879,34 @@ export default function App(props: { libraryDir?: string } = {}) {
       showNavigationItem(navigationItems[selectionIndex]);
       setHistoryOpen(false);
     }
-  }, { isActive: !aiSetupOpen && !speakerSetupOpen });
+  }, { isActive: !aiSetupOpen && !speakerSetupOpen && !settingsOpen });
+
+  // A quiet footer nudge when something needed for recording meetings is broken.
+  useEffect(() => {
+    if (settingsOpen) return;
+    const controller = new AbortController();
+    void readFeatureStatuses({ config, libraryDir: libraryRoot, signal: controller.signal })
+      .then(statuses => { if (!controller.signal.aborted) setSetupNeeded(statuses.some(status => !status.optional && status.state === 'broken')); })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [settingsOpen, libraryRoot]);
+
+  const connectMeetReader = () => {
+    updateMeetingConfig({ speakerBrowser: 'auto' });
+    setConfig(current => ({ ...current, meeting: { ...current.meeting, speakerBrowser: 'auto' } }));
+    setMeetSpeakerStatus(undefined);
+  };
+  const closeSubSettings = () => {
+    if (!returnToSettings) return;
+    setReturnToSettings(false);
+    setSettingsOpen(true);
+  };
+
+  if (settingsOpen) return <SettingsScreen config={config} libraryDir={libraryRoot} columns={terminal.columns}
+    onConnectMeet={connectMeetReader}
+    onOpenSpeakers={() => { setSettingsOpen(false); setReturnToSettings(true); setSpeakerSetupOpen(true); }}
+    onOpenAI={() => { setSettingsOpen(false); setReturnToSettings(true); setAiSetupIntent(null); setAiSetupOpen(true); }}
+    onClose={() => setSettingsOpen(false)} />;
 
   if (speakerSetupOpen) return <SpeakerSettings recording={Boolean(activeBackgroundEntry) || (!paused && !listenerDisabled)}
     browser={config.meeting?.speakerBrowser ?? 'off'}
@@ -1883,7 +1917,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       setMeetSpeakerStatus(undefined);
     }}
     canIdentify={view === 'record' && Boolean(selectedRecord) && !currentRecordBusy}
-    onClose={() => setSpeakerSetupOpen(false)}
+    onClose={() => { setSpeakerSetupOpen(false); closeSubSettings(); }}
     onIdentify={() => {
       if (view !== 'record' || !selectedRecord || currentRecordBusy) return;
       setSpeakerSetupOpen(false);
@@ -1899,7 +1933,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     }} />;
 
   if (aiSetupOpen) return <AIProviderPicker current={config.meeting} recording={Boolean(activeBackgroundEntry) || (!paused && !listenerDisabled)}
-    onClose={() => { setAiSetupIntent(null); setAiSetupOpen(false); }}
+    onClose={() => { setAiSetupIntent(null); setAiSetupOpen(false); closeSubSettings(); }}
     onSave={(patch) => {
       const saved = updateMeetingConfig(patch);
       // Keep capture settings and their object identities stable while changing AI routes.
@@ -1907,6 +1941,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         calendar: current.meeting?.calendar, automation: current.meeting?.automation,
       } }));
       setAiSetupOpen(false);
+      closeSubSettings();
       setError(null);
       const names = [...new Set(Object.values(patch.routes ?? {}).flatMap((route) => route ? [route.backend] : []))];
       setNotice(`AI ready · ${names.join(' + ')} · P for settings`);
@@ -2051,6 +2086,9 @@ export default function App(props: { libraryDir?: string } = {}) {
       <Box marginBottom={1} flexShrink={0}>
         <Text>🐚 </Text>
         <Text bold color="cyan">Sea Shell</Text>
+        {setupNeeded
+          ? <Text color="yellow">  · Setup needed · press ,</Text>
+          : <Text dimColor>  · [,] Settings</Text>}
       </Box>
 
       <Box marginBottom={1} flexShrink={0}>
@@ -2184,6 +2222,7 @@ export default function App(props: { libraryDir?: string } = {}) {
             <Text dimColor>[/] choose speaker · R rename · ↑↓ / wheel scroll · L live · Q quit</Text>
             <Text dimColor>M mark meeting · 1-4 meeting views · G enrich/finalize · A ask</Text>
             <Text dimColor>P choose AI models and effort for live analysis, notes and chat</Text>
+            <Text dimColor>, Settings: what works, what is off, and one-key fixes</Text>
             <Text dimColor>Automatic meeting prompt: M record · X ignore</Text>
           </>
         ) : !historyOpen && currentRecord?.transcript.length ? (
