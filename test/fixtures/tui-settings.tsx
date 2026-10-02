@@ -64,7 +64,7 @@ try {
   const app = render(<SettingsScreen config={{ meeting: { speakerBrowser: 'auto' } }} libraryDir={join(root, 'library')} columns={columns}
     dependencies={dependencies}
     actions={{ allowMicrophone: async () => { permissionRequests++; micAllowed = true; return { authorization: 'authorized', detail: 'Allowed.' }; } }}
-    onConnectMeet={() => connects++} onOpenSpeakers={() => speakers++} onOpenAI={() => {}} onClose={() => closed++} />,
+    onConnectMeet={() => connects++} onEnableCalendar={() => {}} onOpenSpeakers={() => speakers++} onOpenAI={() => {}} onClose={() => closed++} />,
   { stdin: t.input as any, stdout: t.output as any, stderr: t.output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
   const type = async (text: string) => { t.input.write(text); await Bun.sleep(60); };
 

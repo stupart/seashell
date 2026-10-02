@@ -1,5 +1,7 @@
 import { setTimeout as sleep } from 'timers/promises';
 import { randomUUID } from 'node:crypto';
+import { existsSync, realpathSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { claimManagedProcessSignalOwnership } from './process-lifecycle.ts';
 import { finalizeCaptureTranscript } from './capture-finalizer.ts';
 import { readMacCalendarEventsAsync, suggestCalendarMeeting } from './calendar.ts';
@@ -57,6 +59,7 @@ export type AutomaticMeetingWatchEvent =
   | { readonly type: 'meeting.capture-finished'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string }
   | { readonly type: 'meeting.ready'; readonly at: string; readonly candidate: MeetingCandidate; readonly transcriptId: string; readonly directory: string }
   | { readonly type: 'watch.warning'; readonly at: string; readonly message: string }
+  | { readonly type: 'watch.restarting'; readonly at: string; readonly reason: string }
   | { readonly type: 'watch.error'; readonly at: string; readonly message: string };
 
 export interface AutomaticMeetingWatchDependencies {
@@ -80,6 +83,27 @@ export interface AutomaticMeetingWatchOptions {
   readonly lockPath?: string;
   readonly onEvent?: (event: AutomaticMeetingWatchEvent) => void;
   readonly dependencies?: AutomaticMeetingWatchDependencies;
+  /**
+   * Polled between meetings only. A reason ends the watch so its supervisor
+   * (launchd) starts a fresh one on the current code and settings.
+   */
+  readonly restartWhen?: () => string | undefined;
+}
+
+/**
+ * Why a long-running watcher should be replaced: a package upgrade moved or
+ * removed the code and helpers it runs from, or settings changed on disk.
+ */
+export function watchRestartReason(options: { readonly configPath: string; readonly packageRoot?: string; readonly codeRoot: string }): () => string | undefined {
+  const configStamp = () => { try { return statSync(options.configPath).mtimeMs; } catch { return 0; } };
+  const resolvedPackage = () => { try { return options.packageRoot ? realpathSync(options.packageRoot) : undefined; } catch { return undefined; } };
+  const initialConfig = configStamp();
+  const initialPackage = resolvedPackage();
+  return () => {
+    if (!existsSync(join(options.codeRoot, 'package.json')) || resolvedPackage() !== initialPackage) return 'Seashell was updated';
+    if (configStamp() !== initialConfig) return 'Settings changed';
+    return undefined;
+  };
 }
 
 function errorMessage(error: unknown): string {
@@ -143,6 +167,11 @@ export class AutomaticMeetingWatchService {
 
   get phase() {
     return this.#controller.state.phase;
+  }
+
+  /** No meeting is recording, paused for resume, awaiting consent or being confirmed. */
+  get idle(): boolean {
+    return !this.#active && !this.#parked && this.#controller.state.phase === 'watching';
   }
 
   async pollOnce(): Promise<MeetingAutomationAction> {
@@ -611,6 +640,11 @@ export async function runAutomaticMeetingWatch(options: AutomaticMeetingWatchOpt
       DEFAULT_MEETING_AUTOMATION.pollSeconds;
     while (!options.signal?.aborted) {
       await service.pollOnce();
+      const reason = service.idle ? options.restartWhen?.() : undefined;
+      if (reason) {
+        options.onEvent?.(event({ type: 'watch.restarting', at: new Date().toISOString(), reason }));
+        break;
+      }
       await sleep(pollSeconds * 1_000, undefined, { signal: options.signal }).catch(() => {});
     }
   } finally {

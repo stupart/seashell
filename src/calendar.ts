@@ -1,5 +1,22 @@
 import { execFile, spawnSync } from 'child_process';
+import { existsSync } from 'fs';
+import { dirname, join } from 'path';
+import { fileURLToPath } from 'url';
 import type { MeetingCalendarEvent } from './meeting-artifact.ts';
+import { CALENDAR_RUNTIME_HELPER, prepareRuntimeHelper } from './runtime-host.ts';
+
+export const CALENDAR_HELPER = join(dirname(fileURLToPath(import.meta.url)), '..', 'native', 'bin', 'seashell-calendar');
+
+/**
+ * Prefer the native EventKit helper on macOS. Scripting Calendar.app needs an
+ * Apple Events permission the background watcher's hardened Bun host cannot
+ * hold, and it launches Calendar.app on every read. The helper holds its own
+ * Calendars permission. SEASHELL_CALENDAR_READER=osascript restores the old reader.
+ */
+function calendarHelper(): string | undefined {
+  if (process.platform !== 'darwin' || process.env.SEASHELL_CALENDAR_READER === 'osascript' || !existsSync(CALENDAR_HELPER)) return undefined;
+  try { return prepareRuntimeHelper(CALENDAR_HELPER, CALENDAR_RUNTIME_HELPER); } catch { return CALENDAR_HELPER; }
+}
 
 export type MeetingCapturePolicy = 'off' | 'ask' | 'selected-calendars' | 'all';
 
@@ -167,6 +184,25 @@ export function readMacCalendarEventsAsync(
 ): Promise<MeetingCalendarEvent[]> {
   const leadMinutes = Math.max(5, options.leadMinutes ?? 15);
   const lookbackMinutes = Math.max(0, options.lookbackMinutes ?? 10);
+  const helper = calendarHelper();
+  if (helper) {
+    return new Promise((resolve, reject) => {
+      execFile(helper, ['--lead-minutes', String(leadMinutes), '--lookback-minutes', String(lookbackMinutes)], {
+        encoding: 'utf8', timeout: 8_000, maxBuffer: 1_000_000,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      }, (error, stdout, stderr) => {
+        if (error) {
+          reject((error as { code?: unknown }).code === 77
+            ? new Error('Calendar access is off for Seashell Calendar. Press , in Seashell or run seashell meeting calendar setup. Audio-based meeting detection still works.')
+            : calendarReadFailure(error, stderr));
+          return;
+        }
+        try { resolve(parseCalendarEvents(JSON.parse(stdout))); } catch (parseError) {
+          reject(new Error(`Could not parse calendar events: ${parseError instanceof Error ? parseError.message : String(parseError)}`));
+        }
+      });
+    });
+  }
   const script = `
     ObjC.import('Foundation');
     const app = Application('Calendar');

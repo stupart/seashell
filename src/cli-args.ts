@@ -55,7 +55,7 @@ export type MeetingCommand = {
         browserWithoutCalendar?: BrowserMeetingPolicy;
         contextFiles?: string[];
       }
-    | { kind: 'calendar' }
+    | { kind: 'calendar'; operation?: 'setup' | 'check' }
     | { kind: 'speakers'; browser: 'setup' | 'auto' | 'chrome' | 'safari' | 'off' | 'check' }
     | { kind: 'microphone'; operation: 'setup' | 'check' }
     | { kind: 'merge'; ids: string[]; auto: boolean; dryRun: boolean; maxGapMinutes?: number }
@@ -582,10 +582,14 @@ function parseMeeting(args: string[]): MeetingCommand {
         ...(model ? { model } : {}),
       };
       break;
-    case 'calendar':
-      if (positional.length > 0) throw new Error('meeting calendar accepts no positional arguments');
-      action = { kind: 'calendar' };
+    case 'calendar': {
+      const operation = positional[0];
+      if (positional.length > 1 || (operation !== undefined && operation !== 'setup' && operation !== 'check')) {
+        throw new Error('Usage: seashell meeting calendar [setup|check]');
+      }
+      action = { kind: 'calendar', ...(operation ? { operation } : {}) };
       break;
+    }
     case 'watch':
       if (positional.length > 0) throw new Error('meeting watch accepts no positional arguments');
       action = { kind: 'watch', once };
@@ -845,6 +849,8 @@ Meeting actions:
                       [--context <json>]
   meeting show <id> [--json]
   meeting chat <id> <question> [--backend <backend>] [--model <exact-model>]
+  meeting calendar setup [--json]           Name meetings after calendar events (macOS asks once)
+  meeting calendar check [--json]           Check calendar access without a prompt
   meeting calendar [--json]
   meeting watch [--once] [--json]             Watch cheaply and record detected meetings
   meeting consent approve|decline             Answer a background browser-capture request

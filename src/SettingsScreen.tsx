@@ -15,6 +15,7 @@ import {
 import { enableMeetingLaunchAtLogin } from './launch-at-login.ts';
 import { requestMeetAccessibilityPermission } from './meet-speakers.ts';
 import { microphonePermission } from './microphone-permission.ts';
+import { calendarPermission } from './calendar-permission.ts';
 
 const MENU_LABEL: Record<FeatureId, string> = {
   recorder: 'Recorder',
@@ -32,6 +33,7 @@ export interface SettingsActions {
   enableRecorder?: () => void;
   connectMeet?: (signal: AbortSignal) => Promise<{ detail: string }>;
   allowMicrophone?: (signal: AbortSignal) => Promise<{ authorization: string; detail: string }>;
+  allowCalendar?: (signal: AbortSignal) => Promise<{ authorization: string; detail: string }>;
 }
 
 /** Everything Seashell can do, whether it works right now, and one key to fix it. */
@@ -41,6 +43,8 @@ export default function SettingsScreen(props: {
   columns: number;
   /** Connecting Meet enables the reader before asking macOS for access. */
   onConnectMeet: () => void;
+  /** Turning on titles saves the setting once macOS allows Calendar access. */
+  onEnableCalendar: () => void;
   onOpenSpeakers: () => void;
   onOpenAI: () => void;
   onClose: () => void;
@@ -93,6 +97,19 @@ export default function SettingsScreen(props: {
           spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'], { stdio: 'ignore', timeout: 5_000 });
         }
         setMessage(result.authorization === 'authorized' ? 'Microphone allowed. Your side of meetings is now recorded.' : result.detail);
+      } else if (action === 'allow-calendar') {
+        setMessage('macOS will ask about "Seashell Calendar". Choose Allow (Full Access).');
+        const result = await (props.actions?.allowCalendar ?? (signal => calendarPermission({ request: true, signal })))(controller.signal);
+        if (controller.signal.aborted) return;
+        if (result.authorization === 'authorized') {
+          props.onEnableCalendar();
+          setMessage('Calendar titles are on. Meetings with a calendar event get its name and attendees.');
+        } else {
+          if ((result.authorization === 'denied' || result.authorization === 'writeOnly') && !props.actions?.allowCalendar) {
+            spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars'], { stdio: 'ignore', timeout: 5_000 });
+          }
+          setMessage(result.detail);
+        }
       }
     } catch (cause) {
       if (!controller.signal.aborted) setMessage(cause instanceof Error ? cause.message : String(cause));

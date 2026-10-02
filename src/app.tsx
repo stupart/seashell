@@ -1904,6 +1904,12 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   if (settingsOpen) return <SettingsScreen config={config} libraryDir={libraryRoot} columns={terminal.columns}
     onConnectMeet={connectMeetReader}
+    onEnableCalendar={() => {
+      const policy = config.meeting?.calendar?.policy ?? 'ask';
+      updateMeetingConfig({ calendar: { enabled: true, policy: policy === 'off' ? 'ask' : policy } });
+      setConfig(current => ({ ...current, meeting: { ...current.meeting,
+        calendar: { ...current.meeting?.calendar, enabled: true, policy: policy === 'off' ? 'ask' : policy } } }));
+    }}
     onOpenSpeakers={() => { setSettingsOpen(false); setReturnToSettings(true); setSpeakerSetupOpen(true); }}
     onOpenAI={() => { setSettingsOpen(false); setReturnToSettings(true); setAiSetupIntent(null); setAiSetupOpen(true); }}
     onClose={() => setSettingsOpen(false)} />;

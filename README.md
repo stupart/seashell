@@ -279,7 +279,9 @@ Background meetings record your microphone through a small native helper,
 background runtime itself cannot be granted one). Run
 `seashell meeting microphone setup` once and choose **Allow**; check it any time
 with `seashell meeting microphone`. If you leave a call and rejoin within three
-minutes, the recording continues in the same History entry. Use
+minutes, the recording continues in the same History entry. To name meetings
+after their calendar event, press **,** → Meeting titles from Calendar (or run
+`seashell meeting calendar setup`); **Seashell Calendar** asks macOS once. Use
 `seashell meeting merge --auto --dry-run` to find older meetings that were split.
 The background runtime stays at
 `~/Library/Application Support/Sea Shell/Runtime/Seashell Background`
