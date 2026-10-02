@@ -28,6 +28,8 @@ interface Fragment {
   readonly manifest: CaptureSessionManifest;
   /** What was recorded: a Meet room such as /abc-defg-hij, or an app such as audio:zoom. */
   readonly meeting?: string;
+  /** The watcher's own key, e.g. meet:safari:/abc-defg-hij, when known. */
+  readonly meetingKey?: string;
 }
 
 /** A Meet room is the same call in any browser; other candidates keep their ID. */
@@ -75,7 +77,7 @@ function loadFragment(libraryDir: string, id: string, watchLog = new Map<string,
   const key = readBackgroundMeetingStatus(directory)?.meetingKey ?? watchLog.get(manifest.sessionId);
   const meeting = readMeetSamples(manifestPath, manifest).find(sample => sample.meeting)?.meeting ??
     (key ? meetingIdentity(key) : undefined);
-  return { record, directory, manifestPath, manifest, ...(meeting ? { meeting } : {}) };
+  return { record, directory, manifestPath, manifest, ...(meeting ? { meeting } : {}), ...(key ? { meetingKey: key } : {}) };
 }
 
 function endedAtUnixMs(fragment: Fragment): number {
@@ -124,7 +126,7 @@ export function planMeetingMerges(libraryDir: string, options: {
  */
 export function mergeMeetingFragments(libraryDir: string, ids: readonly string[]): MeetingMergeResult {
   if (new Set(ids).size !== ids.length || ids.length < 2) throw new Error('Choose at least two different meetings to merge.');
-  const fragments = ids.map(id => loadFragment(libraryDir, id))
+  const fragments = ids.map(id => loadFragment(libraryDir, id, meetingKeysFromWatchLog(readMeetingWatchLog())))
     .toSorted((left, right) => left.manifest.startedAtUnixMs - right.manifest.startedAtUnixMs);
   const first = fragments[0]!;
   const origin = first.manifest.startedAtUnixMs;
@@ -196,7 +198,8 @@ export function mergeMeetingFragments(libraryDir: string, ids: readonly string[]
   saveMeetingArtifact(libraryDir, createMeetingArtifact(record, {
     mode: previous?.mode ?? 'hybrid', ...(previous?.calendar ? { calendar: previous.calendar } : {}),
   }));
-  writeBackgroundMeetingState(saved.directory, 'ready');
+  const meetingKey = fragments.find(fragment => fragment.meetingKey)?.meetingKey;
+  writeBackgroundMeetingState(saved.directory, 'ready', meetingKey ? { meetingKey } : {});
   const trashed = fragments.map(fragment => trashTranscriptRecord(libraryDir, fragment.record.id));
   return { record, directory: saved.directory, trashed };
 }
