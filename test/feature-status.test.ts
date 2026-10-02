@@ -54,7 +54,7 @@ test('a stopped recorder and missing optional setup each name their one next ste
   expect(statuses.recorder).toMatchObject({ state: 'broken', action: 'enable-recorder', command: 'seashell meeting autostart enable' });
   expect(statuses['ai-notes']).toMatchObject({ state: 'off', summary: 'Not installed' });
   expect(statuses['speaker-separation']).toMatchObject({ state: 'off', command: 'seashell setup --speakers --login' });
-  expect(statuses.calendar).toMatchObject({ state: 'off', command: 'seashell meeting setup --calendar ask' });
+  expect(statuses.calendar).toMatchObject({ state: 'off', action: 'allow-calendar', command: 'seashell meeting calendar setup' });
 });
 
 test('the terminal table groups optional features and shows a command for anything not working', async () => {
@@ -63,4 +63,17 @@ test('the terminal table groups optional features and shows a command for anythi
   expect(table).toContain('→ Choose Allow when macOS asks. (seashell meeting microphone setup)');
   expect(table.indexOf('Optional')).toBeGreaterThan(table.indexOf('Transcription'));
   expect(table).not.toContain('Press Enter');
+});
+
+test('calendar titles report access and whether this Mac has any calendars to read', async () => {
+  const on = { speakerBrowser: 'auto', calendar: { enabled: true, policy: 'ask' } };
+  let asked = 0;
+  const calendar = (authorization: 'authorized' | 'notDetermined', calendars?: number) => async () => {
+    asked++; return { authorization, detail: 'fixture', ...(calendars === undefined ? {} : { calendars }) };
+  };
+  expect((await byId({ calendar: calendar('authorized', 3) }, { speakerBrowser: 'auto' })).calendar).toMatchObject({ state: 'off' });
+  expect(asked).toBe(0);
+  expect((await byId({ calendar: calendar('notDetermined') }, on)).calendar).toMatchObject({ state: 'attention', action: 'allow-calendar' });
+  expect((await byId({ calendar: calendar('authorized', 0) }, on)).calendar).toMatchObject({ summary: 'On · no calendars on this Mac' });
+  expect((await byId({ calendar: calendar('authorized', 2) }, on)).calendar).toMatchObject({ state: 'ok', summary: 'On' });
 });

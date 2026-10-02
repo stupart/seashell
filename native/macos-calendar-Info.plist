@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.humain.seashell.calendar</string>
+  <key>CFBundleName</key>
+  <string>Seashell Calendar</string>
+  <!-- Bump only when the JSON/exit-code contract changes; see the microphone helper. -->
+  <key>SeashellHelperProtocol</key>
+  <string>1</string>
+  <key>NSCalendarsFullAccessUsageDescription</key>
+  <string>Seashell names recorded meetings after their calendar event and lists the attendees. Calendar data stays on this Mac.</string>
+  <key>NSCalendarsUsageDescription</key>
+  <string>Seashell names recorded meetings after their calendar event and lists the attendees. Calendar data stays on this Mac.</string>
+</dict>
+</plist>

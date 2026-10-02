@@ -11,6 +11,8 @@ import { resolveHumainExecutable } from './humain-client.ts';
 import { meetingLaunchAtLoginStatus } from './launch-at-login.ts';
 import { checkMeetConnection, type MeetProbe } from './meet-speakers.ts';
 import { microphonePermission, type MicrophonePermissionStatus } from './microphone-permission.ts';
+import { calendarPermission } from './calendar-permission.ts';
+import type { HelperPermissionStatus } from './helper-permission.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
 import { microphoneRuntimeHelperPath } from './runtime-host.ts';
 import { listTranscriptRecords } from './transcript-library.ts';
@@ -19,7 +21,7 @@ const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** ok: works · attention: works partly or needs one step · off: not set up (optional) · broken: should work and does not. */
 export type FeatureState = 'ok' | 'attention' | 'off' | 'broken';
-export type FeatureAction = 'enable-recorder' | 'connect-meet' | 'allow-microphone' | 'open-speakers' | 'open-ai';
+export type FeatureAction = 'enable-recorder' | 'connect-meet' | 'allow-microphone' | 'allow-calendar' | 'open-speakers' | 'open-ai';
 export type FeatureId = 'recorder' | 'detection' | 'microphone' | 'computer-audio' | 'transcription'
   | 'meet-names' | 'speaker-separation' | 'ai-notes' | 'calendar';
 
@@ -44,6 +46,7 @@ export const FEATURE_ACTION_LABEL: Record<FeatureAction, string> = {
   'enable-recorder': 'Start the background recorder',
   'connect-meet': 'Connect Google Meet',
   'allow-microphone': 'Allow microphone',
+  'allow-calendar': 'Turn on calendar titles',
   'open-speakers': 'Open speaker setup',
   'open-ai': 'Choose AI',
 };
@@ -64,6 +67,7 @@ export interface FeatureStatusDependencies {
   readonly watchStatus?: typeof readBackgroundWatchStatus;
   readonly meetConnection?: (browser: 'auto' | 'chrome' | 'safari', signal?: AbortSignal) => Promise<MeetProbe>;
   readonly microphone?: (signal?: AbortSignal) => Promise<MicrophonePermissionStatus>;
+  readonly calendar?: (signal?: AbortSignal) => Promise<HelperPermissionStatus>;
   readonly lastMeeting?: (libraryDir: string) => MeetingEvidence | undefined;
   readonly speakerSeparationReady?: () => boolean;
   readonly aiEngineInstalled?: () => boolean;
@@ -117,12 +121,17 @@ export async function readFeatureStatuses(options: {
   const automation = meeting?.automation;
   const automationOn = automation?.enabled !== false && automation?.mode !== 'off';
   const browser = meeting?.speakerBrowser ?? 'off';
-  const [meet, microphone] = await Promise.all([
+  const calendarOn = meeting?.calendar?.enabled === true && meeting.calendar.policy !== 'off';
+  const [meet, microphone, calendarAccess] = await Promise.all([
     browser === 'off' ? Promise.resolve(undefined)
       : (deps.meetConnection ?? checkMeetConnection)(browser, options.signal)
         .catch((): MeetProbe => ({ state: 'unavailable', detail: 'Meeting detection could not be checked.' })),
     (deps.microphone ?? (signal => microphonePermission({ ...(signal ? { signal } : {}) })))(options.signal)
       .catch((): MicrophonePermissionStatus => ({ authorization: 'unknown', detail: 'Could not check microphone access.' })),
+    // Only ask about Calendar once titles are on; turning them on asks anyway.
+    !calendarOn ? Promise.resolve(undefined)
+      : (deps.calendar ?? (signal => calendarPermission({ ...(signal ? { signal } : {}) })))(options.signal)
+        .catch((): HelperPermissionStatus => ({ authorization: 'unknown', detail: 'Could not check calendar access.' })),
   ]);
   const evidence = (deps.lastMeeting ?? lastMeetingEvidence)(options.libraryDir);
   const statuses: FeatureStatus[] = [];
@@ -255,14 +264,20 @@ export async function readFeatureStatuses(options: {
       fix: 'Choose which AI writes your notes.', command: 'seashell ai setup' } as const),
   });
 
-  const calendar = meeting?.calendar;
+  const titlesDetail = 'Names each meeting after its calendar event (matched by its Meet link) and lists the attendees, which later helps name speakers.';
   statuses.push({
     id: 'calendar', label: 'Meeting titles from Calendar', optional: true,
-    ...(calendar?.enabled && calendar.policy !== 'off' ? { state: 'ok', summary: 'On',
-      detail: 'Names meetings after their calendar event and lists the attendees.' } as const
-    : { state: 'off', summary: 'Off · meetings are called "Google Meet"',
-      detail: 'Names meetings after their calendar event and lists the attendees. macOS asks for Calendar access the first time.',
-      fix: 'Turn on calendar titles; macOS asks for Calendar access once.', command: 'seashell meeting setup --calendar ask' } as const),
+    ...(!calendarOn ? { state: 'off', summary: 'Off · meetings are called "Google Meet"',
+      detail: `${titlesDetail} macOS asks for Calendar access once.`,
+      fix: 'Turn on calendar titles; macOS asks for Calendar access once.', action: 'allow-calendar',
+      command: 'seashell meeting calendar setup' } as const
+    : calendarAccess?.authorization !== 'authorized' ? { state: 'attention', summary: 'On · needs Calendar access',
+      detail: calendarAccess?.detail ?? titlesDetail,
+      fix: 'Allow Seashell Calendar when macOS asks.', action: 'allow-calendar', command: 'seashell meeting calendar setup' } as const
+    : calendarAccess.calendars === 0 ? { state: 'attention', summary: 'On · no calendars on this Mac',
+      detail: `${titlesDetail} This Mac has no calendars to read.`,
+      fix: 'Add your work account in System Settings → Internet Accounts, with Calendars on.' } as const
+    : { state: 'ok', summary: 'On', detail: titlesDetail } as const),
   });
   return statuses;
 }

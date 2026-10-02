@@ -32,11 +32,22 @@ export function meetingRuntimeHostPath(options: RuntimeHostOptions = {}): string
   return join(runtimeDirectory(options), 'Seashell Background');
 }
 
-const MICROPHONE_HELPER_IDENTIFIER = 'com.humain.seashell.microphone';
+/** A native helper that holds its own macOS permission under a fixed name. */
+export interface StableRuntimeHelper {
+  /** Shown by macOS in Privacy & Security. */
+  readonly name: string;
+  readonly identifier: string;
+}
+export const MICROPHONE_RUNTIME_HELPER: StableRuntimeHelper = { name: 'Seashell Microphone', identifier: 'com.humain.seashell.microphone' };
+export const CALENDAR_RUNTIME_HELPER: StableRuntimeHelper = { name: 'Seashell Calendar', identifier: 'com.humain.seashell.calendar' };
+
+export function runtimeHelperPath(helper: StableRuntimeHelper, options: RuntimeHostOptions = {}): string {
+  return join(runtimeDirectory(options), helper.name);
+}
 
 /** macOS lists this name under Privacy & Security → Microphone. */
 export function microphoneRuntimeHelperPath(options: RuntimeHostOptions = {}): string {
-  return join(runtimeDirectory(options), 'Seashell Microphone');
+  return runtimeHelperPath(MICROPHONE_RUNTIME_HELPER, options);
 }
 
 function existing(path: string) {
@@ -150,27 +161,27 @@ export function embeddedHelperProtocol(path: string, bundleIdentifier: string): 
   return version === undefined ? 1 : Number(version);
 }
 
-/** The microphone helper answers for its own Microphone permission, which
- * macOS ties to its path and exact code hash. Keep one stable copy and replace
- * it only when the helper's protocol changes: rebuilding the same helper with
- * another SDK changes its bytes, and replacing it would ask for access again. */
-export function prepareMicrophoneRuntimeHelper(source: string, options: RuntimeHostOptions = {}): string {
-  if ((options.platform ?? process.platform) !== 'darwin') throw new Error('The Seashell microphone helper requires macOS.');
-  const path = microphoneRuntimeHelperPath(options);
+/** A permission helper answers for its own macOS permission, which macOS ties
+ * to its path and exact code hash. Keep one stable copy and replace it only
+ * when the helper's protocol changes: rebuilding the same helper with another
+ * SDK changes its bytes, and replacing it would ask for access again. */
+export function prepareRuntimeHelper(source: string, helper: StableRuntimeHelper, options: RuntimeHostOptions = {}): string {
+  if ((options.platform ?? process.platform) !== 'darwin') throw new Error(`${helper.name} requires macOS.`);
+  const path = runtimeHelperPath(helper, options);
   const directory = runtimeDirectory(options);
   const resolvedSource = realpathSync(source);
   const sourceInfo = statSync(resolvedSource);
-  if (!sourceInfo.isFile() || (sourceInfo.mode & 0o111) === 0) throw new Error('The microphone helper is not an executable file.');
+  if (!sourceInfo.isFile() || (sourceInfo.mode & 0o111) === 0) throw new Error(`${helper.name} is not an executable file.`);
   if (existing(directory)) assertOwned(directory, true, false);
   else mkdirSync(directory, { recursive: true, mode: 0o700 });
   chmodSync(directory, 0o700);
   if (existing(path)) {
     assertOwned(path, false, false);
     if (statSync(path).size === sourceInfo.size && digest(path) === digest(resolvedSource)) return path;
-    const installed = embeddedHelperProtocol(path, MICROPHONE_HELPER_IDENTIFIER);
-    if (installed !== undefined && installed === embeddedHelperProtocol(resolvedSource, MICROPHONE_HELPER_IDENTIFIER)) return path;
+    const installed = embeddedHelperProtocol(path, helper.identifier);
+    if (installed !== undefined && installed === embeddedHelperProtocol(resolvedSource, helper.identifier)) return path;
   }
-  const temporary = join(directory, `.seashell-microphone-${randomUUID()}.tmp`);
+  const temporary = join(directory, `.seashell-helper-${randomUUID()}.tmp`);
   try {
     copyFileSync(resolvedSource, temporary, constants.COPYFILE_EXCL);
     chmodSync(temporary, 0o700);
@@ -178,4 +189,8 @@ export function prepareMicrophoneRuntimeHelper(source: string, options: RuntimeH
     renameSync(temporary, path);
     return path;
   } finally { rmSync(temporary, { force: true }); }
+}
+
+export function prepareMicrophoneRuntimeHelper(source: string, options: RuntimeHostOptions = {}): string {
+  return prepareRuntimeHelper(source, MICROPHONE_RUNTIME_HELPER, options);
 }

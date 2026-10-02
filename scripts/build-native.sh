@@ -51,3 +51,16 @@ if [ ! -x "$MICROPHONE_BINARY" ] || \
     codesign --force --sign - --identifier com.humain.seashell.microphone "$BUILD_DIR/seashell-microphone" 2>/dev/null
     mv -f "$BUILD_DIR/seashell-microphone" "$MICROPHONE_BINARY"
 fi
+CALENDAR_BINARY=native/bin/seashell-calendar
+if [ ! -x "$CALENDAR_BINARY" ] || \
+   [ native/macos-calendar.swift -nt "$CALENDAR_BINARY" ] || \
+   [ native/macos-calendar-Info.plist -nt "$CALENDAR_BINARY" ]; then
+    # Same pattern as the microphone helper: its own Calendars permission.
+    xcrun swiftc native/macos-calendar.swift -O -module-name SeashellCalendar \
+        -framework EventKit \
+        -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+        -Xlinker native/macos-calendar-Info.plist \
+        -o "$BUILD_DIR/seashell-calendar"
+    codesign --force --sign - --identifier com.humain.seashell.calendar "$BUILD_DIR/seashell-calendar" 2>/dev/null
+    mv -f "$BUILD_DIR/seashell-calendar" "$CALENDAR_BINARY"
+fi

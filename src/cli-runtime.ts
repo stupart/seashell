@@ -1,6 +1,7 @@
 import { installHumainPackage, requireHumainNode } from './humain-install.ts';
 import { checkMeetConnection, requestMeetAccessibilityPermission, meetPermissionHelp, MEETING_ACCESSIBILITY_HELPER } from './meet-speakers.ts';
 import { microphonePermission } from './microphone-permission.ts';
+import { calendarPermission } from './calendar-permission.ts';
 import { readFeatureStatuses, renderFeatureStatusTable } from './feature-status.ts';
 import { mergeMeetingFragments, planMeetingMerges } from './meeting-merge.ts';
 import { discoverHumainProviders, resolveHumainExecutable } from './humain-client.ts';
@@ -57,10 +58,11 @@ import {
 } from './capture-session.ts';
 import { finalizeCaptureTranscript } from './capture-finalizer.ts';
 import { recordBoundedCapture, runCaptureSignalTest } from './capture-test.ts';
-import { runAutomaticMeetingWatch } from './automatic-meeting-watch.ts';
+import { runAutomaticMeetingWatch, watchRestartReason } from './automatic-meeting-watch.ts';
 import {
   disableMeetingLaunchAtLogin,
   enableMeetingLaunchAtLogin,
+  SEASHELL_LAUNCH_AGENT_LABEL,
   meetingLaunchAtLoginStatus,
 } from './launch-at-login.ts';
 import { MEETING_SIGNALS_HELPER, readMeetingSignalSnapshot } from './meeting-automation.ts';
@@ -654,6 +656,24 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       return 0;
     }
     case 'calendar': {
+      if (command.action.operation) {
+        const result = await calendarPermission({ request: command.action.operation === 'setup' });
+        let enabled = config.meeting?.calendar?.enabled === true && config.meeting.calendar.policy !== 'off';
+        if (command.action.operation === 'setup') {
+          if (result.authorization === 'authorized' && !enabled) {
+            updateMeetingConfig({ calendar: { enabled: true, policy: config.meeting?.calendar?.policy ?? 'ask' } });
+            enabled = true;
+          }
+          if (result.authorization === 'denied' || result.authorization === 'writeOnly') {
+            spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars'], { stdio: 'ignore', timeout: 5_000 });
+          }
+        }
+        print(command.json ? JSON.stringify({ ...result, enabled }) : [
+          `Meeting titles from Calendar · ${enabled ? 'on' : 'off'} · ${result.authorization}`, result.detail,
+          ...(result.calendars === 0 ? ['No calendars are set up on this Mac. Add your work account in System Settings → Internet Accounts.'] : []),
+        ].join('\n'));
+        return result.authorization === 'authorized' && enabled ? 0 : 2;
+      }
       const events = await readMacCalendarEventsAsync({
         leadMinutes: config.meeting?.calendar?.leadMinutes,
       });
@@ -678,6 +698,12 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
           libraryDir,
           signal: controller.signal,
           once,
+          // Only the login agent replaces itself; launchd starts the new watcher.
+          ...(process.env.XPC_SERVICE_NAME === SEASHELL_LAUNCH_AGENT_LABEL && !once ? {
+            restartWhen: watchRestartReason({ configPath: defaultConfigPath(),
+              ...(process.env.SEASHELL_PACKAGE_ROOT ? { packageRoot: process.env.SEASHELL_PACKAGE_ROOT } : {}),
+              codeRoot: PROJECT_ROOT }),
+          } : {}),
           onEvent: (event) => {
             // The login agent uses JSON logging; prompts must still be visible.
             if (event.type === 'meeting.suggested' && !once) {
@@ -694,6 +720,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
             }
             if (event.type === 'watch.ready') print('Sea Shell is watching for meetings.');
             else if (event.type === 'meeting.started') print(`Recording ${event.candidate.title}.`);
+            else if (event.type === 'watch.restarting') print(`${event.reason}; restarting the meeting watcher.`);
             else if (event.type === 'meeting.resumed') print(`Resumed ${event.candidate.title} after ${event.pausedSeconds}s; it stays one meeting.`);
             else if (event.type === 'meeting.capture-finished') print(`Captured ${event.candidate.title}; finalizing in the background.`);
             else if (event.type === 'meeting.ready') print(`Meeting ready: ${event.directory}`);

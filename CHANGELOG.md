@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — calendar titles that work in the background
+
+- Meeting titles and attendees come from a native "Seashell Calendar" helper
+  using EventKit. Scripting Calendar.app could not work from the background
+  recorder (its hardened Bun host cannot hold Apple Events permission) and
+  launched Calendar.app on every read. Reads never prompt; turn titles on with
+  `,` → Meeting titles from Calendar, or `seashell meeting calendar setup`.
+- The Meet link is found in the event's URL, location or notes (where Google
+  Calendar puts it), so a Meet call matches its event. Notes are searched,
+  never stored. All-day and cancelled events are ignored.
+- The login watcher restarts itself between meetings when Seashell is upgraded
+  or settings change, so new code and settings apply without a manual restart.
+  It never restarts during a meeting.
+
 ## Unreleased — keep microphone permission across upgrades
 
 - The installed "Seashell Microphone" copy is replaced only when its helper
