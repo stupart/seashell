@@ -3,7 +3,7 @@ import type { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { inspectMeetingRuntimeHost, meetingRuntimeHostPath, prepareMeetingRuntimeHost, type RuntimeHostOptions } from '../src/runtime-host.ts';
+import { embeddedHelperProtocol, inspectMeetingRuntimeHost, meetingRuntimeHostPath, prepareMeetingRuntimeHost, prepareMicrophoneRuntimeHelper, type RuntimeHostOptions } from '../src/runtime-host.ts';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -129,4 +129,43 @@ test('legacy bun is not reused, deleted or changed when installing the named hos
   expect(statSync(legacy).ino).toBe(legacyInode);
   expect(inspectMeetingRuntimeHost(h.options).ready).toBe(true);
   expect(h.calls.every(call => call[0] === '/usr/bin/codesign' && !call.includes('--sign'))).toBe(true);
+});
+
+const helperPlist = (version?: number, identifier = 'com.humain.seashell.microphone') =>
+  `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${identifier}</string>` +
+  `${version === undefined ? '' : `<key>SeashellHelperProtocol</key><string>${version}</string>`}</dict></plist>`;
+function helperBinary(directory: string, name: string, plist: string, salt: string): string {
+  const path = join(directory, name);
+  // Machine code around the embedded plist differs between SDKs; the plist does not.
+  writeFileSync(path, Buffer.concat([Buffer.from(`\xcf\xfa\xed\xfe${salt}`, 'latin1'), Buffer.from(plist), Buffer.from(salt)]), { mode: 0o755 });
+  return path;
+}
+
+test('the allowed microphone helper survives a rebuild of the same protocol', () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-mic-host-'));
+  try {
+    const options = { hostDirectory: join(root, 'Runtime'), platform: 'darwin' as const };
+    const first = helperBinary(root, 'first', helperPlist(), 'sdk-27');
+    const installed = prepareMicrophoneRuntimeHelper(first, options);
+    expect(readFileSync(installed, 'latin1')).toContain('sdk-27');
+    expect(embeddedHelperProtocol(installed, 'com.humain.seashell.microphone')).toBe(1);
+    // Same protocol, other SDK bytes: keep the copy macOS already allowed.
+    prepareMicrophoneRuntimeHelper(helperBinary(root, 'rebuilt', helperPlist(1), 'sdk-26.5'), options);
+    expect(readFileSync(installed, 'latin1')).toContain('sdk-27');
+    // A new protocol must replace it, even though macOS will ask again.
+    prepareMicrophoneRuntimeHelper(helperBinary(root, 'next', helperPlist(2), 'sdk-26.5'), options);
+    expect(readFileSync(installed, 'latin1')).toContain('sdk-26.5');
+    expect(embeddedHelperProtocol(installed, 'com.humain.seashell.microphone')).toBe(2);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a file that is not the microphone helper is replaced, never trusted', () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-mic-host-'));
+  try {
+    const options = { hostDirectory: join(root, 'Runtime'), platform: 'darwin' as const };
+    const installed = prepareMicrophoneRuntimeHelper(helperBinary(root, 'other', helperPlist(1, 'com.example.other'), 'other'), options);
+    expect(embeddedHelperProtocol(installed, 'com.humain.seashell.microphone')).toBeUndefined();
+    prepareMicrophoneRuntimeHelper(helperBinary(root, 'real', helperPlist(1), 'real'), options);
+    expect(readFileSync(installed, 'latin1')).toContain('real');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

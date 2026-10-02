@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased — keep microphone permission across upgrades
+
+- The installed "Seashell Microphone" copy is replaced only when its helper
+  protocol changes. Rebuilding the same helper with another SDK (Homebrew vs. a
+  source build, or a Command Line Tools update) changes its bytes, and macOS
+  ties Microphone access to the exact code hash, so replacing it asked again.
+- Out-of-view Meet windows now read "A call already recording keeps recording"
+  instead of "meeting detection paused".
+
 ## Unreleased — Settings: what works, at a glance
 
 - Press `,` for Settings: features on the left, details and one-key fixes on the

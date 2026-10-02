@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync, closeSync, constants, copyFileSync, lstatSync, mkdirSync, openSync,
-  readSync, realpathSync, renameSync, rmSync, statSync,
+  readFileSync, readSync, realpathSync, renameSync, rmSync, statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -31,6 +31,8 @@ export function meetingRuntimeHostPath(options: RuntimeHostOptions = {}): string
   // identifier remains Bun's original "bun", independently of this basename.
   return join(runtimeDirectory(options), 'Seashell Background');
 }
+
+const MICROPHONE_HELPER_IDENTIFIER = 'com.humain.seashell.microphone';
 
 /** macOS lists this name under Privacy & Security → Microphone. */
 export function microphoneRuntimeHelperPath(options: RuntimeHostOptions = {}): string {
@@ -136,9 +138,22 @@ export function prepareMeetingRuntimeHost(options: RuntimeHostOptions = {}): str
   } finally { rmSync(temporary, { force: true }); }
 }
 
+/** Protocol of a Seashell helper from its embedded Info.plist; undefined when
+ * the file is not that helper. Copies from before the key existed are 1. */
+export function embeddedHelperProtocol(path: string, bundleIdentifier: string): number | undefined {
+  const size = statSync(path).size;
+  if (size > 32 * 1024 * 1024) return undefined;
+  const text = readFileSync(path).toString('latin1');
+  const plist = text.slice(Math.max(0, text.indexOf('<plist')), text.indexOf('</plist>') + 8);
+  if (!plist.includes(`<string>${bundleIdentifier}</string>`)) return undefined;
+  const version = /<key>SeashellHelperProtocol<\/key>\s*<string>(\d+)<\/string>/u.exec(plist)?.[1];
+  return version === undefined ? 1 : Number(version);
+}
+
 /** The microphone helper answers for its own Microphone permission, which
- * macOS ties to its path and code hash. Keep one stable copy so a package
- * upgrade asks again only when the helper itself actually changed. */
+ * macOS ties to its path and exact code hash. Keep one stable copy and replace
+ * it only when the helper's protocol changes: rebuilding the same helper with
+ * another SDK changes its bytes, and replacing it would ask for access again. */
 export function prepareMicrophoneRuntimeHelper(source: string, options: RuntimeHostOptions = {}): string {
   if ((options.platform ?? process.platform) !== 'darwin') throw new Error('The Seashell microphone helper requires macOS.');
   const path = microphoneRuntimeHelperPath(options);
@@ -152,6 +167,8 @@ export function prepareMicrophoneRuntimeHelper(source: string, options: RuntimeH
   if (existing(path)) {
     assertOwned(path, false, false);
     if (statSync(path).size === sourceInfo.size && digest(path) === digest(resolvedSource)) return path;
+    const installed = embeddedHelperProtocol(path, MICROPHONE_HELPER_IDENTIFIER);
+    if (installed !== undefined && installed === embeddedHelperProtocol(resolvedSource, MICROPHONE_HELPER_IDENTIFIER)) return path;
   }
   const temporary = join(directory, `.seashell-microphone-${randomUUID()}.tmp`);
   try {

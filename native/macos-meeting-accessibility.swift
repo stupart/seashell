@@ -194,7 +194,7 @@ private func analyze(_ tree: BrowserTree) -> Probe {
     guard !windows.isEmpty else {
         if let uncertainty { return Probe(state: "unavailable", detail: uncertainty + " Meeting detection and names are paused.", browser: browser) }
         if tree.offscreenWindows == true {
-            return Probe(state: "unavailable", detail: "Browser windows are on another desktop or in full screen. Meeting detection and names are paused.", browser: browser)
+            return Probe(state: "unavailable", detail: "Meet is out of view (another desktop or full screen). A call already recording keeps recording; speaker names pause.", browser: browser)
         }
         return Probe(state: "idle", detail: "Browser has no open windows.", browser: browser, absenceConfirmed: true)
     }
