@@ -24,6 +24,10 @@ private struct BrowserTree: Codable {
     var browser: String
     var running: Bool
     var root: AXNode?
+    /// Accessibility lists only windows on the current desktop (Space). A
+    /// full-screen Meet window on another Space is invisible to it, but not to
+    /// the window server; this records that such windows exist.
+    var offscreenWindows: Bool? = nil
 }
 private struct Fixture: Codable { var browsers: [BrowserTree] }
 private struct Participant: Codable {
@@ -189,6 +193,9 @@ private func analyze(_ tree: BrowserTree) -> Probe {
     let windows = browserScaffold(root, stopAtWindows: true).filter { $0.role == "AXWindow" }
     guard !windows.isEmpty else {
         if let uncertainty { return Probe(state: "unavailable", detail: uncertainty + " Meeting detection and names are paused.", browser: browser) }
+        if tree.offscreenWindows == true {
+            return Probe(state: "unavailable", detail: "Browser windows are on another desktop or in full screen. Meeting detection and names are paused.", browser: browser)
+        }
         return Probe(state: "idle", detail: "Browser has no open windows.", browser: browser, absenceConfirmed: true)
     }
     let webAreas = scaffold.filter { $0.role == "AXWebArea" }
@@ -389,7 +396,16 @@ private func liveTree(_ browser: String, deadline: TimeInterval) -> BrowserTree 
     let reader = AXReader(deadline: deadline, readsSpeakerMetadata: browser == "chrome")
     let roots = apps.map { reader.application(AXUIElementCreateApplication($0.processIdentifier)) }
     let root = AXNode(role: "AXApplication", children: roots)
-    return BrowserTree(browser: browser, running: true, root: root)
+    // Owner, layer, size and alpha need no Screen Recording permission; titles do and are not read.
+    let pids = Set(apps.map { $0.processIdentifier })
+    let offscreen = (CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] ?? []).contains { window in
+        guard let owner = window[kCGWindowOwnerPID as String] as? pid_t, pids.contains(owner),
+              (window[kCGWindowLayer as String] as? Int) == 0, (window[kCGWindowIsOnscreen as String] as? Bool) != true,
+              (window[kCGWindowAlpha as String] as? Double ?? 1) > 0,
+              let bounds = window[kCGWindowBounds as String] as? [String: Double] else { return false }
+        return (bounds["Width"] ?? 0) >= 320 && (bounds["Height"] ?? 0) >= 240
+    }
+    return BrowserTree(browser: browser, running: true, root: root, offscreenWindows: offscreen)
 }
 
 private func emit(_ probe: Probe) {
@@ -470,7 +486,7 @@ if let path = argument("--dump-tree", in: args) {
         result.children = node.children?.map { scoped($0, insideMeet: meet) }
         return result
     }
-    let safeTrees = trees.map { BrowserTree(browser: $0.browser, running: $0.running, root: $0.root.map { scoped($0) }) }
+    let safeTrees = trees.map { BrowserTree(browser: $0.browser, running: $0.running, root: $0.root.map { scoped($0) }, offscreenWindows: $0.offscreenWindows) }
     if let data = try? JSONEncoder().encode(Fixture(browsers: safeTrees)) {
         if !FileManager.default.createFile(atPath: path, contents: data, attributes: [.posixPermissions: 0o600]) {
             emit(Probe(state: "unavailable", detail: "Could not save the requested local Accessibility diagnostic.")); exit(2)

@@ -24,6 +24,19 @@ export function tuiLayout(columns: number, rows: number): TuiLayout {
   };
 }
 
+/** Sidebar row for a meeting: date (if not today), start time and length come
+ * first so same-titled meetings stay distinguishable when the title truncates. */
+export function meetingEntryLabel(entry: TranscriptLibraryEntry, now = new Date()): string {
+  const created = new Date(entry.createdAt);
+  const marker = entry.captureState === 'recording' ? '●' : entry.captureState === 'processing' ? '◐' : 'M';
+  const date = created.toDateString() === now.toDateString()
+    ? '' : `${created.toLocaleDateString([], { month: 'short', day: 'numeric' })} `;
+  const time = created.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const minutes = entry.duration && entry.captureState !== 'recording' ? Math.max(1, Math.round(entry.duration / 60)) : 0;
+  const length = !minutes ? '' : minutes < 60 ? ` · ${minutes}m` : ` · ${Math.floor(minutes / 60)}h${minutes % 60 ? `${minutes % 60}m` : ''}`;
+  return `${marker} ${date}${time}${length} · ${entry.title}`;
+}
+
 export function moveSelection(current: number, delta: number, count: number): number {
   if (count <= 0) return 0;
   return Math.min(count - 1, Math.max(0, current + delta));

@@ -287,3 +287,15 @@ describe.skipIf(!available)('native Accessibility classifier', () => {
     }
   });
 });
+
+describe.skipIf(!available)('native Accessibility across desktops', () => {
+  test('a full-screen Meet on another desktop is unreadable, never a confirmed departure', () => {
+    const elsewhere = { browser: 'safari', running: true, root: { role: 'AXApplication', children: [] }, offscreenWindows: true };
+    const result = probe([elsewhere]);
+    expect(result.state).toBe('unavailable');
+    expect(result.absenceConfirmed).toBeUndefined();
+    expect(result.detail).toContain('another desktop');
+    const closed = probe([{ ...elsewhere, offscreenWindows: false }]);
+    expect(closed).toMatchObject({ state: 'idle', absenceConfirmed: true });
+  });
+});

@@ -82,6 +82,7 @@ import {
   DEFAULT_WHISPER_MODEL_FILENAME,
 } from './model-config.ts';
 import {
+  meetingEntryLabel,
   moveSelection,
   moveTranscriptScroll,
   formatTuiClock,
@@ -336,9 +337,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     },
     ...visibleEntries.map((entry) => ({
       kind: 'record' as const,
-      label: entry.kind === 'meeting'
-        ? `${entry.captureState === 'recording' ? '●' : entry.captureState === 'processing' ? '◐' : 'M'} ${new Date(entry.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · ${entry.title}`
-        : entry.title,
+      label: entry.kind === 'meeting' ? meetingEntryLabel(entry) : entry.title,
       entry,
     })),
   ], [paused, visibleEntries]);

@@ -57,6 +57,8 @@ export type MeetingCommand = {
       }
     | { kind: 'calendar' }
     | { kind: 'speakers'; browser: 'setup' | 'auto' | 'chrome' | 'safari' | 'off' | 'check' }
+    | { kind: 'microphone'; operation: 'setup' | 'check' }
+    | { kind: 'merge'; ids: string[]; auto: boolean; dryRun: boolean; maxGapMinutes?: number }
     | { kind: 'watch'; once: boolean }
     | { kind: 'consent'; decision: 'approve' | 'decline' }
     | { kind: 'autostart'; operation: 'enable' | 'disable' | 'status' };
@@ -369,7 +371,7 @@ function meetingBackend(value: string): HumainBackend {
 function parseMeeting(args: string[]): MeetingCommand {
   const actionName = args[1];
   if (!actionName) {
-    throw new Error('Meeting command requires setup, create, enrich, show, chat, calendar, watch, consent, or autostart');
+    throw new Error('Meeting command requires setup, create, enrich, show, chat, calendar, watch, consent, autostart, speakers, microphone, or merge');
   }
   const positional: string[] = [];
   let libraryDir: string | undefined;
@@ -391,6 +393,9 @@ function parseMeeting(args: string[]): MeetingCommand {
   const contextFiles: string[] = [];
   let contextFilesSpecified = false;
   let once = false;
+  let auto = false;
+  let dryRun = false;
+  let maxGapMinutes: number | undefined;
 
   for (let index = 2; index < args.length; index += 1) {
     const arg = args[index]!;
@@ -451,6 +456,14 @@ function parseMeeting(args: string[]): MeetingCommand {
         contextFilesSpecified = true;
         break;
       case '--once': once = true; break;
+      case '--auto': auto = true; break;
+      case '--dry-run': dryRun = true; break;
+      case '--max-gap-minutes': {
+        const value = Number(next());
+        if (!Number.isSafeInteger(value) || value < 1) throw new Error('--max-gap-minutes must be a positive integer');
+        maxGapMinutes = value;
+        break;
+      }
       default:
         if (arg.startsWith('-')) throw new Error(`Unknown meeting option: ${arg}`);
         positional.push(arg);
@@ -466,6 +479,20 @@ function parseMeeting(args: string[]): MeetingCommand {
 
   let action: MeetingCommand['action'];
   switch (actionName) {
+    case 'merge':
+      if (auto === (positional.length > 0) || (!auto && positional.length < 2)) {
+        throw new Error('Usage: seashell meeting merge <id> <id>... | --auto [--dry-run] [--max-gap-minutes N]');
+      }
+      action = { kind: 'merge', ids: positional, auto, dryRun, ...(maxGapMinutes === undefined ? {} : { maxGapMinutes }) };
+      break;
+    case 'microphone': {
+      const operation = positional[0] ?? 'check';
+      if (positional.length > 1 || !['setup', 'check'].includes(operation)) {
+        throw new Error('Usage: seashell meeting microphone [setup|check]');
+      }
+      action = { kind: 'microphone', operation: operation as 'setup' | 'check' };
+      break;
+    }
     case 'speakers': {
       const browser = positional[0] ?? 'check';
       if (positional.length > 1 || !['setup', 'auto', 'chrome', 'safari', 'off', 'check'].includes(browser)) {
@@ -802,6 +829,10 @@ Meeting actions:
                 [--chat-backend <backend> --chat-model <model>]
   meeting speakers setup [--json]           Enable Meet names and open Accessibility setup
   meeting speakers [auto|chrome|safari|off|check] [--json]  Configure/check without permission prompts
+  meeting microphone setup [--json]         Ask macOS once for background microphone access
+  meeting microphone [check] [--json]       Check background microphone access without a prompt
+  meeting merge <id> <id>... [--json]       Join pieces of one meeting into one entry (pieces go to _Trash)
+  meeting merge --auto [--dry-run] [--max-gap-minutes 15]  Find and join split meetings
   meeting create <id> [--event-json <path>] [--mode streaming|post-session|hybrid]
   meeting enrich <id> [--mode <mode>] [--backend <backend>] [--model <exact-model>]
                       [--context <json>]
@@ -818,5 +849,5 @@ Configuration precedence:
 Machine use:
   stdout contains results only; progress and errors use stderr. Library, doctor,
   and update commands support JSON. Read-only status commands never prompt. The
-  explicit meeting speakers setup action can open macOS permission UI.
+  explicit meeting speakers/microphone setup actions can open macOS permission UI.
 `;

@@ -35,3 +35,19 @@ if [ ! -x "$MEETING_ACCESSIBILITY_BINARY" ] || \
         -o "$BUILD_DIR/seashell-meeting-accessibility"
     mv -f "$BUILD_DIR/seashell-meeting-accessibility" "$MEETING_ACCESSIBILITY_BINARY"
 fi
+MICROPHONE_BINARY=native/bin/seashell-microphone
+if [ ! -x "$MICROPHONE_BINARY" ] || \
+   [ native/macos-microphone.swift -nt "$MICROPHONE_BINARY" ] || \
+   [ native/macos-microphone-Info.plist -nt "$MICROPHONE_BINARY" ]; then
+    # The embedded Info.plist supplies the usage string macOS requires before
+    # it will ask for Microphone access on this helper's own behalf. A fixed
+    # module name keeps the build reproducible: macOS ties that permission to
+    # the code hash, so identical sources must yield identical bytes.
+    xcrun swiftc native/macos-microphone.swift -O -module-name SeashellMicrophone \
+        -framework AVFoundation -framework CoreAudio \
+        -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+        -Xlinker native/macos-microphone-Info.plist \
+        -o "$BUILD_DIR/seashell-microphone"
+    codesign --force --sign - --identifier com.humain.seashell.microphone "$BUILD_DIR/seashell-microphone" 2>/dev/null
+    mv -f "$BUILD_DIR/seashell-microphone" "$MICROPHONE_BINARY"
+fi

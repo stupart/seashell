@@ -26,6 +26,8 @@ export interface MeetingAutomationConfig {
   pollSeconds?: number;
   endGraceSeconds?: number;
   cooldownSeconds?: number;
+  /** A meeting that reappears within this window continues its saved entry. */
+  resumeWindowSeconds?: number;
   maxDurationMinutes?: number;
   launchAtLogin?: boolean;
 }
@@ -38,6 +40,7 @@ export const DEFAULT_MEETING_AUTOMATION = Object.freeze({
   pollSeconds: 3,
   endGraceSeconds: 20,
   cooldownSeconds: 30,
+  resumeWindowSeconds: 180,
   maxDurationMinutes: 240,
   launchAtLogin: false,
 });
@@ -394,6 +397,14 @@ function patternFor(bundleId: string): AppPattern | undefined {
   ));
 }
 
+/** Browsers capture audio in helper processes: Safari's microphone belongs to
+ * com.apple.WebKit.GPU and Chrome's to com.google.Chrome.helper. Compare the
+ * application family, never the literal bundle ID of the browser itself. */
+export function sameApplicationFamily(left: string, right: string): boolean {
+  const pattern = patternFor(left);
+  return pattern ? pattern === patternFor(right) : bundleMatches(left, right);
+}
+
 /** Only a complete inspection can prove a different call replaced this one.
  * A positive call on a partial inspection can coexist with an unreadable old
  * call; it must use the normal grace period instead of proving departure. */
@@ -407,20 +418,21 @@ export function hasConfirmedMeetingEnd(candidate: MeetingCandidate | undefined, 
  * already recording call while its browser still owns microphone input. This
  * never starts capture or overrides a known end. Losing permission to read
  * names does not revoke permission to keep recording the existing audio.
- * Without either UI or audio evidence, the controller's normal grace applies. */
+ * Without either UI or audio evidence, the controller's normal grace applies.
+ * `held` is a just-ended call that may still resume into its saved entry. */
 export function preserveMeetingCandidateDuringObservationGap(
   candidate: MeetingCandidate | undefined,
   state: MeetingAutomationState,
   snapshot: MeetingSignalSnapshot,
   meet?: MeetProbe,
+  held?: MeetingCandidate,
 ): MeetingCandidate | undefined {
-  const active = state.candidate;
+  const active = state.phase === 'recording' || state.phase === 'ending' ? state.candidate : held;
   const unobservable = meet?.state === 'unavailable' || meet?.state === 'permission' ||
     (meet?.state === 'idle' && meet.source === 'google-meet-accessibility' && meet.absenceConfirmed !== true);
-  if ((state.phase !== 'recording' && state.phase !== 'ending') ||
-      !active?.evidence.includes('joined-meet') || !unobservable ||
+  if (!active?.evidence.includes('joined-meet') || !unobservable ||
       meet?.snapshot?.joined || !snapshot.supported) return candidate;
-  const input = snapshot.inputProcesses.find(process => bundleMatches(process.bundleId, active.bundleId));
+  const input = snapshot.inputProcesses.find(process => sameApplicationFamily(process.bundleId, active.bundleId));
   return input ? Object.freeze({ ...active, pid: input.pid }) : candidate;
 }
 
@@ -440,7 +452,7 @@ export function resolveMeetingCandidate(
     return Object.freeze({
       id: `meet:${meet.browser}:${meet.snapshot.meeting}`,
       appName: 'Google Meet', bundleId,
-      pid: snapshot.inputProcesses.find(p => bundleMatches(p.bundleId, bundleId))?.pid ?? 0,
+      pid: snapshot.inputProcesses.find(p => sameApplicationFamily(p.bundleId, bundleId))?.pid ?? 0,
       kind: 'browser' as const,
       title: matchingCalendar?.title?.trim() || 'Google Meet',
       ...(matchingCalendar ? { calendar: matchingCalendar } : {}),
@@ -520,7 +532,7 @@ const NONE = Object.freeze({ kind: 'none' as const });
 /** Deterministic hysteresis controller; all system reads and side effects stay outside. */
 export class MeetingAutomationController {
   #state: MeetingAutomationState = Object.freeze({ phase: 'watching', confirmations: 0 });
-  readonly #config: Required<Omit<MeetingAutomationConfig, 'launchAtLogin'>>;
+  readonly #config: Required<Omit<MeetingAutomationConfig, 'launchAtLogin' | 'resumeWindowSeconds'>>;
 
   constructor(config: MeetingAutomationConfig = {}) {
     this.#config = {
@@ -579,7 +591,9 @@ export class MeetingAutomationController {
       }
       const ending = this.#state.candidate;
       if (!ending) return NONE;
-      this.beginCooldown(nowUnixMs);
+      // No cooldown: if the same call comes back, the watcher resumes its
+      // saved entry rather than starting a second recording.
+      this.reset();
       return Object.freeze({ kind: 'finish' as const, candidate: ending, reason: 'signal-ended' as const });
     }
     if (this.#state.phase === 'awaiting-consent') {

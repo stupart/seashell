@@ -101,6 +101,14 @@ function optionalPositiveInteger(value: unknown, label: string): number | undefi
   return Number(value);
 }
 
+function optionalNonNegativeInteger(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new Error(`Sea Shell config ${label} must be a non-negative integer`);
+  }
+  return Number(value);
+}
+
 function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -197,6 +205,7 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
       'pollSeconds',
       'endGraceSeconds',
       'cooldownSeconds',
+      'resumeWindowSeconds',
       'maxDurationMinutes',
       'launchAtLogin',
     ]);
@@ -235,6 +244,10 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
       ...(optionalPositiveInteger(candidate.cooldownSeconds, 'meeting.automation.cooldownSeconds') === undefined
         ? {}
         : { cooldownSeconds: candidate.cooldownSeconds as number }),
+      // Zero is meaningful here: it disables resuming a just-ended meeting.
+      ...(optionalNonNegativeInteger(candidate.resumeWindowSeconds, 'meeting.automation.resumeWindowSeconds') === undefined
+        ? {}
+        : { resumeWindowSeconds: candidate.resumeWindowSeconds as number }),
       ...(optionalPositiveInteger(candidate.maxDurationMinutes, 'meeting.automation.maxDurationMinutes') === undefined
         ? {}
         : { maxDurationMinutes: candidate.maxDurationMinutes as number }),

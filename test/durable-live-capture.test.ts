@@ -9,7 +9,7 @@ import { saveFinalizedCapture } from '../src/capture-finalizer.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 import { listTranscriptRecords } from '../src/transcript-library.ts';
 import { readVerifiedCaptureChunk } from '../src/capture-session.ts';
-import type { StartMicrophoneOptions } from '../src/live-microphone.ts';
+import { startMicrophoneCapture, type StartMicrophoneOptions } from '../src/live-microphone.ts';
 import {
   pcmS16leToWav,
   type StartSystemAudioOptions,
@@ -217,4 +217,40 @@ test('quiet/reconnecting cautions persist independently of legacy active/stopped
   expect(health.systemAudio.state).toBe('disabled');
   expect(health.microphone.warnings.map(w => w.kind)).toEqual(['reconnecting', 'quiet']);
   expect(health.microphone.warnings.every(w => w.resolvedAtUnixMs === undefined)).toBe(true);
+});
+
+test('a resumed meeting reopens its capture bundle and continues on the original clock', async () => {
+  const libraryDir = mkdtempSync(join(tmpdir(), 'seashell-resume-capture-'));
+  roots.push(libraryDir);
+  const startedAt = new Date(Date.now() - 60_000);
+  const segment = async () => {
+    const handle = startDurableLiveCapture({
+      libraryDir, sessionId: 'resumed-call', startedAt, systemAudio: false, chunkMilliseconds: 500,
+      microphoneStarter: (options) => startMicrophoneCapture({ ...options, maxRestarts: 0,
+        command: process.execPath,
+        commandArgs: ['-e', 'process.stdout.write(Buffer.alloc(16000, 1)); setInterval(() => {}, 1000)'] }),
+    });
+    const before = handle.store.manifest.chunks.length;
+    const deadline = Date.now() + 5_000;
+    while (handle.store.manifest.chunks.length <= before && Date.now() < deadline) {
+      await Bun.sleep(10);
+    }
+    return handle.stop('signal-ended');
+  };
+  const first = await segment();
+  // The fixture writes its half second at once; let wall time pass it, as a real call would.
+  await Bun.sleep(700);
+  const resumed = await segment();
+  expect(resumed.sessionId).toBe(first.sessionId);
+  expect(resumed.startedAtUnixMs).toBe(startedAt.getTime());
+  expect(resumed.status).toBe('captured');
+  const chunks = resumed.chunks.filter(chunk => chunk.trackId === 'microphone');
+  expect(chunks.length).toBe(first.chunks.length * 2);
+  expect(chunks.map(chunk => chunk.sequence)).toEqual(chunks.map((_, index) => index + 1));
+  const firstEnd = Math.max(...first.chunks.map(chunk => chunk.endMs));
+  const later = chunks.slice(first.chunks.length);
+  // The pause stays a gap on one timeline: about a minute in, never restarting at zero.
+  expect(first.chunks[0]!.startMs).toBeGreaterThanOrEqual(59_000);
+  expect(later[0]!.startMs).toBeGreaterThanOrEqual(firstEnd);
+  for (const chunk of chunks) readVerifiedCaptureChunk(join(libraryDir, '_Capture', 'resumed-call', 'manifest.json'), chunk);
 });
