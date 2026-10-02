@@ -771,9 +771,11 @@ seashell transcribe meeting.m4a --speakers --format json
 ```
 
 Later runs use the Hugging Face cache. `HF_HUB_OFFLINE=1` enforces cached-only
-operation, and `PYANNOTE_METRICS_ENABLED=0` disables pyannote telemetry. The
-experimental `SEASHELL_DIARIZATION_DEVICE=mps` setting requests MPS; CPU is the
-documented macOS default.
+operation, and `PYANNOTE_METRICS_ENABLED=0` disables pyannote telemetry. On
+Apple silicon, speaker separation runs on the GPU (MPS) and falls back to the
+CPU if the GPU path fails. On an M5 Max, a 36-minute meeting took 48 seconds on
+the GPU versus 14.8 minutes on the CPU, with identical speakers and turns. Set
+`SEASHELL_DIARIZATION_DEVICE=cpu` to force the CPU.
 
 When this local capability is ready, the live-meeting finalizer automatically
 separates the completed system-audio track into stable `REMOTE_*` speaker
