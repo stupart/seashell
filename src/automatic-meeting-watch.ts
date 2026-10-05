@@ -548,7 +548,11 @@ export class AutomaticMeetingWatchService {
       maxObserverRuns: this.#config.meeting?.maxObserverRuns,
     });
     saveMeetingArtifact(this.#libraryDir, artifact);
-    const mode = this.#config.meeting?.mode ?? artifact.mode;
+    // Live analysis only helps while someone watches the call. After a
+    // background meeting, replaying every window first would add minutes (19
+    // sequential calls for a 36-minute meeting) before final notes start.
+    const configuredMode = this.#config.meeting?.mode ?? artifact.mode;
+    const mode = configuredMode === 'hybrid' ? 'post-session' : configuredMode;
     try {
       const observer = resolveMeetingRoute(this.#config.meeting, 'observer');
       const reconciliation = resolveMeetingRoute(this.#config.meeting, 'reconciliation');

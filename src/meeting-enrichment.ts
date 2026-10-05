@@ -1,3 +1,4 @@
+import { readFileSync } from 'fs';
 import { createHash } from 'crypto';
 import { dirname, join } from 'path';
 import {
@@ -22,6 +23,10 @@ import {
 import { findTranscriptRecord } from './transcript-library.ts';
 import { speakerLabel } from './transcript-renderer.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
+
+/** A little longer than Humain's own per-role limits (3, 15 and 5 minutes), so
+ * Humain reports its own timeout. Final notes read the whole meeting at once. */
+const HUMAIN_ROLE_TIMEOUT_MS = { observe: 4 * 60_000, reconcile: 20 * 60_000, chat: 6 * 60_000 } as const;
 
 interface HumainEnrichmentOutput {
   summary: string;
@@ -63,6 +68,24 @@ function runSafeId(value: string, idempotencyKey: string): string {
   // Reserve the digest before truncating the readable prefix. Long transcript
   // IDs and changed requests must never share one durable run directory.
   return `${value.replace(/[^a-zA-Z0-9_-]+/gu, '-').slice(0, 63)}-${idempotencyKey.slice(0, 32)}`;
+}
+
+/**
+ * A failed Humain run keeps its directory and idempotency claim, so asking
+ * again with the same request can never start over: Humain refuses to reuse
+ * that run. Move a retry after a terminal failure to a new attempt; reuse a
+ * run that succeeded or is still resumable.
+ */
+export function retryableRun(storeDir: string, runId: string, idempotencyKey: string): { runId: string; idempotencyKey: string } {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const candidate = attempt === 0 ? { runId, idempotencyKey }
+      : { runId: `${runId}-r${attempt}`, idempotencyKey: `${idempotencyKey}:retry-${attempt}` };
+    let status: unknown;
+    try { status = JSON.parse(readFileSync(join(storeDir, 'runs', candidate.runId, 'receipt.json'), 'utf8')).status; }
+    catch { return candidate; }
+    if (!['failed', 'cancelled', 'timed-out', 'timedOut'].includes(String(status))) return candidate;
+  }
+  throw new Error('This meeting step failed too many times. Check the AI provider in Settings (,).');
 }
 
 export function meetingSegments(record: TranscriptRecord) {
@@ -199,15 +222,16 @@ export async function enrichMeeting(
           approvedContext,
           artifact.provisionalClaims,
         ]);
-        const runId = runSafeId(`meeting-${transcriptId}-observe-${window.fromCursor}-${window.toCursor}`, idempotencyKey);
+        const { runId, idempotencyKey: attemptKey } = retryableRun(storeDir,
+          runSafeId(`meeting-${transcriptId}-observe-${window.fromCursor}-${window.toCursor}`, idempotencyKey), idempotencyKey);
         const result = await runner('observe', {
           meetingId: artifact.meetingId,
           ...humainRouteRequest(observerRoute),
           segments: window.segments,
           priorClaims: artifact.provisionalClaims,
           context: approvedContext,
-          idempotencyKey,
-        }, { storeDir, runId, onStatus: options.onStatus });
+          idempotencyKey: attemptKey,
+        }, { storeDir, runId, onStatus: options.onStatus, timeoutMs: HUMAIN_ROLE_TIMEOUT_MS.observe });
         const output = parseEnrichmentOutput(result.output, new Set(window.segments.map((segment) => segment.id)));
         appendProvisionalOverlay(libraryDir, transcriptId, {
           schemaVersion: 1,
@@ -257,15 +281,16 @@ export async function enrichMeeting(
         reconciliationRoute,
         approvedContext,
       ]);
-      const runId = runSafeId(`meeting-${transcriptId}-reconcile`, idempotencyKey);
+      const { runId, idempotencyKey: attemptKey } = retryableRun(storeDir,
+        runSafeId(`meeting-${transcriptId}-reconcile`, idempotencyKey), idempotencyKey);
       const result = await runner('reconcile', {
         meetingId: artifact.meetingId,
         ...humainRouteRequest(reconciliationRoute),
         segments,
         provisionalClaims: artifact.provisionalClaims,
         context: approvedContext,
-        idempotencyKey,
-      }, { storeDir, runId, onStatus: options.onStatus });
+        idempotencyKey: attemptKey,
+      }, { storeDir, runId, onStatus: options.onStatus, timeoutMs: HUMAIN_ROLE_TIMEOUT_MS.reconcile });
       const output = parseEnrichmentOutput(result.output, validIds);
       const analysis: MeetingAnalysis = {
         final: true,
@@ -349,7 +374,8 @@ export async function chatWithMeeting(
     route,
     approvedContext,
   ]);
-  const runId = runSafeId(`meeting-${transcriptId}-chat`, idempotencyKey);
+  const { runId, idempotencyKey: attemptKey } = retryableRun(join(dirname(path), '.humain'),
+    runSafeId(`meeting-${transcriptId}-chat`, idempotencyKey), idempotencyKey);
   const result = await runHumainMeeting('chat', {
     meetingId: artifact.meetingId,
     ...humainRouteRequest(route),
@@ -357,11 +383,12 @@ export async function chatWithMeeting(
     segments,
     finalClaims: artifact.analysis?.claims ?? artifact.provisionalClaims,
     context: approvedContext,
-    idempotencyKey,
+    idempotencyKey: attemptKey,
   }, {
     storeDir: join(dirname(path), '.humain'),
     runId,
     onStatus,
+    timeoutMs: HUMAIN_ROLE_TIMEOUT_MS.chat,
   });
   if (!result.output || typeof result.output !== 'object' || Array.isArray(result.output)) {
     throw new Error('Humain chat output must be an object');
