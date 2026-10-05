@@ -512,3 +512,40 @@ test('a paused meeting finalizes once its resume window passes', async () => {
   } finally { await service.shutdown(); }
   expect(listTranscriptRecords(root)).toHaveLength(2);
 });
+
+test('a background meeting goes straight to final notes instead of replaying live analysis', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-final-notes-mode-'));
+  roots.push(root);
+  const modes: string[] = [];
+  const service = new AutomaticMeetingWatchService({
+    config: { libraryDir: root, meeting: {
+      mode: 'hybrid',
+      routes: {
+        observer: { backend: 'claude-code', model: 'sonnet', effort: 'low' },
+        reconciliation: { backend: 'claude-code', model: 'opus[1m]', effort: 'high' },
+        chat: { backend: 'claude-code', model: 'opus[1m]', effort: 'medium' },
+      },
+      automation: { enabled: true, mode: 'automatic', confirmationPolls: 2 },
+    } },
+    dependencies: {
+      now: () => new Date(1_000),
+      readSignals: () => ({ schemaVersion: 1, capturedAtUnixMs: 1_000, supported: true,
+        inputProcesses: [{ pid: 42, bundleId: 'us.zoom.xos', name: 'Zoom' }] }),
+      startCapture: () => {
+        const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'final-notes-mode', startedAtUnixMs: 1_000 });
+        return { store, sessionId: 'final-notes-mode', manifestPath: store.manifestPath,
+          async stop() { return store.setStatus('captured', 'test'); } };
+      },
+      finalizeCapture: async () => createTranscriptRecord({ transcript: [{ start: 0, end: 1, text: 'Decision made.' }], speakers: [] },
+        { id: 'final-notes-mode', now: new Date(1_000) }),
+      enrich: async (libraryDir, id, options) => {
+        modes.push(options.mode ?? 'unset');
+        return loadMeetingArtifact(libraryDir, id)!;
+      },
+    },
+  });
+  await service.pollOnce();
+  await service.pollOnce();
+  await service.shutdown();
+  expect(modes).toEqual(['post-session']);
+});

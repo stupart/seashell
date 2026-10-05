@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased — final notes that finish
+
+- Final notes on Claude Code (e.g. Opus) failed for every real meeting: Humain
+  capped each call at $0.10 and Claude Code stopped with `error_max_budget_usd`
+  (a 36-minute meeting needed about $0.55). Humain now gives each meeting role
+  its own budget and time limit; Seashell waits a little longer than Humain for
+  each role (live 4 min, final notes 20 min, chat 6 min).
+- A failed AI step can be retried. Humain keeps a failed run's directory and
+  idempotency claim, so the same request could never run again; retries now
+  move to a new attempt, and successful runs are still reused.
+- After a background meeting, final notes start right away instead of first
+  replaying live analysis over every window (19 sequential calls for a
+  36-minute meeting).
+
 ## Unreleased — speaker separation on the Apple GPU
 
 - "auto" now uses the Apple GPU (MPS) when CUDA is absent. A real 36-minute
