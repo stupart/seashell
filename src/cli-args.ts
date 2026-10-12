@@ -108,6 +108,7 @@ export type CliCommand =
   | { kind: 'capabilities'; json: boolean }
   | { kind: 'doctor'; json: boolean }
   | { kind: 'status'; json: boolean }
+  | { kind: 'mcp'; action: 'serve' | 'install'; json: boolean }
   | { kind: 'setup'; autostart: boolean; json: boolean }
   | { kind: 'speaker-setup'; login: boolean; check: boolean; json: boolean }
   | { kind: 'update'; check: boolean; json: boolean }
@@ -726,6 +727,11 @@ export function parseCliArgs(args: string[]): CliCommand {
     }
     throw new Error('Usage: seashell ai install <trusted-package.tgz> | seashell ai setup | status | providers [--json]');
   }
+  if (args[0] === 'mcp') {
+    const rest = args.slice(1).filter((arg) => arg !== '--json');
+    if (rest.length > 1 || (rest[0] !== undefined && rest[0] !== 'install')) throw new Error('Usage: seashell mcp [install] [--json]');
+    return { kind: 'mcp', action: rest[0] === 'install' ? 'install' : 'serve', json: args.includes('--json') };
+  }
   if (args[0] === 'status') {
     const unknown = args.slice(1).filter((arg) => arg !== '--json');
     if (unknown.length) throw new Error(`Unknown status option: ${unknown[0]}`);
@@ -787,6 +793,8 @@ Usage:
   seashell setup --speakers [--login]       Set up optional local speaker identification
   seashell setup --speakers --check [--json] Verify the cached speaker model offline
   seashell status [--json]                  What works, what is off, and the next step for each
+  seashell mcp                              Read-only meetings server for Claude Code/Codex (stdio)
+  seashell mcp install [--json]             Add that server and its skill to Claude Code and Codex
   seashell doctor [--json]                  Check dependencies and models
   seashell capabilities [--json]            Describe optional engine capabilities
   seashell update [--check] [--json]        Update Sea Shell or show package-manager guidance
