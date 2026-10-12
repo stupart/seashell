@@ -12,9 +12,12 @@ import {
   transcriptSegmentId,
   type MeetingAnalysis,
   type MeetingArtifact,
+  parseMeetingNotes,
   type MeetingClaim,
   type MeetingEnrichmentMode,
+  type MeetingNoteSection,
 } from './meeting-artifact.ts';
+import { meetingInstructions, type MeetingInstructions } from './meeting-templates.ts';
 import {
   humainRouteRequest,
   runHumainMeeting,
@@ -31,6 +34,7 @@ const HUMAIN_ROLE_TIMEOUT_MS = { observe: 4 * 60_000, reconcile: 20 * 60_000, ch
 interface HumainEnrichmentOutput {
   summary: string;
   claims: MeetingClaim[];
+  notes?: MeetingNoteSection[];
 }
 
 export interface MeetingEnrichmentOptions {
@@ -42,6 +46,8 @@ export interface MeetingEnrichmentOptions {
     reconciliation?: HumainMeetingRoute;
   };
   context?: unknown;
+  /** The owner's profile, template and note. Unset: read from the Templates folder and the meeting's choices. */
+  instructions?: MeetingInstructions | null;
   minimumNewSegments?: number;
   maximumNewSegments?: number;
   overlapSegments?: number;
@@ -121,7 +127,29 @@ function parseEnrichmentOutput(
     if (missing) throw new Error(`Humain claim ${index} cites missing segment ${missing}`);
     return parsed;
   });
-  return { summary: output.summary.trim(), claims };
+  if (output.notes === undefined) return { summary: output.summary.trim(), claims };
+  const notes = parseMeetingNotes(output.notes, 'Humain notes');
+  for (const section of notes) {
+    const missing = section.items.flatMap((item) => item.evidenceSegmentIds).find((id) => !validEvidenceIds.has(id));
+    if (missing) throw new Error(`Humain notes "${section.heading}" cite missing segment ${missing}`);
+  }
+  return { summary: output.summary.trim(), claims, notes };
+}
+
+/**
+ * The owner's instructions for this meeting. A template chosen for the
+ * meeting wins over the calendar match; "none" leaves notes untemplated.
+ */
+function ownerInstructions(libraryDir: string, artifact: MeetingArtifact, options: MeetingEnrichmentOptions) {
+  if (options.instructions !== undefined) {
+    return options.instructions === null ? {} : { instructions: options.instructions };
+  }
+  return meetingInstructions(libraryDir, {
+    title: artifact.title,
+    ...(artifact.calendar?.title ? { calendarTitle: artifact.calendar.title } : {}),
+    ...(artifact.ai?.template ? { template: artifact.ai.template } : {}),
+    ...(artifact.ai?.note ? { note: artifact.ai.note } : {}),
+  });
 }
 
 function compactClaims(claims: MeetingClaim[]): MeetingClaim[] {
@@ -189,6 +217,7 @@ export async function enrichMeeting(
   const overlap = options.overlapSegments ?? artifact.session.overlapSegments;
   const storeDir = join(dirname(found.path), '.humain');
   const runner = options.runner ?? runHumainMeeting;
+  const { instructions } = ownerInstructions(libraryDir, artifact, options);
 
   try {
     if (mode === 'streaming' || mode === 'hybrid') {
@@ -221,6 +250,7 @@ export async function enrichMeeting(
           observerRoute,
           approvedContext,
           artifact.provisionalClaims,
+          ...(instructions ? [instructions] : []),
         ]);
         const { runId, idempotencyKey: attemptKey } = retryableRun(storeDir,
           runSafeId(`meeting-${transcriptId}-observe-${window.fromCursor}-${window.toCursor}`, idempotencyKey), idempotencyKey);
@@ -230,6 +260,7 @@ export async function enrichMeeting(
           segments: window.segments,
           priorClaims: artifact.provisionalClaims,
           context: approvedContext,
+          ...(instructions ? { instructions } : {}),
           idempotencyKey: attemptKey,
         }, { storeDir, runId, onStatus: options.onStatus, timeoutMs: HUMAIN_ROLE_TIMEOUT_MS.observe });
         const output = parseEnrichmentOutput(result.output, new Set(window.segments.map((segment) => segment.id)));
@@ -280,6 +311,7 @@ export async function enrichMeeting(
         artifact.provisionalClaims,
         reconciliationRoute,
         approvedContext,
+        ...(instructions ? [instructions] : []),
       ]);
       const { runId, idempotencyKey: attemptKey } = retryableRun(storeDir,
         runSafeId(`meeting-${transcriptId}-reconcile`, idempotencyKey), idempotencyKey);
@@ -289,15 +321,21 @@ export async function enrichMeeting(
         segments,
         provisionalClaims: artifact.provisionalClaims,
         context: approvedContext,
+        ...(instructions ? { instructions } : {}),
         idempotencyKey: attemptKey,
       }, { storeDir, runId, onStatus: options.onStatus, timeoutMs: HUMAIN_ROLE_TIMEOUT_MS.reconcile });
       const output = parseEnrichmentOutput(result.output, validIds);
+      if (instructions?.template && output.notes === undefined) {
+        // An engine from before templates ignores them and returns plain claims.
+        options.onStatus?.('This Humain version does not write templated notes yet; run `seashell ai install` with a newer engine.');
+      }
       const analysis: MeetingAnalysis = {
         final: true,
         summary: output.summary,
         claims: output.claims,
         runId: result.runId,
         createdAt: new Date().toISOString(),
+        ...(output.notes && instructions?.template ? { template: instructions.template.name, notes: output.notes } : {}),
       };
       artifact = {
         ...artifact,
@@ -365,6 +403,7 @@ export async function chatWithMeeting(
     attendees: artifact.attendees,
     priorConversation: artifact.chat.slice(-10),
   };
+  const { instructions } = ownerInstructions(libraryDir, artifact, {});
   const idempotencyKey = stableKey([
     transcriptId,
     'chat',
@@ -373,6 +412,7 @@ export async function chatWithMeeting(
     artifact.analysis?.claims ?? artifact.provisionalClaims,
     route,
     approvedContext,
+    ...(instructions ? [instructions] : []),
   ]);
   const { runId, idempotencyKey: attemptKey } = retryableRun(join(dirname(path), '.humain'),
     runSafeId(`meeting-${transcriptId}-chat`, idempotencyKey), idempotencyKey);
@@ -383,6 +423,7 @@ export async function chatWithMeeting(
     segments,
     finalClaims: artifact.analysis?.claims ?? artifact.provisionalClaims,
     context: approvedContext,
+    ...(instructions ? { instructions } : {}),
     idempotencyKey: attemptKey,
   }, {
     storeDir: join(dirname(path), '.humain'),

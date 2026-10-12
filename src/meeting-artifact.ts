@@ -61,12 +61,35 @@ export interface MeetingClaim {
   person?: string;
 }
 
+/** One point of templated notes, with the transcript segments it rests on. */
+export interface MeetingNoteItem {
+  text: string;
+  evidenceSegmentIds: string[];
+}
+
+/** A template heading and what the meeting said under it; empty when it did not come up. */
+export interface MeetingNoteSection {
+  heading: string;
+  items: MeetingNoteItem[];
+}
+
 export interface MeetingAnalysis {
   final: boolean;
   summary: string;
   claims: MeetingClaim[];
   runId: string;
   createdAt: string;
+  /** The template the notes follow, when one was used. */
+  template?: string;
+  notes?: MeetingNoteSection[];
+}
+
+/** The owner's choices for this meeting's AI, made before or after it ran. */
+export interface MeetingAiSettings {
+  /** A template name, or "none" for no templated notes. Unset: chosen from the calendar title. */
+  template?: string;
+  /** Guidance for this meeting only: "focus on pricing". */
+  note?: string;
 }
 
 export interface MeetingProvisionalOverlay {
@@ -110,6 +133,7 @@ export interface MeetingArtifact {
   };
   provisionalClaims: MeetingClaim[];
   analysis?: MeetingAnalysis;
+  ai?: MeetingAiSettings;
   chat: MeetingChatMessage[];
   failure?: string;
   /** Content binding, independent of positional segment IDs and modified times. */
@@ -287,7 +311,46 @@ function parseAnalysis(value: unknown): MeetingAnalysis | undefined {
     claims: analysis.claims.map((claim, index) => parseMeetingClaim(claim, `analysis claim ${index}`)),
     runId: string(analysis.runId, 'meeting analysis runId'),
     createdAt: string(analysis.createdAt, 'meeting analysis createdAt'),
+    ...(optionalString(analysis.template, 'meeting analysis template') === undefined
+      ? {}
+      : { template: analysis.template as string }),
+    ...(analysis.notes === undefined ? {} : { notes: parseMeetingNotes(analysis.notes) }),
   };
+}
+
+export function parseMeetingNotes(value: unknown, label = 'meeting notes'): MeetingNoteSection[] {
+  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
+  return value.map((raw, index) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`${label} section ${index} is invalid`);
+    const section = raw as Record<string, unknown>;
+    if (!Array.isArray(section.items)) throw new Error(`${label} section ${index} items must be an array`);
+    return {
+      heading: string(section.heading, `${label} section ${index} heading`),
+      items: section.items.map((item, itemIndex) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          throw new Error(`${label} section ${index} item ${itemIndex} is invalid`);
+        }
+        const note = item as Record<string, unknown>;
+        if (!Array.isArray(note.evidenceSegmentIds) || note.evidenceSegmentIds.length === 0 ||
+            note.evidenceSegmentIds.some((id) => typeof id !== 'string' || !id.trim())) {
+          throw new Error(`${label} section ${index} item ${itemIndex} must cite transcript segments`);
+        }
+        return {
+          text: string(note.text, `${label} section ${index} item ${itemIndex} text`),
+          evidenceSegmentIds: [...note.evidenceSegmentIds] as string[],
+        };
+      }),
+    };
+  });
+}
+
+function parseAiSettings(value: unknown): MeetingAiSettings | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('meeting AI settings must be an object');
+  const ai = value as Record<string, unknown>;
+  const template = optionalString(ai.template, 'meeting AI template');
+  const note = optionalString(ai.note, 'meeting AI note');
+  return { ...(template === undefined ? {} : { template }), ...(note === undefined ? {} : { note }) };
 }
 
 export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): MeetingArtifact {
@@ -321,6 +384,7 @@ export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): Mee
   }
   const calendar = parseCalendar(artifact.calendar);
   const analysis = parseAnalysis(artifact.analysis);
+  const ai = parseAiSettings(artifact.ai);
   const transcriptEvidence = parseMeetingEvidence(artifact.transcriptEvidence);
   return {
     schemaVersion: 1,
@@ -349,6 +413,7 @@ export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): Mee
     provisionalClaims: artifact.provisionalClaims.map((claim, index) =>
       parseMeetingClaim(claim, `provisional claim ${index}`)),
     ...(analysis === undefined ? {} : { analysis }),
+    ...(ai === undefined || Object.keys(ai).length === 0 ? {} : { ai }),
     chat: artifact.chat.map((raw, index) => {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
         throw new Error(`chat message ${index} is invalid`);
@@ -410,6 +475,16 @@ function documentFor(artifact: MeetingArtifact, type: MeetingClaimType, title: s
   return `# ${title}\n\n${markdownList(claims)}\n`;
 }
 
+/** The notes as their template laid them out, each point with the segments it cites. */
+export function templatedNotesMarkdown(title: string, analysis: MeetingAnalysis): string {
+  const sections = (analysis.notes ?? []).map((section) => `## ${section.heading}\n\n${
+    section.items.length
+      ? section.items.map((item) => `- ${item.text} _(${item.evidenceSegmentIds.join(', ')})_`).join('\n')
+      : '- Not discussed.'
+  }`);
+  return `# ${title}\n\n${analysis.template ? `_${analysis.template} notes_\n\n` : ''}${analysis.summary}\n\n${sections.join('\n\n')}\n`;
+}
+
 function writeMeetingProjections(
   directory: string,
   artifact: MeetingArtifact,
@@ -429,6 +504,11 @@ function writeMeetingProjections(
   atomicWrite(join(directory, 'documents', 'actions.md'), documentFor(artifact, 'action_item', 'Actions'));
   atomicWrite(join(directory, 'documents', 'notes.md'), documentFor(artifact, 'note', 'Notes'));
   atomicWrite(join(directory, 'documents', 'resources.md'), documentFor(artifact, 'resource', 'Resources'));
+  if (analysis?.notes) {
+    atomicWrite(join(directory, 'documents', 'meeting-notes.md'), templatedNotesMarkdown(artifact.title, analysis));
+  } else {
+    rmSync(join(directory, 'documents', 'meeting-notes.md'), { force: true });
+  }
 
   const readable = renderText(record, { timestamps: true, speakers: true });
   const transcriptMarkdown = `# ${artifact.title}\n\n${readable}\n`;

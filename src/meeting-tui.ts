@@ -70,6 +70,21 @@ export function meetingViewLines(
         ? 'The transcript is safe, but meeting enrichment failed.'
         : 'No meeting summary yet. Press G to run the configured enrichment route.'
     );
+    const templated = artifact.analysis?.notes;
+    if (templated) {
+      // The template is the layout the owner chose; its sections replace the generic lists.
+      return [
+        summary,
+        ...(artifact.analysis?.template ? ['', `${artifact.analysis.template} notes`] : []),
+        ...templated.flatMap((section) => [
+          '',
+          section.heading,
+          ...(section.items.length
+            ? section.items.flatMap((item) => [`- ${item.text}`, ...sources(item.evidenceSegmentIds)])
+            : ['- Not discussed.']),
+        ]),
+      ];
+    }
     const actionLines = claims(artifact, ['action_item'], sources);
     const noteLines = claims(artifact, ['note', 'highlight', 'feedback'], sources);
     return [

@@ -15,6 +15,9 @@ send their content somewhere, so only do that when the user asks.
 - Then `get_meeting` for notes (summary, decisions, action items with their
   supporting segments) and `get_transcript` to read the exact words (page with
   `offset`/`nextOffset`; filter one `speaker`).
+- When `get_meeting` notes carry `sections`, they follow the user's own notes
+  template (for example "Goals and pain points", "Next steps"); prefer them
+  for the layout of a summary or follow-up, and keep their citations.
 
 ## Speakers
 - "Microphone" is the user. "Remote speaker N", "System audio" and
