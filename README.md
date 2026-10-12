@@ -6,6 +6,12 @@ saved reports and the optional pre-push check. Pushes and PRs do not start hoste
 To see what works, what is off, and how to fix each item, press **,** in
 Seashell for Settings or run `seashell status`.
 
+To use your meetings from Claude Code or Codex, run `seashell mcp install` once.
+It adds a local, read-only meetings server and a skill, so you can ask things
+like "what did we decide in my last call with Dana?" or "draft a follow-up from
+today's sync". Answers cite transcript segments, and nothing is sent anywhere
+unless you approve it.
+
 For optional summaries and meeting chat, press **P** in Seashell or run
 `seashell ai setup` to choose models and supported effort levels for live analysis,
 final notes and chat. Each role can use Claude Code, Codex, a local model, or OpenRouter.

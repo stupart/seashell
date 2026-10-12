@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — your meetings in Claude Code and Codex
+
+- `seashell mcp` is a local, read-only MCP server over the meeting library:
+  `list_meetings`, `get_meeting` (summary and items with their source
+  segments), `get_transcript` (paged, per speaker), `search_transcripts` and
+  `list_action_items`. Tool output cites segment IDs and times, e.g.
+  `[s000123 12:04]`. It has no dependencies and uses stdio JSON-RPC.
+- `seashell mcp install` registers it with Claude Code and Codex at user scope,
+  using their own `mcp add`, and installs the `seashell-meetings` skill. The
+  skill covers when to use meetings, how to cite them, and approval before
+  sending follow-ups or filing issues.
+
 ## Unreleased — final notes that finish
 
 - Final notes on Claude Code (e.g. Opus) failed for every real meeting: Humain

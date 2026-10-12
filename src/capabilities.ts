@@ -7,7 +7,7 @@ import { SYSTEM_AUDIO_HELPER } from './live-system-audio.ts';
 import { MEETING_SIGNALS_HELPER } from './meeting-automation.ts';
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const PACKAGE_VERSION = (() => {
+export const PACKAGE_VERSION = (() => {
   const parsed = JSON.parse(readFileSync(join(PROJECT_ROOT, 'package.json'), 'utf8')) as {
     version?: unknown;
   };

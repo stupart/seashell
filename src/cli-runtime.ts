@@ -3,6 +3,8 @@ import { checkMeetConnection, requestMeetAccessibilityPermission, meetPermission
 import { microphonePermission } from './microphone-permission.ts';
 import { calendarPermission } from './calendar-permission.ts';
 import { readFeatureStatuses, renderFeatureStatusTable } from './feature-status.ts';
+import { runMeetingsMcpServer } from './meetings-mcp.ts';
+import { installMeetingsMcp } from './mcp-install.ts';
 import { mergeMeetingFragments, planMeetingMerges } from './meeting-merge.ts';
 import { discoverHumainProviders, resolveHumainExecutable } from './humain-client.ts';
 import { randomUUID } from 'crypto';
@@ -44,7 +46,7 @@ import {
 } from './meeting-artifact.ts';
 import { chatWithMeeting, enrichMeeting } from './meeting-enrichment.ts';
 import { transcribeMedia } from './transcription-service.ts';
-import { renderCapabilityManifest, seashellCapabilityManifest } from './capabilities.ts';
+import { PACKAGE_VERSION, renderCapabilityManifest, seashellCapabilityManifest } from './capabilities.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
 import {
   parseNativeSystemAudioEvent,
@@ -884,6 +886,21 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
     }
     case 'doctor':
       return executeDoctor(command.json);
+    case 'mcp': {
+      if (command.action === 'serve') {
+        const config = loadConfig();
+        await runMeetingsMcpServer(resolveLibraryDir(undefined, process.env, config), PACKAGE_VERSION);
+        return 0;
+      }
+      const result = installMeetingsMcp();
+      print(command.json ? JSON.stringify(result, null, 2) : [
+        `Seashell meetings server: ${result.command.join(' ')}`,
+        ...result.clients.map((client) => `  ${client.status === 'installed' || client.status === 'already-installed' ? '✓' : client.status === 'not-found' ? '–' : '✗'} ${client.client}: ${client.detail}`),
+        ...result.skills.map((path) => `  ✓ skill: ${path}`),
+        'Ask Claude Code things like "what did we decide in my last call?" or "draft a follow-up from today\'s meeting".',
+      ].join('\n'));
+      return result.clients.some((client) => client.status === 'failed') ? 1 : 0;
+    }
     case 'status': {
       const config = loadConfig();
       const statuses = await readFeatureStatuses({ config, libraryDir: resolveLibraryDir(undefined, process.env, config) });
