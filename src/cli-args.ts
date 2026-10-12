@@ -59,6 +59,8 @@ export type MeetingCommand = {
     | { kind: 'speakers'; browser: 'setup' | 'auto' | 'chrome' | 'safari' | 'off' | 'check' }
     | { kind: 'microphone'; operation: 'setup' | 'check' }
     | { kind: 'merge'; ids: string[]; auto: boolean; dryRun: boolean; maxGapMinutes?: number }
+    | { kind: 'template'; id: string; template?: string }
+    | { kind: 'note'; id: string; note?: string }
     | { kind: 'watch'; once: boolean }
     | { kind: 'consent'; decision: 'approve' | 'decline' }
     | { kind: 'autostart'; operation: 'enable' | 'disable' | 'status' };
@@ -109,6 +111,7 @@ export type CliCommand =
   | { kind: 'doctor'; json: boolean }
   | { kind: 'status'; json: boolean }
   | { kind: 'mcp'; action: 'serve' | 'install'; json: boolean }
+  | { kind: 'templates'; json: boolean }
   | { kind: 'setup'; autostart: boolean; json: boolean }
   | { kind: 'speaker-setup'; login: boolean; check: boolean; json: boolean }
   | { kind: 'update'; check: boolean; json: boolean }
@@ -487,6 +490,16 @@ function parseMeeting(args: string[]): MeetingCommand {
       }
       action = { kind: 'merge', ids: positional, auto, dryRun, ...(maxGapMinutes === undefined ? {} : { maxGapMinutes }) };
       break;
+    case 'template':
+      if (!positional[0] || positional.length > 2) {
+        throw new Error('Usage: seashell meeting template <id> [<template>|none|auto]');
+      }
+      action = { kind: 'template', id: positional[0], ...(positional[1] === undefined ? {} : { template: positional[1] }) };
+      break;
+    case 'note':
+      if (!positional[0]) throw new Error('Usage: seashell meeting note <id> [text] (an empty text clears it)');
+      action = { kind: 'note', id: positional[0], ...(positional.length > 1 ? { note: positional.slice(1).join(' ') } : {}) };
+      break;
     case 'microphone': {
       const operation = positional[0] ?? 'check';
       if (positional.length > 1 || !['setup', 'check'].includes(operation)) {
@@ -732,6 +745,11 @@ export function parseCliArgs(args: string[]): CliCommand {
     if (rest.length > 1 || (rest[0] !== undefined && rest[0] !== 'install')) throw new Error('Usage: seashell mcp [install] [--json]');
     return { kind: 'mcp', action: rest[0] === 'install' ? 'install' : 'serve', json: args.includes('--json') };
   }
+  if (args[0] === 'templates') {
+    const unknown = args.slice(1).filter((arg) => arg !== '--json');
+    if (unknown.length) throw new Error('Usage: seashell templates [--json]');
+    return { kind: 'templates', json: args.includes('--json') };
+  }
   if (args[0] === 'status') {
     const unknown = args.slice(1).filter((arg) => arg !== '--json');
     if (unknown.length) throw new Error(`Unknown status option: ${unknown[0]}`);
@@ -795,6 +813,7 @@ Usage:
   seashell status [--json]                  What works, what is off, and the next step for each
   seashell mcp                              Read-only meetings server for Claude Code/Codex (stdio)
   seashell mcp install [--json]             Add that server and its skill to Claude Code and Codex
+  seashell templates [--json]               Your notes templates and "About me", in an editable folder
   seashell doctor [--json]                  Check dependencies and models
   seashell capabilities [--json]            Describe optional engine capabilities
   seashell update [--check] [--json]        Update Sea Shell or show package-manager guidance
@@ -852,6 +871,8 @@ Meeting actions:
   meeting microphone [check] [--json]       Check background microphone access without a prompt
   meeting merge <id> <id>... [--json]       Join pieces of one meeting into one entry (pieces go to _Trash)
   meeting merge --auto [--dry-run] [--max-gap-minutes 15]  Find and join split meetings
+  meeting template <id> [<name>|none|auto]  Choose the notes template for one meeting (auto: from its title)
+  meeting note <id> [text]                  Tell the AI what matters in this meeting ("" clears it)
   meeting create <id> [--event-json <path>] [--mode streaming|post-session|hybrid]
   meeting enrich <id> [--mode <mode>] [--backend <backend>] [--model <exact-model>]
                       [--context <json>]

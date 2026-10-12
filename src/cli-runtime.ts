@@ -45,6 +45,15 @@ import {
   saveMeetingArtifact,
 } from './meeting-artifact.ts';
 import { chatWithMeeting, enrichMeeting } from './meeting-enrichment.ts';
+import {
+  ensureTemplatesDirectory,
+  findMeetingTemplate,
+  loadMeetingTemplates,
+  loadProfile,
+  meetingInstructions,
+  NO_TEMPLATE,
+  PROFILE_FILE,
+} from './meeting-templates.ts';
 import { transcribeMedia } from './transcription-service.ts';
 import { PACKAGE_VERSION, renderCapabilityManifest, seashellCapabilityManifest } from './capabilities.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
@@ -505,6 +514,42 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
         : 'No split meetings found.');
       return 0;
     }
+    case 'template':
+    case 'note': {
+      const { record } = findTranscriptRecord(libraryDir, command.action.id);
+      const artifact = loadMeetingArtifact(libraryDir, record.id) ?? createMeetingArtifact(record);
+      const ai = { ...artifact.ai };
+      if (command.action.kind === 'template' && command.action.template !== undefined) {
+        const wanted = command.action.template.trim();
+        if (wanted.toLowerCase() === 'auto') delete ai.template;
+        else if (wanted.toLowerCase() === NO_TEMPLATE) ai.template = NO_TEMPLATE;
+        else {
+          const found = findMeetingTemplate(loadMeetingTemplates(libraryDir), wanted);
+          if (!found) throw new Error(`No template named "${wanted}". See: seashell templates`);
+          ai.template = found.name;
+        }
+      }
+      if (command.action.kind === 'note' && command.action.note !== undefined) {
+        if (command.action.note.trim()) ai.note = command.action.note.trim();
+        else delete ai.note;
+      }
+      const changed = command.action.kind === 'template' ? command.action.template !== undefined : command.action.note !== undefined;
+      const next = { ...artifact, ai };
+      if (!Object.keys(ai).length) delete (next as { ai?: unknown }).ai;
+      if (changed) saveMeetingArtifact(libraryDir, next);
+      const selected = meetingInstructions(libraryDir, {
+        title: next.title,
+        ...(next.calendar?.title ? { calendarTitle: next.calendar.title } : {}),
+        ...(next.ai?.template ? { template: next.ai.template } : {}),
+      }).template;
+      print(command.json ? JSON.stringify({ id: record.id, template: selected?.name ?? null, chosen: next.ai?.template ?? 'auto', note: next.ai?.note ?? null }, null, 2) : [
+        `${next.title}`,
+        `  Template: ${selected?.name ?? 'none'}${next.ai?.template ? '' : ' (from the title)'}`,
+        `  Note: ${next.ai?.note ?? '—'}`,
+        ...(changed ? ['Applies the next time notes run: seashell meeting enrich ' + record.id] : []),
+      ].join('\n'));
+      return 0;
+    }
     case 'microphone': {
       const result = await microphonePermission({ request: command.action.operation === 'setup' });
       if (command.action.operation === 'setup' && result.authorization === 'denied') {
@@ -900,6 +945,25 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
         'Ask Claude Code things like "what did we decide in my last call?" or "draft a follow-up from today\'s meeting".',
       ].join('\n'));
       return result.clients.some((client) => client.status === 'failed') ? 1 : 0;
+    }
+    case 'templates': {
+      const config = loadConfig();
+      const libraryDir = resolveLibraryDir(undefined, process.env, config);
+      const directory = ensureTemplatesDirectory(libraryDir);
+      const templates = loadMeetingTemplates(libraryDir);
+      const profile = loadProfile(libraryDir);
+      print(command.json ? JSON.stringify({
+        directory,
+        profile: profile ? 'set' : 'empty',
+        templates: templates.map((template) => ({ name: template.name, match: template.match, default: template.default, path: template.path })),
+      }, null, 2) : [
+        `Notes templates: ${directory}`,
+        ...templates.map((template) => `  ${template.name}${template.default ? ' (default)' : ''}${template.match.length ? ` — ${template.match.join(', ')}` : ''}`),
+        `  About me: ${profile ? 'set' : `empty — write who you are and how you like notes in "${PROFILE_FILE}"`}`,
+        'Each ## heading is a section of the notes; the text under it tells the AI what goes there.',
+        'Templates are picked from the meeting title. Choose one for a meeting: seashell meeting template <id> <name>',
+      ].join('\n'));
+      return 0;
     }
     case 'status': {
       const config = loadConfig();

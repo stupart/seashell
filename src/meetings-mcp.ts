@@ -116,6 +116,17 @@ export function getMeeting(libraryDir: string, args: Arguments) {
         ...(claim.person ? { person: claim.person } : {}),
         evidence: claim.evidenceSegmentIds.map(id => `${id} ${clock(starts.get(id) ?? 0)}`),
       })),
+      // The notes in the owner's template, section by section, each point cited.
+      ...(artifact?.analysis?.notes ? {
+        template: artifact.analysis.template,
+        sections: artifact.analysis.notes.map(section => ({
+          heading: section.heading,
+          items: section.items.map(item => ({
+            text: item.text,
+            evidence: item.evidenceSegmentIds.map(id => `${id} ${clock(starts.get(id) ?? 0)}`),
+          })),
+        })),
+      } : {}),
     },
     transcriptSegments: record.transcript.length,
   };

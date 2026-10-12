@@ -565,6 +565,43 @@ For consented cloud transcription, add a `transcription` object to:
 The complete Local/Cloud/Adaptive example is in
 [`docs/live-performance-routing-0.1.md`](docs/live-performance-routing-0.1.md).
 
+### Notes templates and your instructions
+
+Final notes follow a template: Markdown headings, each with a line saying what
+belongs under it. Sea Shell picks one from the meeting's calendar title — a
+"Weekly 1:1" gets One-on-one, an "Acme discovery call" gets Customer call —
+and falls back to General. Every point in the notes cites the transcript lines
+it came from, and a section the meeting never touched says so instead of
+being filled in.
+
+```sh
+seashell templates                                  # create and list ~/Documents/Sea Shell/Templates
+seashell meeting template <id> "Customer call"      # choose for one meeting (none | auto)
+seashell meeting note <id> "Capture pricing and anything I promised to send"
+seashell meeting enrich <id>                        # run the notes again with the change
+```
+
+Edit any template, or add your own `.md` file with this shape:
+
+```markdown
+---
+name: Investor update
+match: [investor, board, fundraise]
+---
+## Metrics
+Numbers mentioned, with their period.
+
+## Asks
+What we asked for, and what they offered.
+```
+
+`About me.md` in the same folder is read before every meeting: who you are,
+who you meet, and how you like notes written. Templates, the profile and the
+meeting note shape focus and wording only; they cannot loosen the rule that
+every point needs transcript evidence. Until you run `seashell templates`, the
+built-in templates are used as shipped. Templated notes need a Humain engine
+with owner instructions; an older engine still writes the summary and claims.
+
 ### Google Meet status
 
 The current build imports Meet recordings, captures live microphone plus macOS
