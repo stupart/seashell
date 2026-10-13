@@ -54,3 +54,22 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## FluidAudio (native speaker separation)
+
+`native/bin/seashell-speakers` is built from `native/speakers/` and links
+[FluidAudio](https://github.com/FluidInference/FluidAudio) 0.17.7, which is
+licensed under the Apache License, Version 2.0
+(http://www.apache.org/licenses/LICENSE-2.0). FluidAudio's own third-party
+notices, including fastcluster (BSD-2-Clause) and VBx (Apache-2.0) used by its
+clustering, ship in its source tree under `ThirdPartyLicenses/`. Sea Shell
+builds it without its default `NemoTextProcessing` trait, so that binary is not
+included.
+
+## Speaker diarization models
+
+`seashell setup --speakers` downloads FluidInference's Core ML conversion of
+[pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1)
+from https://huggingface.co/FluidInference/speaker-diarization-coreml. The
+Community-1 artifacts are distributed under CC-BY-4.0; see that repository's
+NOTICE.md for attribution and scope. Sea Shell does not redistribute them.

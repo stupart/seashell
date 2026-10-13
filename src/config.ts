@@ -91,6 +91,8 @@ export interface SeashellConfig {
   saveByDefault?: boolean;
   meeting?: SeashellMeetingConfig;
   transcription?: TranscriptionRoutingConfig;
+  /** Local speaker separation: native (Core ML, the default) or pyannote (Python). */
+  speakers?: { engine?: 'native' | 'pyannote' };
 }
 
 function optionalPositiveInteger(value: unknown, label: string): number | undefined {
@@ -374,6 +376,11 @@ export function loadConfig(path = defaultConfigPath()): SeashellConfig {
   if (candidate.saveByDefault !== undefined && typeof candidate.saveByDefault !== 'boolean') {
     throw new Error('Sea Shell config saveByDefault must be a boolean');
   }
+  const speakers = candidate.speakers as Record<string, unknown> | undefined;
+  if (speakers !== undefined && (!speakers || typeof speakers !== 'object' || Array.isArray(speakers) ||
+      (speakers.engine !== undefined && speakers.engine !== 'native' && speakers.engine !== 'pyannote'))) {
+    throw new Error('Sea Shell config speakers.engine must be native or pyannote');
+  }
   return {
     ...(typeof candidate.libraryDir === 'string' ? { libraryDir: candidate.libraryDir } : {}),
     ...(typeof candidate.saveByDefault === 'boolean'
@@ -385,6 +392,7 @@ export function loadConfig(path = defaultConfigPath()): SeashellConfig {
     ...(parseTranscriptionConfig(candidate.transcription) === undefined
       ? {}
       : { transcription: parseTranscriptionConfig(candidate.transcription) as TranscriptionRoutingConfig }),
+    ...(speakers?.engine ? { speakers: { engine: speakers.engine as 'native' | 'pyannote' } } : {}),
   };
 }
 

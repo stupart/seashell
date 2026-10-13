@@ -19,7 +19,7 @@ import {
   type CaptureSessionManifest,
   type CaptureTrackId,
 } from './capture-session.ts';
-import { diarizationEnvironment, diarizationStatus } from './diarization-environment.ts';
+import { diarizationStatus } from './diarization-environment.ts';
 import { isLikelySystemAudioLeak } from './live-echo.ts';
 import { meetSpeakerForSegment, readMeetSamples } from './meet-speakers.ts';
 import { amplifyPcm, hasAudiblePcmSignal, pcmS16leSignalLevel, pcmS16leToWav, quietAudioGain } from './live-system-audio.ts';
@@ -328,7 +328,7 @@ export async function finalizeCaptureTranscript(
             speaker: speakerIds.get(segment.speaker ?? '') ?? remoteSpeakerId('UNKNOWN'),
           }))));
           separated = true;
-          speakerAnalysis = { status: 'complete', model: diarizationEnvironment().model,
+          speakerAnalysis = { status: 'complete', model: diarizationStatus().model,
             detail: 'Remote voices separated locally. Microphone is a separate source; names need confirmation.' };
         } catch (error) {
           if (options.strictSpeakers) throw error;

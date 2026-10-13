@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
-import { diarizationEnvironment, resolveDiarizationPython } from './diarization-environment.ts';
+import { diarizationStatus, resolveDiarizationPython } from './diarization-environment.ts';
+import { speakerEngine, speakersHelper } from './speaker-engine.ts';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { prepareMedia, type PreparedMedia } from './media-preparation.ts';
@@ -233,6 +234,30 @@ function parsePythonDiarization(value: unknown): PythonDiarization {
   return { turns, speakers };
 }
 
+/**
+ * Separate speakers with the configured engine. The native helper prints the
+ * same JSON as scripts/diarize.py; an explicit Python or pyannote model always
+ * means Python.
+ */
+export async function runSpeakerSeparation(
+  audioPath: string,
+  options: DiarizeFileOptions,
+): Promise<PythonDiarization> {
+  if (options.pythonPath || options.model || speakerEngine() !== 'native') return runPythonDiarization(audioPath, options);
+  const args = [audioPath];
+  if (options.channelRoles) args.push('--channel-roles', options.channelRoles.join(','));
+  positiveIntegerArgument(args, '--num-speakers', options.numSpeakers);
+  positiveIntegerArgument(args, '--min-speakers', options.minSpeakers);
+  positiveIntegerArgument(args, '--max-speakers', options.maxSpeakers);
+  const result = await runProcess(speakersHelper(), args, options.onDiarizationMessage);
+  try {
+    return parsePythonDiarization(JSON.parse(result.stdout));
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error('The speaker helper wrote malformed JSON');
+    throw error;
+  }
+}
+
 async function runPythonDiarization(
   audioPath: string,
   options: DiarizeFileOptions,
@@ -291,7 +316,7 @@ export async function diarizePreparedMedia(
   try {
     // Fail fast on missing Python dependencies, gated model access, or invalid
     // channel routing before spending time on one or more Whisper passes.
-    const diarization = await runPythonDiarization(audio.path, options);
+    const diarization = await runSpeakerSeparation(audio.path, options);
     const transcriptUnits = await transcribePreparedAudio(audio, options);
     const roleSpeakers = Object.fromEntries(
       (options.channelRoles ?? [])
@@ -308,7 +333,7 @@ export async function diarizePreparedMedia(
     const identities = new Map(diarization.speakers.map((speaker, index) => [speaker.id,
       speaker.label === speaker.id ? `Speaker ${index + 1}` : speaker.label]));
     let document: StructuredTranscript = {
-      speakerAnalysis: { status: 'complete', model: options.model ?? diarizationEnvironment().model,
+      speakerAnalysis: { status: 'complete', model: options.model ?? diarizationStatus().model,
         detail: 'Voices separated locally. Speaker numbers apply to this recording; names need confirmation.' },
       transcript,
       speakers: completeSpeakerList(diarization.speakers.map((s) => ({ ...s, label: identities.get(s.id)! })), transcript),

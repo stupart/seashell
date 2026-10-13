@@ -32,7 +32,7 @@ mock.module('../../src/live-microphone.ts', () => ({ ...mic, startMicrophoneCapt
   return { done: Promise.resolve(), startup: Promise.resolve(), stop() { stops++; } };
 } }));
 mock.module('../../src/diarization-environment.ts', () => ({ ...environment, diarizationStatus() {
-  return { ready, model: 'fixture', python: '/fixture/python' };
+  return { ready, model: 'fixture', python: '/fixture/python', engine: 'pyannote' };
 } }));
 mock.module('../../src/diarization-setup.ts', () => ({ async setupDiarization(options: any) {
   setups++; options.onStatus?.('Verifying fixture model…'); await Bun.sleep(40); ready = true;
