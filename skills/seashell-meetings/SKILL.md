@@ -19,6 +19,9 @@ send their content somewhere, so only do that when the user asks.
   template (for example "Goals and pain points", "Next steps"); prefer them
   for the layout of a summary or follow-up, and keep their citations.
 
+- A meeting listed as `private` has AI turned off by the user. Tell them it is
+  private rather than reading its files directly.
+
 ## Speakers
 - "Microphone" is the user. "Remote speaker N", "System audio" and
   "Unknown remote speaker" are other people. Calendar attendees (in

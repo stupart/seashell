@@ -64,6 +64,13 @@ export function meetingViewLines(
     ]);
   }
 
+  if (view === 'notes' && artifact.ai?.off) {
+    return [
+      'AI is off for this meeting.',
+      'Seashell sends it to no model: no live analysis, notes or chat, and agents using the meetings server are refused it.',
+      'The transcript is here as usual. Press N to turn AI back on.',
+    ];
+  }
   if (view === 'notes') {
     const summary = artifact.analysis?.summary || (
       artifact.status === 'failed'

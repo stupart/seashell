@@ -9,6 +9,7 @@ import type { SeashellConfig } from './config.ts';
 import { diarizationStatus } from './diarization-environment.ts';
 import { resolveHumainExecutable } from './humain-client.ts';
 import { meetingLaunchAtLoginStatus } from './launch-at-login.ts';
+import { loadMeetingTemplates, loadProfile, templatesDirectory } from './meeting-templates.ts';
 import { checkMeetConnection, type MeetProbe } from './meet-speakers.ts';
 import { microphonePermission, type MicrophonePermissionStatus } from './microphone-permission.ts';
 import { calendarPermission } from './calendar-permission.ts';
@@ -21,9 +22,9 @@ const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** ok: works · attention: works partly or needs one step · off: not set up (optional) · broken: should work and does not. */
 export type FeatureState = 'ok' | 'attention' | 'off' | 'broken';
-export type FeatureAction = 'enable-recorder' | 'connect-meet' | 'allow-microphone' | 'allow-calendar' | 'open-speakers' | 'open-ai';
+export type FeatureAction = 'enable-recorder' | 'connect-meet' | 'allow-microphone' | 'allow-calendar' | 'open-speakers' | 'open-ai' | 'open-templates';
 export type FeatureId = 'recorder' | 'detection' | 'microphone' | 'computer-audio' | 'transcription'
-  | 'meet-names' | 'speaker-separation' | 'ai-notes' | 'calendar';
+  | 'meet-names' | 'speaker-separation' | 'ai-notes' | 'notes-templates' | 'calendar';
 
 export interface FeatureStatus {
   readonly id: FeatureId;
@@ -49,6 +50,7 @@ export const FEATURE_ACTION_LABEL: Record<FeatureAction, string> = {
   'allow-calendar': 'Turn on calendar titles',
   'open-speakers': 'Open speaker setup',
   'open-ai': 'Choose AI',
+  'open-templates': 'Open your templates and About me',
 };
 
 /** What the most recent recorded meeting actually captured, per source. */
@@ -264,6 +266,8 @@ export async function readFeatureStatuses(options: {
       fix: 'Choose which AI writes your notes.', command: 'seashell ai setup' } as const),
   });
 
+  statuses.push(templatesStatus(options.libraryDir));
+
   const titlesDetail = 'Names each meeting after its calendar event (matched by its Meet link) and lists the attendees, which later helps name speakers.';
   statuses.push({
     id: 'calendar', label: 'Meeting titles from Calendar', optional: true,
@@ -280,6 +284,28 @@ export async function readFeatureStatuses(options: {
     : { state: 'ok', summary: 'On', detail: titlesDetail } as const),
   });
   return statuses;
+}
+
+/** Which notes templates meetings use, and whether the AI knows who it is writing for. */
+function templatesStatus(libraryDir: string): FeatureStatus {
+  const detail = 'Final notes follow a template picked from the meeting title (1:1, discovery call, standup…), with every point cited. "About me" tells the AI who you are and how you like notes. Per meeting: [N] in the meeting.';
+  let count = 0;
+  let personalised = false;
+  let profile = false;
+  try {
+    count = loadMeetingTemplates(libraryDir).length;
+    personalised = existsSync(templatesDirectory(libraryDir));
+    profile = loadProfile(libraryDir) !== undefined;
+  } catch {}
+  const base = { id: 'notes-templates', label: 'Notes templates & About me', optional: true, action: 'open-templates', command: 'seashell templates' } as const;
+  if (!personalised) {
+    return { ...base, state: 'off', summary: `${count} built-in templates · not personalised`, detail,
+      fix: 'Open your templates folder and write a few lines in "About me".' };
+  }
+  return profile
+    ? { ...base, state: 'ok', summary: `${count} templates · About me set`, detail }
+    : { ...base, state: 'attention', summary: `${count} templates · About me empty`, detail,
+      fix: 'Write who you are and how you like notes in "About me".' };
 }
 
 export const FEATURE_STATE_SYMBOL: Record<FeatureState, string> = { ok: '✓', attention: '!', off: '–', broken: '✗' };

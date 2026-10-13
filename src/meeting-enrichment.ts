@@ -6,6 +6,7 @@ import {
   createChatMessage,
   createMeetingArtifact,
   loadMeetingArtifact,
+  MeetingAiOffError,
   MEETING_CLAIM_TYPES,
   parseMeetingClaim,
   saveMeetingArtifact,
@@ -211,6 +212,7 @@ export async function enrichMeeting(
   if (segments.length === 0) throw new Error('Meeting enrichment requires transcript text');
   const validIds = new Set(segments.map((segment) => segment.id));
   let artifact = baseArtifact(record, loadMeetingArtifact(libraryDir, transcriptId), options);
+  if (artifact.ai?.off) throw new MeetingAiOffError();
   const mode = options.mode ?? artifact.mode;
   const minimum = options.minimumNewSegments ?? 3;
   const maximum = options.maximumNewSegments ?? 12;
@@ -394,6 +396,7 @@ export async function chatWithMeeting(
   const { record, path } = findTranscriptRecord(libraryDir, transcriptId);
   const artifact = loadMeetingArtifact(libraryDir, transcriptId);
   if (!artifact) throw new Error('Create the meeting artifact before using meeting chat');
+  if (artifact.ai?.off) throw new MeetingAiOffError();
   const trimmed = question.trim();
   if (!trimmed) throw new Error('Meeting question cannot be empty');
   const segments = meetingSegments(record);

@@ -27,6 +27,7 @@ import {
   type TranscriptLibraryEntry,
 } from './transcript-library.ts';
 import { createTranscriptRecord } from './transcript-record.ts';
+import { loadMeetingTemplates, meetingInstructions, NO_TEMPLATE } from './meeting-templates.ts';
 import {
   createChatMessage,
   createMeetingArtifact,
@@ -238,6 +239,8 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [liveMeeting, setLiveMeeting] = useState<MeetingArtifact | null>(null);
   const [meetingView, setMeetingView] = useState<MeetingView>('transcript');
   const [chatInputState, setChatInputState] = useState<ChatInputState | null>(null);
+  /** [N] Notes setup for the open meeting: its template, its note, and whether AI may see it. */
+  const [notesSetup, setNotesSetup] = useState<{ row: 0 | 1 | 2; options: string[]; editing?: string } | null>(null);
   const [calendarSuggestion, setCalendarSuggestion] = useState<MeetingCalendarEvent | null>(null);
   const [automaticCandidate, setAutomaticCandidate] = useState<MeetingCandidate | null>(null);
   const [automationPhase, setAutomationPhase] = useState<MeetingAutomationPhase>('watching');
@@ -1191,6 +1194,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       !liveMeeting ||
       !configuredMeetingRoutes.observer ||
       observerActiveRef.current ||
+      liveMeeting.ai?.off ||
       liveMeeting.status === 'failed' ||
       liveMeeting.session.observerRunIds.length >= liveMeeting.session.maxObserverRuns ||
       (config.meeting?.mode ?? liveMeeting.mode) === 'post-session'
@@ -1505,7 +1509,21 @@ export default function App(props: { libraryDir?: string } = {}) {
   const { stdin } = useStdin();
   const { stdout } = useStdout();
   const mouseDecoder = useRef(new MouseScrollDecoder());
-  const mouseEnabled = !speakerSetupOpen && !aiSetupOpen && !chatInputState && !renameState && !searchMode && !exportMode && !confirmTrashId;
+  const mouseEnabled = !speakerSetupOpen && !aiSetupOpen && !chatInputState && !renameState && !searchMode && !exportMode && !confirmTrashId && !notesSetup;
+
+  const saveMeetingAi = useCallback((change: (ai: NonNullable<MeetingArtifact['ai']>) => void) => {
+    if (!currentMeeting) return;
+    const ai = { ...currentMeeting.ai };
+    change(ai);
+    const next: MeetingArtifact = { ...currentMeeting, ai };
+    if (!Object.keys(ai).length) delete next.ai;
+    try {
+      saveMeetingArtifact(libraryRoot, next);
+      commitMeetingState(next);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : String(saveError));
+    }
+  }, [commitMeetingState, currentMeeting, libraryRoot]);
   useEffect(() => {
     if (!mouseEnabled || !stdin.isTTY || !stdout.isTTY) return;
     stdout.write('\x1b[?1000h\x1b[?1006h');
@@ -1641,6 +1659,45 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
 
+    if (notesSetup) {
+      if (notesSetup.editing !== undefined) {
+        if (key.escape) { setNotesSetup({ ...notesSetup, editing: undefined }); return; }
+        if (key.return) {
+          const note = notesSetup.editing.trim();
+          saveMeetingAi((ai) => { if (note) ai.note = note; else delete ai.note; });
+          setNotesSetup({ ...notesSetup, editing: undefined });
+          return;
+        }
+        if (key.backspace || key.delete) { setNotesSetup({ ...notesSetup, editing: notesSetup.editing.slice(0, -1) }); return; }
+        if (input && !key.ctrl && !key.meta) setNotesSetup({ ...notesSetup, editing: notesSetup.editing + input });
+        return;
+      }
+      if (key.escape || input === 'n' || key.return && notesSetup.row !== 1) {
+        setNotesSetup(null);
+        if (currentMeeting && !currentMeeting.ai?.off) setNotice('Press G to write the notes again with these choices.');
+        return;
+      }
+      if (key.upArrow) { setNotesSetup({ ...notesSetup, row: Math.max(0, notesSetup.row - 1) as 0 | 1 | 2 }); return; }
+      if (key.downArrow) { setNotesSetup({ ...notesSetup, row: Math.min(2, notesSetup.row + 1) as 0 | 1 | 2 }); return; }
+      if (notesSetup.row === 0 && (key.leftArrow || key.rightArrow)) {
+        const current = currentMeeting?.ai?.template ?? 'auto';
+        const index = Math.max(0, notesSetup.options.indexOf(current));
+        const step = key.rightArrow ? 1 : -1;
+        const chosen = notesSetup.options[(index + step + notesSetup.options.length) % notesSetup.options.length]!;
+        saveMeetingAi((ai) => { if (chosen === 'auto') delete ai.template; else ai.template = chosen; });
+        return;
+      }
+      if (notesSetup.row === 1 && key.return) {
+        setNotesSetup({ ...notesSetup, editing: currentMeeting?.ai?.note ?? '' });
+        return;
+      }
+      if (notesSetup.row === 2 && (key.leftArrow || key.rightArrow || input === ' ')) {
+        saveMeetingAi((ai) => { if (ai.off) delete ai.off; else ai.off = true; });
+        return;
+      }
+      return;
+    }
+
     if (audioHelpOpen) {
       if (input === 'i' || key.escape) { setAudioHelpOpen(false); return; }
       if (input === 'o' || input === 'p') {
@@ -1750,11 +1807,25 @@ export default function App(props: { libraryDir?: string } = {}) {
       setNotice(`Ignored ${automaticCandidate.appName} for this detection window.`);
       return;
     }
+    if (input === 'n' && currentMeeting) {
+      let names: string[] = [];
+      try { names = loadMeetingTemplates(libraryRoot).map((template) => template.name); } catch {}
+      setNotesSetup({ row: 0, options: ['auto', ...names, NO_TEMPLATE] });
+      return;
+    }
     if (input === 'g' && currentMeeting) {
+      if (currentMeeting.ai?.off) {
+        setNotice('AI is off for this meeting. Press N to turn it on.');
+        return;
+      }
       runCurrentMeetingEnrichment(view === 'live');
       return;
     }
     if (input === 'a' && currentMeeting) {
+      if (currentMeeting.ai?.off) {
+        setNotice('AI is off for this meeting. Press N to turn it on.');
+        return;
+      }
       if (!configuredMeetingRoutes.chat) {
         setAiSetupIntent('chat');
         setAiSetupOpen(true);
@@ -2210,7 +2281,34 @@ export default function App(props: { libraryDir?: string } = {}) {
         {showingLiveTranscript && !followLiveTranscript && !historyOpen && (
           <Text dimColor>Reading earlier text · [L] Latest</Text>
         )}
-        {chatInputState ? (
+        {notesSetup && currentMeeting ? (() => {
+          const applied = currentMeeting.ai?.off ? undefined : (() => {
+            try {
+              return meetingInstructions(libraryRoot, {
+                title: currentMeeting.title,
+                ...(currentMeeting.calendar?.title ? { calendarTitle: currentMeeting.calendar.title } : {}),
+                ...(currentMeeting.ai?.template ? { template: currentMeeting.ai.template } : {}),
+              }).template?.name;
+            } catch { return undefined; }
+          })();
+          const template = currentMeeting.ai?.template === NO_TEMPLATE ? 'None (summary and claims only)'
+            : currentMeeting.ai?.template ?? `Auto · ${applied ?? 'General'} from the title`;
+          const rows: Array<[string, string]> = [
+            ['Template', `‹ ${template} ›`],
+            ['Note', notesSetup.editing !== undefined ? `${notesSetup.editing}█` : currentMeeting.ai?.note ?? '— Enter to add, e.g. "Capture pricing"'],
+            ['AI', currentMeeting.ai?.off ? '‹ Off › no notes or chat; agents are refused it' : '‹ On ›'],
+          ];
+          return (
+            <>
+              <Text color="yellow">Notes setup for this meeting · ↑↓ choose · ←→ change · Enter edit note · Esc done</Text>
+              {rows.map(([label, value], index) => (
+                <Text key={label} {...(index === notesSetup.row ? { color: 'cyan' } : { dimColor: true })}>
+                  {index === notesSetup.row ? '▸ ' : '  '}{label.padEnd(9)}{value}
+                </Text>
+              ))}
+            </>
+          );
+        })() : chatInputState ? (
           <Text color="yellow">Ask: {chatInputState.input}█  [Enter send · Esc cancel]</Text>
         ) : renameState ? (
           <Text color="yellow">Rename {renameState.speakerId}: {renameState.input}█  [Enter save · Esc cancel]</Text>
@@ -2226,7 +2324,7 @@ export default function App(props: { libraryDir?: string } = {}) {
             <Text dimColor>F import · ⇧F import + speakers · V speaker setup · T timestamps · S labels</Text>
             <Text dimColor>C copy · E export · O folder · D trash · DEL clear live</Text>
             <Text dimColor>[/] choose speaker · R rename · ↑↓ / wheel scroll · L live · Q quit</Text>
-            <Text dimColor>M mark meeting · 1-4 meeting views · G enrich/finalize · A ask</Text>
+            <Text dimColor>M mark meeting · 1-4 meeting views · G enrich/finalize · A ask · N notes setup</Text>
             <Text dimColor>P choose AI models and effort for live analysis, notes and chat</Text>
             <Text dimColor>, Settings: what works, what is off, and one-key fixes</Text>
             <Text dimColor>Automatic meeting prompt: M record · X ignore</Text>
@@ -2236,7 +2334,7 @@ export default function App(props: { libraryDir?: string } = {}) {
             {currentMeeting && meetingView === 'analysis'
               ? `${currentMeeting.analysis?.claims.length ?? currentMeeting.provisionalClaims.length} insights`
               : currentMeeting && meetingView === 'notes'
-                ? `${currentMeeting.attendees.length} attendees`
+                ? `${currentMeeting.ai?.off ? 'AI off' : currentMeeting.analysis?.template ? `${currentMeeting.analysis.template} notes` : `${currentMeeting.attendees.length} attendees`} · [N] Notes setup · [G] Write notes`
                 : currentMeeting && meetingView === 'chat'
                   ? `${Math.floor(currentMeeting.chat.length / 2)} exchanges`
                   : terminal.columns < 56

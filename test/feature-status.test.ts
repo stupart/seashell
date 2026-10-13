@@ -1,4 +1,8 @@
 import { expect, test } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { ensureTemplatesDirectory, PROFILE_FILE } from '../src/meeting-templates.ts';
 import { readFeatureStatuses, renderFeatureStatusTable, type FeatureStatusDependencies, type MeetingEvidence } from '../src/feature-status.ts';
 import type { MeetProbe } from '../src/meet-speakers.ts';
 
@@ -76,4 +80,24 @@ test('calendar titles report access and whether this Mac has any calendars to re
   expect((await byId({ calendar: calendar('notDetermined') }, on)).calendar).toMatchObject({ state: 'attention', action: 'allow-calendar' });
   expect((await byId({ calendar: calendar('authorized', 0) }, on)).calendar).toMatchObject({ summary: 'On · no calendars on this Mac' });
   expect((await byId({ calendar: calendar('authorized', 2) }, on)).calendar).toMatchObject({ state: 'ok', summary: 'On' });
+});
+
+test('Settings shows whether templates are yours and whether the AI knows who you are', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'seashell-templates-status-'));
+  const libraryDir = join(home, 'Transcripts');
+  const previous = process.env.SEASHELL_TEMPLATES_DIR;
+  process.env.SEASHELL_TEMPLATES_DIR = join(home, 'Templates');
+  try {
+    const row = async () => (await readFeatureStatuses({ config: { meeting: { speakerBrowser: 'auto' } } as never, libraryDir, dependencies: healthy }))
+      .find((status) => status.id === 'notes-templates')!;
+    expect(await row()).toMatchObject({ state: 'off', summary: '6 built-in templates · not personalised', action: 'open-templates' });
+    const directory = ensureTemplatesDirectory(libraryDir);
+    expect(await row()).toMatchObject({ state: 'attention', summary: '6 templates · About me empty' });
+    writeFileSync(join(directory, PROFILE_FILE), 'I run a studio.');
+    expect(await row()).toMatchObject({ state: 'ok', summary: '6 templates · About me set' });
+  } finally {
+    if (previous === undefined) delete process.env.SEASHELL_TEMPLATES_DIR;
+    else process.env.SEASHELL_TEMPLATES_DIR = previous;
+    rmSync(home, { recursive: true, force: true });
+  }
 });

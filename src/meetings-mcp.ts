@@ -1,5 +1,6 @@
 import { createInterface } from 'readline';
-import { loadMeetingArtifact } from './meeting-artifact.ts';
+import { dirname } from 'path';
+import { loadMeetingArtifact, readMeetingAiSettingsAt } from './meeting-artifact.ts';
 import { findTranscriptRecord, listTranscriptRecords, loadTranscriptPath } from './transcript-library.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 
@@ -17,6 +18,7 @@ export const MEETINGS_MCP_INSTRUCTIONS = [
   'Quote with the segment ID and time, e.g. [s000123 12:04], so the user can check the source.',
   'Transcripts are machine-generated. "Microphone" is the user; "Remote speaker N" and "System audio" are other people unless renamed.',
   'This server is read-only. Ask the user before sending anything (email, Slack, Linear) based on a meeting.',
+  'A meeting marked private has AI turned off by its owner: say so, and do not try to reach its content another way.',
 ].join(' ');
 
 type Arguments = Record<string, unknown>;
@@ -63,8 +65,16 @@ function minutes(record: TranscriptRecord): number | undefined {
   return record.source.duration === undefined ? undefined : Math.round(record.source.duration / 6) / 10;
 }
 
+/** Meetings the owner turned AI off for are not handed to agents. */
+const PRIVATE_MEETING = 'This meeting is private: its owner turned AI off for it in Seashell, so it is not shared with agents.';
+
+function isPrivate(directory: string): boolean {
+  return readMeetingAiSettingsAt(directory)?.off === true;
+}
+
 function load(libraryDir: string, id: unknown) {
   const found = findTranscriptRecord(libraryDir, text(id, 'id', true)!);
+  if (isPrivate(dirname(found.path))) throw new Error(PRIVATE_MEETING);
   return { ...found, artifact: loadMeetingArtifact(libraryDir, found.record.id) };
 }
 
@@ -77,6 +87,14 @@ export function listMeetings(libraryDir: string, args: Arguments = {}) {
   for (const entry of listTranscriptRecords(libraryDir)) {
     const started = Date.parse(entry.createdAt);
     if ((from !== undefined && started < from) || (to !== undefined && started > to + 86_400_000 - 1)) continue;
+    if (isPrivate(entry.directory)) {
+      // Listed so a question about it gets a straight answer, but nothing of its content.
+      if (!query || entry.title.toLocaleLowerCase().includes(query)) {
+        meetings.push({ id: entry.id, title: entry.title, startedAt: entry.createdAt, private: true });
+        if (meetings.length >= limit) break;
+      }
+      continue;
+    }
     const artifact = loadMeetingArtifact(libraryDir, entry.id);
     const summary = artifact?.analysis?.summary;
     if (query) {
@@ -152,6 +170,7 @@ export function searchTranscripts(libraryDir: string, args: Arguments) {
   const limit = count(args.limit, 'limit', 30, 200);
   const matches = [];
   for (const entry of listTranscriptRecords(libraryDir)) {
+    if (isPrivate(entry.directory)) continue;
     let record: TranscriptRecord;
     try { record = loadTranscriptPath(`${entry.directory}/transcript.json`); } catch { continue; }
     const names = labels(record);
@@ -173,6 +192,7 @@ export function listActionItems(libraryDir: string, args: Arguments = {}) {
   const items = [];
   for (const entry of listTranscriptRecords(libraryDir)) {
     if (since !== undefined && Date.parse(entry.createdAt) < since) continue;
+    if (isPrivate(entry.directory)) continue;
     const artifact = loadMeetingArtifact(libraryDir, entry.id);
     for (const claim of artifact?.analysis?.claims ?? artifact?.provisionalClaims ?? []) {
       if (claim.type !== 'action_item') continue;
