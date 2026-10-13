@@ -6,7 +6,7 @@ import { diarizationEnvironment, diarizationStatus, fileStamp, modelArtifacts, r
 import { seashellCapabilityManifest } from '../src/capabilities.ts';
 import { setupDiarization } from '../src/diarization-setup.ts';
 
-const envKeys = ['SEASHELL_DIARIZATION_HOME', 'SEASHELL_DIARIZATION_PYTHON', 'SEASHELL_PYTHON', 'SEASHELL_DIARIZATION_MODEL', 'HF_HUB_CACHE'] as const;
+const envKeys = ['SEASHELL_DIARIZATION_HOME', 'SEASHELL_DIARIZATION_PYTHON', 'SEASHELL_PYTHON', 'SEASHELL_DIARIZATION_MODEL', 'HF_HUB_CACHE', 'SEASHELL_SPEAKER_ENGINE'] as const;
 const original = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
 const directories: string[] = [];
 afterEach(() => {
@@ -23,6 +23,8 @@ function fixture() {
   for (const key of envKeys) delete process.env[key];
   process.env.SEASHELL_DIARIZATION_HOME = join(directory, 'Application Support');
   process.env.HF_HUB_CACHE = join(directory, 'hub');
+  // These cover the Python engine; speaker-engine.test.ts covers the native one.
+  process.env.SEASHELL_SPEAKER_ENGINE = 'pyannote';
   return directory;
 }
 

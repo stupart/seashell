@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import { homedir } from 'os';
 import { dirname, isAbsolute, join } from 'path';
 import { fileURLToPath } from 'url';
+import { nativeSpeakerStatus, speakerEngine, type SpeakerEngine } from './speaker-engine.ts';
 
 export const DIARIZATION_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const DEFAULT_DIARIZATION_MODEL = 'pyannote/speaker-diarization-community-1';
@@ -42,7 +43,12 @@ export function fileStamp(path: string): string | null {
   try { const stat = statSync(path); return `${stat.size}:${stat.mtimeMs}:${stat.mode}`; } catch { return null; }
 }
 
-export function diarizationStatus() {
+export function diarizationStatus(): { ready: boolean; python: string; model: string; engine: SpeakerEngine; nextStep?: string } {
+  if (speakerEngine() === 'native') {
+    const native = nativeSpeakerStatus();
+    return { ready: native.ready, python: '', model: native.model, engine: 'native',
+      nextStep: native.ready ? undefined : `Identify speakers: run ${SPEAKER_SETUP_COMMAND} (a 21 MB download). Recording works without it.` };
+  }
   const environment = diarizationEnvironment();
   const python = Bun.which(environment.python) || environment.python;
   let ready = false;
@@ -54,7 +60,7 @@ export function diarizationStatus() {
       receipt.artifacts.every((entry: { path: string; stamp: string }) =>
         typeof entry.path === 'string' && typeof entry.stamp === 'string' && fileStamp(entry.path) === entry.stamp);
   } catch { /* Missing or obsolete verification is setup required, never a successful model check. */ }
-  return { ready, python, model: environment.model,
+  return { ready, python, model: environment.model, engine: 'pyannote',
     nextStep: ready ? undefined : `Identify speakers: run ${SPEAKER_SETUP_COMMAND}. Recording works without it.` };
 }
 

@@ -773,17 +773,31 @@ seashell transcribe movie.mkv --audio-stream 3
 
 ## Speaker diarization
 
-Sea Shell uses the local
+Sea Shell separates voices with the
 [`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1)
-pipeline. Diarization creates recording-local clusters; it does not inherently
-know human identities. Rename those clusters later through the TUI or library
-CLI.
+models, on your Mac. Diarization creates recording-local clusters; it does not
+inherently know human identities. Rename those clusters later through the TUI
+or library CLI.
 
-Optional one-time setup (source/main; the pinned RC6 package predates this command):
+By default they run natively: `native/bin/seashell-speakers` uses
+[FluidAudio](https://github.com/FluidInference/FluidAudio)'s Core ML conversion
+of community-1 on the Neural Engine. One-time setup downloads about 21 MB of
+models — no Python, no Hugging Face account:
 
 ```bash
-seashell setup --speakers
+seashell setup --speakers           # download the models once
+seashell setup --speakers --check   # offline: are they there?
 ```
+
+Measured on four AMI meetings (92 minutes, reference annotations, 0.25 s
+collar): 10.0% diarization error natively against 8.8% for pyannote in Python,
+in 22 seconds against 257, using about 400 MB of memory. The Python engine
+below is still available for anyone who wants that extra accuracy: set
+`"speakers": { "engine": "pyannote" }` in config.json (or
+`SEASHELL_SPEAKER_ENGINE=pyannote`). Everything else in this section describes
+that engine.
+
+### The Python engine
 
 This installs the Python environment in your user application-data directory,
 checks dependencies, and downloads and loads the model. It does not change

@@ -21,6 +21,7 @@ export default function SpeakerSettings(props: {
   onClose: () => void;
 }) {
   const [ready, setReady] = useState(() => diarizationStatus().ready);
+  const [engine] = useState(() => diarizationStatus().engine);
   const [index, setIndex] = useState(0);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string>();
@@ -97,7 +98,11 @@ export default function SpeakerSettings(props: {
       <Text>Numbers are not names. Use [ / ] then R to rename.</Text>
       <Text dimColor>Shared microphones and overlap need review.</Text>
     </>}
-    {index >= 3 && index < 6 && !ready && <>
+    {index >= 3 && index < 6 && !ready && engine === 'native' && <>
+      <Text>Downloads a 21 MB voice model once. It runs on this Mac; no account needed.</Text>
+      <Text dimColor>Press Enter on “Set up / repair local voice model”.</Text>
+    </>}
+    {index >= 3 && index < 6 && !ready && engine === 'pyannote' && <>
       <Text>Downloads a model; requires Hugging Face access and publisher contact sharing.</Text>
       <Text color="cyan">{diarizationEnvironment().model.startsWith('/') ? diarizationEnvironment().model : `https://huggingface.co/${diarizationEnvironment().model}`}</Text>
       <Text color="yellow">seashell setup --speakers --login</Text>

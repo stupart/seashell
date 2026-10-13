@@ -985,9 +985,11 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
         result.detail,
         ...(!result.ready ? [
           'Speaker identification is optional. Recording and transcription still work.',
-          ...(result.modelUrl ? [`1. Accept model access: ${result.modelUrl}`] : []),
-          `2. Sign in locally: ${result.loginCommand}`,
-          `3. ${result.nextStep}`,
+          ...(result.loginCommand ? [
+            ...(result.modelUrl ? [`1. Accept model access: ${result.modelUrl}`] : []),
+            `2. Sign in locally: ${result.loginCommand}`,
+            `3. ${result.nextStep}`,
+          ] : result.nextStep ? [result.nextStep] : []),
         ] : []),
       ].join('\n'));
       return result.ready ? 0 : 1;

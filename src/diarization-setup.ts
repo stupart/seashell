@@ -4,6 +4,7 @@ import { dirname, join } from 'path';
 import { randomUUID } from 'crypto';
 import { beginManagedProcessSession, trackChildProcess, terminateManagedChild } from './process-lifecycle.ts';
 import { DIARIZATION_ROOT, diarizationEnvironment, fileStamp, modelArtifacts } from './diarization-environment.ts';
+import { nativeSpeakerStatus, speakerEngine, speakersHelper } from './speaker-engine.ts';
 
 function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'`; }
 
@@ -63,6 +64,18 @@ export async function setupDiarization(options: { login: boolean; check: boolean
   const invoke = (command: string, args: string[], interactive = false) => run(command, args, { interactive, signal: options.signal });
   try {
     options.signal?.throwIfAborted();
+    if (speakerEngine() === 'native') {
+      // Core ML models from Hugging Face's public mirror: no Python, no account, no login.
+      if (!options.check) {
+        status('Downloading speaker models · about 21 MB, once…');
+        await invoke(speakersHelper(), ['--prepare']).catch(() => {
+          throw new Error('Could not download the speaker models. Check your connection, then run seashell setup --speakers again.');
+        });
+      }
+      const native = nativeSpeakerStatus();
+      return { ready: native.ready, stage: native.ready ? 'ready' : 'models-missing', detail: native.detail, model: native.model,
+        ...(native.ready ? {} : { nextStep: 'Run seashell setup --speakers to download the speaker models (about 21 MB).' }) };
+    }
     rmSync(environment.verificationPath, { force: true });
     let uv = Bun.which('uv');
     const brew = Bun.which('brew');

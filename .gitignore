@@ -54,3 +54,5 @@ docs/codebase-analysis/
 
 # Private local CI receipts and logs
 .ci-results/
+native/.build-speakers/
+native/speakers/.build/
