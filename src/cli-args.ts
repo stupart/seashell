@@ -61,6 +61,7 @@ export type MeetingCommand = {
     | { kind: 'merge'; ids: string[]; auto: boolean; dryRun: boolean; maxGapMinutes?: number }
     | { kind: 'template'; id: string; template?: string }
     | { kind: 'note'; id: string; note?: string }
+    | { kind: 'meeting-ai'; id: string; off?: boolean }
     | { kind: 'watch'; once: boolean }
     | { kind: 'consent'; decision: 'approve' | 'decline' }
     | { kind: 'autostart'; operation: 'enable' | 'disable' | 'status' };
@@ -496,6 +497,12 @@ function parseMeeting(args: string[]): MeetingCommand {
       }
       action = { kind: 'template', id: positional[0], ...(positional[1] === undefined ? {} : { template: positional[1] }) };
       break;
+    case 'ai':
+      if (!positional[0] || positional.length > 2 || (positional[1] !== undefined && !['on', 'off'].includes(positional[1]))) {
+        throw new Error('Usage: seashell meeting ai <id> [on|off]');
+      }
+      action = { kind: 'meeting-ai', id: positional[0], ...(positional[1] === undefined ? {} : { off: positional[1] === 'off' }) };
+      break;
     case 'note':
       if (!positional[0]) throw new Error('Usage: seashell meeting note <id> [text] (an empty text clears it)');
       action = { kind: 'note', id: positional[0], ...(positional.length > 1 ? { note: positional.slice(1).join(' ') } : {}) };
@@ -873,6 +880,7 @@ Meeting actions:
   meeting merge --auto [--dry-run] [--max-gap-minutes 15]  Find and join split meetings
   meeting template <id> [<name>|none|auto]  Choose the notes template for one meeting (auto: from its title)
   meeting note <id> [text]                  Tell the AI what matters in this meeting ("" clears it)
+  meeting ai <id> [on|off]                  No AI for one meeting: no notes or chat, hidden from agents
   meeting create <id> [--event-json <path>] [--mode streaming|post-session|hybrid]
   meeting enrich <id> [--mode <mode>] [--backend <backend>] [--model <exact-model>]
                       [--context <json>]

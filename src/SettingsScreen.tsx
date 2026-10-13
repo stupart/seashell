@@ -16,6 +16,8 @@ import { enableMeetingLaunchAtLogin } from './launch-at-login.ts';
 import { requestMeetAccessibilityPermission } from './meet-speakers.ts';
 import { microphonePermission } from './microphone-permission.ts';
 import { calendarPermission } from './calendar-permission.ts';
+import { join } from 'path';
+import { ensureTemplatesDirectory, PROFILE_FILE } from './meeting-templates.ts';
 
 const MENU_LABEL: Record<FeatureId, string> = {
   recorder: 'Recorder',
@@ -26,6 +28,7 @@ const MENU_LABEL: Record<FeatureId, string> = {
   'meet-names': 'Meet names',
   'speaker-separation': 'Who said what',
   'ai-notes': 'AI notes',
+  'notes-templates': 'Templates',
   calendar: 'Calendar titles',
 };
 
@@ -34,6 +37,7 @@ export interface SettingsActions {
   connectMeet?: (signal: AbortSignal) => Promise<{ detail: string }>;
   allowMicrophone?: (signal: AbortSignal) => Promise<{ authorization: string; detail: string }>;
   allowCalendar?: (signal: AbortSignal) => Promise<{ authorization: string; detail: string }>;
+  openTemplates?: (directory: string) => void;
 }
 
 /** Everything Seashell can do, whether it works right now, and one key to fix it. */
@@ -77,6 +81,20 @@ export default function SettingsScreen(props: {
   const run = async (action: FeatureAction) => {
     if (action === 'open-speakers') { props.onOpenSpeakers(); return; }
     if (action === 'open-ai') { props.onOpenAI(); return; }
+    if (action === 'open-templates') {
+      try {
+        const directory = ensureTemplatesDirectory(props.libraryDir);
+        (props.actions?.openTemplates ?? ((folder: string) => {
+          spawnSync('/usr/bin/open', [folder], { stdio: 'ignore', timeout: 5_000 });
+          spawnSync('/usr/bin/open', ['-t', join(folder, PROFILE_FILE)], { stdio: 'ignore', timeout: 5_000 });
+        }))(directory);
+        setMessage(`Opened ${directory}. Edit "About me", then any template; each ## heading is a section.`);
+      } catch (cause) {
+        setMessage(cause instanceof Error ? cause.message : String(cause));
+      }
+      setRefresh(value => value + 1);
+      return;
+    }
     const controller = new AbortController(); request.current = controller;
     setBusy(true); setMessage(undefined);
     try {

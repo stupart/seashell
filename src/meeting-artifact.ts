@@ -90,6 +90,16 @@ export interface MeetingAiSettings {
   template?: string;
   /** Guidance for this meeting only: "focus on pricing". */
   note?: string;
+  /** No AI for this meeting: no live analysis, notes or chat, and agents are refused it. */
+  off?: boolean;
+}
+
+/** A meeting the owner turned AI off for. Every path that would send it to a model throws this. */
+export class MeetingAiOffError extends Error {
+  constructor() {
+    super('AI is off for this meeting. Turn it on with [N] in the meeting, or: seashell meeting ai <id> on');
+    this.name = 'MeetingAiOffError';
+  }
 }
 
 export interface MeetingProvisionalOverlay {
@@ -350,7 +360,36 @@ function parseAiSettings(value: unknown): MeetingAiSettings | undefined {
   const ai = value as Record<string, unknown>;
   const template = optionalString(ai.template, 'meeting AI template');
   const note = optionalString(ai.note, 'meeting AI note');
-  return { ...(template === undefined ? {} : { template }), ...(note === undefined ? {} : { note }) };
+  if (ai.off !== undefined && typeof ai.off !== 'boolean') throw new Error('meeting AI off must be true or false');
+  return {
+    ...(template === undefined ? {} : { template }),
+    ...(note === undefined ? {} : { note }),
+    ...(ai.off === true ? { off: true } : {}),
+  };
+}
+
+/**
+ * The owner's AI choices for a meeting, read straight from meeting.json without
+ * reconciling it against the transcript — for keeping them across a rewrite.
+ */
+export function readMeetingAiSettings(libraryDir: string, transcriptId: string): MeetingAiSettings | undefined {
+  try {
+    return readMeetingAiSettingsAt(dirname(meetingArtifactPath(libraryDir, transcriptId)));
+  } catch {
+    return undefined;
+  }
+}
+
+/** The same, for a transcript folder already in hand. */
+export function readMeetingAiSettingsAt(directory: string): MeetingAiSettings | undefined {
+  try {
+    const path = join(directory, 'meeting.json');
+    if (!existsSync(path)) return undefined;
+    const ai = parseAiSettings((JSON.parse(readFileSync(path, 'utf8')) as { ai?: unknown }).ai);
+    return ai && Object.keys(ai).length ? ai : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): MeetingArtifact {

@@ -515,7 +515,8 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       return 0;
     }
     case 'template':
-    case 'note': {
+    case 'note':
+    case 'meeting-ai': {
       const { record } = findTranscriptRecord(libraryDir, command.action.id);
       const artifact = loadMeetingArtifact(libraryDir, record.id) ?? createMeetingArtifact(record);
       const ai = { ...artifact.ai };
@@ -533,7 +534,13 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
         if (command.action.note.trim()) ai.note = command.action.note.trim();
         else delete ai.note;
       }
-      const changed = command.action.kind === 'template' ? command.action.template !== undefined : command.action.note !== undefined;
+      if (command.action.kind === 'meeting-ai' && command.action.off !== undefined) {
+        if (command.action.off) ai.off = true;
+        else delete ai.off;
+      }
+      const changed = command.action.kind === 'template' ? command.action.template !== undefined
+        : command.action.kind === 'note' ? command.action.note !== undefined
+          : command.action.off !== undefined;
       const next = { ...artifact, ai };
       if (!Object.keys(ai).length) delete (next as { ai?: unknown }).ai;
       if (changed) saveMeetingArtifact(libraryDir, next);
@@ -542,11 +549,12 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
         ...(next.calendar?.title ? { calendarTitle: next.calendar.title } : {}),
         ...(next.ai?.template ? { template: next.ai.template } : {}),
       }).template;
-      print(command.json ? JSON.stringify({ id: record.id, template: selected?.name ?? null, chosen: next.ai?.template ?? 'auto', note: next.ai?.note ?? null }, null, 2) : [
+      print(command.json ? JSON.stringify({ id: record.id, ai: next.ai?.off ? 'off' : 'on', template: selected?.name ?? null, chosen: next.ai?.template ?? 'auto', note: next.ai?.note ?? null }, null, 2) : [
         `${next.title}`,
+        `  AI: ${next.ai?.off ? 'off — no notes or chat, and agents are refused it' : 'on'}`,
         `  Template: ${selected?.name ?? 'none'}${next.ai?.template ? '' : ' (from the title)'}`,
         `  Note: ${next.ai?.note ?? '—'}`,
-        ...(changed ? ['Applies the next time notes run: seashell meeting enrich ' + record.id] : []),
+        ...(changed && !next.ai?.off ? ['Applies the next time notes run: seashell meeting enrich ' + record.id] : []),
       ].join('\n'));
       return 0;
     }

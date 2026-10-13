@@ -36,6 +36,7 @@ import {
 } from './meeting-automation.ts';
 import {
   createMeetingArtifact,
+  readMeetingAiSettings,
   loadMeetingArtifact,
   saveMeetingArtifact,
 } from './meeting-artifact.ts';
@@ -542,11 +543,14 @@ export class AutomaticMeetingWatchService {
     const saved = saveTranscriptRecord(this.#libraryDir, record);
     capture.store.setStatus('completed', 'automatic-meeting-finalized');
     capture.store.attachTo(saved.directory);
+    // The owner may have chosen a template, a note, or no AI while the call ran.
+    const ai = readMeetingAiSettings(this.#libraryDir, record.id);
     let artifact = createMeetingArtifact(record, {
       mode: this.#config.meeting?.mode ?? 'hybrid',
       ...(candidate.calendar === undefined ? {} : { calendar: candidate.calendar }),
       maxObserverRuns: this.#config.meeting?.maxObserverRuns,
     });
+    if (ai) artifact = { ...artifact, ai };
     saveMeetingArtifact(this.#libraryDir, artifact);
     // Live analysis only helps while someone watches the call. After a
     // background meeting, replaying every window first would add minutes (19
@@ -558,7 +562,7 @@ export class AutomaticMeetingWatchService {
       const reconciliation = resolveMeetingRoute(this.#config.meeting, 'reconciliation');
       const hasRequiredRoutes = (mode === 'post-session' || observer) &&
         (mode === 'streaming' || reconciliation);
-      if (hasRequiredRoutes) {
+      if (hasRequiredRoutes && !artifact.ai?.off) {
         artifact = await this.#dependencies.enrich(this.#libraryDir, record.id, {
           mode,
           routes: {

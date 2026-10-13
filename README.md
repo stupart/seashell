@@ -595,6 +595,13 @@ Numbers mentioned, with their period.
 What we asked for, and what they offered.
 ```
 
+In the app, press **N** in any meeting for its notes setup: ←→ changes the
+template, Enter writes a note for that meeting, and the last row turns AI off
+for it. A meeting with AI off is sent to no model — no live analysis, notes or
+chat — and the meetings MCP server lists it as private without its content
+(`seashell meeting ai <id> off` does the same from a script). Choices made
+while a background meeting is still recording carry into its final notes.
+
 `About me.md` in the same folder is read before every meeting: who you are,
 who you meet, and how you like notes written. Templates, the profile and the
 meeting note shape focus and wording only; they cannot loosen the rule that
