@@ -72,7 +72,19 @@ if [ ! -x "$SPEAKERS_BINARY" ] || \
     # fetches the release; Homebrew stages its source and sets
     # SEASHELL_FLUIDAUDIO_PATH, so the build never needs the network. Optional:
     # without it Sea Shell uses the Python engine, or none.
-    if swift build -c release --disable-sandbox --package-path native/speakers \
+    SPEAKERS_PACKAGE=native/speakers
+    if [ -n "${SEASHELL_FLUIDAUDIO_PATH:-}" ]; then
+        # Offline build from staged source. Leave out the remote pin, and the
+        # text-normalization binary target: SwiftPM downloads a declared binary
+        # target (87 MB) even when the trait that uses it is off.
+        SPEAKERS_PACKAGE="$BUILD_DIR/speakers-package"
+        mkdir -p "$SPEAKERS_PACKAGE"
+        cp -R native/speakers/Package.swift native/speakers/Sources "$SPEAKERS_PACKAGE/"
+        for manifest in "$SEASHELL_FLUIDAUDIO_PATH"/Package*.swift; do
+            perl -0pi -e 's/\.(?:binaryTarget|target|trait)\(\s*name:\s*"NemoTextProcessing"(?:[^()]++|(\((?:[^()]++|(?1))*+\)))*+\),?//g; s/\.default\(enabledTraits: \["NemoTextProcessing"\]\)/.default(enabledTraits: [])/g' "$manifest"
+        done
+    fi
+    if swift build -c release --disable-sandbox --package-path "$SPEAKERS_PACKAGE" \
         --scratch-path native/.build-speakers >"$BUILD_DIR/speakers.log" 2>&1; then
         cp native/.build-speakers/release/SeashellSpeakers "$BUILD_DIR/seashell-speakers"
         codesign --force --sign - --identifier com.humain.seashell.speakers "$BUILD_DIR/seashell-speakers" 2>/dev/null
