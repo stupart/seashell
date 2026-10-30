@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
+import { KeyBar, ScreenTitle } from './tui-chrome.tsx';
 import { AI_PROVIDERS, MEETING_ROLES, currentMeetingRoutes, meetingRolesPatch, roleRoute, suggestedMeetingRoutes,
   type MeetingRole, type MeetingRoutes } from './ai-provider.ts';
 import type { SeashellMeetingConfig } from './config.ts';
@@ -138,9 +139,9 @@ export default function AIProviderPicker(props: {
   else entries = ['Provider default', ...(chosen?.efforts ?? [])];
   const offset = Math.max(0, Math.min(index - 3, entries.length - 7));
   const selectedProvider = screen === 'providers' ? AI_PROVIDERS[index]! : provider;
-  return <Box flexDirection="column" paddingX={1} paddingY={1}>
-    <Text bold color="cyan">Meeting AI{screen === 'roles' ? ' · models by role' : ` · ${suggesting ? 'Suggested setup' : roleName}`}</Text>
-    {props.recording && <Text color="red">Recording continues · Esc to return</Text>}
+  return <Box flexDirection="column" paddingX={1}>
+    <ScreenTitle name={`AI for notes and chat · ${screen === 'roles' ? 'models by role' : suggesting ? 'Suggested setup' : roleName}`} />
+    {props.recording && <Text color="yellow">Recording continues · Esc to return</Text>}
     {screen === 'roles' && <Text dimColor>Each role can use its own provider, model and effort.</Text>}
     {screen === 'models' && <Text dimColor>{loadingModels ? 'Reading available models…' : `${provider.name} · ${models.length} discovered models`}</Text>}
     {screen === 'effort' && <Text>{chosen?.name} · reasoning effort</Text>}
@@ -162,6 +163,7 @@ export default function AIProviderPicker(props: {
       {notice && screen === 'roles' && <Text color="green">{notice}</Text>}
       {error && <Text color="red">{error.slice(0, 250)}</Text>}
     </Box>
-    <Box marginTop={1}><Text dimColor>{screen === 'custom' ? 'Enter use model · Esc back' : '↑↓ choose · Enter select · r refresh · Esc back'}</Text></Box>
+    <Box marginTop={1} flexShrink={0}><KeyBar help={false} columns={78} hints={screen === 'custom' ? [['Enter', 'use model'], ['Esc', 'back']]
+      : [['↑↓', 'choose'], ['Enter', 'select'], ['r', 'refresh'], ['Esc', 'back']]} /></Box>
   </Box>;
 }

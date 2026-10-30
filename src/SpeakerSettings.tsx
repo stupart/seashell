@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
-import { KeyBar } from './tui-chrome.tsx';
+import { KeyBar, ScreenTitle } from './tui-chrome.tsx';
 import { diarizationEnvironment, diarizationStatus } from './diarization-environment.ts';
 import { setupDiarization, type SpeakerSetupResult } from './diarization-setup.ts';
 import { checkMeetConnection, requestMeetAccessibilityPermission, type MeetBrowserMode, type MeetProbe } from './meet-speakers.ts';
@@ -84,8 +84,7 @@ export default function SpeakerSettings(props: {
   });
   const selected = entries[Math.min(index, entries.length - 1)]!;
   return <Box flexDirection="column" paddingX={1} {...(props.rows ? { height: props.rows } : {})} overflow="hidden">
-    <Text wrap="truncate-end">🐚 <Text bold color="cyan">Sea Shell</Text>  <Text bold>Speaker names</Text></Text>
-    <Text dimColor wrap="truncate-end">{'─'.repeat(Math.max(1, props.columns - 2))}</Text>
+    <ScreenTitle name="Speaker names" />
     {entries.map(([id, label, value], i) => <Text key={id} inverse={i === index} wrap="truncate-end">
       {i === index ? '› ' : '  '}{label.padEnd(32)}{value}
     </Text>)}

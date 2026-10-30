@@ -1,3 +1,4 @@
+import type { MeetProbe } from './meet-speakers.ts';
 import { setTimeout as sleep } from 'timers/promises';
 import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync, statSync } from 'node:fs';
@@ -185,7 +186,11 @@ export class AutomaticMeetingWatchService {
       ? await this.#dependencies.readMeet(browser, this.#calendarAbort.signal).catch(() => ({
         state: 'unavailable' as const, detail: 'Could not check Google Meet. Check the connection in Speakers.',
       })) : undefined;
-    if (meet && ['permission', 'ambiguous', 'unavailable'].includes(meet.state)) {
+    // Any browser window Accessibility cannot read lands here: with no call
+    // running that is routine, and a person cannot act on it. Lost access is not.
+    const routine = meet?.state === 'unavailable' && (meet as MeetProbe).accessibilityTrusted === true &&
+      !this.#active && this.#controller.state.phase === 'watching';
+    if (meet && !routine && ['permission', 'ambiguous', 'unavailable'].includes(meet.state)) {
       if (this.#meetWarning !== meet.detail) this.emit({ type: 'watch.warning', at: now.toISOString(), message: meet.detail });
       this.#meetWarning = meet.detail;
     } else this.#meetWarning = undefined;

@@ -18,7 +18,7 @@ import { microphonePermission } from './microphone-permission.ts';
 import { calendarPermission } from './calendar-permission.ts';
 import { join } from 'path';
 import { ensureTemplatesDirectory, PROFILE_FILE } from './meeting-templates.ts';
-import { KeyBar, type Hint } from './tui-chrome.tsx';
+import { KeyBar, ScreenTitle, type Hint } from './tui-chrome.tsx';
 
 const MENU_LABEL: Record<FeatureId, string> = {
   recorder: 'Recorder',
@@ -180,12 +180,9 @@ export default function SettingsScreen(props: {
   ];
 
   return <Box flexDirection="column" paddingX={1} {...(props.rows ? { height: props.rows } : {})} overflow="hidden">
-    <Text wrap="truncate-end">🐚 <Text bold color="cyan">Sea Shell</Text>  <Text bold>Settings</Text>
-      {statuses ? <Text color={needs.length ? 'yellow' : 'green'}>
-        {`  ${needs.length ? `${needs.length} ${needs.length === 1 ? 'thing needs' : 'things need'} you` : 'Everything needed to record meetings works'}`}
-      </Text> : null}
-    </Text>
-    <Text dimColor wrap="truncate-end">{'─'.repeat(Math.max(1, props.columns - 2))}</Text>
+    <ScreenTitle name="Settings" detail={statuses ? <Text color={needs.length ? 'yellow' : 'green'}>
+      {`  ${needs.length ? `${needs.length} ${needs.length === 1 ? 'thing needs' : 'things need'} you` : 'Everything needed to record meetings works'}`}
+    </Text> : undefined} />
     <Box flexDirection={compact ? 'column' : 'row'} flexGrow={1} overflow="hidden">
       {menu}
       <Box flexDirection="column" flexGrow={1} minWidth={0} {...(compact ? { marginTop: 1 } : { paddingLeft: 1 })}>

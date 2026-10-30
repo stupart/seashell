@@ -51,3 +51,24 @@ test('meeting answers and claims expose the exact cited passage, without unrelat
   expect(stale).toContain('Source text changed');
   expect(stale).not.toContain('masquerade');
 });
+
+test('notes keep every decision and action, and drop only what a template section already says', () => {
+  const record = createTranscriptRecord({ transcript: [{ id: 's1', start: 5, end: 7, text: 'We settled it.' }], speakers: [] }, { id: 'kept' });
+  const artifact = createMeetingArtifact(record);
+  const claim = (id: string, type: 'decision' | 'action_item', text: string) => ({ id, type, text, evidenceSegmentIds: ['s000001'], confidence: 0.9 });
+  artifact.analysis = {
+    final: true, summary: 'Settled.', runId: 'r', createdAt: new Date().toISOString(),
+    claims: [
+      claim('a', 'decision', 'Ship on Friday.'),
+      claim('b', 'action_item', 'Send the security summary.'),
+      claim('c', 'action_item', 'Book the kickoff room.'),
+    ],
+    notes: [{ heading: 'Next steps', items: [{ text: 'You send the security summary by Friday.', evidenceSegmentIds: ['s000001'] }] }],
+  };
+  const lines = meetingViewLines(artifact, 'notes');
+  // Citing the same passage as a note is not repeating it.
+  expect(lines).toContain('- Ship on Friday.');
+  expect(lines).toContain('- Book the kickoff room.');
+  expect(lines).not.toContain('- Send the security summary.');
+  expect(lines.indexOf('# Decisions')).toBeLessThan(lines.indexOf('# Next steps'));
+});

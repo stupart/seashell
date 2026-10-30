@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
+import { readBackgroundWatchStatus } from '../src/background-watch-status.ts';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -482,6 +483,21 @@ test('a call that drops and rejoins within the resume window stays one meeting e
   expect(state.events.map(e => e.type).filter(type => type.startsWith('meeting.'))).toEqual([
     'meeting.started', 'meeting.capture-finished', 'meeting.resumed', 'meeting.capture-finished', 'meeting.ready',
   ]);
+});
+
+test('an unreadable browser window is no warning with no call running, but lost access still is', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-idle-warning-'));
+  roots.push(root);
+  const { state, service } = resumableWatch(root);
+  try {
+    state.probe = { state: 'unavailable', detail: 'A browser window does not expose its page through Accessibility.',
+      source: 'google-meet-accessibility', accessibilityTrusted: true };
+    await service.pollOnce();
+    expect(readBackgroundWatchStatus(root, { nowUnixMs: state.now })?.warning).toBeUndefined();
+    state.probe = { state: 'permission', detail: 'Accessibility access was removed.', source: 'google-meet-accessibility' };
+    await service.pollOnce();
+    expect(readBackgroundWatchStatus(root, { nowUnixMs: state.now })?.warning).toBe('Accessibility access was removed.');
+  } finally { await service.shutdown(); }
 });
 
 test('a paused meeting finalizes once its resume window passes', async () => {

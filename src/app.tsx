@@ -39,7 +39,7 @@ import {
 import { chatWithMeeting, enrichMeeting } from './meeting-enrichment.ts';
 import { Chalk } from 'chalk';
 import { HEADING, meetingViewLines, type MeetingView } from './meeting-tui.ts';
-import { HELP_ROWS, KeyBar, Sheet, type Hint } from './tui-chrome.tsx';
+import { HELP_ROWS, HelpRow, KeyBar, Sheet, type Hint } from './tui-chrome.tsx';
 import { transcriptRows, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
   renderText,
@@ -277,6 +277,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [speakerSelection, setSpeakerSelection] = useState(0);
   const [renameState, setRenameState] = useState<RenameState | null>(null);
   const [speakerPickerOpen, setSpeakerPickerOpen] = useState(false);
+  const [confirmRewrite, setConfirmRewrite] = useState(false);
   const [jumpTo, setJumpTo] = useState<string | null>(null);
   const [exportMode, setExportMode] = useState(false);
   const [helpMode, setHelpMode] = useState(false);
@@ -358,7 +359,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       label: entry.title,
       entry,
     })),
-  ], [paused, visibleEntries]);
+  ], [paused, visibleEntries, watchOwnership]);
 
   // Reload an open background transcript when the watcher publishes it.
   useEffect(() => {
@@ -369,9 +370,11 @@ export default function App(props: { libraryDir?: string } = {}) {
     } catch { /* The user may have just removed this entry. */ }
   }, [libraryEntries, libraryRoot, watchOwnership, view, selectedRecord?.id, processing]);
 
+  // The cursor stays on its meeting when a new one arrives above it.
   useEffect(() => {
-    setSelectionIndex((current) => moveSelection(current, 0, navigationItems.length));
-  }, [navigationItems.length]);
+    const open = navigationItems.findIndex((item) => item.kind === 'record' && item.entry.id === selectedRecord?.id);
+    setSelectionIndex((current) => (open >= 0 ? open : moveSelection(current, 0, navigationItems.length)));
+  }, [navigationItems, selectedRecord?.id]);
 
   const cleanupFile = useCallback((path: string) => {
     try {
@@ -795,8 +798,9 @@ export default function App(props: { libraryDir?: string } = {}) {
       setSelectedRecord(findTranscriptRecord(libraryRoot, entry.id).record);
       setSelectedMeeting(meeting);
       setView('record');
-      // Notes are what people come back for; the transcript is there until they exist.
-      setMeetingView(meeting?.analysis ? 'notes' : 'transcript');
+      // Notes are what people come back for, and where they are asked for.
+      // While a call is running there are no notes yet, only its words.
+      setMeetingView(meeting && entry.captureState !== 'recording' && entry.captureState !== 'processing' ? 'notes' : 'transcript');
       setTranscriptScroll(0);
       setFollowLiveTranscript(true);
       setSpeakerSelection(0);
@@ -857,6 +861,8 @@ export default function App(props: { libraryDir?: string } = {}) {
   }, [watchOwnership, view, activeBackgroundEntry, libraryEntries, openRecord]);
   useEffect(() => {
     if (watchOwnership !== 'external' || !activeBackgroundEntry || followedBackgroundId.current === activeBackgroundEntry.id) return;
+    // Never swap the meeting out from under someone who is typing about it.
+    if (chatInputState || renameState || searchMode) return;
     if (view === 'live' || selectedRecord?.id === followedBackgroundId.current || selectedRecord?.id === openedOnLaunch.current) {
       openRecord(activeBackgroundEntry);
       setSelectionIndex(Math.max(0, navigationItems.findIndex(item => item.kind === 'record' && item.entry.id === activeBackgroundEntry.id)));
@@ -892,12 +898,12 @@ export default function App(props: { libraryDir?: string } = {}) {
     visibleTranscriptScroll + visibleRows,
   );
   // Opened from a search: land on the words that were searched for.
+  // The rows rewrap once the list closes, so this holds until the person moves.
   useEffect(() => {
     if (!jumpTo || !displayRows.length) return;
     const needle = jumpTo.toLocaleLowerCase();
     const row = displayRows.findIndex((text) => stripVTControlCharacters(text).toLocaleLowerCase().includes(needle));
     if (row >= 0) setTranscriptScroll(Math.max(0, row - 1));
-    setJumpTo(null);
   }, [jumpTo, displayRows]);
   const configuredMeetingRoutes = useMemo(() => ({
     observer: resolveMeetingRoute(config.meeting, 'observer'),
@@ -1161,6 +1167,8 @@ export default function App(props: { libraryDir?: string } = {}) {
   useEffect(() => {
     const calendar = config.meeting?.calendar;
     if (!calendar?.enabled || (calendar.policy ?? 'ask') === 'off') return;
+    // The background recorder reads the calendar itself; a second reader here only adds a way to fail.
+    if (watchOwnership === 'external' || watchOwnership === 'checking') return;
     let cancelled = false;
     let polling = false;
     let retryAtUnixMs = 0;
@@ -1186,7 +1194,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       } catch (calendarError) {
         if (!cancelled) {
           retryAtUnixMs = Date.now() + 5 * 60_000;
-          setNotice(calendarError instanceof Error ? calendarError.message : String(calendarError));
+          setError(calendarError instanceof Error ? calendarError.message : String(calendarError));
         }
       } finally {
         polling = false;
@@ -1199,7 +1207,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       calendarAbort.abort();
       clearInterval(interval);
     };
-  }, [config.meeting?.calendar]);
+  }, [config.meeting?.calendar, watchOwnership]);
 
   useEffect(() => {
     if (!calendarSuggestion || liveMeeting || view !== 'live') return;
@@ -1578,6 +1586,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
     setError(null);
     setNotice(null);
+    setJumpTo(null);
     if (chatInputState) {
       if (key.escape) {
         setChatInputState(null);
@@ -1692,6 +1701,12 @@ export default function App(props: { libraryDir?: string } = {}) {
       };
       const format = formats[input.toLowerCase()];
       if (format) performExport(format);
+      return;
+    }
+
+    if (confirmRewrite) {
+      setConfirmRewrite(false);
+      if (input.toLowerCase() === 'y') runCurrentMeetingEnrichment(view === 'live');
       return;
     }
 
@@ -1881,6 +1896,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         setNotice('AI is off for this meeting. Press N to turn it on.');
         return;
       }
+      if (currentMeeting.analysis?.final) { setConfirmRewrite(true); return; }
       runCurrentMeetingEnrichment(view === 'live');
       return;
     }
@@ -1928,7 +1944,8 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
     if (input === 'r' && currentRecord?.speakers.length) {
-      setSpeakerSelection(0);
+      // Start on the first person still without a real name.
+      setSpeakerSelection(Math.max(0, currentRecord.speakers.findIndex((speaker) => /^Remote speaker \d/u.test(speaker.label))));
       setSpeakerPickerOpen(true);
       return;
     }
@@ -1941,12 +1958,12 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
     if (input === ' ' && watchOwnership === 'external' && !activeBackgroundEntry) {
-      setNotice('Seashell records calls by itself. To record anything else: seashell meeting autostart disable');
+      setNotice('Recording starts by itself when you join a call. Recording by hand is not available yet.');
       return;
     }
     if ((input === ' ' || key.return) && view === 'live' && !historyOpen) {
       if (pausedRef.current && watchOwnership === 'external') {
-        setNotice('Seashell records calls by itself. To record anything else: seashell meeting autostart disable');
+        setNotice('Recording starts by itself when you join a call. Recording by hand is not available yet.');
         return;
       }
       if (pausedRef.current && automaticCandidate) {
@@ -2025,7 +2042,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         (status.state === 'attention' && (status.id === 'microphone' || status.id === 'computer-audio'))))); })
       .catch(() => {});
     return () => controller.abort();
-  }, [settingsOpen, libraryRoot]);
+  }, [settingsOpen, libraryRoot, backgroundWatch?.phase]);
 
   const connectMeetReader = () => {
     updateMeetingConfig({ speakerBrowser: 'auto' });
@@ -2098,15 +2115,16 @@ export default function App(props: { libraryDir?: string } = {}) {
     : atHome && attention.length ? [[',', 'fix setup'], ['f', 'import']]
     : !navigationItems.some((item) => item.kind === 'record') && historyOpen ? [['f', 'import'], ['/', 'search']]
     : historyOpen ? [['↑↓', 'choose'], ['Enter', 'read'], ['/', 'search'], ['f', 'import']]
+    : currentRecordBusy ? [['↑↓', 'scroll'], ...(followLiveTranscript ? [] : [['l', 'latest'] as Hint]), ['h', 'meetings'], ['i', 'audio']]
     : showingLiveTranscript ? [['↑↓', 'scroll'], ...(followLiveTranscript ? [] : [['l', 'latest'] as Hint]), ['h', 'meetings'], ['i', 'audio']]
     : !currentRecord?.transcript.length ? [['h', 'meetings'], ['f', 'import']]
     : !currentMeeting ? [['↑↓', 'scroll'], ['r', 'name speakers'], ['m', 'make it a meeting'], ['c', 'copy'], ['h', 'meetings']]
     : meetingView === 'notes' ? [
-      ...(hasNotes ? [['↑↓', 'scroll'], ['a', 'ask'], ['c', 'copy'], ['g', 'rewrite notes']] as Hint[] : [['g', 'write notes']] as Hint[]),
-      ['n', 'notes options'], ['h', 'meetings'],
+      ...(hasNotes ? [['↑↓', 'scroll'], ['h', 'meetings'], ['a', 'ask'], ['c', 'copy'], ['g', 'rewrite notes']] as Hint[] : [['g', 'write notes'], ['h', 'meetings']] as Hint[]),
+      ['n', 'notes options'],
     ]
-    : meetingView === 'chat' ? [['a', 'ask'], ['↑↓', 'scroll'], ['c', 'copy'], ['h', 'meetings']]
-    : [['↑↓', 'scroll'], ['r', 'name speakers'], ['a', 'ask'], ['e', 'export'], ['c', 'copy'], ['h', 'meetings']];
+    : meetingView === 'chat' ? [['a', 'ask'], ['h', 'meetings'], ['↑↓', 'scroll'], ['c', 'copy']]
+    : [['↑↓', 'scroll'], ['h', 'meetings'], ['r', 'name speakers'], ['a', 'ask'], ['e', 'export'], ['c', 'copy']];
 
   const list = (
     <Box width={layout.compact ? undefined : layout.sidebarWidth} flexGrow={layout.compact ? 1 : 0} flexShrink={0}
@@ -2119,7 +2137,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       {navigationItems.slice(sidebarStart, sidebarStart + layout.visibleLibraryItems).map((item, windowIndex) => {
         const index = sidebarStart + windowIndex;
         const selected = selectionIndex === index;
-        const rowWidth = (layout.compact ? terminal.columns - 2 : layout.sidebarWidth - 2) - 2;
+        const rowWidth = (layout.compact ? terminal.columns - 3 : layout.sidebarWidth - 2) - 2;
         const label = item.kind === 'record' ? meetingEntryRow(item.entry, rowWidth, new Date(statusNow),
           visibleEntries.some((other) => other.id !== item.entry.id && sameDay(other.createdAt, item.entry.createdAt))) : item.label;
         return <Text key={item.kind === 'record' ? item.entry.id : item.kind} inverse={selected} wrap="truncate-end"
@@ -2130,6 +2148,8 @@ export default function App(props: { libraryDir?: string } = {}) {
     </Box>
   );
 
+  const readerTotal = currentMeeting && meetingView !== 'transcript' ? auxiliaryMeetingLines.length : displayRows.length;
+  const readerScroll = currentMeeting && meetingView !== 'transcript' ? transcriptScroll : visibleTranscriptScroll;
   const searchHighlight = searchQuery.trim() && meetingView === 'transcript'
     ? new RegExp(searchQuery.trim().replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'giu') : undefined;
   const homeMessage = attention.length ? <>
@@ -2148,7 +2168,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const reader = (
     <Box flexDirection="column" flexGrow={1} minWidth={0} paddingLeft={layout.compact ? 0 : 1} overflow="hidden">
       {currentMeeting && !drawerOnly && (
-        <Box flexShrink={0} marginBottom={1}>
+        <Box flexShrink={0} marginBottom={1} justifyContent="space-between">
           <Text>
             {([
               ['notes', '1 Notes'],
@@ -2161,6 +2181,7 @@ export default function App(props: { libraryDir?: string } = {}) {
               </React.Fragment>
             ))}
           </Text>
+          {readerTotal > visibleRows && <Text dimColor>{Math.min(readerTotal, readerScroll + visibleRows)}/{readerTotal}</Text>}
         </Box>
       )}
       <Box ref={transcriptPaneRef} flexGrow={1} minHeight={2} flexDirection="column" overflow="hidden" aria-label="Transcript reader">
@@ -2217,7 +2238,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     })}
   </Sheet> : null;
   const helpSheet = helpMode ? <Sheet title="Keys">
-    {HELP_ROWS.map(([group, keys]) => <Text key={group} wrap="truncate-end"><Text bold>{group.padEnd(12)}</Text>{keys}</Text>)}
+    {HELP_ROWS.map(([group, keys]) => <HelpRow key={group} group={group} keys={keys} />)}
   </Sheet> : null;
   const audioSheet = audioHelpOpen ? <Sheet title="Is your audio being heard?">
     <Text>1. Quiet can just mean you are muted or nobody is speaking.</Text>
@@ -2230,7 +2251,8 @@ export default function App(props: { libraryDir?: string } = {}) {
     : renameState ? `Name for ${renameState.label}: ${renameState.input}█  Enter save · Esc cancel`
     : searchMode ? `Search: ${searchQuery}█  Enter choose · Esc clear`
     : exportMode ? 'Export: s SRT · v WebVTT · t text · j JSON · Esc cancel'
-    : confirmTrashId ? 'Move this meeting to Trash? It can be recovered. y yes · n no'
+    : confirmTrashId ? 'Trash this meeting?  y yes  n no'
+    : confirmRewrite ? 'Rewrite these notes? The old ones are kept in history.  y yes  n no'
     : notesSetup ? notesSetup.editing !== undefined ? 'Enter save · Esc cancel' : '↑↓ choose · ←→ change · Enter edit note · Esc done'
     : speakerPickerOpen ? '↑↓ choose · Enter name · Esc back'
     : helpMode ? '? or Esc close'
@@ -2285,31 +2307,37 @@ export default function App(props: { libraryDir?: string } = {}) {
     ...((consentOverRecord || recordingElsewhere) && summary && !quietlyDone ? [summary.headline] : []),
     ...(summary?.problems ?? []),
     ...(attention.length && !(view === 'live' && statusProps?.mode === 'watching') && !summary?.problems.length
-      ? [`${attention[0]!.label}: ${attention[0]!.summary} · , to fix`] : []),
+      ? [`${attention[0]!.label}: ${attention[0]!.summary} · ${attention[0]!.action ? ', to fix' : 'i audio help'}`] : []),
+    ...(currentMeeting?.status === 'failed' ? ['The notes failed · g to try again'] : []),
     ...(currentMeeting && meetingView === 'transcript' && reading && showSpeakers &&
       currentRecord?.speakers.some((speaker) => speaker.id === 'SYSTEM')
       ? [currentRecord.speakerAnalysis?.detail ?? 'Source labels only · v to set up speaker names'] : []),
   ];
   const toast = error ?? (copied ? 'Copied.' : notice) ?? undefined;
+  // Says the recorder is on, so a quiet screen never reads as a stopped one.
+  const standing = watchOwnership === 'external' && backgroundWatch?.phase === 'watching' && !recordingElsewhere && !attention.length
+    && !(summary && !quietlyDone && statusProps?.mode !== 'watching') ? 'Watching for calls'
+    : currentMeeting?.status === 'reconciling' || currentMeeting?.status === 'observing' ? 'writing notes…' : undefined;
 
   return (
     <Box flexDirection="column" paddingX={1} height={terminal.rows} overflow="hidden">
-      <Box flexShrink={0}>
+      <Box flexShrink={0} justifyContent="space-between">
         <Text wrap="truncate-end">
           🐚{layout.compact ? '' : <Text> <Text bold color="cyan">Sea Shell</Text></Text>}
           {heading.text ? '  ' : ''}
           <Text bold={Boolean(heading.color)} {...(heading.color ? { color: heading.color } : {})}>{heading.text}</Text>
           {summary?.detail && !layout.compact && !quietlyDone ? <Text dimColor>  {summary.detail}</Text> : null}
         </Text>
+        {standing && <Box flexShrink={0} marginLeft={2}><Text dimColor>{standing}</Text></Box>}
       </Box>
-      {problems.map((problem) => <Text key={problem} color="red" inverse wrap="truncate-end">{` ${problem} `}</Text>)}
-      <Text dimColor wrap="truncate-end">{'─'.repeat(Math.max(1, terminal.columns - 2))}</Text>
+      {problems.map((problem) => <Box key={problem} flexShrink={0}><Text color="red" inverse wrap="truncate-end">{` ${problem} `}</Text></Box>)}
+      <Box flexShrink={0}><Text dimColor wrap="truncate-end">{'─'.repeat(Math.max(1, terminal.columns - 2))}</Text></Box>
       {sheet ?? <Box flexDirection="row" flexGrow={1} overflow="hidden">
         {historyOpen && list}
         {!drawerOnly && reader}
       </Box>}
       <Box flexShrink={0}>
-        {prompt ? <Text color="yellow" wrap="truncate-end">{prompt}</Text>
+        {prompt ? <Text color={confirmTrashId ? 'red' : 'yellow'} wrap="truncate-start">{prompt}</Text>
           : processing ? <Text color="magenta" wrap="truncate-end">◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}</Text>
           : toast ? <Text color={error ? 'red' : 'green'}>{toast}</Text>
           : <KeyBar hints={hints} columns={terminal.columns - 2} />}

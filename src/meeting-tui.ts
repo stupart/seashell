@@ -53,6 +53,10 @@ function createClock(artifact: MeetingArtifact, record?: TranscriptRecord): (ids
   };
 }
 
+function wordsOf(text: string): Set<string> {
+  return new Set(text.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+}
+
 /** Lines starting with this are headings; wrappedMeetingRows keeps them, the app makes them bold. */
 export const HEADING = '# ';
 
@@ -99,16 +103,27 @@ export function meetingViewLines(
   const summary = artifact.analysis?.summary || (
     artifact.status === 'failed'
       ? 'The transcript is safe, but the notes failed. Press G to try again.'
+      : artifact.status === 'reconciling' ? 'Writing the notes…'
       : claims.length ? 'Notes so far. Press G for final notes.' : 'No notes yet. Press G to write them.'
   );
-  // A template is the layout the owner chose, so its sections come first. A
-  // claim citing the same passage as a section would only say it twice.
+  // Decisions and actions lead, so they are never a scroll away. A template is
+  // the layout the owner chose, so its sections follow. Anything saying what a
+  // section already says goes; what merely cites the same passage stays.
   const sections = artifact.analysis?.notes ?? [];
-  const cited = new Set(sections.flatMap((section) => section.items.flatMap((item) => item.evidenceSegmentIds)));
+  const said = sections.flatMap((section) => section.items.map((item) => wordsOf(item.text)));
+  const repeated = (text: string) => {
+    const words = wordsOf(text);
+    return said.some((other) => [...words].filter((word) => other.has(word)).length >= Math.max(2, words.size * 0.7));
+  };
+  const group = ([title, types]: [string, MeetingClaimType[]]) => {
+    const items = claims.filter((claim) => types.includes(claim.type) && !repeated(claim.text));
+    return items.length ? ['', `${HEADING}${title}`, ...items.map((claim) => bullet(claim.text, claim.evidenceSegmentIds))] : [];
+  };
   const stale = record && artifact.transcriptEvidence &&
     compareMeetingEvidence(artifact.transcriptEvidence, meetingEvidence(record)) !== 'same';
   return [
     summary,
+    ...CLAIM_GROUPS.slice(0, 2).flatMap(group),
     ...sections.flatMap((section) => [
       '',
       `${HEADING}${section.heading}`,
@@ -116,11 +131,7 @@ export function meetingViewLines(
         ? section.items.map((item) => bullet(item.text, item.evidenceSegmentIds))
         : ['- Not discussed.']),
     ]),
-    ...CLAIM_GROUPS.flatMap(([title, types]) => {
-      const group = claims.filter((claim) => types.includes(claim.type) &&
-        !claim.evidenceSegmentIds.some((id) => cited.has(id)));
-      return group.length ? ['', `${HEADING}${title}`, ...group.map((claim) => bullet(claim.text, claim.evidenceSegmentIds))] : [];
-    }),
+    ...CLAIM_GROUPS.slice(2).flatMap(group),
     ...(stale ? ['', 'The transcript changed since these notes. Press G to rewrite them.'] : []),
   ];
 }

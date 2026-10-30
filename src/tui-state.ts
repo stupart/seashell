@@ -45,7 +45,9 @@ export function meetingEntryRow(entry: TranscriptLibraryEntry, width: number, no
   const marker = entry.captureState === 'recording' ? '● ' : entry.captureState === 'processing' ? '◐ ' : '';
   const when = meetingWhen(entry.createdAt, now, withTime);
   const room = Math.max(4, width - when.length - 1 - marker.length);
-  const title = entry.title.length > room ? `${entry.title.slice(0, room - 1)}…` : entry.title.padEnd(room);
+  // Old live recordings are titled by their own date, which the row already shows.
+  const name = /^Live \d/u.test(entry.title) ? 'Live recording' : entry.title;
+  const title = name.length > room ? `${name.slice(0, room - 1)}…` : name.padEnd(room);
   return `${marker}${title} ${when}`;
 }
 
