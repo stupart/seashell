@@ -4,20 +4,27 @@ import Foundation
 
 // seashell-speakers: local speaker separation on the Neural Engine, no Python.
 //
-//   seashell-speakers <audio> [--channel-roles local,remote] [--num-speakers N |
-//                     --min-speakers N --max-speakers N]
-//   seashell-speakers --status     models present? (never touches the network)
-//   seashell-speakers --prepare    download the models once (about 21 MB)
+//   seashell-speakers <audio> [--engine community-1|nemotron3]
+//                     [--channel-roles local,remote]
+//                     [--num-speakers N | --min-speakers N --max-speakers N]
+//   seashell-speakers --status [--engine …]    models present? (never touches the network)
+//   seashell-speakers --prepare [--engine …]   download once (21 MB, or 190 MB for Nemotron 3)
 //
 // Output is the JSON scripts/diarize.py prints, so src/diarize.ts reads either:
 // { model, device, channels, turns: [{ start, end, speaker, role? }], speakers: [{ id, label }] }.
 // Measured on four AMI meetings: diarization error 10.0% against 8.8% for the
 // Python pipeline, about 5x faster, 21 MB of models instead of a 1 GB install.
+// NVIDIA's Nemotron 3 is the optional second engine: on the same meetings it put
+// the wrong name on 1.4% of words outside crosstalk against 4.7%, about 5x faster
+// again, for 190 MB of models and a cap of eight voices per channel.
 
 let modelName = "fluidaudio/speaker-diarization-coreml (pyannote community-1)"
 let requiredFiles = [
     "Segmentation.mlmodelc", "Embedding.mlmodelc", "PldaRho.mlmodelc", "FBank.mlmodelc", "plda-parameters.json",
 ]
+let nemotronModelName = "nvidia/nemotron-3-diarization (fast128, Core ML via FluidAudio)"
+// fast128 tied the offline preset on words and runs on the Neural Engine.
+let nemotronConfig = Nemotron3Config.fast128
 
 // FluidAudio writes profiling lines to stderr unasked, and Seashell shows this
 // helper's stderr as status. Keep the real stderr for our own words and send
@@ -65,6 +72,26 @@ func status(_ root: URL) -> [String: Any] {
         "model": modelName,
         "directory": root.appendingPathComponent("speaker-diarization").path,
         "nextStep": ready ? NSNull() : "Run: seashell setup --speakers",
+    ]
+}
+
+func nemotronDirectory(_ root: URL) -> URL {
+    root.appendingPathComponent("nemotron-3-diarization", isDirectory: true)
+}
+
+func nemotronReady(_ root: URL) -> Bool {
+    let directory = nemotronDirectory(root)
+    return ["\(nemotronConfig.hubSubdirectory)/\(nemotronConfig.modelFileName)", "learnable_sil_emb.bin"]
+        .allSatisfy { FileManager.default.fileExists(atPath: directory.appendingPathComponent($0).path) }
+}
+
+func nemotronStatus(_ root: URL) -> [String: Any] {
+    let ready = nemotronReady(root)
+    return [
+        "ready": ready,
+        "model": nemotronModelName,
+        "directory": nemotronDirectory(root).path,
+        "nextStep": ready ? NSNull() : "Run: seashell speakers use nemotron3",
     ]
 }
 
@@ -209,35 +236,55 @@ func round3(_ value: Double) -> Double { (value * 1000).rounded() / 1000 }
 
 // MARK: - Main
 
-let arguments = Array(CommandLine.arguments.dropFirst())
+var arguments = Array(CommandLine.arguments.dropFirst())
 let root = modelsRoot()
 
+// `--engine` picks the model everywhere, including --status and --prepare.
+var useNemotron = false
+if let index = arguments.firstIndex(of: "--engine") {
+    guard index + 1 < arguments.count else { fail("--engine needs a value") }
+    switch arguments[index + 1] {
+    case "community-1": break
+    case "nemotron3": useNemotron = true
+    default: fail("--engine must be community-1 or nemotron3")
+    }
+    arguments.removeSubrange(index...(index + 1))
+}
+
 if arguments == ["--version"] {
-    print("seashell-speakers 1 (FluidAudio 0.17.7)")
+    print("seashell-speakers 2 (FluidAudio 0.18.0)")
     exit(0)
 }
 if arguments == ["--status"] {
-    emit(status(root))
+    emit(useNemotron ? nemotronStatus(root) : status(root))
     exit(0)
 }
 if arguments == ["--prepare"] {
-    note("Downloading speaker models (about 21 MB)…")
+    note("Downloading speaker models (about \(useNemotron ? 190 : 21) MB)…")
     do {
-        _ = try await OfflineDiarizerModels.load(from: root)
+        if useNemotron {
+            _ = try await Nemotron3Models.loadFromHuggingFace(config: nemotronConfig, cacheDirectory: root)
+        } else {
+            _ = try await OfflineDiarizerModels.load(from: root)
+        }
     } catch {
         fail("Could not download the speaker models: \(error.localizedDescription)")
     }
-    emit(status(root))
-    exit(modelsReady(root) ? 0 : 1)
+    emit(useNemotron ? nemotronStatus(root) : status(root))
+    exit((useNemotron ? nemotronReady(root) : modelsReady(root)) ? 0 : 1)
 }
 
 let options = parse(arguments)
 guard let path = options.audio else {
-    fail("Usage: seashell-speakers <audio> [--channel-roles local,remote] [--num-speakers N | --min-speakers N --max-speakers N]")
+    fail("Usage: seashell-speakers <audio> [--engine community-1|nemotron3] [--channel-roles local,remote] [--num-speakers N | --min-speakers N --max-speakers N]")
 }
 guard FileManager.default.fileExists(atPath: path) else { fail("Audio file not found: \(path)") }
 // Separation runs after meetings, possibly offline: never download here.
-guard modelsReady(root) else { fail("Speaker models are not downloaded. Run: seashell setup --speakers", code: 2) }
+if useNemotron {
+    guard nemotronReady(root) else { fail("Nemotron 3 is not downloaded. Run: seashell speakers use nemotron3", code: 2) }
+} else {
+    guard modelsReady(root) else { fail("Speaker models are not downloaded. Run: seashell setup --speakers", code: 2) }
+}
 
 var config = OfflineDiarizerConfig.default
 // The accurate preset: a 10% segmentation step and no minimum segment, which
@@ -246,7 +293,8 @@ config.segmentation.stepRatio = 0.1
 config.embedding.minSegmentDurationSeconds = 0
 let fixed = (options.roles?.contains("local") ?? false) ? 1 : 0
 let modelled = options.roles.map { $0.filter { $0 != "local" }.count } ?? 1
-if modelled > 1 && (options.numSpeakers ?? options.minSpeakers ?? options.maxSpeakers) != nil {
+let constrained = (options.numSpeakers ?? options.minSpeakers ?? options.maxSpeakers) != nil
+if modelled > 1 && constrained {
     fail("Speaker-count options are ambiguous with multiple model-processed channels; provide one remote channel or omit the constraint")
 }
 if let exactly = options.numSpeakers {
@@ -259,11 +307,23 @@ if let exactly = options.numSpeakers {
     }
     config = config.withSpeakers(min: low, max: options.maxSpeakers.map { $0 - fixed })
 }
+// Nemotron 3 finds the count itself and takes no hint, so a stated count goes to community-1.
+if useNemotron && constrained {
+    note("Nemotron 3 takes no speaker count; using community-1 for this file.")
+    useNemotron = false
+    guard modelsReady(root) else { fail("Speaker models are not downloaded. Run: seashell setup --speakers", code: 2) }
+}
 
 note("Loading speaker models…")
 let manager = OfflineDiarizerManager(config: config)
+var nemotron: Nemotron3Diarizer?
 do {
-    manager.initialize(models: try await OfflineDiarizerModels.load(from: root))
+    // community-1 is also the fallback when Nemotron 3 fills all eight slots.
+    if modelsReady(root) { manager.initialize(models: try await OfflineDiarizerModels.load(from: root)) }
+    if useNemotron {
+        nemotron = Nemotron3Diarizer(config: nemotronConfig,
+            models: try await Nemotron3Models.loadFromHuggingFace(config: nemotronConfig, cacheDirectory: root))
+    }
 } catch {
     fail("Could not load the speaker models: \(error.localizedDescription). Run: seashell setup --speakers")
 }
@@ -281,33 +341,60 @@ if let roles = options.roles, roles.count != audio.count {
 note("Separating speakers…")
 var turns: [Turn] = []
 var speakers: [String: String] = [:]
+var usedModel = useNemotron ? nemotronModelName : modelName
+
+struct Span {
+    var start: Double
+    var end: Double
+    var speaker: String
+}
+
+func community1(_ samples: [Float]) async throws -> [Span] {
+    do {
+        return try await manager.process(audio: samples).segments.map {
+            Span(start: Double($0.startTimeSeconds), end: Double($0.endTimeSeconds), speaker: $0.speakerId)
+        }
+    } catch OfflineDiarizationError.noSpeechDetected {
+        return []
+    }
+}
 
 func separate(_ samples: [Float], role: String?) async throws {
-    let result: DiarizationResult
-    do {
-        result = try await manager.process(audio: samples)
-    } catch OfflineDiarizationError.noSpeechDetected {
-        return
+    var spans: [Span]
+    if let nemotron {
+        let (probabilities, frames) = try nemotron.processComplete(samples)
+        spans = Nemotron3Diarizer.segments(probabilities: probabilities, frameCount: frames).map {
+            Span(start: Double($0.startSeconds), end: Double($0.endSeconds), speaker: String($0.speakerIndex))
+        }
+        // Every slot taken means the call may have more people than the model
+        // can hold, and they would be merged. community-1 has no cap.
+        if Set(spans.map(\.speaker)).count >= nemotronConfig.numSpeakers, modelsReady(root) {
+            note("All eight speaker slots are in use; using community-1 for this channel.")
+            usedModel = modelName
+            spans = try await community1(samples)
+        }
+    } else {
+        spans = try await community1(samples)
     }
     var identities: [String: String] = [:]
-    for segment in result.segments.sorted(by: { $0.startTimeSeconds < $1.startTimeSeconds }) {
+    for span in spans.sorted(by: { $0.start < $1.start }) {
         let id: String
         let label: String
         if let role {
-            if identities[segment.speakerId] == nil {
-                identities[segment.speakerId] = "\(prefix(role))_\(String(format: "%02d", identities.count))"
+            if identities[span.speaker] == nil {
+                identities[span.speaker] = "\(prefix(role))_\(String(format: "%02d", identities.count))"
             }
-            id = identities[segment.speakerId]!
+            id = identities[span.speaker]!
             label = "\(role) \(Int(id.split(separator: "_").last!)! + 1)"
         } else {
-            if identities[segment.speakerId] == nil {
-                identities[segment.speakerId] = "SPEAKER_\(String(format: "%02d", identities.count))"
+            if identities[span.speaker] == nil {
+                identities[span.speaker] = "SPEAKER_\(String(format: "%02d", identities.count))"
             }
-            id = identities[segment.speakerId]!
+            id = identities[span.speaker]!
             label = id
         }
-        let start = max(0, Double(segment.startTimeSeconds))
-        turns.append(Turn(start: round3(start), end: round3(max(start, Double(segment.endTimeSeconds))), speaker: id, role: role))
+        let start = max(0, span.start)
+        turns.append(Turn(start: round3(start), end: round3(max(start, span.end)), speaker: id, role: role))
         speakers[id] = label
     }
 }
@@ -335,7 +422,7 @@ do {
 }
 
 emit([
-    "model": modelName,
+    "model": usedModel,
     "device": "ane",
     "channels": audio.count,
     "turns": coalesce(turns).map { turn -> [String: Any] in

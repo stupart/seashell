@@ -2,16 +2,16 @@
 import Foundation
 import PackageDescription
 
-// FluidAudio runs pyannote's community-1 speaker models on the Neural Engine.
-// Homebrew builds offline from the source tarball it stages and names in
+// FluidAudio runs the speaker models on the Neural Engine. Homebrew builds
+// offline from the source tarball it stages and names in
 // SEASHELL_FLUIDAUDIO_PATH; a checkout fetches the same pinned release.
-// `traits: []` leaves out its text-normalization binary, which diarization
-// does not use.
+// Naming only the Diarizer trait leaves out text-to-speech and the
+// text-normalization binary, which this helper does not use.
 let fluidAudio: Package.Dependency = {
     if let path = ProcessInfo.processInfo.environment["SEASHELL_FLUIDAUDIO_PATH"], !path.isEmpty {
-        return .package(path: path, traits: [])
+        return .package(path: path, traits: ["Diarizer"])
     }
-    return .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.17.7", traits: [])
+    return .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.18.0", traits: ["Diarizer"])
 }()
 
 let package = Package(

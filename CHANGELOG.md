@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — try Nemotron 3 on your own calls
+
+- FluidAudio 0.18.0. Its speaker code is now an opt-in package trait, so the
+  helper names the `Diarizer` trait; the old `traits: []` would have removed it.
+- `seashell-speakers --engine nemotron3` runs NVIDIA's Nemotron 3 (190 MB, eight
+  voices per channel). When all eight slots fill, or a speaker count is given,
+  that channel goes back to community-1, which has no cap.
+- `seashell speakers compare` runs it on past calls and builds a local page of
+  the lines where it disagrees with the saved speaker, with a clip of each to
+  listen to. Nothing saved changes, and private meetings are skipped.
+- `seashell speakers use nemotron3|community-1` switches new meetings. The
+  default stays community-1 until Nemotron 3 proves itself on real calls.
+
 ## Unreleased — your meetings in Claude Code and Codex
 
 - `seashell mcp` is a local, read-only MCP server over the meeting library:

@@ -81,7 +81,7 @@ if [ ! -x "$SPEAKERS_BINARY" ] || \
         mkdir -p "$SPEAKERS_PACKAGE"
         cp -R native/speakers/Package.swift native/speakers/Sources "$SPEAKERS_PACKAGE/"
         for manifest in "$SEASHELL_FLUIDAUDIO_PATH"/Package*.swift; do
-            perl -0pi -e 's/\.(?:binaryTarget|target|trait)\(\s*name:\s*"NemoTextProcessing"(?:[^()]++|(\((?:[^()]++|(?1))*+\)))*+\),?//g; s/\.default\(enabledTraits: \["NemoTextProcessing"\]\)/.default(enabledTraits: [])/g' "$manifest"
+            perl -0pi -e 's/\.(?:binaryTarget|target|trait)\(\s*name:\s*"NemoTextProcessing"(?:[^()]++|(\((?:[^()]++|(?1))*+\)))*+\),?//g; s/(\.default\(enabledTraits: \[)"NemoTextProcessing",\s*/$1/g' "$manifest"
         done
     fi
     if swift build -c release --disable-sandbox --package-path "$SPEAKERS_PACKAGE" \

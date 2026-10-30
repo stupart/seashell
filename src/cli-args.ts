@@ -113,6 +113,8 @@ export type CliCommand =
   | { kind: 'status'; json: boolean }
   | { kind: 'mcp'; action: 'serve' | 'install'; json: boolean }
   | { kind: 'templates'; json: boolean }
+  | { kind: 'speaker-compare'; ids: string[]; last?: number; open: boolean; json: boolean }
+  | { kind: 'speaker-use'; engine: 'native' | 'nemotron3'; json: boolean }
   | { kind: 'setup'; autostart: boolean; json: boolean }
   | { kind: 'speaker-setup'; login: boolean; check: boolean; json: boolean }
   | { kind: 'update'; check: boolean; json: boolean }
@@ -757,6 +759,30 @@ export function parseCliArgs(args: string[]): CliCommand {
     if (unknown.length) throw new Error('Usage: seashell templates [--json]');
     return { kind: 'templates', json: args.includes('--json') };
   }
+  if (args[0] === 'speakers') {
+    const usage = 'Usage: seashell speakers compare [<id> ...] [--last <n>] [--open] [--json] | seashell speakers use <nemotron3|community-1> [--json]';
+    const json = args.includes('--json');
+    const rest = args.slice(1).filter((arg) => arg !== '--json');
+    if (rest[0] === 'use' && rest.length === 2) {
+      if (rest[1] === 'nemotron3') return { kind: 'speaker-use', engine: 'nemotron3', json };
+      if (rest[1] === 'community-1') return { kind: 'speaker-use', engine: 'native', json };
+      throw new Error(usage);
+    }
+    if (rest[0] !== 'compare') throw new Error(usage);
+    const ids: string[] = [];
+    let last: number | undefined;
+    let open = false;
+    for (let index = 1; index < rest.length; index += 1) {
+      const argument = rest[index]!;
+      if (argument === '--open') open = true;
+      else if (argument === '--last') {
+        last = Number(rest[index += 1]);
+        if (!Number.isSafeInteger(last) || last < 1) throw new Error(usage);
+      } else if (argument.startsWith('-')) throw new Error(usage);
+      else ids.push(argument);
+    }
+    return { kind: 'speaker-compare', ids, ...(last === undefined ? {} : { last }), open, json };
+  }
   if (args[0] === 'status') {
     const unknown = args.slice(1).filter((arg) => arg !== '--json');
     if (unknown.length) throw new Error(`Unknown status option: ${unknown[0]}`);
@@ -821,6 +847,8 @@ Usage:
   seashell mcp                              Read-only meetings server for Claude Code/Codex (stdio)
   seashell mcp install [--json]             Add that server and its skill to Claude Code and Codex
   seashell templates [--json]               Your notes templates and "About me", in an editable folder
+  seashell speakers compare [--last <n>]    Try Nemotron 3 on past calls and listen where the engines disagree
+  seashell speakers use <engine>            Separate voices with nemotron3 or community-1
   seashell doctor [--json]                  Check dependencies and models
   seashell capabilities [--json]            Describe optional engine capabilities
   seashell update [--check] [--json]        Update Sea Shell or show package-manager guidance
