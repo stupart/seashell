@@ -23,7 +23,7 @@ test('meeting views stay concise and show only relevant artifact layers', () => 
     }],
   };
   expect(meetingViewLines(artifact, 'notes')[0]).toBe('The team picked the launch date.');
-  expect(meetingViewLines(artifact, 'analysis')).toContain('- Launch Friday.');
+  expect(meetingViewLines(artifact, 'notes')).toContain('- Launch Friday.');
   expect(meetingViewLines(artifact, 'chat')[0]).toContain('Ask about this meeting');
 });
 
@@ -41,7 +41,8 @@ test('meeting answers and claims expose the exact cited passage, without unrelat
   expect(chat).not.toContain('Unrelated');
   artifact.provisionalClaims = [{ id: 'd1', type: 'decision', text: 'Release Monday.',
     evidenceSegmentIds: ['s1', 's2'], confidence: 0.9 }];
-  expect(meetingViewLines(artifact, 'analysis', record).join('\n')).toContain('Source 00:05–00:09');
+  // Notes point at the moment rather than repeating the quote.
+  expect(meetingViewLines(artifact, 'notes', record)).toContain('- Release Monday.  00:05');
   artifact.chat[0]!.evidenceSegmentIds = ['missing'];
   expect(meetingViewLines(artifact, 'chat', record).join('\n')).toContain('cited passages are unavailable');
   artifact.chat[0]!.evidenceSegmentIds = ['s1'];

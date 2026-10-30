@@ -12,7 +12,7 @@ import { listTranscriptRecords, loadTranscriptPath } from '../../src/transcript-
 const root = mkdtempSync(join(tmpdir(), 'seashell-live-follow-'));
 const narrow = process.argv[2] === 'narrow';
 const columns = narrow ? 48 : 100;
-const rows = narrow ? 24 : 28;
+const rows = narrow ? 24 : 16;
 Object.defineProperty(process.stdout, 'columns', { value: columns });
 Object.defineProperty(process.stdout, 'rows', { value: rows });
 const library = join(root, 'library');
@@ -60,7 +60,7 @@ const until = async (check: () => boolean) => {
   while (!check() && Date.now() < deadline) await Bun.sleep(10);
   if (!check()) throw new Error('TUI did not process the fixture audio');
 };
-const screen = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('🐚 Sea Shell')));
+const screen = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('🐚')));
 let sequence = 0;
 const emit = async (text: string) => {
   nextText = text;

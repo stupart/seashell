@@ -6,6 +6,8 @@ import type { StructuredTranscript } from './transcript-types.ts';
 import { formatTuiClock, SPEAKER_COLORS, speakerColorIndex } from './tui-state.ts';
 
 const color = new Chalk({ level: 1 });
+const MAX_NAME_COLUMN = 18;
+const MIN_COLUMNS_FOR_NAME_COLUMN = 64;
 
 /** Scroll physical terminal rows so even a single long segment is fully readable. */
 export function transcriptRows(
@@ -19,18 +21,39 @@ export function transcriptRows(
     const text = segments.map((segment) => stripVTControlCharacters(segment.text)).join(' ');
     return text ? wrapAnsi(text, width, { hard: true }).split('\n') : [];
   }
-  return segments.flatMap((segment) => {
+  const names = new Map(segments.map((segment) => {
     const label = options.speakers ? speakerLabel(record, segment.speaker) : undefined;
+    const name = label ? stripVTControlCharacters(label) : '';
+    return [segment.speaker ?? '', segment.speaker === 'LOCAL' && name === 'Microphone' ? 'You' : name];
+  }));
+  const nameWidth = Math.min(MAX_NAME_COLUMN, Math.max(0, ...[...names.values()].map((name) => name.length)));
+  const clockWidth = options.timestamps ? formatTuiClock(segments.at(-1)?.start ?? 0).length : 0;
+  // Below this, a name column leaves too little room for the words themselves.
+  const stacked = options.speakers && width < MIN_COLUMNS_FOR_NAME_COLUMN;
+  return segments.flatMap((segment) => {
     const speakerColor = SPEAKER_COLORS[speakerColorIndex(segment.speaker ?? '')]!;
-    const prefix = (options.timestamps ? color.dim(`[${formatTuiClock(segment.start)}] `) : '') +
-      (label ? color[speakerColor](`${stripVTControlCharacters(label)}: `) : '');
-    return wrapAnsi(prefix + stripVTControlCharacters(segment.text), width, { hard: true }).split('\n');
+    const name = names.get(segment.speaker ?? '') ?? '';
+    const clock = options.timestamps ? color.dim(formatTuiClock(segment.start).padStart(clockWidth)) : '';
+    const text = stripVTControlCharacters(segment.text);
+    if (stacked) {
+      return [[clock, color[speakerColor](name)].filter(Boolean).join('  '), ...wrapAnsi(text, width, { hard: true }).split('\n')];
+    }
+    const label = options.speakers ? color[speakerColor](name.slice(0, nameWidth).padEnd(nameWidth)) : '';
+    const prefix = [clock, label].filter(Boolean).join('  ');
+    const indent = (clockWidth ? clockWidth + 2 : 0) + (options.speakers ? nameWidth + 2 : 0);
+    return wrapAnsi(text, Math.max(1, width - indent), { hard: true }).split('\n')
+      .map((line, index) => (index === 0 ? `${prefix}  ${line}` : ' '.repeat(indent) + line));
   });
 }
 
 export function wrappedMeetingRows(lines: readonly string[], columns: number): string[] {
-  return lines.flatMap((line) => wrapAnsi(stripVTControlCharacters(line) || ' ',
-    Math.max(1, Math.floor(columns)), { hard: true }).split('\n'));
+  const width = Math.max(1, Math.floor(columns));
+  return lines.flatMap((line) => {
+    const clean = stripVTControlCharacters(line) || ' ';
+    if (!clean.startsWith('- ')) return wrapAnsi(clean, width, { hard: true }).split('\n');
+    return wrapAnsi(clean.slice(2), Math.max(1, width - 2), { hard: true }).split('\n')
+      .map((row, index) => (index === 0 ? `- ${row}` : `  ${row}`));
+  });
 }
 
 /** Ink removes the first ESC. Buffer split SGR reports; swallow clicks so their

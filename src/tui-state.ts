@@ -13,28 +13,40 @@ export function tuiLayout(columns: number, rows: number): TuiLayout {
   const safeColumns = Math.max(40, columns);
   const safeRows = Math.max(16, rows);
   const compact = safeColumns < COMPACT_TUI_COLUMNS;
-  const contentRows = Math.max(5, safeRows - 9);
+  const contentRows = Math.max(5, safeRows - 5);
   return {
     compact,
     sidebarWidth: compact
       ? safeColumns - 4
-      : Math.min(34, Math.max(24, Math.floor(safeColumns * 0.28))),
+      : Math.min(40, Math.max(28, Math.floor(safeColumns * 0.34))),
     visibleTranscriptRows: contentRows,
-    visibleLibraryItems: Math.max(3, contentRows - 3),
+    visibleLibraryItems: Math.max(3, safeRows - 4),
   };
 }
 
-/** Sidebar row for a meeting: date (if not today), start time and length come
- * first so same-titled meetings stay distinguishable when the title truncates. */
-export function meetingEntryLabel(entry: TranscriptLibraryEntry, now = new Date()): string {
-  const created = new Date(entry.createdAt);
-  const marker = entry.captureState === 'recording' ? '●' : entry.captureState === 'processing' ? '◐' : 'M';
-  const date = created.toDateString() === now.toDateString()
-    ? '' : `${created.toLocaleDateString([], { month: 'short', day: 'numeric' })} `;
-  const time = created.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const minutes = entry.duration && entry.captureState !== 'recording' ? Math.max(1, Math.round(entry.duration / 60)) : 0;
-  const length = !minutes ? '' : minutes < 60 ? ` · ${minutes}m` : ` · ${Math.floor(minutes / 60)}h${minutes % 60 ? `${minutes % 60}m` : ''}`;
-  return `${marker} ${date}${time}${length} · ${entry.title}`;
+export function sameDay(left: string, right: string): boolean {
+  return new Date(left).toDateString() === new Date(right).toDateString();
+}
+
+const clockTime = (date: Date) => date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  .replace(/\s?([ap])\.?m\.?/iu, (_, half: string) => half.toLowerCase());
+
+/** When a meeting happened, short enough to sit beside its title. */
+export function meetingWhen(createdAt: string, now = new Date(), withTime = true): string {
+  const created = new Date(createdAt);
+  if (created.toDateString() === now.toDateString()) return clockTime(created);
+  const day = created.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return withTime ? `${day} ${clockTime(created)}` : day;
+}
+
+/** List row: the title first, its date against the right edge. The time appears
+ * when it tells two meetings of the same day apart, and the date never truncates. */
+export function meetingEntryRow(entry: TranscriptLibraryEntry, width: number, now = new Date(), withTime = true): string {
+  const marker = entry.captureState === 'recording' ? '● ' : entry.captureState === 'processing' ? '◐ ' : '';
+  const when = meetingWhen(entry.createdAt, now, withTime);
+  const room = Math.max(4, width - when.length - 1 - marker.length);
+  const title = entry.title.length > room ? `${entry.title.slice(0, room - 1)}…` : entry.title.padEnd(room);
+  return `${marker}${title} ${when}`;
 }
 
 export function moveSelection(current: number, delta: number, count: number): number {
@@ -65,13 +77,12 @@ export function filterLibraryEntries(
   ].some((value) => value.toLocaleLowerCase().includes(normalized)));
 }
 
+/** Yellow and red are left out: they mean attention and failure everywhere else. */
 export const SPEAKER_COLORS = [
   'cyan',
   'magenta',
-  'yellow',
   'green',
   'blue',
-  'red',
 ] as const;
 
 export function speakerColorIndex(speakerId: string): number {

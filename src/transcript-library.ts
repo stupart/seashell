@@ -175,7 +175,7 @@ function existingRecordPath(libraryDir: string, id: string): string | undefined 
 export function saveTranscriptRecord(
   libraryDir: string,
   record: TranscriptRecord,
-  options: { provisional?: boolean } = {},
+  options: { provisional?: boolean; namesOnly?: boolean } = {},
 ): SavedTranscript {
   assertTranscriptId(record.id);
   const existingPath = existingRecordPath(libraryDir, record.id);
@@ -188,7 +188,7 @@ export function saveTranscriptRecord(
 
   let meetingWarning: string | undefined;
   try {
-    if (existingPath && !options.provisional) archiveMeetingTranscript(directory, loadTranscriptPath(existingPath), record);
+    if (existingPath && !options.provisional && !options.namesOnly) archiveMeetingTranscript(directory, loadTranscriptPath(existingPath), record);
   } catch (error) {
     meetingWarning = `Transcript saved; meeting history needs repair: ${error instanceof Error ? error.message : String(error)}`;
   }
@@ -197,7 +197,7 @@ export function saveTranscriptRecord(
     timestamps: true,
     speakers: record.speakers.length > 0,
   })}\n`);
-  try { if (!options.provisional) synchronizeMeetingTranscript(directory, record); } catch (error) {
+  try { if (!options.provisional) synchronizeMeetingTranscript(directory, record, { namesOnly: options.namesOnly }); } catch (error) {
     meetingWarning = `Transcript saved; meeting notes need repair: ${error instanceof Error ? error.message : String(error)}`;
   }
   return { directory, jsonPath, textPath, ...(meetingWarning ? { meetingWarning } : {}) };
@@ -293,7 +293,7 @@ export function renameTranscriptSpeaker(
   if (!speaker) throw new Error(`Speaker ${speakerId} was not found in transcript ${transcriptId}`);
   speaker.label = trimmed;
   record.updatedAt = new Date().toISOString();
-  saveTranscriptRecord(libraryDir, record);
+  saveTranscriptRecord(libraryDir, record, { namesOnly: true });
   return record;
 }
 

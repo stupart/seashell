@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
+import { KeyBar } from './tui-chrome.tsx';
 import { diarizationEnvironment, diarizationStatus } from './diarization-environment.ts';
 import { setupDiarization, type SpeakerSetupResult } from './diarization-setup.ts';
 import { checkMeetConnection, requestMeetAccessibilityPermission, type MeetBrowserMode, type MeetProbe } from './meet-speakers.ts';
@@ -19,6 +20,9 @@ export default function SpeakerSettings(props: {
   canIdentify: boolean;
   onIdentify: () => void;
   onClose: () => void;
+  columns: number;
+  rows?: number;
+  modelSize?: string;
 }) {
   const [ready, setReady] = useState(() => diarizationStatus().ready);
   const [engine] = useState(() => diarizationStatus().engine);
@@ -28,8 +32,15 @@ export default function SpeakerSettings(props: {
   const [result, setResult] = useState<SpeakerSetupResult>();
   const request = useRef<AbortController | undefined>(undefined);
   useEffect(() => () => request.current?.abort(), []);
-  const entries = ['Connect Google Meet · Accessibility', 'Check Meet connection', 'Turn off Meet reader',
-    'Set up / repair local voice model', 'Check offline model readiness', 'Identify saved recording · review copy', 'Done'];
+  const meetOn = props.browser !== 'off';
+  type Action = 'meet' | 'meet-off' | 'voices' | 'redo';
+  const entries: Array<[Action, string, string]> = [
+    ['meet', 'Names from Google Meet', meetOn ? 'On · Enter checks it' : 'Off · Enter connects it'],
+    ...(meetOn ? [['meet-off', 'Turn off names from Meet', ''] as [Action, string, string]] : []),
+    ['voices', 'Tell voices apart', ready ? 'Ready · Enter checks it' : `Not set up · Enter downloads ${props.modelSize ?? '21 MB'}`],
+    ...(props.canIdentify && ready ? [['redo', 'Redo speakers for this meeting', 'Makes a copy to review'] as [Action, string, string]] : []),
+  ];
+  const action = entries[Math.min(index, entries.length - 1)]![0];
   const checkMeet = async (browser: MeetBrowserMode, connect = false) => {
     const controller = new AbortController(); request.current = controller;
     setBusy(true); setResult(undefined);
@@ -60,55 +71,42 @@ export default function SpeakerSettings(props: {
     if (key.upArrow) setIndex((value) => Math.max(0, value - 1));
     else if (key.downArrow) setIndex((value) => Math.min(entries.length - 1, value + 1));
     else if (key.return) {
-      if (index === 6) { props.onClose(); return; }
-      if (index === 0) {
-        props.onBrowser('auto'); void checkMeet('auto', true); return;
+      if (action === 'meet') {
+        if (meetOn) void checkMeet(props.browser as MeetBrowserMode);
+        else { props.onBrowser('auto'); void checkMeet('auto', true); }
+        return;
       }
-      if (index === 1) {
-        if (props.browser === 'off') { setMessage('Choose Connect Google Meet to enable Accessibility setup first.'); return; }
-        void checkMeet(props.browser); return;
-      }
-      if (index === 2) { props.onBrowser('off'); setMessage('Meet reader off. Audio recording continues.'); return; }
-      if (props.recording) { setMessage('Pause recording and return here to set up or process speakers.'); return; }
-      if (index === 5) {
-        if (!ready) { setMessage('Set up the local model first.'); return; }
-        if (!props.canIdentify) { setMessage('Open a saved recording from History first.'); return; }
-        props.onIdentify(); return;
-      }
-      void setup(index === 4);
+      if (action === 'meet-off') { props.onBrowser('off'); setIndex(0); setMessage('Names from Meet are off. Recording continues.'); return; }
+      if (props.recording) { setMessage('Wait for the recording to finish, then come back here.'); return; }
+      if (action === 'redo') { props.onIdentify(); return; }
+      void setup(ready);
     }
   });
-  return <Box flexDirection="column" paddingX={1}>
-    <Text bold>Speakers</Text>
-    <Text>Meet · {props.browser === 'auto' ? 'Auto' : props.browser} | Voices · {ready ? 'Ready' : 'Optional setup'}</Text>
-    <Box flexDirection="column" marginY={1}>
-      {entries.map((entry, i) => <Text key={entry} color={i === index ? 'cyan' : undefined}>{i === index ? '❯' : ' '} {entry}</Text>)}
+  const selected = entries[Math.min(index, entries.length - 1)]!;
+  return <Box flexDirection="column" paddingX={1} {...(props.rows ? { height: props.rows } : {})} overflow="hidden">
+    <Text wrap="truncate-end">🐚 <Text bold color="cyan">Sea Shell</Text>  <Text bold>Speaker names</Text></Text>
+    <Text dimColor wrap="truncate-end">{'─'.repeat(Math.max(1, props.columns - 2))}</Text>
+    {entries.map(([id, label, value], i) => <Text key={id} inverse={i === index} wrap="truncate-end">
+      {i === index ? '› ' : '  '}{label.padEnd(32)}{value}
+    </Text>)}
+    <Box flexDirection="column" flexGrow={1} marginTop={1} overflow="hidden">
+      {(selected[0] === 'meet' || selected[0] === 'meet-off') && <>
+        <Text>Reads who is talking from Google Meet in Chrome, using Accessibility. Names are hints.</Text>
+        <Text dimColor>Keep Meet's People panel open if you are unmuted, and avoid other audio playing.</Text>
+        {!message && props.meetStatus && meetOn && <Text>{meetStatusMessage(props.meetStatus)}</Text>}
+      </>}
+      {selected[0] === 'voices' && (ready ? <>
+        <Text>Numbers are not names. In a meeting's transcript, press r to name them.</Text>
+        <Text dimColor>Shared microphones and people talking over each other need review.</Text>
+      </> : engine === 'pyannote' ? <>
+        <Text>Downloads a model; needs Hugging Face access and publisher contact sharing.</Text>
+        <Text color="cyan">{diarizationEnvironment().model.startsWith('/') ? diarizationEnvironment().model : `https://huggingface.co/${diarizationEnvironment().model}`}</Text>
+        <Text color="yellow">seashell setup --speakers --login</Text>
+      </> : <Text>Downloads a voice model once. It runs on this Mac; no account needed.</Text>)}
+      {selected[0] === 'redo' && <Text>Separates voices again and saves a copy. This meeting and its notes stay as they are.</Text>}
+      {message && <Text color={result?.ready ? 'green' : 'yellow'}>{message}</Text>}
     </Box>
-    {index < 3 && <>
-      <Text dimColor>Experimental · Meet in Chrome.</Text>
-      <Text dimColor>Local names · no extension or voice model.</Text>
-      <Text dimColor>{index === 0 ? 'Connect sets up window + background access.'
-        : index === 1 ? 'Checks access without permission prompts.'
-          : 'Audio continues without meeting name hints.'}</Text>
-      <Text dimColor>Unmuted? Keep Meet’s People panel open.</Text>
-      <Text dimColor>Names are hints; avoid other audio playback.</Text>
-      {!message && props.meetStatus && props.browser !== 'off' && <Text>{meetStatusMessage(props.meetStatus)}</Text>}
-    </>}
-    {index >= 3 && index < 6 && ready && <>
-      <Text>Numbers are not names. Use [ / ] then R to rename.</Text>
-      <Text dimColor>Shared microphones and overlap need review.</Text>
-    </>}
-    {index >= 3 && index < 6 && !ready && engine === 'native' && <>
-      <Text>Downloads a 21 MB voice model once. It runs on this Mac; no account needed.</Text>
-      <Text dimColor>Press Enter on “Set up / repair local voice model”.</Text>
-    </>}
-    {index >= 3 && index < 6 && !ready && engine === 'pyannote' && <>
-      <Text>Downloads a model; requires Hugging Face access and publisher contact sharing.</Text>
-      <Text color="cyan">{diarizationEnvironment().model.startsWith('/') ? diarizationEnvironment().model : `https://huggingface.co/${diarizationEnvironment().model}`}</Text>
-      <Text color="yellow">seashell setup --speakers --login</Text>
-    </>}
-    {message && <Text color={result?.ready ? 'green' : 'yellow'}>{message}</Text>}
-    {props.recording && <Text dimColor>Recording continues. Voice setup needs pause.</Text>}
-    <Text dimColor>{busy ? 'Working… Esc cancels setup' : '↑↓ choose · Enter select · Esc close'}</Text>
+    {busy ? <Text color="yellow">Working… Esc cancels</Text>
+      : <KeyBar hints={[['↑↓', 'choose'], ['Enter', 'select'], ['Esc', 'back']]} columns={props.columns - 2} help={false} />}
   </Box>;
 }

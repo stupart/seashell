@@ -25,7 +25,7 @@ const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, r
 let rendered = '';
 const output = Object.assign(new Writable({ write(chunk, _enc, cb) { rendered += chunk.toString(); cb(); } }), { columns: 110, rows: 32 });
 const app = render(<App />, { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
-const screen = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('🐚 Sea Shell')));
+const screen = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('🐚')));
 const tick = () => Bun.sleep(80);
 const level = { peak: 5000, rms: 1000, rmsDbfs: -30 };
 try {
@@ -40,7 +40,7 @@ try {
   mics[0]!.onLevel?.(level); systems[0]!.onLevel?.(level); await tick();
   assert(screen().includes('Starting recording'), 'late old callbacks cannot report or stop new capture');
   mics[1]!.onLevel?.(level); systems[1]!.onLevel?.(level); await tick();
-  assert(screen().includes('● Recording') && screen().includes('Microphone: sound detected') && screen().includes('Computer audio: sound detected'), screen());
+  assert(screen().includes('● Recording') && !screen().includes('Microphone:') && !screen().includes('Computer audio:'), 'healthy sources stay out of the way');
   mics[1]!.onState({ state: 'unavailable' }); await tick();
   assert(screen().includes('● Recording') && screen().includes('NOT CAPTURING'), 'one useful source keeps recording with a visible warning');
   process.stdout.write(JSON.stringify({ passed: true }) + '\n');

@@ -37,7 +37,9 @@ import {
   type MeetingCalendarEvent,
 } from './meeting-artifact.ts';
 import { chatWithMeeting, enrichMeeting } from './meeting-enrichment.ts';
-import { meetingViewLines, type MeetingView } from './meeting-tui.ts';
+import { Chalk } from 'chalk';
+import { HEADING, meetingViewLines, type MeetingView } from './meeting-tui.ts';
+import { HELP_ROWS, KeyBar, Sheet, type Hint } from './tui-chrome.tsx';
 import { transcriptRows, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
   renderText,
@@ -71,13 +73,14 @@ import {
 import AIProviderPicker from './AISettings.tsx';
 import SpeakerSettings from './SpeakerSettings.tsx';
 import SettingsScreen from './SettingsScreen.tsx';
-import { readFeatureStatuses } from './feature-status.ts';
+import { readFeatureStatuses, type FeatureStatus } from './feature-status.ts';
+import { stripVTControlCharacters } from 'util';
 import { startMeetSpeakerReader, meetBrowserMatchesApp, probeMeetSpeakers, type MeetSpeakerReader, type MeetProbe } from './meet-speakers.ts';
 import { backgroundMeetingMessage } from './background-meeting-status.ts';
 import { readBackgroundWatchStatus, type BackgroundWatchStatus } from './background-watch-status.ts';
 import { writeMeetingConsent } from './meeting-consent.ts';
 import { CaptureHealthTracker, type CaptureHealthSnapshot } from './capture-health.ts';
-import RecordingStatus, { captureRecordingMode } from './RecordingStatus.tsx';
+import { captureRecordingMode, recordingSummary, type RecordingMode } from './RecordingStatus.tsx';
 import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { runHumainTranscription } from './humain-client.ts';
@@ -85,7 +88,9 @@ import {
   DEFAULT_WHISPER_MODEL_FILENAME,
 } from './model-config.ts';
 import {
-  meetingEntryLabel,
+  meetingEntryRow,
+  sameDay,
+  meetingWhen,
   moveSelection,
   moveTranscriptScroll,
   formatTuiClock,
@@ -110,6 +115,8 @@ const __filename = fileURLToPath(import.meta.url);
 const PROJECT_ROOT = join(dirname(__filename), '..');
 const WHISPER_SERVER = join(PROJECT_ROOT, 'whisper.cpp/build/bin/whisper-server');
 const MODEL_PATH = join(PROJECT_ROOT, 'models', DEFAULT_WHISPER_MODEL_FILENAME);
+const HIGHLIGHT = new Chalk({ level: 1 }).black.bgYellow;
+
 type ListenerState = 'listening' | 'recording';
 type View = 'live' | 'record';
 type WatchOwnership = 'disabled' | 'checking' | 'owned' | 'external';
@@ -121,6 +128,7 @@ interface ProcessingState {
 
 interface RenameState {
   speakerId: string;
+  label: string;
   input: string;
 }
 
@@ -196,7 +204,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   // Speakers and AI open from Settings return there when closed.
   const [returnToSettings, setReturnToSettings] = useState(false);
-  const [setupNeeded, setSetupNeeded] = useState(false);
+  const [attention, setAttention] = useState<FeatureStatus[]>([]);
   const [aiSetupIntent, setAiSetupIntent] = useState<'notes' | 'chat' | null>(null);
   const libraryRoot = useMemo(
     () => resolveLibraryDir(props.libraryDir, process.env, config),
@@ -259,8 +267,8 @@ export default function App(props: { libraryDir?: string } = {}) {
   useEffect(() => {
     if (!transcriptPaneRef.current) return;
     const measured = measureElement(transcriptPaneRef.current);
-    const rows = Math.max(1, Math.floor(measured.height) - 4);
-    const columns = Math.max(1, Math.floor(measured.width) - 6);
+    const rows = Math.max(1, Math.floor(measured.height));
+    const columns = Math.max(1, Math.floor(measured.width));
     setTranscriptContentColumns((previous) => previous === columns ? previous : columns);
     setTranscriptContentRows((previous) => previous === rows ? previous : rows);
   });
@@ -268,6 +276,8 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [showSpeakers, setShowSpeakers] = useState(true);
   const [speakerSelection, setSpeakerSelection] = useState(0);
   const [renameState, setRenameState] = useState<RenameState | null>(null);
+  const [speakerPickerOpen, setSpeakerPickerOpen] = useState(false);
+  const [jumpTo, setJumpTo] = useState<string | null>(null);
   const [exportMode, setExportMode] = useState(false);
   const [helpMode, setHelpMode] = useState(false);
   const [confirmTrashId, setConfirmTrashId] = useState<string | null>(null);
@@ -338,15 +348,14 @@ export default function App(props: { libraryDir?: string } = {}) {
     [libraryEntries, libraryRoot, searchQuery],
   );
   const navigationItems: NavigationItem[] = useMemo(() => [
-    {
-      kind: 'live',
-      label: paused
-        ? 'Live transcription'
-        : '● Live transcription',
-    },
+    // With a background recorder there is nothing live here: its meeting is a row like any other.
+    ...(watchOwnership === 'external' ? [] : [{
+      kind: 'live' as const,
+      label: paused ? 'Live transcription' : '● Live transcription',
+    }]),
     ...visibleEntries.map((entry) => ({
       kind: 'record' as const,
-      label: entry.kind === 'meeting' ? meetingEntryLabel(entry) : entry.title,
+      label: entry.title,
       entry,
     })),
   ], [paused, visibleEntries]);
@@ -782,10 +791,12 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   const openRecord = useCallback((entry: TranscriptLibraryEntry) => {
     try {
+      const meeting = loadMeetingArtifact(libraryRoot, entry.id) ?? null;
       setSelectedRecord(findTranscriptRecord(libraryRoot, entry.id).record);
-      setSelectedMeeting(loadMeetingArtifact(libraryRoot, entry.id) ?? null);
+      setSelectedMeeting(meeting);
       setView('record');
-      setMeetingView('transcript');
+      // Notes are what people come back for; the transcript is there until they exist.
+      setMeetingView(meeting?.analysis ? 'notes' : 'transcript');
       setTranscriptScroll(0);
       setFollowLiveTranscript(true);
       setSpeakerSelection(0);
@@ -815,12 +826,13 @@ export default function App(props: { libraryDir?: string } = {}) {
     const freshEntries = listTranscriptRecords(libraryRoot);
     setLibraryEntries(freshEntries);
     const entries = searchQuery.trim() ? searchTranscriptRecords(libraryRoot, searchQuery) : freshEntries;
+    const offset = watchOwnership === 'external' ? 0 : 1;
     const currentIndex = view === 'record' && selectedRecord
-      ? entries.findIndex((entry) => entry.id === selectedRecord.id) + 1
+      ? entries.findIndex((entry) => entry.id === selectedRecord.id) + offset
       : 0;
     setSelectionIndex(currentIndex >= 0 ? currentIndex : 0);
     setHistoryOpen(true);
-  }, [historyOpen, libraryRoot, searchQuery, selectedRecord, view]);
+  }, [historyOpen, libraryRoot, searchQuery, selectedRecord, view, watchOwnership]);
 
   const currentRecord = view === 'live' ? liveRecord : selectedRecord;
   const currentMeeting = view === 'live' ? liveMeeting : selectedMeeting;
@@ -833,12 +845,24 @@ export default function App(props: { libraryDir?: string } = {}) {
   const currentRecordBusy = currentEntry?.captureState === 'recording' || currentEntry?.captureState === 'processing';
   const backgroundRecording = backgroundEntry?.captureState === 'recording';
   const showBackgroundStatus = (watchOwnership === 'external' && view === 'live') || Boolean(currentEntry?.captureState);
+  // The newest meeting opens by itself, and giving way to a call that starts is part of that.
+  const openedOnLaunch = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (watchOwnership !== 'external' || openedOnLaunch.current || view !== 'live' || activeBackgroundEntry) return;
+    const newest = libraryEntries[0];
+    if (!newest) return;
+    openedOnLaunch.current = newest.id;
+    openRecord(newest);
+    setSelectionIndex(0);
+  }, [watchOwnership, view, activeBackgroundEntry, libraryEntries, openRecord]);
   useEffect(() => {
     if (watchOwnership !== 'external' || !activeBackgroundEntry || followedBackgroundId.current === activeBackgroundEntry.id) return;
-    if (view === 'live' || selectedRecord?.id === followedBackgroundId.current) {
+    if (view === 'live' || selectedRecord?.id === followedBackgroundId.current || selectedRecord?.id === openedOnLaunch.current) {
       openRecord(activeBackgroundEntry);
       setSelectionIndex(Math.max(0, navigationItems.findIndex(item => item.kind === 'record' && item.entry.id === activeBackgroundEntry.id)));
       setFollowLiveTranscript(true);
+      // A list open beside a call only gets in the way of reading it.
+      setHistoryOpen(false);
     }
     followedBackgroundId.current = activeBackgroundEntry.id;
   }, [watchOwnership, view, activeBackgroundEntry?.id, selectedRecord?.id, openRecord, navigationItems]);
@@ -847,9 +871,9 @@ export default function App(props: { libraryDir?: string } = {}) {
     : undefined;
   const drawerOnly = historyOpen && layout.compact;
   const mainPanelColumns = historyOpen && !drawerOnly
-    ? terminal.columns - layout.sidebarWidth - 7
-    : terminal.columns - 4;
-  const contentColumns = transcriptContentColumns ?? Math.max(1, mainPanelColumns - 6);
+    ? terminal.columns - layout.sidebarWidth - 4
+    : terminal.columns - 2;
+  const contentColumns = transcriptContentColumns ?? Math.max(1, mainPanelColumns);
   const displayRows = useMemo(() => currentRecord
     ? transcriptRows(currentRecord, contentColumns, { timestamps: showTimestamps, speakers: showSpeakers })
     : [], [currentRecord, contentColumns, showTimestamps, showSpeakers]);
@@ -867,7 +891,14 @@ export default function App(props: { libraryDir?: string } = {}) {
     visibleTranscriptScroll,
     visibleTranscriptScroll + visibleRows,
   );
-  const selectedSpeaker = currentRecord?.speakers[speakerSelection];
+  // Opened from a search: land on the words that were searched for.
+  useEffect(() => {
+    if (!jumpTo || !displayRows.length) return;
+    const needle = jumpTo.toLocaleLowerCase();
+    const row = displayRows.findIndex((text) => stripVTControlCharacters(text).toLocaleLowerCase().includes(needle));
+    if (row >= 0) setTranscriptScroll(Math.max(0, row - 1));
+    setJumpTo(null);
+  }, [jumpTo, displayRows]);
   const configuredMeetingRoutes = useMemo(() => ({
     observer: resolveMeetingRoute(config.meeting, 'observer'),
     reconciliation: resolveMeetingRoute(config.meeting, 'reconciliation'),
@@ -1265,12 +1296,11 @@ export default function App(props: { libraryDir?: string } = {}) {
     if (showingLiveTranscript) setFollowLiveTranscript(next >= latestTranscriptScroll);
   };
 
-  const copyCurrentTranscript = useCallback(() => {
+  const copyCurrentView = useCallback(() => {
     if (!currentRecord) return;
-    const text = renderText(currentRecord, {
-      timestamps: showTimestamps,
-      speakers: showSpeakers,
-    });
+    const text = currentMeeting && meetingView !== 'transcript'
+      ? meetingViewLines(currentMeeting, meetingView, currentRecord).join('\n').replaceAll(HEADING, '')
+      : renderText(currentRecord, { timestamps: showTimestamps, speakers: showSpeakers });
     if (!text) return;
     const result = spawnSync('pbcopy', [], { input: text, encoding: 'utf8' });
     if (result.error || result.status !== 0) {
@@ -1279,7 +1309,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
-  }, [currentRecord, showSpeakers, showTimestamps]);
+  }, [currentMeeting, currentRecord, meetingView, showSpeakers, showTimestamps]);
 
   const performExport = useCallback((format: TranscriptFormat) => {
     if (!currentRecord) return;
@@ -1509,7 +1539,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const { stdin } = useStdin();
   const { stdout } = useStdout();
   const mouseDecoder = useRef(new MouseScrollDecoder());
-  const mouseEnabled = !speakerSetupOpen && !aiSetupOpen && !chatInputState && !renameState && !searchMode && !exportMode && !confirmTrashId && !notesSetup;
+  const mouseEnabled = !speakerSetupOpen && !aiSetupOpen && !chatInputState && !renameState && !speakerPickerOpen && !searchMode && !exportMode && !confirmTrashId && !notesSetup;
 
   const saveMeetingAi = useCallback((change: (ai: NonNullable<MeetingArtifact['ai']>) => void) => {
     if (!currentMeeting) return;
@@ -1546,6 +1576,8 @@ export default function App(props: { libraryDir?: string } = {}) {
       }
       return;
     }
+    setError(null);
+    setNotice(null);
     if (chatInputState) {
       if (key.escape) {
         setChatInputState(null);
@@ -1592,7 +1624,7 @@ export default function App(props: { libraryDir?: string } = {}) {
             const meeting = loadMeetingArtifact(libraryRoot, renamed.id);
             if (meeting) commitMeetingState(meeting);
             refreshLibrary();
-            setNotice(`${renameState.speakerId} renamed to ${renameState.input.trim()}.`);
+            setNotice(`${renameState.label} is now ${renameState.input.trim()}. Notes kept.`);
           } catch (renameError) {
             setError(renameError instanceof Error ? renameError.message : String(renameError));
           }
@@ -1610,9 +1642,33 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
 
+    if (speakerPickerOpen) {
+      if (key.escape || input === 'r') { setSpeakerPickerOpen(false); return; }
+      const speakers = currentRecord?.speakers ?? [];
+      if (key.upArrow) setSpeakerSelection((index) => moveSelection(index, -1, speakers.length));
+      else if (key.downArrow) setSpeakerSelection((index) => moveSelection(index, 1, speakers.length));
+      else if (key.return) {
+        const speaker = speakers[speakerSelection];
+        setSpeakerPickerOpen(false);
+        if (speaker) setRenameState({ speakerId: speaker.id, input: '',
+          label: speaker.id === 'LOCAL' && speaker.label === 'Microphone' ? 'You' : speaker.label });
+      }
+      return;
+    }
+
     if (searchMode) {
-      if (key.escape || key.return) {
+      if (key.escape) {
         setSearchMode(false);
+        setSearchQuery('');
+        return;
+      }
+      if (key.return) {
+        setSearchMode(false);
+        const first = navigationItems.findIndex((item) => item.kind === 'record');
+        if (first >= 0) {
+          setSelectionIndex(first);
+          showNavigationItem(navigationItems[first]);
+        }
         return;
       }
       if (key.backspace || key.delete) {
@@ -1674,7 +1730,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       }
       if (key.escape || input === 'n' || key.return && notesSetup.row !== 1) {
         setNotesSetup(null);
-        if (currentMeeting && !currentMeeting.ai?.off) setNotice('Press G to write the notes again with these choices.');
+        if (currentMeeting && !currentMeeting.ai?.off) setNotice('Press G to rewrite the notes with these choices.');
         return;
       }
       if (key.upArrow) { setNotesSetup({ ...notesSetup, row: Math.max(0, notesSetup.row - 1) as 0 | 1 | 2 }); return; }
@@ -1728,11 +1784,14 @@ export default function App(props: { libraryDir?: string } = {}) {
       setHelpMode(true);
       return;
     }
-    if (key.escape && historyOpen) {
-      setHistoryOpen(false);
+    // Esc goes back one level and never leaves the app; only Q does.
+    if (key.escape) {
+      if (searchQuery) setSearchQuery('');
+      else if (!historyOpen) toggleHistory();
+      else if (layout.compact && view === 'record') setHistoryOpen(false);
       return;
     }
-    if (key.escape || input === 'q') {
+    if (input === 'q') {
       gracefulExit();
       return;
     }
@@ -1751,7 +1810,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
     if (currentRecordBusy && ['r', 'd', 'g', 'a', 'e', 'm'].includes(input)) {
-      setNotice('This meeting is still recording or finishing. Review and edit it once the final transcript is ready.');
+      setNotice('Review and edit this when it finishes.');
       return;
     }
     if (input === ',') { setSettingsOpen(true); return; }
@@ -1770,6 +1829,10 @@ export default function App(props: { libraryDir?: string } = {}) {
       if (activeBackgroundEntry) {
         openRecord(activeBackgroundEntry);
         setHistoryOpen(false);
+        setFollowLiveTranscript(true);
+        return;
+      }
+      if (watchOwnership === 'external') {
         setFollowLiveTranscript(true);
         return;
       }
@@ -1795,7 +1858,7 @@ export default function App(props: { libraryDir?: string } = {}) {
             setError(automationError instanceof Error ? automationError.message : String(automationError));
           });
         }
-      } else {
+      } else if (currentRecord?.transcript.length) {
         markCurrentAsMeeting(view === 'live' ? calendarSuggestion ?? undefined : undefined);
       }
       return;
@@ -1835,8 +1898,8 @@ export default function App(props: { libraryDir?: string } = {}) {
       }
       return;
     }
-    if (currentMeeting && input >= '1' && input <= '4') {
-      const views: MeetingView[] = ['notes', 'transcript', 'analysis', 'chat'];
+    if (currentMeeting && input >= '1' && input <= '3') {
+      const views: MeetingView[] = ['notes', 'transcript', 'chat'];
       setMeetingView(views[Number(input) - 1]!);
       if (input === '2') setFollowLiveTranscript(true);
       setTranscriptScroll(0);
@@ -1853,7 +1916,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
     if (input === 'c') {
-      copyCurrentTranscript();
+      copyCurrentView();
       return;
     }
     if (input === 'o') {
@@ -1864,16 +1927,9 @@ export default function App(props: { libraryDir?: string } = {}) {
       setExportMode(true);
       return;
     }
-    if (input === 'r' && selectedSpeaker) {
-      setRenameState({ speakerId: selectedSpeaker.id, input: selectedSpeaker.label });
-      return;
-    }
-    if (input === '[' && currentRecord?.speakers.length) {
-      setSpeakerSelection((index) => moveSelection(index, -1, currentRecord.speakers.length));
-      return;
-    }
-    if (input === ']' && currentRecord?.speakers.length) {
-      setSpeakerSelection((index) => moveSelection(index, 1, currentRecord.speakers.length));
+    if (input === 'r' && currentRecord?.speakers.length) {
+      setSpeakerSelection(0);
+      setSpeakerPickerOpen(true);
       return;
     }
     if (input === 'd' && view === 'record' && selectedRecord) {
@@ -1884,9 +1940,13 @@ export default function App(props: { libraryDir?: string } = {}) {
       resetLiveSession();
       return;
     }
+    if (input === ' ' && watchOwnership === 'external' && !activeBackgroundEntry) {
+      setNotice('Seashell records calls by itself. To record anything else: seashell meeting autostart disable');
+      return;
+    }
     if ((input === ' ' || key.return) && view === 'live' && !historyOpen) {
       if (pausedRef.current && watchOwnership === 'external') {
-        setNotice('Background watch owns capture. Run seashell meeting autostart disable before recording here.');
+        setNotice('Seashell records calls by itself. To record anything else: seashell meeting autostart disable');
         return;
       }
       if (pausedRef.current && automaticCandidate) {
@@ -1949,6 +2009,10 @@ export default function App(props: { libraryDir?: string } = {}) {
     if (key.return && historyOpen) {
       showNavigationItem(navigationItems[selectionIndex]);
       setHistoryOpen(false);
+      if (searchQuery.trim()) {
+        setMeetingView('transcript');
+        setJumpTo(searchQuery.trim());
+      }
     }
   }, { isActive: !aiSetupOpen && !speakerSetupOpen && !settingsOpen });
 
@@ -1957,7 +2021,8 @@ export default function App(props: { libraryDir?: string } = {}) {
     if (settingsOpen) return;
     const controller = new AbortController();
     void readFeatureStatuses({ config, libraryDir: libraryRoot, signal: controller.signal })
-      .then(statuses => { if (!controller.signal.aborted) setSetupNeeded(statuses.some(status => !status.optional && status.state === 'broken')); })
+      .then(statuses => { if (!controller.signal.aborted) setAttention(statuses.filter(status => !status.optional && (status.state === 'broken' ||
+        (status.state === 'attention' && (status.id === 'microphone' || status.id === 'computer-audio'))))); })
       .catch(() => {});
     return () => controller.abort();
   }, [settingsOpen, libraryRoot]);
@@ -1973,7 +2038,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     setSettingsOpen(true);
   };
 
-  if (settingsOpen) return <SettingsScreen config={config} libraryDir={libraryRoot} columns={terminal.columns}
+  if (settingsOpen) return <SettingsScreen config={config} libraryDir={libraryRoot} columns={terminal.columns} rows={terminal.rows}
     onConnectMeet={connectMeetReader}
     onEnableCalendar={() => {
       const policy = config.meeting?.calendar?.policy ?? 'ask';
@@ -1985,7 +2050,8 @@ export default function App(props: { libraryDir?: string } = {}) {
     onOpenAI={() => { setSettingsOpen(false); setReturnToSettings(true); setAiSetupIntent(null); setAiSetupOpen(true); }}
     onClose={() => setSettingsOpen(false)} />;
 
-  if (speakerSetupOpen) return <SpeakerSettings recording={Boolean(activeBackgroundEntry) || (!paused && !listenerDisabled)}
+  if (speakerSetupOpen) return <SpeakerSettings columns={terminal.columns} rows={terminal.rows}
+    recording={Boolean(activeBackgroundEntry) || (!paused && !listenerDisabled)}
     browser={config.meeting?.speakerBrowser ?? 'off'}
     meetStatus={meetSpeakerStatus}
     onBrowser={(browser) => {
@@ -2004,7 +2070,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         .then((record) => {
           setSelectedRecord(record); setSelectedMeeting(null); setMeetingView('transcript');
           setTranscriptScroll(0); setSpeakerSelection(0); setHistoryOpen(false); refreshLibrary();
-          setNotice('Speaker review copy saved. Original transcript and notes unchanged. [ / ] choose a speaker · R rename.');
+          setNotice('Speaker review copy saved. Original transcript and notes unchanged. R names speakers.');
         }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
         .finally(() => setProcessing(null));
     }} />;
@@ -2021,327 +2087,232 @@ export default function App(props: { libraryDir?: string } = {}) {
       closeSubSettings();
       setError(null);
       const names = [...new Set(Object.values(patch.routes ?? {}).flatMap((route) => route ? [route.backend] : []))];
-      setNotice(`AI ready · ${names.join(' + ')} · P for settings`);
+      setNotice(`AI ready · ${names.join(' + ')}`);
     }} />;
 
-  const title = view === 'live' ? liveRecord.title : selectedRecord?.title ?? 'Transcript';
-  const transcriptBorderColor = processing
-    ? 'magenta'
-    : view === 'record'
-      ? 'cyan'
-      : paused
-        ? 'gray'
-        : listenerState === 'recording'
-          ? 'red'
-          : transcribingCount > 0
-            ? 'yellow'
-            : 'green';
-  const primaryCommands = watchOwnership === 'external' && backgroundWatch?.phase === 'awaiting-consent'
-    ? terminal.columns < 56 ? '[M]Record [X]Ignore [H]History [Q]Quit' : '[M] Record meeting  [X] Ignore  [H] History  [?] Help  [Q] Quit'
-    : watchOwnership === 'external' && view === 'live'
-      ? terminal.columns < 56 ? '[H]History [V]Setup [I]Audio [?] [Q]Quit' : '[H] History  [V] Meet setup  [I] Audio help  [?] Help  [Q] Quit'
-    : historyOpen
-    ? terminal.columns < 56
-      ? '[↑↓] Browse  [↵] Open  [ESC] Close'
-      : '[↑↓] Browse  [ENTER] Open  [/] Search  [H/ESC] Close'
-    : currentMeeting
-      ? view === 'live'
-        ? terminal.columns < 56
-          ? `[SPC] ${paused ? 'Rec' : 'Pause'} [G] End [P] AI [Q] Quit`
-          : `[SPACE] ${paused ? 'Record' : 'Pause'}  [A] Ask  [G] Finish  [H] History  [P] AI  [?] Help  [Q] Quit`
-        : currentEntry?.captureState === 'recording'
-          ? terminal.columns < 56 ? '[L]Latest [H]History [I]Audio [?] [Q]Quit' : '[L] Latest  [H] History  [I] Audio help  [?] Help  [Q] Quit'
-        : terminal.columns < 56
-          ? '[A] Ask [G] Notes [H] List [P] AI [Q] Quit'
-          : '[A] Ask  [G] Enrich  [H] History  [P] AI  [?] Help  [Q] Quit'
-    : view === 'live'
-      ? terminal.columns < 56
-        ? `[SPC] ${paused ? 'Rec' : 'Pause'} [H] History [P] AI [Q] Quit`
-        : terminal.columns < 80
-          ? `[SPC] ${paused ? 'Record now' : 'Pause'}  [F] File  [H] History  [P] AI  [?] Help  [Q] Quit`
-          : `[SPACE] ${paused ? 'Record now' : 'Pause'}  [F] File  [H] History  [P] AI  [?] Help  [Q] Quit`
-      : terminal.columns < 56
-        ? '[L] Live [H] History [P] AI [Q] Quit'
-        : terminal.columns < 72
-          ? '[L] Live  [H] History  [P] AI  [?] Help  [Q] Quit'
-          : '[L] Live  [H] History  [P] AI  [?] Help  [Q] Quit';
-  const historyDrawer = (
-    <Box
-      width={layout.compact ? undefined : layout.sidebarWidth}
-      flexGrow={layout.compact ? 1 : 0}
-      flexShrink={0}
-      flexDirection="column"
-      borderStyle="round"
-      borderColor="cyan"
-      paddingX={1}
-      overflow="hidden"
-      aria-role="listbox"
-      aria-label="Transcript history"
-    >
-      <Text bold>History</Text>
-      {(searchMode || searchQuery) && (
-        <Text dimColor wrap="truncate-end">/ {searchQuery || 'Type to search'}</Text>
-      )}
-      <Box height={1} />
-      {navigationItems
-        .slice(sidebarStart, sidebarStart + layout.visibleLibraryItems)
-        .map((item, windowIndex) => {
-          const index = sidebarStart + windowIndex;
-          const selected = selectionIndex === index;
-          const rowWidth = layout.compact
-            ? Math.max(12, terminal.columns - 8)
-            : Math.max(12, layout.sidebarWidth - 4);
-          return (
-            <Text
-              key={item.kind === 'record' ? item.entry.id : item.kind}
-              color={!selected && item.kind === 'live' ? 'green' : undefined}
-              inverse={selected}
-              wrap="truncate-end"
-              aria-role="option"
-              aria-state={{ selected }}
-            >
-              {selected ? '› ' : '  '}{truncate(item.label, rowWidth)}
-            </Text>
-          );
-        })}
-      {searchQuery && visibleEntries.length === 0 && (
-        <Text dimColor>No saved transcripts found.</Text>
-      )}
-      {!searchQuery && libraryEntries.length === 0 && (
-        <Text dimColor>No saved transcripts yet.</Text>
-      )}
+  const consentPending = (watchOwnership === 'external' && backgroundWatch?.phase === 'awaiting-consent') || Boolean(automaticCandidate);
+  const reading = !historyOpen;
+  const hasNotes = Boolean(currentMeeting?.analysis);
+  const atHome = view === 'live' && paused && !currentMeeting;
+  const hints: Hint[] = consentPending ? [['m', 'record'], ['x', 'ignore']]
+    : atHome && attention.length ? [[',', 'fix setup'], ['f', 'import']]
+    : !navigationItems.some((item) => item.kind === 'record') && historyOpen ? [['f', 'import'], ['/', 'search']]
+    : historyOpen ? [['↑↓', 'choose'], ['Enter', 'read'], ['/', 'search'], ['f', 'import']]
+    : showingLiveTranscript ? [['↑↓', 'scroll'], ...(followLiveTranscript ? [] : [['l', 'latest'] as Hint]), ['h', 'meetings'], ['i', 'audio']]
+    : !currentRecord?.transcript.length ? [['h', 'meetings'], ['f', 'import']]
+    : !currentMeeting ? [['↑↓', 'scroll'], ['r', 'name speakers'], ['m', 'make it a meeting'], ['c', 'copy'], ['h', 'meetings']]
+    : meetingView === 'notes' ? [
+      ...(hasNotes ? [['↑↓', 'scroll'], ['a', 'ask'], ['c', 'copy'], ['g', 'rewrite notes']] as Hint[] : [['g', 'write notes']] as Hint[]),
+      ['n', 'notes options'], ['h', 'meetings'],
+    ]
+    : meetingView === 'chat' ? [['a', 'ask'], ['↑↓', 'scroll'], ['c', 'copy'], ['h', 'meetings']]
+    : [['↑↓', 'scroll'], ['r', 'name speakers'], ['a', 'ask'], ['e', 'export'], ['c', 'copy'], ['h', 'meetings']];
+
+  const list = (
+    <Box width={layout.compact ? undefined : layout.sidebarWidth} flexGrow={layout.compact ? 1 : 0} flexShrink={0}
+      flexDirection="column" overflow="hidden" paddingRight={1}
+      {...(layout.compact ? {} : { borderStyle: 'single' as const, borderTop: false, borderBottom: false, borderLeft: false, borderDimColor: true })}
+      aria-role="listbox" aria-label="Meetings">
+      <Text bold color="cyan" wrap="truncate-end">
+        {searchQuery ? `/ ${searchQuery} · ${visibleEntries.length} found` : searchMode ? '/ Type to search' : 'Meetings'}
+      </Text>
+      {navigationItems.slice(sidebarStart, sidebarStart + layout.visibleLibraryItems).map((item, windowIndex) => {
+        const index = sidebarStart + windowIndex;
+        const selected = selectionIndex === index;
+        const rowWidth = (layout.compact ? terminal.columns - 2 : layout.sidebarWidth - 2) - 2;
+        const label = item.kind === 'record' ? meetingEntryRow(item.entry, rowWidth, new Date(statusNow),
+          visibleEntries.some((other) => other.id !== item.entry.id && sameDay(other.createdAt, item.entry.createdAt))) : item.label;
+        return <Text key={item.kind === 'record' ? item.entry.id : item.kind} inverse={selected} wrap="truncate-end"
+          aria-role="option" aria-state={{ selected }}>{selected ? '› ' : '  '}{truncate(label, rowWidth)}</Text>;
+      })}
+      {searchQuery && visibleEntries.length === 0 && <Text dimColor>Nothing found. Esc clears the search.</Text>}
+      {!searchQuery && libraryEntries.length === 0 && <Text dimColor>Your meetings will appear here.</Text>}
     </Box>
   );
 
-  const transcriptPane = (
-    <Box
-      ref={transcriptPaneRef}
-      flexGrow={1}
-      minWidth={0}
-      flexDirection="column"
-      borderStyle="round"
-      borderColor={transcriptBorderColor}
-      paddingX={2}
-      paddingY={1}
-      minHeight={4}
-      marginLeft={historyOpen ? 1 : 0}
-      overflow="hidden"
-      aria-label="Transcript reader"
-    >
-      {currentMeeting && meetingView !== 'transcript' ? (
-        <Box flexDirection="column">
-          {visibleAuxiliaryMeetingLines.map((line, index) => (
-            <Box key={`${meetingView}-${index}`} flexShrink={0}>
-              <Text
-                bold={line.length > 0 && !line.startsWith('-') && !line.includes(':') && line.length < 28}
-                dimColor={line === ''}
-                wrap="wrap"
-              >
-                {line || ' '}
-              </Text>
-            </Box>
-          ))}
-        </Box>
-      ) : visibleTranscriptRows.length === 0 ? (
-        view === 'live' && paused ? null : (
-          <Text dimColor>{view === 'live'
-            ? transcribingCount > 0 ? 'Preparing transcript…' : 'Speak to transcribe · the first words take a moment'
-            : backgroundMessage ?? 'No transcript text'}</Text>
-        )
-      ) : (
-        <Box flexDirection="column">
-          {visibleTranscriptRows.map((row, index) => <Box key={index} flexShrink={0} height={1}>
-            <Text wrap="truncate-end">{row || ' '}</Text>
-          </Box>)}
-        </Box>
-      )}
-    </Box>
-  );
+  const searchHighlight = searchQuery.trim() && meetingView === 'transcript'
+    ? new RegExp(searchQuery.trim().replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'giu') : undefined;
+  const homeMessage = attention.length ? <>
+    <Text bold>Seashell can't record meetings yet.</Text>
+    <Text> </Text>
+    {attention.map((status) => <Text key={status.id}>{status.label}: {status.summary}</Text>)}
+    <Text> </Text>
+    <Text>Press <Text bold>,</Text> to fix this.</Text>
+  </> : <>
+    <Text bold>Seashell is ready.</Text>
+    <Text> </Text>
+    <Text>Join a call and recording starts by itself. Words appear here as people speak.</Text>
+    <Text dimColor>Notes are written when the call ends.</Text>
+  </>;
 
-  return (
-    <Box flexDirection="column" padding={1} height={terminal.rows} overflow="hidden">
-      <Box marginBottom={1} flexShrink={0}>
-        <Text>🐚 </Text>
-        <Text bold color="cyan">Sea Shell</Text>
-        {setupNeeded
-          ? <Text color="yellow">  · Setup needed · press ,</Text>
-          : <Text dimColor>  · [,] Settings</Text>}
-      </Box>
-
-      <Box marginBottom={1} flexShrink={0}>
-        <Text dimColor wrap="truncate-end">
-          {truncate(primaryCommands, Math.max(20, terminal.columns - 4))}
-        </Text>
-      </Box>
-
-      {(error || copied || notice) && (
-        <Box marginBottom={1} flexShrink={0}>
-          <Text color={error ? 'red' : 'green'}>
-            {error ?? (copied ? 'Copied!' : notice)}
-          </Text>
-        </Box>
-      )}
-
-      {view === 'record' && backgroundWatch?.phase === 'awaiting-consent' && <Box marginBottom={1} flexShrink={0}>
-        <Text color="yellow">Not recording {backgroundWatch.candidate?.title} · [M] Record  [X] Ignore</Text>
-      </Box>}
-
-      {activeBackgroundEntry && backgroundEntry?.id !== activeBackgroundEntry.id && <Box marginBottom={1} flexShrink={0}>
-        <Text color="yellow">{backgroundWatch?.phase === 'recording' ? 'Another meeting is recording' : 'Another meeting needs attention'} · [L] View current meeting</Text>
-      </Box>}
-
-      {audioHelpOpen ? <Box flexDirection="column" flexShrink={0} borderStyle="round" borderColor="yellow" paddingX={1} marginBottom={1}>
-        <Text bold>Audio help</Text>
-        <Text>Quiet can mean you are muted or not speaking. It does not prove a permission problem.</Text>
-        <Text>[O] Sound → Input: choose your microphone and check its input level.</Text>
-        <Text>[P] Microphone permission: allow Seashell Background or your terminal, as shown by macOS.</Text>
-        <Text>Background access can differ from terminal access. [I] or [Esc] Back</Text>
-      </Box> : null}
-
-      {showBackgroundStatus ? <RecordingStatus
-        mode={backgroundRecording ? backgroundWatch?.phase === 'recording' && backgroundWatch.sessionId === backgroundEntry?.id ? captureRecordingMode(backgroundEntry?.captureHealth) : 'unavailable'
-          : view === 'live' && backgroundWatch?.phase === 'awaiting-consent' ? 'awaiting-consent'
-          : backgroundEntry?.captureState === 'processing' ? 'processing'
-          : backgroundEntry?.captureState === 'ready' ? 'ready'
-          : backgroundEntry?.captureState === 'failed' || backgroundEntry?.captureState === 'interrupted' ? 'unavailable'
-          : backgroundWatch?.phase === 'watching' ? 'watching' : 'unavailable'}
-        title={view === 'live' && backgroundWatch?.phase === 'awaiting-consent' ? backgroundWatch.candidate?.title : backgroundEntry?.title}
-        health={backgroundEntry?.captureHealth}
-        elapsedSeconds={backgroundEntry ? (statusNow - new Date(backgroundEntry.createdAt).getTime()) / 1000 : undefined}
-        savedThroughSeconds={backgroundEntry?.audioSavedThroughMs === undefined
-          ? backgroundEntry?.captureState === 'ready' ? backgroundEntry.duration : undefined
-          : backgroundEntry.audioSavedThroughMs / 1000}
-        draftLabel={backgroundEntry?.captureState === 'recording'
-          ? backgroundEntry.draftStatus?.stage === 'delayed' ? 'Live transcript delayed · final pass will retry'
-            : backgroundEntry.draftStatus?.stage === 'transcribing' ? 'Live transcript updating…'
-            : backgroundEntry.draftStatus?.stage === 'live' ? 'Live draft · updates as people speak'
-            : 'Live transcript waiting for speech'
-          : backgroundEntry?.captureState === 'processing' ? 'Final transcript in progress' : undefined}
-        warning={(view === 'live' || backgroundRecording) && backgroundWatch?.warning ? backgroundWatch.warning
-          : backgroundRecording && !backgroundWatch ? 'The recorder has not confirmed its status. Check seashell meeting watch status.' : undefined}
-        approvalPending={backgroundWatch?.consentId !== undefined && backgroundApproval === backgroundWatch.consentId}
-        nowUnixMs={statusNow}
-      /> : view === 'live' ? <RecordingStatus
-        mode={paused ? automaticCandidate ? 'awaiting-consent' : automaticMeetingEnabled ? 'watching' : 'paused' : captureRecordingMode(liveHealth)}
-        title={automaticCandidate?.title}
-        health={liveHealth}
-        elapsedSeconds={(statusNow - (liveSessionStartedAt.current ?? statusNow)) / 1000}
-        savedThroughSeconds={Math.max(0, ...(captureSessionStore.current?.manifest.chunks.map(chunk => chunk.endMs / 1000) ?? []))}
-        draftLabel={paused ? undefined : transcribingCount ? 'Live transcript updating…' : liveRecord.transcript.length ? 'Live draft' : 'Live transcript waiting for speech'}
-        nowUnixMs={statusNow}
-      /> : null}
-
-      {(processing || (view === 'record' && !showBackgroundStatus)) && (
-        <Box marginBottom={1} flexShrink={0}>
-          {processing ? <Text color="magenta">
-            ◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}
-          </Text> : <Text color="cyan" wrap="truncate-end">
-            {currentMeeting ? 'Meeting · ' : ''}{truncate(title, Math.max(12, terminal.columns - 6))}
-          </Text>}
-        </Box>
-      )}
-
+  const reader = (
+    <Box flexDirection="column" flexGrow={1} minWidth={0} paddingLeft={layout.compact ? 0 : 1} overflow="hidden">
       {currentMeeting && !drawerOnly && (
-        <Box marginBottom={1} flexShrink={0}>
+        <Box flexShrink={0} marginBottom={1}>
           <Text>
             {([
               ['notes', '1 Notes'],
-              ['transcript', terminal.columns < 56 ? '2 Text' : '2 Transcript'],
-              ['analysis', '3 Analysis'],
-              ['chat', '4 Chat'],
+              ['transcript', '2 Transcript'],
+              ['chat', '3 Chat'],
             ] as Array<[MeetingView, string]>).map(([candidate, label], index) => (
               <React.Fragment key={candidate}>
-                {index > 0 && <Text dimColor>  </Text>}
-                <Text inverse={meetingView === candidate}>{` ${label} `}</Text>
+                {index > 0 && <Text> </Text>}
+                <Text inverse={meetingView === candidate} bold={meetingView === candidate}>{` ${label} `}</Text>
               </React.Fragment>
             ))}
-            {currentMeeting.status !== 'base-only' && (
-              <Text dimColor>  {currentMeeting.status[0]!.toUpperCase() + currentMeeting.status.slice(1)}</Text>
-            )}
           </Text>
         </Box>
       )}
-
-      <Box flexDirection="row" flexGrow={1} overflow="hidden">
-        {historyOpen && historyDrawer}
-        {!drawerOnly && transcriptPane}
+      <Box ref={transcriptPaneRef} flexGrow={1} minHeight={2} flexDirection="column" overflow="hidden" aria-label="Transcript reader">
+        {currentMeeting && meetingView !== 'transcript' ? visibleAuxiliaryMeetingLines.map((line, index) => (
+          <Box key={`${meetingView}-${index}`} flexShrink={0} height={1}>
+            {line.startsWith(HEADING)
+              ? <Text bold color="cyan" wrap="truncate-end">{line.slice(HEADING.length)}</Text>
+              : <Text wrap="truncate-end">{line || ' '}</Text>}
+          </Box>
+        )) : visibleTranscriptRows.length === 0 ? (
+          view === 'live' && paused ? homeMessage : (
+            <Text dimColor>{view === 'live'
+              ? transcribingCount > 0 ? 'Preparing transcript…' : 'Speak to transcribe · the first words take a moment'
+              : backgroundMessage ?? 'No transcript text'}</Text>
+          )
+        ) : visibleTranscriptRows.map((row, index) => <Box key={index} flexShrink={0} height={1}>
+          <Text wrap="truncate-end">{(searchHighlight ? row.replace(searchHighlight, (match) => HIGHLIGHT(match)) : row) || ' '}</Text>
+        </Box>)}
       </Box>
+    </Box>
+  );
 
-      <Box flexDirection="column" marginTop={1} flexShrink={0}>
-        {showingLiveTranscript && !paused && !historyOpen && meetBrowserMatchesApp(config.meeting?.speakerBrowser, captureAppBundle) && (
-          <Text dimColor>{meetSpeakerStatus?.state === 'permission' ? 'Meet names need browser permission · [V] Setup'
-            : meetSpeakerStatus?.detail ?? 'Connecting Meet speaker names…'}</Text>
-        )}
-        {currentMeeting && meetingView === 'transcript' && showSpeakers && !historyOpen &&
-          currentRecord?.speakers.some((speaker) => speaker.id === 'SYSTEM') && (
-          <Text dimColor>{currentRecord.speakerAnalysis?.detail ?? (showingLiveTranscript
-            ? 'Source labels · [V] Connect Meet names or set up voice separation'
-            : 'Source labels only · [V] Set up or identify speakers')}</Text>
-        )}
-        {showingLiveTranscript && !followLiveTranscript && !historyOpen && (
-          <Text dimColor>Reading earlier text · [L] Latest</Text>
-        )}
-        {notesSetup && currentMeeting ? (() => {
-          const applied = currentMeeting.ai?.off ? undefined : (() => {
-            try {
-              return meetingInstructions(libraryRoot, {
-                title: currentMeeting.title,
-                ...(currentMeeting.calendar?.title ? { calendarTitle: currentMeeting.calendar.title } : {}),
-                ...(currentMeeting.ai?.template ? { template: currentMeeting.ai.template } : {}),
-              }).template?.name;
-            } catch { return undefined; }
-          })();
-          const template = currentMeeting.ai?.template === NO_TEMPLATE ? 'None (summary and claims only)'
-            : currentMeeting.ai?.template ?? `Auto · ${applied ?? 'General'} from the title`;
-          const rows: Array<[string, string]> = [
-            ['Template', `‹ ${template} ›`],
-            ['Note', notesSetup.editing !== undefined ? `${notesSetup.editing}█` : currentMeeting.ai?.note ?? '— Enter to add, e.g. "Capture pricing"'],
-            ['AI', currentMeeting.ai?.off ? '‹ Off › no notes or chat; agents are refused it' : '‹ On ›'],
-          ];
-          return (
-            <>
-              <Text color="yellow">Notes setup for this meeting · ↑↓ choose · ←→ change · Enter edit note · Esc done</Text>
-              {rows.map(([label, value], index) => (
-                <Text key={label} {...(index === notesSetup.row ? { color: 'cyan' } : { dimColor: true })}>
-                  {index === notesSetup.row ? '▸ ' : '  '}{label.padEnd(9)}{value}
-                </Text>
-              ))}
-            </>
-          );
-        })() : chatInputState ? (
-          <Text color="yellow">Ask: {chatInputState.input}█  [Enter send · Esc cancel]</Text>
-        ) : renameState ? (
-          <Text color="yellow">Rename {renameState.speakerId}: {renameState.input}█  [Enter save · Esc cancel]</Text>
-        ) : searchMode ? (
-          <Text color="yellow">Search: {searchQuery}█  [Enter apply · Esc cancel]</Text>
-        ) : exportMode ? (
-          <Text color="yellow">Export: [S] SRT  [V] WebVTT  [T] Text  [J] JSON  [Esc] Cancel</Text>
-        ) : confirmTrashId ? (
-          <Text color="red">Move this transcript to recoverable Trash? [Y/N]</Text>
-        ) : helpMode ? (
-          <>
-            <Text color="yellow">Keyboard help · [?] or [Esc] close</Text>
-            <Text dimColor>F import · ⇧F import + speakers · V speaker setup · T timestamps · S labels</Text>
-            <Text dimColor>C copy · E export · O folder · D trash · DEL clear live</Text>
-            <Text dimColor>[/] choose speaker · R rename · ↑↓ / wheel scroll · L live · Q quit</Text>
-            <Text dimColor>M mark meeting · 1-4 meeting views · G enrich/finalize · A ask · N notes setup</Text>
-            <Text dimColor>P choose AI models and effort for live analysis, notes and chat</Text>
-            <Text dimColor>, Settings: what works, what is off, and one-key fixes</Text>
-            <Text dimColor>Automatic meeting prompt: M record · X ignore</Text>
-          </>
-        ) : !historyOpen && currentRecord?.transcript.length ? (
-          <Text dimColor>
-            {currentMeeting && meetingView === 'analysis'
-              ? `${currentMeeting.analysis?.claims.length ?? currentMeeting.provisionalClaims.length} insights`
-              : currentMeeting && meetingView === 'notes'
-                ? `${currentMeeting.ai?.off ? 'AI off' : currentMeeting.analysis?.template ? `${currentMeeting.analysis.template} notes` : `${currentMeeting.attendees.length} attendees`} · [N] Notes setup · [G] Write notes`
-                : currentMeeting && meetingView === 'chat'
-                  ? `${Math.floor(currentMeeting.chat.length / 2)} exchanges`
-                  : terminal.columns < 56
-                    ? '↑↓ / wheel scroll · [?] Help'
-                    : `↑↓ / wheel scroll · [T] Time [S] Speakers · ${visibleTranscriptScroll + 1}–${Math.min(displayRows.length, visibleTranscriptScroll + visibleRows)}/${displayRows.length}`}
-          </Text>
-        ) : null}
+  const notesSheet = notesSetup && currentMeeting ? (() => {
+    const applied = currentMeeting.ai?.off ? undefined : (() => {
+      try {
+        return meetingInstructions(libraryRoot, {
+          title: currentMeeting.title,
+          ...(currentMeeting.calendar?.title ? { calendarTitle: currentMeeting.calendar.title } : {}),
+          ...(currentMeeting.ai?.template ? { template: currentMeeting.ai.template } : {}),
+        }).template?.name;
+      } catch { return undefined; }
+    })();
+    const template = currentMeeting.ai?.template === NO_TEMPLATE ? 'None (summary and claims only)'
+      : currentMeeting.ai?.template ?? `Auto · ${applied ?? 'General'} from the title`;
+    const rows: Array<[string, string]> = [
+      ['Template', `‹ ${template} ›`],
+      ['Note', notesSetup.editing !== undefined ? `${notesSetup.editing}█` : currentMeeting.ai?.note ?? '— Enter to add, e.g. "Capture pricing"'],
+      ['AI', currentMeeting.ai?.off ? '‹ Off › no notes or chat; agents are refused it' : '‹ On ›'],
+    ];
+    return <Sheet title="Notes setup for this meeting">
+      {rows.map(([label, value], index) => (
+        <Text key={label} inverse={index === notesSetup.row} wrap="truncate-end">{index === notesSetup.row ? '› ' : '  '}{label.padEnd(10)}{value}</Text>
+      ))}
+    </Sheet>;
+  })() : null;
+  const namedSpeakers = currentRecord?.speakers ?? [];
+  const speakerSheet = speakerPickerOpen && currentRecord ? <Sheet title="Name a speaker">
+    {namedSpeakers.map((speaker, index) => {
+      const said = currentRecord.transcript.find((segment) => segment.speaker === speaker.id)?.text ?? '';
+      const label = speaker.id === 'LOCAL' && speaker.label === 'Microphone' ? 'You' : speaker.label;
+      return <Text key={speaker.id} inverse={index === speakerSelection} wrap="truncate-end">
+        {index === speakerSelection ? '› ' : '  '}{label.padEnd(20)}<Text dimColor={index !== speakerSelection}>“{said}”</Text>
+      </Text>;
+    })}
+  </Sheet> : null;
+  const helpSheet = helpMode ? <Sheet title="Keys">
+    {HELP_ROWS.map(([group, keys]) => <Text key={group} wrap="truncate-end"><Text bold>{group.padEnd(12)}</Text>{keys}</Text>)}
+  </Sheet> : null;
+  const audioSheet = audioHelpOpen ? <Sheet title="Is your audio being heard?">
+    <Text>1. Quiet can just mean you are muted or nobody is speaking.</Text>
+    <Text>2. Check the right microphone is chosen and its level moves. <Text bold>o</Text> opens Sound.</Text>
+    <Text>3. Check Seashell Microphone is allowed. <Text bold>p</Text> opens Privacy.</Text>
+  </Sheet> : null;
+  const sheet = helpSheet ?? audioSheet ?? notesSheet ?? speakerSheet;
+
+  const prompt = chatInputState ? `Ask: ${chatInputState.input}█  Enter send · Esc cancel`
+    : renameState ? `Name for ${renameState.label}: ${renameState.input}█  Enter save · Esc cancel`
+    : searchMode ? `Search: ${searchQuery}█  Enter choose · Esc clear`
+    : exportMode ? 'Export: s SRT · v WebVTT · t text · j JSON · Esc cancel'
+    : confirmTrashId ? 'Move this meeting to Trash? It can be recovered. y yes · n no'
+    : notesSetup ? notesSetup.editing !== undefined ? 'Enter save · Esc cancel' : '↑↓ choose · ←→ change · Enter edit note · Esc done'
+    : speakerPickerOpen ? '↑↓ choose · Enter name · Esc back'
+    : helpMode ? '? or Esc close'
+    : audioHelpOpen ? 'o Sound · p Privacy · Esc back'
+    : undefined;
+
+  const statusProps = showBackgroundStatus ? {
+    mode: backgroundRecording ? backgroundWatch?.phase === 'recording' && backgroundWatch.sessionId === backgroundEntry?.id ? captureRecordingMode(backgroundEntry?.captureHealth) : 'unavailable' as RecordingMode
+      : view === 'live' && backgroundWatch?.phase === 'awaiting-consent' ? 'awaiting-consent' as RecordingMode
+      : backgroundEntry?.captureState === 'processing' ? 'processing' as RecordingMode
+      : backgroundEntry?.captureState === 'ready' ? 'ready' as RecordingMode
+      : backgroundEntry?.captureState === 'failed' || backgroundEntry?.captureState === 'interrupted' ? 'unavailable' as RecordingMode
+      : backgroundWatch?.phase === 'watching' ? 'watching' as RecordingMode : 'unavailable' as RecordingMode,
+    title: view === 'live' && backgroundWatch?.phase === 'awaiting-consent' ? backgroundWatch.candidate?.title : backgroundEntry?.title,
+    health: backgroundEntry?.captureHealth,
+    elapsedSeconds: backgroundEntry ? (statusNow - new Date(backgroundEntry.createdAt).getTime()) / 1000 : undefined,
+    savedThroughSeconds: backgroundEntry?.audioSavedThroughMs === undefined
+      ? backgroundEntry?.captureState === 'ready' ? backgroundEntry.duration : undefined
+      : backgroundEntry.audioSavedThroughMs / 1000,
+    draftLabel: backgroundEntry?.captureState === 'recording'
+      ? backgroundEntry.draftStatus?.stage === 'delayed' ? 'Live transcript delayed · final pass will retry'
+        : backgroundEntry.draftStatus?.stage === 'transcribing' ? 'Live transcript updating…'
+        : backgroundEntry.draftStatus?.stage === 'live' ? 'Live draft · updates as people speak'
+        : 'Live transcript waiting for speech'
+      : backgroundEntry?.captureState === 'processing' ? 'Final transcript in progress' : undefined,
+    warning: (view === 'live' || backgroundRecording) && backgroundWatch?.warning ? backgroundWatch.warning
+      : backgroundRecording && !backgroundWatch ? 'The recorder has not confirmed its status. Check seashell meeting watch status.' : undefined,
+    approvalPending: backgroundWatch?.consentId !== undefined && backgroundApproval === backgroundWatch.consentId,
+    nowUnixMs: statusNow,
+  } : view === 'live' ? {
+    mode: (paused ? automaticCandidate ? 'awaiting-consent' : automaticMeetingEnabled ? 'watching' : 'paused' : captureRecordingMode(liveHealth)) as RecordingMode,
+    title: automaticCandidate?.title,
+    health: liveHealth,
+    elapsedSeconds: (statusNow - (liveSessionStartedAt.current ?? statusNow)) / 1000,
+    savedThroughSeconds: Math.max(0, ...(captureSessionStore.current?.manifest.chunks.map(chunk => chunk.endMs / 1000) ?? [])),
+    draftLabel: paused ? undefined : transcribingCount ? 'Live transcript updating…' : liveRecord.transcript.length ? 'Live draft' : 'Live transcript waiting for speech',
+    nowUnixMs: statusNow,
+  } : undefined;
+  const summary = statusProps ? recordingSummary(statusProps) : undefined;
+  const quietlyDone = statusProps?.mode === 'ready' && !summary?.problems.length && summary?.color === undefined;
+  const recordingElsewhere = activeBackgroundEntry && backgroundEntry?.id !== activeBackgroundEntry.id ? activeBackgroundEntry : undefined;
+  const consentOverRecord = view === 'record' && backgroundWatch?.phase === 'awaiting-consent';
+  const heading = attention.length && view === 'live' && statusProps?.mode === 'watching'
+    ? { text: 'Not recording · finish setup to record meetings', color: 'yellow' as const }
+    : consentOverRecord ? { text: `Not recording · record this? · ${backgroundWatch?.candidate?.title}`, color: 'yellow' as const }
+    : recordingElsewhere ? { text: `● Another meeting is recording · ${recordingElsewhere.title} · l to open`, color: 'red' as const }
+    : summary && !quietlyDone ? { text: summary.headline, color: summary.color }
+    : currentRecord && view === 'record' ? { text: [currentRecord.title, meetingWhen(currentRecord.createdAt),
+      ...(currentEntry?.duration ? [`${Math.max(1, Math.round(currentEntry.duration / 60))} min`] : [])].join(' · ') }
+    : { text: '' };
+  const problems = [
+    ...((consentOverRecord || recordingElsewhere) && summary && !quietlyDone ? [summary.headline] : []),
+    ...(summary?.problems ?? []),
+    ...(attention.length && !(view === 'live' && statusProps?.mode === 'watching') && !summary?.problems.length
+      ? [`${attention[0]!.label}: ${attention[0]!.summary} · , to fix`] : []),
+    ...(currentMeeting && meetingView === 'transcript' && reading && showSpeakers &&
+      currentRecord?.speakers.some((speaker) => speaker.id === 'SYSTEM')
+      ? [currentRecord.speakerAnalysis?.detail ?? 'Source labels only · v to set up speaker names'] : []),
+  ];
+  const toast = error ?? (copied ? 'Copied.' : notice) ?? undefined;
+
+  return (
+    <Box flexDirection="column" paddingX={1} height={terminal.rows} overflow="hidden">
+      <Box flexShrink={0}>
+        <Text wrap="truncate-end">
+          🐚{layout.compact ? '' : <Text> <Text bold color="cyan">Sea Shell</Text></Text>}
+          {heading.text ? '  ' : ''}
+          <Text bold={Boolean(heading.color)} {...(heading.color ? { color: heading.color } : {})}>{heading.text}</Text>
+          {summary?.detail && !layout.compact && !quietlyDone ? <Text dimColor>  {summary.detail}</Text> : null}
+        </Text>
+      </Box>
+      {problems.map((problem) => <Text key={problem} color="red" inverse wrap="truncate-end">{` ${problem} `}</Text>)}
+      <Text dimColor wrap="truncate-end">{'─'.repeat(Math.max(1, terminal.columns - 2))}</Text>
+      {sheet ?? <Box flexDirection="row" flexGrow={1} overflow="hidden">
+        {historyOpen && list}
+        {!drawerOnly && reader}
+      </Box>}
+      <Box flexShrink={0}>
+        {prompt ? <Text color="yellow" wrap="truncate-end">{prompt}</Text>
+          : processing ? <Text color="magenta" wrap="truncate-end">◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}</Text>
+          : toast ? <Text color={error ? 'red' : 'green'}>{toast}</Text>
+          : <KeyBar hints={hints} columns={terminal.columns - 2} />}
       </Box>
     </Box>
   );

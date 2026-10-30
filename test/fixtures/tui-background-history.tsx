@@ -34,7 +34,7 @@ let rendered = '';
 const output = Object.assign(new Writable({ write(chunk, _enc, cb) { rendered += chunk.toString(); cb(); } }), { columns, rows });
 const app = render(<App />, { stdin: input as any, stdout: output as any, stderr: output as any,
   debug: true, patchConsole: false, exitOnCtrlC: false });
-const screen = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('🐚 Sea Shell')));
+const screen = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('🐚')));
 const type = async (key: string) => { input.write(key); await Bun.sleep(100); };
 const until = async (condition: () => boolean, message: string) => {
   const deadline = Date.now() + 2500;
@@ -45,7 +45,7 @@ try {
   await until(() => screen().includes(meetWarning), 'idle watcher must expose detection failures');
   assert(screen().includes('Not recording') && !screen().includes('● Recording'), 'detection failure cannot imply capture is active');
   writeBackgroundWatchStatus(library, { phase: 'awaiting-consent', candidate: { id: 'call', title: 'Design meeting', appName: 'Chrome' }, consentId: 'suggestion-1' });
-  await until(() => screen().includes('meeting needs your approval'), 'must explicitly show not recording before consent');
+  await until(() => screen().includes('record this?'), 'must explicitly show not recording before consent');
   assert(!screen().includes(meetWarning), 'recovered detection clears the warning');
   await type('m');
   assert.equal(decisions.length, 1);
@@ -63,27 +63,26 @@ try {
   writeBackgroundWatchStatus(library, { phase: 'recording', sessionId: first.id, warning: meetWarning });
   await until(() => screen().includes('NOT CAPTURING'), 'new meeting opens automatically and exposes microphone failure');
   assert(screen().includes(meetWarning) && screen().includes('● Recording'), 'observer warning remains visible while confirmed audio capture continues');
-  assert(screen().includes('Audio saved through 1:50'), 'saved duration comes from committed audio');
-  if (columns >= 80) await type('h'); // close history; compact opens directly in the reader
-  await type('i'); assert(screen().includes('Sound → Input'), `audio help is reachable\n${screen()}`);
-  await type('\x1b'); assert(!screen().includes('Sound → Input'), 'Escape closes audio help without quitting');
-  const transcript = Array.from({ length: 60 }, (_, i) => ({ id: `s${i}`, start: i, end: i + 1, text: `Live sentence ${String(i).padStart(3, '0')}.`, speaker: 'LOCAL' }));
+  if (columns >= 80) assert(screen().includes('Audio saved through 1:50'), 'saved duration comes from committed audio');
+  await type('i'); assert(screen().includes('Is your audio being heard?'), `audio help is reachable\n${screen()}`);
+  await type('\x1b'); assert(!screen().includes('Is your audio being heard?'), 'Escape closes audio help without quitting');
+  const transcript = Array.from({ length: 200 }, (_, i) => ({ id: `s${i}`, start: i, end: i + 1, text: `Live sentence ${String(i).padStart(3, '0')}.`, speaker: 'LOCAL' }));
   saveTranscriptRecord(library, { ...first, transcript }, { provisional: true });
-  await until(() => screen().includes('Live sentence 059.'), 'draft text appears while recording, not just after finalization');
+  await until(() => screen().includes('Live sentence 199.'), 'draft text appears while recording, not just after finalization');
   await type('r'); assert(screen().includes('Review and edit'), 'live drafts cannot be renamed while recorder owns them');
   // Clear the notice through the transcript tab, then scroll away from the live edge.
   await type('2'); await type('\x1b[5~');
-  assert(!screen().includes('Live sentence 059.'), 'page up leaves the live edge');
-  saveTranscriptRecord(library, { ...first, transcript: [...transcript, { id: 's60', start: 60, end: 61, text: 'New live sentence 060.', speaker: 'LOCAL' }] }, { provisional: true });
+  assert(!screen().includes('Live sentence 199.'), 'page up leaves the live edge');
+  saveTranscriptRecord(library, { ...first, transcript: [...transcript, { id: 's200', start: 200, end: 201, text: 'New live sentence 200.', speaker: 'LOCAL' }] }, { provisional: true });
   await Bun.sleep(1200);
-  assert(!screen().includes('060.'), 'new text does not yank the reader back to the bottom');
-  await type('l'); assert(screen().includes('060.'), 'Latest resumes following live text');
+  assert(!screen().includes('200.'), 'new text does not yank the reader back to the bottom');
+  await type('l'); assert(screen().includes('200.'), 'Latest resumes following live text');
   writeBackgroundMeetingState(saved.directory, 'ready', { captureHealth: health.stop() });
   writeBackgroundWatchStatus(library, { phase: 'watching', warning: meetWarning });
   await until(() => screen().includes('Saved · audio needs review'), 'capture failure remains visible after finalization');
   assert(!screen().includes(meetWarning), 'current detection warning must not attach to a saved transcript');
   writeBackgroundWatchStatus(library, { phase: 'awaiting-consent', candidate: { id: 'next', title: 'Next call', appName: 'Chrome' }, consentId: 'suggestion-2' });
-  await until(() => screen().includes('Not recording Next call'), 'next approval is visible separately');
+  await until(() => screen().includes('record this? · Next call'), 'next approval is visible separately');
   assert(screen().includes('Design meeting') && screen().includes('Saved · audio needs review'), 'new approval must not relabel the saved transcript');
   // A second meeting becomes the current view without reusing the old transcript.
   const second = createTranscriptRecord({ transcript: [{ start: 0, end: 1, text: 'Second meeting live text.' }], speakers: [] }, { id: 'second-call', title: 'Second meeting' });

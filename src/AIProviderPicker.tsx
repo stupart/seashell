@@ -162,6 +162,6 @@ export default function AIProviderPicker(props: {
       {notice && screen === 'roles' && <Text color="green">{notice}</Text>}
       {error && <Text color="red">{error.slice(0, 250)}</Text>}
     </Box>
-    <Box marginTop={1}><Text dimColor>{screen === 'custom' ? '[Enter] Use model  [Esc] Back' : '[↑↓] Choose  [Enter] Select  [R] Refresh  [Esc] Back'}</Text></Box>
+    <Box marginTop={1}><Text dimColor>{screen === 'custom' ? 'Enter use model · Esc back' : '↑↓ choose · Enter select · r refresh · Esc back'}</Text></Box>
   </Box>;
 }

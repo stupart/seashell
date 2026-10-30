@@ -25,7 +25,7 @@ const output = Object.assign(new Writable({ write(chunk, _encoding, callback) {
 } }), { columns: 100, rows: 28 });
 const app = render(<App />, { stdin: input as any, stdout: output as any, stderr: output as any,
   debug: true, patchConsole: false, exitOnCtrlC: false });
-const screen = () => stripVTControlCharacters(outputText.slice(outputText.lastIndexOf('🐚 Sea Shell')));
+const screen = () => stripVTControlCharacters(outputText.slice(outputText.lastIndexOf('🐚')));
 const type = async (key: string) => { input.write(key); await Bun.sleep(100); };
 try {
   await Bun.sleep(150);

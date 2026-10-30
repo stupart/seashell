@@ -110,7 +110,7 @@ export default function AISettings(props: {
     <Text bold color="cyan">Meeting AI</Text>
     {props.recording && <Text color="red">Recording continues · Esc to return</Text>}
     <Text>{screen === 'providers' ? 'Connect once. Seashell chooses the models.' : busy ? 'Finding your connected AI…'
-      : canUse ? `${proposal ? 'Ready with' : 'Using'} ${providerName}` : 'No connected AI found. Recording still works.'}</Text>
+      : canUse ? `${proposal ? 'Write notes with' : 'Using'} ${providerName}${proposal ? '?' : ''}` : 'No connected AI found. Recording still works.'}</Text>
     {screen === 'home' && canUse && <Box flexDirection="column" marginTop={1}>
       <Text>{automatic ? 'Recommended models' : 'Your saved models'}</Text>
       <Text>Notes: {routes.reconciliation?.model ?? 'Off'} · Chat: {routes.chat?.model ?? 'Not set'}</Text>
@@ -128,6 +128,6 @@ export default function AISettings(props: {
       {error && <Text color="red">{error.slice(0, 240)}</Text>}
       {!busy && !canUse && screen === 'home' && <Text dimColor>No Seashell account needed. Connect a provider or return to your transcript.</Text>}
     </Box>
-    <Box marginTop={1}><Text dimColor>[↑↓] Choose  [Enter] Continue  [R] Refresh  [Esc] Back</Text></Box>
+    <Box marginTop={1}><Text dimColor>↑↓ choose · Enter continue · r refresh · Esc back</Text></Box>
   </Box>;
 }

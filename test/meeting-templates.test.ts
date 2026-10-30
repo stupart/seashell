@@ -146,9 +146,8 @@ describe('templated meeting notes', () => {
     expect(markdown).toContain('## Concerns\n\n- Not discussed.');
 
     const lines = meetingViewLines(saved, 'notes', record);
-    expect(lines).toContain('Customer call notes');
-    expect(lines).toContain('Budget, timeline and decision');
-    expect(lines).toContain('- $10k for the quarter.');
+    expect(lines).toContain('# Budget, timeline and decision');
+    expect(lines.some((line) => line.startsWith('- $10k for the quarter.'))).toBe(true);
 
     const mcp = getMeeting(root, { id: record.id }) as { notes: { template?: string; sections?: Array<{ heading: string; items: Array<{ evidence: string[] }> }> } };
     expect(mcp.notes.template).toBe('Customer call');

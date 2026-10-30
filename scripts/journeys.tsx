@@ -91,7 +91,7 @@ export const JOURNEYS: Journey[] = [
       { title: 'Waiting for a meeting', note: 'Nothing happening yet.' },
       { title: 'A call is noticed', note: 'A browser call without a calendar event: Seashell asks first.',
         world: ({ library, background }) => background.writeBackgroundWatchStatus(library, { phase: 'awaiting-consent',
-          candidate: { id: 'call', title: 'Design review', appName: 'Chrome' }, consentId: 'demo-1' }), until: 'approval' },
+          candidate: { id: 'call', title: 'Design review', appName: 'Chrome' }, consentId: 'demo-1' }), until: 'record this' },
       { title: 'Recording', note: 'Words appear as people speak.',
         world: ({ library, background }) => liveMeeting(library, background), until: 'Recording' },
       { title: 'Reading back during the call', press: [UP, UP, UP], keys: '↑ ↑ ↑' },
@@ -105,11 +105,10 @@ export const JOURNEYS: Journey[] = [
     machine: 'ready', library: 'demo', narrow: true,
     steps: [
       { title: 'History', history: true, until: 'Acme', note: 'Finding the meeting.' },
-      { title: 'Meeting opened', press: [DOWN, ENTER], keys: '↓ Enter', until: '1 Notes', note: 'Which tab do I land on?' },
+      { title: 'Meeting opened', press: [ENTER], keys: 'Enter', until: '1 Notes', note: 'Which tab do I land on?' },
       { title: 'Notes', press: ['1'], keys: '1' },
       { title: 'Transcript', press: ['2'], keys: '2' },
-      { title: 'Next tab', press: ['3'], keys: '3' },
-      { title: 'Chat', press: ['4'], keys: '4' },
+      { title: 'Chat', press: ['3'], keys: '3' },
       { title: 'Asking a question', press: ['a'], keys: 'A', note: 'Typing a question about the meeting.' },
       { title: 'Question typed', press: [...'What did we promise Acme?'], keys: 'What did we promise Acme?' },
       { title: 'Cancelled', press: [ESC], keys: 'Esc' },
@@ -126,7 +125,7 @@ export const JOURNEYS: Journey[] = [
       { title: 'Search', press: ['/'], keys: '/', note: 'Search box opens.' },
       { title: 'Typing', press: [...'pricing'], keys: 'pricing' },
       { title: 'Results', press: [ENTER], keys: 'Enter' },
-      { title: 'Opened a result', press: [DOWN, ENTER], keys: '↓ Enter', until: '1 Notes' },
+      { title: 'Opened a result', press: [ENTER], keys: 'Enter', until: '1 Notes' },
       { title: 'Delete asked', press: ['d'], keys: 'D', note: 'Moving a meeting to the Trash.' },
       { title: 'Delete cancelled', press: ['n'], keys: 'N' },
     ],
@@ -136,9 +135,9 @@ export const JOURNEYS: Journey[] = [
     machine: 'ready', library: 'demo', narrow: true,
     steps: [
       { title: 'History', history: true, until: 'Acme' },
-      { title: 'Meeting transcript', press: [DOWN, ENTER, '2'], keys: '↓ Enter 2', until: 'Remote' },
-      { title: 'Picking a speaker', press: [']'], keys: ']', note: 'Which speaker is selected?' },
-      { title: 'Rename', press: ['r'], keys: 'R' },
+      { title: 'Meeting transcript', press: [ENTER, '2'], keys: 'Enter 2', until: 'Remote' },
+      { title: 'Picking a speaker', press: ['r'], keys: 'R', until: 'Name a speaker', note: 'Who can be named?' },
+      { title: 'Chose one', press: [DOWN, ENTER], keys: '↓ Enter' },
       { title: 'Name typed', press: [...'Dana'], keys: 'Dana' },
       { title: 'Saved', press: [ENTER], keys: 'Enter' },
       { title: 'Hide speakers', press: ['s'], keys: 'S', note: 'Toggle.' },
@@ -151,7 +150,7 @@ export const JOURNEYS: Journey[] = [
     machine: 'fresh', library: 'demo', narrow: true,
     steps: [
       { title: 'History', history: true, until: 'Weekly' },
-      { title: 'Meeting without notes', press: [DOWN, DOWN, ENTER], keys: '↓ ↓ Enter', until: '1 Notes' },
+      { title: 'Meeting without notes', press: [DOWN, ENTER], keys: '↓ Enter', until: '1 Notes' },
       { title: 'Asked for notes', press: ['g'], keys: 'G', note: 'No AI chosen yet: what happens?' },
       { title: 'Next choice', press: [DOWN], keys: '↓' },
       { title: 'Picked one', press: [ENTER], keys: 'Enter' },
@@ -162,7 +161,7 @@ export const JOURNEYS: Journey[] = [
     id: 'trouble', title: 'Something is wrong', who: 'Someone whose microphone stopped being heard during a call.',
     machine: 'mic-silent', library: 'demo', narrow: true,
     steps: [
-      { title: 'Warning at the top', until: 'etup', note: 'Does it say what is wrong and what to do?' },
+      { title: 'Warning at the top', until: 'silent', note: 'Does it say what is wrong and what to do?' },
       { title: 'Microphone fails during a call',
         world: ({ library, background }) => liveMeeting(library, background, { microphoneDown: true }), until: 'NOT CAPTURING' },
       { title: 'Audio help', press: ['i'], keys: 'I', until: 'Sound' },
@@ -177,7 +176,6 @@ export const JOURNEYS: Journey[] = [
       { title: 'Idle', note: 'How do I just start recording?' },
       { title: 'Tried Space', press: [' '], keys: 'Space' },
       { title: 'Tried Enter', press: [ENTER], keys: 'Enter' },
-      { title: 'Tried M', press: ['m'], keys: 'M' },
     ],
   },
   {
@@ -353,7 +351,7 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
     for (const step of journey.steps) {
       await step.world?.(context);
       if (step.world) await sleep(900);
-      if (step.history && !stripVTControlCharacters(latest).includes('Live transcription')) await type('h');
+      if (step.history && !stripVTControlCharacters(latest).includes('Meetings')) await type('h');
       for (const key of step.press ?? []) await type(key);
       if (step.until) {
         const deadline = Date.now() + 2500;

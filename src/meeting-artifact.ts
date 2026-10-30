@@ -603,13 +603,26 @@ function retainMeetingRevision(directory: string, artifact: MeetingArtifact, tra
 }
 
 /** Also repairs interruption between transcript replacement and projection refresh. */
-export function synchronizeMeetingTranscript(directory: string, record: TranscriptRecord): MeetingArtifact | undefined {
+export function synchronizeMeetingTranscript(
+  directory: string,
+  record: TranscriptRecord,
+  options: { namesOnly?: boolean } = {},
+): MeetingArtifact | undefined {
   const path = join(directory, 'meeting.json');
   if (!existsSync(path)) return undefined;
   const artifact = parseMeetingArtifact(JSON.parse(readFileSync(path, 'utf8')), path);
   const evidence = meetingEvidence(record);
   const change = compareMeetingEvidence(artifact.transcriptEvidence, evidence);
   if (change === 'same') return artifact;
+  // Naming a speaker changes no word or time, so the notes and chat still stand.
+  // The evidence hash includes labels, and stored hashes depend on that, so the
+  // caller says so rather than the hash changing.
+  if (options.namesOnly) {
+    const updated: MeetingArtifact = { ...artifact, transcriptEvidence: evidence, updatedAt: new Date().toISOString() };
+    atomicWrite(path, `${JSON.stringify(updated, null, 2)}\n`);
+    writeMeetingProjections(directory, updated, record);
+    return updated;
+  }
   if (change === 'revised' || artifact.analysis?.final || artifact.chat.length) retainMeetingRevision(directory, artifact);
   const updated: MeetingArtifact = {
     ...artifact,

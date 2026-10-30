@@ -28,7 +28,7 @@ const output = Object.assign(new Writable({ write(chunk, _encoding, cb) { render
 const app = render(<App />, { stdin: input as unknown as NodeJS.ReadStream,
   stdout: output as unknown as NodeJS.WriteStream, stderr: output as unknown as NodeJS.WriteStream,
   debug: true, patchConsole: false, exitOnCtrlC: false });
-const screen = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('🐚 Sea Shell')));
+const screen = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('🐚')));
 const key = async (value: string) => { input.write(value); await Bun.sleep(60); };
 const expect = (ok: boolean, description: string) => { if (!ok) throw new Error(`${description}\n${screen()}`); };
 try {
@@ -40,7 +40,7 @@ try {
   expect(screen() !== first && !screen().includes('word0 '), 'Wheel moves within a single paragraph');
   await key('\x1b[<64;40;10M');
   expect(screen().includes('word0'), 'Wheel returns to first word');
-  await key('\x1b[B');
+  await key('\x1b[B'); await key('\x1b[B');
   expect(!screen().includes('word0 '), 'Arrow scrolls by line');
   for (let i = 0; i < 30 && !screen().includes('word299'); i++) await key('\x1b[6~');
   expect(screen().includes('word299'), 'Final word is reachable');
