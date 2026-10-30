@@ -14,6 +14,7 @@
     "test": "bun test ./test && python3 -m unittest discover -s test -p '*_test.py'",
     "typecheck": "bunx tsc --noEmit",
     "gym": "bun run scripts/gym.ts",
+    "journeys": "bun run scripts/journeys.tsx",
     "benchmark:live-asr": "bun run scripts/benchmark-live-asr.ts",
     "ci": "node scripts/local-ci.mjs",
     "ci:quick": "node scripts/local-ci.mjs --quick",
