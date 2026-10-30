@@ -1,6 +1,6 @@
 import { spawn } from 'child_process';
 import { diarizationStatus, resolveDiarizationPython } from './diarization-environment.ts';
-import { speakerEngine, speakersHelper } from './speaker-engine.ts';
+import { speakerEngine, speakerEngineArguments, speakersHelper, usesSpeakersHelper, type SpeakerEngine } from './speaker-engine.ts';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { prepareMedia, type PreparedMedia } from './media-preparation.ts';
@@ -43,6 +43,8 @@ interface PythonDiarization {
 }
 
 export interface DiarizeFileOptions {
+  /** Overrides the configured engine; `seashell speakers compare` tries one without switching. */
+  engine?: SpeakerEngine;
   /**
    * Roles in physical channel order. For a two-channel meeting recording this
    * is normally ["local", "remote"], but callers must verify their routing.
@@ -243,8 +245,9 @@ export async function runSpeakerSeparation(
   audioPath: string,
   options: DiarizeFileOptions,
 ): Promise<PythonDiarization> {
-  if (options.pythonPath || options.model || speakerEngine() !== 'native') return runPythonDiarization(audioPath, options);
-  const args = [audioPath];
+  const engine = options.engine ?? speakerEngine();
+  if (options.pythonPath || options.model || !usesSpeakersHelper(engine)) return runPythonDiarization(audioPath, options);
+  const args = [audioPath, ...speakerEngineArguments(engine)];
   if (options.channelRoles) args.push('--channel-roles', options.channelRoles.join(','));
   positiveIntegerArgument(args, '--num-speakers', options.numSpeakers);
   positiveIntegerArgument(args, '--min-speakers', options.minSpeakers);

@@ -4,7 +4,7 @@ import { dirname, join } from 'path';
 import { randomUUID } from 'crypto';
 import { beginManagedProcessSession, trackChildProcess, terminateManagedChild } from './process-lifecycle.ts';
 import { DIARIZATION_ROOT, diarizationEnvironment, fileStamp, modelArtifacts } from './diarization-environment.ts';
-import { nativeSpeakerStatus, speakerEngine, speakersHelper } from './speaker-engine.ts';
+import { nativeSpeakerStatus, speakerEngine, speakerEngineArguments, speakersHelper, usesSpeakersHelper, type SpeakerEngine } from './speaker-engine.ts';
 
 function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'`; }
 
@@ -43,7 +43,7 @@ export interface SpeakerSetupResult {
   nextStep?: string;
 }
 
-export async function setupDiarization(options: { login: boolean; check: boolean; signal?: AbortSignal; onStatus?: (message: string) => void }): Promise<SpeakerSetupResult> {
+export async function setupDiarization(options: { login: boolean; check: boolean; engine?: SpeakerEngine; signal?: AbortSignal; onStatus?: (message: string) => void }): Promise<SpeakerSetupResult> {
   const environment = diarizationEnvironment();
   mkdirSync(environment.dataRoot, { recursive: true, mode: 0o700 });
   const lock = join(environment.dataRoot, 'speaker-setup.lock');
@@ -64,17 +64,19 @@ export async function setupDiarization(options: { login: boolean; check: boolean
   const invoke = (command: string, args: string[], interactive = false) => run(command, args, { interactive, signal: options.signal });
   try {
     options.signal?.throwIfAborted();
-    if (speakerEngine() === 'native') {
+    const engine = options.engine ?? speakerEngine();
+    if (usesSpeakersHelper(engine)) {
       // Core ML models from Hugging Face's public mirror: no Python, no account, no login.
+      const size = engine === 'nemotron3' ? '190' : '21';
       if (!options.check) {
-        status('Downloading speaker models · about 21 MB, once…');
-        await invoke(speakersHelper(), ['--prepare']).catch(() => {
+        status(`Downloading speaker models · about ${size} MB, once…`);
+        await invoke(speakersHelper(), ['--prepare', ...speakerEngineArguments(engine)]).catch(() => {
           throw new Error('Could not download the speaker models. Check your connection, then run seashell setup --speakers again.');
         });
       }
-      const native = nativeSpeakerStatus();
+      const native = nativeSpeakerStatus(process.env, engine);
       return { ready: native.ready, stage: native.ready ? 'ready' : 'models-missing', detail: native.detail, model: native.model,
-        ...(native.ready ? {} : { nextStep: 'Run seashell setup --speakers to download the speaker models (about 21 MB).' }) };
+        ...(native.ready ? {} : { nextStep: `Run seashell setup --speakers to download the speaker models (about ${size} MB).` }) };
     }
     rmSync(environment.verificationPath, { force: true });
     let uv = Bun.which('uv');

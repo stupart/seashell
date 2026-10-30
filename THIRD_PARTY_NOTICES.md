@@ -55,10 +55,19 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+## NVIDIA Nemotron 3 Diarization (optional speaker engine)
+
+`seashell speakers use nemotron3` and `seashell speakers compare` download
+[FluidInference/nemotron-3-diarization-coreml](https://huggingface.co/FluidInference/nemotron-3-diarization-coreml),
+a Core ML conversion of
+[nvidia/Nemotron-3-Diarization](https://huggingface.co/nvidia/Nemotron-3-Diarization).
+Sea Shell does not bundle these weights. They are distributed under the OpenMDW
+License Agreement, version 1.1; see that repository's license and notices.
+
 ## FluidAudio (native speaker separation)
 
 `native/bin/seashell-speakers` is built from `native/speakers/` and links
-[FluidAudio](https://github.com/FluidInference/FluidAudio) 0.17.7, which is
+[FluidAudio](https://github.com/FluidInference/FluidAudio) 0.18.0, which is
 licensed under the Apache License, Version 2.0
 (http://www.apache.org/licenses/LICENSE-2.0). FluidAudio's own third-party
 notices, including fastcluster (BSD-2-Clause) and VBx (Apache-2.0) used by its

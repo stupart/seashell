@@ -2,6 +2,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { updateSpeakerEngine } from '../src/config.ts';
 import { diarizationStatus } from '../src/diarization-environment.ts';
 import { setupDiarization } from '../src/diarization-setup.ts';
 import { runSpeakerSeparation } from '../src/diarize.ts';
@@ -85,4 +86,25 @@ test('separation runs the helper with the same arguments and JSON as the Python 
   expect(result.turns).toEqual([{ start: 0, end: 1.5, speaker: 'REMOTE_00', role: 'remote' }]);
   expect(result.speakers.map((speaker) => speaker.id)).toEqual(['LOCAL', 'REMOTE_00']);
   expect(messages.join('\n')).toContain('Separating speakers');
+});
+
+test('Nemotron 3 is asked for by name, and its own models decide whether it is ready', async () => {
+  const { calls } = fakeHelper({ ready: true });
+  process.env.SEASHELL_SPEAKER_ENGINE = 'nemotron3';
+  expect(speakerEngine()).toBe('nemotron3');
+  expect(diarizationStatus()).toMatchObject({ ready: true, engine: 'nemotron3', model: expect.stringContaining('Nemotron 3') });
+  expect(calls()).toContain('--status --engine nemotron3');
+  await runSpeakerSeparation('/tmp/call.wav', {}).catch(() => undefined);
+  expect(calls()).toContain('/tmp/call.wav --engine nemotron3');
+});
+
+test('a config can choose Nemotron 3, and anything else is refused', () => {
+  fakeHelper({ ready: true });
+  const config = process.env.SEASHELL_CONFIG!;
+  writeFileSync(config, JSON.stringify({ saveByDefault: false }));
+  updateSpeakerEngine('nemotron3', config);
+  expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual({ saveByDefault: false, speakers: { engine: 'nemotron3' } });
+  expect(speakerEngine()).toBe('nemotron3');
+  writeFileSync(config, JSON.stringify({ speakers: { engine: 'whisper' } }));
+  expect(speakerEngine()).toBe('native');
 });

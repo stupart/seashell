@@ -86,13 +86,15 @@ function parseRoute(value: unknown, label: string): HumainMeetingRoute | undefin
   };
 }
 
+export type SpeakerEngineName = 'native' | 'nemotron3' | 'pyannote';
+
 export interface SeashellConfig {
   libraryDir?: string;
   saveByDefault?: boolean;
   meeting?: SeashellMeetingConfig;
   transcription?: TranscriptionRoutingConfig;
-  /** Local speaker separation: native (Core ML, the default) or pyannote (Python). */
-  speakers?: { engine?: 'native' | 'pyannote' };
+  /** Local speaker separation: native (Core ML, the default), nemotron3 (NVIDIA, Core ML) or pyannote (Python). */
+  speakers?: { engine?: SpeakerEngineName };
 }
 
 function optionalPositiveInteger(value: unknown, label: string): number | undefined {
@@ -378,8 +380,8 @@ export function loadConfig(path = defaultConfigPath()): SeashellConfig {
   }
   const speakers = candidate.speakers as Record<string, unknown> | undefined;
   if (speakers !== undefined && (!speakers || typeof speakers !== 'object' || Array.isArray(speakers) ||
-      (speakers.engine !== undefined && speakers.engine !== 'native' && speakers.engine !== 'pyannote'))) {
-    throw new Error('Sea Shell config speakers.engine must be native or pyannote');
+      (speakers.engine !== undefined && speakers.engine !== 'native' && speakers.engine !== 'nemotron3' && speakers.engine !== 'pyannote'))) {
+    throw new Error('Sea Shell config speakers.engine must be native, nemotron3 or pyannote');
   }
   return {
     ...(typeof candidate.libraryDir === 'string' ? { libraryDir: candidate.libraryDir } : {}),
@@ -392,7 +394,7 @@ export function loadConfig(path = defaultConfigPath()): SeashellConfig {
     ...(parseTranscriptionConfig(candidate.transcription) === undefined
       ? {}
       : { transcription: parseTranscriptionConfig(candidate.transcription) as TranscriptionRoutingConfig }),
-    ...(speakers?.engine ? { speakers: { engine: speakers.engine as 'native' | 'pyannote' } } : {}),
+    ...(speakers?.engine ? { speakers: { engine: speakers.engine as SpeakerEngineName } } : {}),
   };
 }
 
@@ -419,6 +421,31 @@ export function resolveLibraryDir(
 
 export function resolveSaveByDefault(config: SeashellConfig = loadConfig()): boolean {
   return config.saveByDefault ?? true;
+}
+
+function writeConfigFile(path: string, next: Record<string, unknown>): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = join(dirname(path), `.config.${process.pid}.${randomUUID().slice(0, 8)}.tmp`);
+  try {
+    writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+      flag: 'wx',
+    });
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+}
+
+export function updateSpeakerEngine(engine: SpeakerEngineName, path = defaultConfigPath()): void {
+  let raw: Record<string, unknown> = {};
+  if (existsSync(path)) {
+    loadConfig(path);
+    raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  }
+  writeConfigFile(path, { ...raw, speakers: { engine } });
 }
 
 export function updateMeetingConfig(
@@ -473,19 +500,7 @@ export function updateMeetingConfig(
           }),
     },
   };
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const temporary = join(dirname(path), `.config.${process.pid}.${randomUUID().slice(0, 8)}.tmp`);
-  try {
-    writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, {
-      encoding: 'utf8',
-      mode: 0o600,
-      flag: 'wx',
-    });
-    renameSync(temporary, path);
-  } catch (error) {
-    rmSync(temporary, { force: true });
-    throw error;
-  }
+  writeConfigFile(path, next);
   return loadConfig(path);
 }
 

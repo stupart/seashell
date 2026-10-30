@@ -26,8 +26,8 @@ macOS.
 Sea Shell uses [whisper.cpp](https://github.com/ggerganov/whisper.cpp) with
 Metal acceleration. File and live transcription stay on your machine by
 default; exact-model cloud drafts/finals require explicit upload consent. Optional
-speaker diarization needs a Hugging Face token for its first gated model
-download; inference remains local afterward.
+speaker separation downloads a small model once, with no account, and runs on
+your Mac.
 
 ![Sea Shell live transcription](docs/seashell.png)
 
@@ -79,8 +79,8 @@ yourself instead:
 brew install ffmpeg sox cmake git
 ```
 
-Speaker diarization additionally needs Python 3.10+ (3.12 recommended) and
-the Python packages described under [Speaker diarization](#speaker-diarization).
+Speaker diarization needs nothing extra. The optional Python engine needs
+Python 3.10+; see [Speaker diarization](#speaker-diarization).
 Meeting intelligence optionally uses the separate
 [Humain engine](https://github.com/stupart/humain-engine) (currently a private
 repository; access is required); ordinary capture,
@@ -789,15 +789,34 @@ seashell setup --speakers           # download the models once
 seashell setup --speakers --check   # offline: are they there?
 ```
 
-Measured on four AMI meetings (92 minutes, reference annotations, 0.25 s
-collar): 10.0% diarization error natively against 8.8% for pyannote in Python,
-in 22 seconds against 257, using about 400 MB of memory. The Python engine
-below is still available for anyone who wants that extra accuracy: set
-`"speakers": { "engine": "pyannote" }` in config.json (or
-`SEASHELL_SPEAKER_ENGINE=pyannote`). Everything else in this section describes
-that engine.
+Measured on four AMI meetings (92 minutes, headset-mix audio, reference
+annotations, 0.25 s collar): 10.0% diarization error natively against 8.8% for
+pyannote in Python, in 22 seconds against 257, using about 400 MB of memory.
+
+### Trying Nemotron 3
+
+NVIDIA's Nemotron 3 is an optional second engine, run by the same helper: about
+190 MB, up to eight voices per channel. Past that it hands the channel back to
+community-1. On those four meetings it put the wrong name on 1.4% of words
+outside crosstalk against 4.7%, but they had four speakers each and no video-call
+audio, so check it on your own calls:
+
+```bash
+seashell speakers compare --open        # your last 5 calls; --last <n> or meeting ids
+seashell speakers use nemotron3         # switch new meetings over
+seashell speakers use community-1       # switch back
+```
+
+`compare` changes nothing. It builds a page in your library, in
+`_speaker-comparison`, with the lines where Nemotron 3 disagrees with the saved
+speaker and a short clip of each, so you can listen and pick. Private meetings
+are skipped, and the page and clips stay on your Mac.
 
 ### The Python engine
+
+The Python engine is still available for anyone who wants that extra accuracy: set
+`"speakers": { "engine": "pyannote" }` in config.json (or
+`SEASHELL_SPEAKER_ENGINE=pyannote`).
 
 This installs the Python environment in your user application-data directory,
 checks dependencies, and downloads and loads the model. It does not change

@@ -60,10 +60,10 @@ function validateInterval(
   }
 }
 
-function speakerForUnit(
+export function speakerForUnit(
   unit: TimedTranscriptUnit,
   turns: DiarizationTurn[],
-  options: Required<MergeDiarizationOptions>,
+  options: Required<MergeDiarizationOptions> = DEFAULT_OPTIONS,
 ): string {
   if (unit.role) {
     const knownSpeaker = options.roleSpeakers[unit.role];

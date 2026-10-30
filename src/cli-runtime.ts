@@ -25,6 +25,7 @@ import {
   resolveMeetingRoute,
   resolveSaveByDefault,
   updateMeetingConfig,
+  updateSpeakerEngine,
 } from './config.ts';
 import { parseCalendarEvents, readMacCalendarEventsAsync } from './calendar.ts';
 import {
@@ -82,6 +83,7 @@ import { writeMeetingConsent } from './meeting-consent.ts';
 import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { setupDiarization } from './diarization-setup.ts';
+import { compareSavedSpeakers, renderSpeakerComparison } from './speaker-compare.ts';
 import { initializeFirstInstall } from './first-install.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -970,6 +972,27 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
         `  About me: ${profile ? 'set' : `empty — write who you are and how you like notes in "${PROFILE_FILE}"`}`,
         'Each ## heading is a section of the notes; the text under it tells the AI what goes there.',
         'Templates are picked from the meeting title. Choose one for a meeting: seashell meeting template <id> <name>',
+      ].join('\n'));
+      return 0;
+    }
+    case 'speaker-compare': {
+      const config = loadConfig();
+      const libraryDir = resolveLibraryDir(undefined, process.env, config);
+      const status = (message: string) => { if (!command.json) process.stderr.write(`${message}\n`); };
+      const prepared = await setupDiarization({ login: false, check: false, engine: 'nemotron3', onStatus: status });
+      if (!prepared.ready) throw new Error(prepared.nextStep ?? prepared.detail);
+      const report = await compareSavedSpeakers(libraryDir, { ids: command.ids, last: command.last, onStatus: status });
+      if (command.open && report.page) Bun.spawn(['open', report.page], { stdio: ['ignore', 'ignore', 'ignore'] });
+      print(command.json ? JSON.stringify(report, null, 2) : renderSpeakerComparison(report));
+      return 0;
+    }
+    case 'speaker-use': {
+      const result = await setupDiarization({ login: false, check: false, engine: command.engine, onStatus: (message) => { if (!command.json) process.stderr.write(`${message}\n`); } });
+      if (!result.ready) throw new Error(result.nextStep ?? result.detail);
+      updateSpeakerEngine(command.engine);
+      print(command.json ? JSON.stringify({ engine: command.engine, model: result.model }) : [
+        `New meetings will separate voices with ${result.model}.`,
+        'Past meetings keep their speakers. To redo one: seashell library speakers <id> identify',
       ].join('\n'));
       return 0;
     }
