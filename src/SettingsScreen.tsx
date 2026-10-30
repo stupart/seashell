@@ -18,6 +18,7 @@ import { microphonePermission } from './microphone-permission.ts';
 import { calendarPermission } from './calendar-permission.ts';
 import { join } from 'path';
 import { ensureTemplatesDirectory, PROFILE_FILE } from './meeting-templates.ts';
+import { KeyBar, ScreenTitle, type Hint } from './tui-chrome.tsx';
 
 const MENU_LABEL: Record<FeatureId, string> = {
   recorder: 'Recorder',
@@ -45,6 +46,7 @@ export default function SettingsScreen(props: {
   config: SeashellConfig;
   libraryDir: string;
   columns: number;
+  rows?: number;
   /** Connecting Meet enables the reader before asking macOS for access. */
   onConnectMeet: () => void;
   /** Turning on titles saves the setting once macOS allows Calendar access. */
@@ -72,8 +74,15 @@ export default function SettingsScreen(props: {
   }, [refresh, props.config]);
   useEffect(() => () => request.current?.abort(), []);
 
-  const selected = index > 0 ? statuses?.[index - 1] : undefined;
-  const itemCount = 1 + (statuses?.length ?? 0);
+  // Open on what needs the person; when nothing does, on the first row.
+  const opened = useRef(false);
+  useEffect(() => {
+    if (!statuses || opened.current) return;
+    opened.current = true;
+    setIndex(Math.max(0, statuses.findIndex(status => !status.optional && status.state !== 'ok')));
+  }, [statuses]);
+  const selected = statuses?.[index];
+  const itemCount = statuses?.length ?? 0;
   // Ink paints a frame before it swaps in the new input handler; read the latest state.
   const latest = useRef({ statuses, index, selected, itemCount });
   latest.current = { statuses, index, selected, itemCount };
@@ -139,72 +148,50 @@ export default function SettingsScreen(props: {
   useInput((input, key) => {
     if (key.escape || (input === ',' && !busy)) { request.current?.abort(); props.onClose(); return; }
     if (busy) return;
-    const { statuses, index, selected, itemCount } = latest.current;
+    const { selected, itemCount } = latest.current;
     if (key.upArrow || input === 'k') { setIndex(value => Math.max(0, value - 1)); setMessage(undefined); }
     else if (key.downArrow || input === 'j') { setIndex(value => Math.min(itemCount - 1, value + 1)); setMessage(undefined); }
     else if (input === 'r') { setMessage(undefined); setStatuses(undefined); setRefresh(value => value + 1); }
     else if (key.return && selected?.action) void run(selected.action);
-    else if (key.return && index === 0 && statuses) {
-      // From the overview, Enter jumps to the first thing that needs you.
-      const next = statuses.findIndex(status => !status.optional && status.state !== 'ok');
-      if (next >= 0) setIndex(next + 1);
-    }
   });
 
   const compact = props.columns < 72;
-  const menuWidth = compact ? 19 : 24;
-  const required = statuses?.filter(status => !status.optional) ?? [];
-  const needs = required.filter(status => status.state !== 'ok');
-  const labelWidth = Math.max(0, ...(statuses ?? []).map(status => status.label.length));
-  const row = (status: FeatureStatus) => <Box key={status.id}>
-    <Text color={FEATURE_STATE_COLOR[status.state]}>{FEATURE_STATE_SYMBOL[status.state]} </Text>
-    <Text>{compact ? MENU_LABEL[status.id].padEnd(17) : status.label.padEnd(labelWidth)}  </Text>
-    <Text dimColor={status.state === 'off'}>{status.summary}</Text>
+  const needs = (statuses ?? []).filter(status => !status.optional && status.state !== 'ok');
+  const menuRow = (status: FeatureStatus, i: number) => <Text key={status.id} inverse={index === i} wrap="truncate-end">
+    {index === i ? '› ' : '  '}<Text color={index === i ? undefined : FEATURE_STATE_COLOR[status.state]}>{FEATURE_STATE_SYMBOL[status.state]}</Text> {MENU_LABEL[status.id]}
+  </Text>;
+  const firstOptional = (statuses ?? []).findIndex(status => status.optional);
+  const menu = <Box flexDirection="column" width={compact ? undefined : 26} flexShrink={0} paddingRight={1}
+    {...(compact ? {} : { borderStyle: 'single' as const, borderTop: false, borderBottom: false, borderLeft: false, borderDimColor: true })}>
+    {(statuses ?? []).flatMap((status, i) => i === firstOptional
+      ? [<Text key="optional-heading" dimColor>  Optional</Text>, menuRow(status, i)] : [menuRow(status, i)])}
   </Box>;
 
-  const menu = <Box flexDirection="column" width={menuWidth} flexShrink={0}>
-    <Text color={index === 0 ? 'cyan' : undefined}>{index === 0 ? '❯' : ' '} Overview</Text>
-    {(statuses ?? []).map((status, i) => <Box key={status.id}>
-      <Text color={index === i + 1 ? 'cyan' : undefined}>{index === i + 1 ? '❯' : ' '} </Text>
-      <Text color={FEATURE_STATE_COLOR[status.state]}>{FEATURE_STATE_SYMBOL[status.state]} </Text>
-      <Text color={index === i + 1 ? 'cyan' : undefined} wrap="truncate-end">{MENU_LABEL[status.id]}</Text>
-    </Box>).flatMap((item, i) => statuses![i]!.optional && !statuses![i - 1]?.optional
-      ? [<Text key="optional-heading" dimColor>  Optional</Text>, item] : [item])}
-  </Box>;
-
-  const content = !statuses ? <Text dimColor>Checking what works…</Text>
-    : !selected ? <>
-      <Text bold>Overview</Text>
-      <Text color={needs.length ? 'yellow' : 'green'}>
-        {needs.length ? `${needs.length} ${needs.length === 1 ? 'thing needs' : 'things need'} you: ${needs.map(status => status.label).join(', ')}.`
-          : 'Everything needed to record meetings works.'}
-      </Text>
-      <Box flexDirection="column" marginTop={1}>{required.map(row)}</Box>
-      <Text dimColor> </Text>
-      <Text dimColor>Optional</Text>
-      <Box flexDirection="column">{statuses.filter(status => status.optional).map(row)}</Box>
-      <Text dimColor> </Text>
-      <Text dimColor>{needs.length ? 'Enter goes to the first item that needs you.' : 'Choose an item for details.'} Terminal: seashell status</Text>
-    </> : <>
-      <Text bold>{selected.label}{selected.optional ? ' · optional' : ''}{compact ? <Text dimColor>  {index}/{itemCount - 1}</Text> : null}</Text>
+  const content = !statuses ? <Text dimColor>Checking what works…</Text> : selected ? <>
+    <Box flexDirection="column" flexShrink={0}>
+      <Text bold>{selected.label}{selected.optional ? ' · optional' : ''}</Text>
       <Text color={FEATURE_STATE_COLOR[selected.state]}>{FEATURE_STATE_SYMBOL[selected.state]} {selected.summary}</Text>
-      <Box marginTop={1}><Text>{selected.detail}</Text></Box>
-      {selected.state !== 'ok' && selected.fix && <Box marginTop={1}><Text color="yellow">Next: {selected.fix}</Text></Box>}
-      {selected.action
-        ? <Text color="cyan">[Enter] {FEATURE_ACTION_LABEL[selected.action]}</Text>
-        : selected.state !== 'ok' && selected.command ? <Text color="cyan">Run: {selected.command}</Text> : null}
-    </>;
+    </Box>
+    <Box marginTop={1}><Text>{selected.detail}</Text></Box>
+    {selected.state !== 'ok' && selected.fix && <Box marginTop={1}><Text color="yellow">Next: {selected.fix}</Text></Box>}
+    {!selected.action && selected.state !== 'ok' && selected.command ? <Text>Run: {selected.command}</Text> : null}
+  </> : null;
+  const hints: Hint[] = [
+    ...(selected?.action ? [['Enter', FEATURE_ACTION_LABEL[selected.action].toLowerCase()] as Hint] : []),
+    ['↑↓', 'choose'], ['r', 'recheck'], ['Esc', 'back'],
+  ];
 
-  return <Box flexDirection="column" paddingX={1}>
-    <Text bold>Settings</Text>
-    <Box flexDirection="row" marginTop={1}>
-      {/* Narrow terminals give the whole width to the page; ↑↓ still moves between items. */}
-      {!compact && menu}
-      <Box flexDirection="column" flexGrow={1} borderStyle="round" borderColor="gray" paddingX={1}>
+  return <Box flexDirection="column" paddingX={1} {...(props.rows ? { height: props.rows } : {})} overflow="hidden">
+    <ScreenTitle name="Settings" detail={statuses ? <Text color={needs.length ? 'yellow' : 'green'}>
+      {`  ${needs.length ? `${needs.length} ${needs.length === 1 ? 'thing needs' : 'things need'} you` : 'Everything needed to record meetings works'}`}
+    </Text> : undefined} />
+    <Box flexDirection={compact ? 'column' : 'row'} flexGrow={1} overflow="hidden">
+      {menu}
+      <Box flexDirection="column" flexGrow={1} minWidth={0} {...(compact ? { marginTop: 1 } : { paddingLeft: 1 })}>
         {content}
         {message && <Box marginTop={1}><Text color="yellow">{message}</Text></Box>}
       </Box>
     </Box>
-    <Text dimColor>{busy ? 'Working… Esc cancels' : '↑↓ choose · Enter fix · R recheck · Esc close'}</Text>
+    {busy ? <Text color="yellow">Working… Esc cancels</Text> : <KeyBar hints={hints} columns={props.columns - 2} help={false} />}
   </Box>;
 }

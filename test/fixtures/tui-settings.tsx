@@ -68,23 +68,21 @@ try {
   { stdin: t.input as any, stdout: t.output as any, stderr: t.output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
   const type = async (text: string) => { t.input.write(text); await Bun.sleep(60); };
 
-  await until(() => t.all().includes('thing needs you'), 'overview');
-  assert.ok(t.all().includes(columns < 72 ? 'Microphone' : 'Your microphone'), 'Overview lists the microphone');
-  assert.ok(t.all().includes('Not allowed yet'));
-  assert.ok(t.all().includes('Chrome only · you used Safari'), 'Evidence from the last meeting is shown');
+  await until(() => t.all().includes('thing needs you'), 'summary line');
   assert.ok(t.all().includes('Optional'));
   assert.equal(permissionRequests, 0, 'Opening Settings never asks for permission');
-
-  await type('\r');
-  await until(() => t.all().includes('[Enter] Allow microphone'), 'Enter jumps to the first item that needs you');
+  await until(() => t.all().includes('Enter allow microphone'), 'Settings opens on the first item that needs you');
+  assert.ok(t.all().includes('Not allowed yet'));
   assert.ok(t.all().includes('Choose Allow when macOS asks'));
   await type('\r');
   await until(() => t.all().includes('Microphone allowed'), 'allow microphone');
   assert.equal(permissionRequests, 1);
   await until(() => t.all().includes('Allowed · last meeting silent'), 'statuses refresh after a fix');
 
-  for (let n = 0; n < 4; n++) await type('\x1b[B');
-  await until(() => t.all().includes('[Enter] Open speaker setup'), 'speaker separation page');
+  for (let n = 0; n < 3; n++) await type('\x1b[B');
+  await until(() => t.all().includes('Chrome only · you used Safari'), 'Evidence from the last meeting is shown');
+  await type('\x1b[B');
+  await until(() => t.all().includes('Enter open speaker setup'), 'speaker separation page');
   await type('\r');
   assert.equal(speakers, 1, 'Speaker setup opens from Settings');
   await type('\x1b');
@@ -98,12 +96,12 @@ try {
   const shell = render(<App />, { stdin: main.input as any, stdout: main.output as any, stderr: main.output as any,
     debug: true, patchConsole: false, exitOnCtrlC: false });
   const press = async (text: string) => { main.input.write(text); await Bun.sleep(80); };
-  await until(() => main.all().includes('Setup needed · press ,'), 'header nudge when something required is broken');
+  await until(() => main.all().includes(', to check'), 'the app says what is wrong and where to look');
   await press(',');
   await until(() => main.all().includes('Checking what works') || main.all().includes('thing needs you'), 'comma opens Settings');
-  await until(() => main.all().includes('Esc close'), 'settings footer');
+  await until(() => main.all().includes('Esc back'), 'settings footer');
   await press('\x1b');
-  await until(() => main.all().lastIndexOf('Sea Shell') > main.all().lastIndexOf('Esc close'), 'Esc returns to the app');
+  await until(() => main.all().lastIndexOf('? help') > main.all().lastIndexOf('Esc back'), 'Esc returns to the app');
   shell.unmount();
   console.log(JSON.stringify({ passed: true }));
 } finally {

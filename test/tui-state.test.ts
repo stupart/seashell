@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   filterLibraryEntries,
-  meetingEntryLabel,
+  meetingEntryRow,
   formatTuiClock,
   moveSelection,
   moveTranscriptScroll,
@@ -52,15 +52,15 @@ describe('TUI navigation state', () => {
     expect(tuiLayout(72, 24).compact).toBe(false);
     expect(tuiLayout(120, 36)).toMatchObject({
       compact: false,
-      sidebarWidth: 33,
-      visibleTranscriptRows: 27,
-      visibleLibraryItems: 24,
+      sidebarWidth: 40,
+      visibleTranscriptRows: 31,
+      visibleLibraryItems: 32,
     });
     expect(tuiLayout(80, 24)).toMatchObject({
       compact: false,
-      sidebarWidth: 24,
-      visibleTranscriptRows: 15,
-      visibleLibraryItems: 12,
+      sidebarWidth: 28,
+      visibleTranscriptRows: 19,
+      visibleLibraryItems: 20,
     });
     expect(tuiLayout(60, 24)).toMatchObject({
       compact: true,
@@ -76,12 +76,13 @@ test('meeting rows lead with day, time and length so same-titled meetings differ
     ...(duration === undefined ? {} : { duration }), ...(captureState ? { captureState } : {}),
   });
   const now = new Date(2026, 9, 2, 15, 0);
-  const time = (date: Date) => date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const earlier = new Date(2026, 9, 1, 9, 28);
   const today = new Date(2026, 9, 2, 10, 3);
-  expect(meetingEntryLabel(entry(earlier.toISOString(), 2_064), now))
-    .toBe(`M ${earlier.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time(earlier)} · 34m · Google Meet`);
-  expect(meetingEntryLabel(entry(today.toISOString(), 4_400), now)).toBe(`M ${time(today)} · 1h13m · Google Meet`);
-  expect(meetingEntryLabel(entry(today.toISOString(), 3_600), now)).toBe(`M ${time(today)} · 1h · Google Meet`);
-  expect(meetingEntryLabel(entry(today.toISOString(), 300, 'recording'), now)).toBe(`● ${time(today)} · Google Meet`);
+  const day = earlier.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  expect(meetingEntryRow(entry(earlier.toISOString(), 2_064), 30, now, false)).toBe(`Google Meet${' '.repeat(30 - 12 - day.length)} ${day}`);
+  // A second meeting that day brings the time in, so same-titled rows stay apart.
+  expect(meetingEntryRow(entry(earlier.toISOString(), 2_064), 30, now)).toEndWith(`${day} 9:28a`);
+  expect(meetingEntryRow(entry(today.toISOString(), 4_400), 30, now)).toEndWith(' 10:03a');
+  expect(meetingEntryRow(entry(today.toISOString(), 300, 'recording'), 30, now)).toStartWith('● Google Meet');
+  expect(meetingEntryRow({ ...entry(earlier.toISOString()), title: 'A very long meeting title that cannot fit' }, 24, now)).toEndWith(`… ${day} 9:28a`);
 });

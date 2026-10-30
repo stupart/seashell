@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput, useStdout } from 'ink';
 import AdvancedAISettings from './AIProviderPicker.tsx';
+import { KeyBar, ScreenTitle } from './tui-chrome.tsx';
 import { AI_PROVIDERS, currentMeetingRoutes, preferredAIProvider, recommendedMeetingSetup } from './ai-provider.ts';
 import type { SeashellMeetingConfig } from './config.ts';
 import { discoverHumainModels, discoverHumainProviders, type HumainBackend } from './humain-client.ts';
@@ -63,11 +64,11 @@ export default function AISettings(props: {
   const routes = proposal?.routes ?? currentRoutes;
   const backends = [...new Set(Object.values(routes).flatMap((route) => route ? [route.backend] : []))];
   const providerName = backends.map((id) => AI_PROVIDERS.find((provider) => provider.id === id)!.name).join(' + ');
-  const automatic = proposal || props.current?.modelSelection === 'automatic';
   const canUse = Boolean(proposal || configured);
+  const { stdout } = useStdout();
   const entries = screen === 'providers'
-    ? AI_PROVIDERS.map((provider) => `${provider.name} · ${providers?.find((item) => item.id === provider.id)?.ready ? 'Connected' : 'Set up'}`)
-    : [proposal ? `Use ${providerName}` : configured ? 'Done' : 'Find connected AI', 'Change provider…', 'Advanced · models and effort…',
+    ? AI_PROVIDERS.map((provider) => `${provider.name} · ${providers?.find((item) => item.id === provider.id)?.ready ? 'Connected' : 'Not set up'}`)
+    : [proposal ? `Yes, use ${providerName}` : configured ? 'Done' : 'Find connected AI', 'Choose another AI…', 'Advanced · models and effort…',
       ...(configured ? ['Use recommended models…'] : [])];
 
   useInput((input, key) => {
@@ -106,28 +107,23 @@ export default function AISettings(props: {
   if (screen === 'advanced') return <AdvancedAISettings current={proposal ? { ...props.current, ...proposal } : props.current} recording={props.recording}
     onClose={() => { setScreen('home'); setIndex(2); }}
     onSave={(patch) => props.onSave({ ...patch, modelSelection: 'custom' })} />;
-  return <Box flexDirection="column" paddingX={1} paddingY={1}>
-    <Text bold color="cyan">Meeting AI</Text>
-    {props.recording && <Text color="red">Recording continues · Esc to return</Text>}
+  return <Box flexDirection="column" paddingX={1} height={stdout?.rows ?? 24} overflow="hidden">
+    <ScreenTitle name="AI for notes and chat" />
+    {props.recording && <Text color="yellow">Recording continues · Esc to return</Text>}
     <Text>{screen === 'providers' ? 'Connect once. Seashell chooses the models.' : busy ? 'Finding your connected AI…'
-      : canUse ? `${proposal ? 'Ready with' : 'Using'} ${providerName}` : 'No connected AI found. Recording still works.'}</Text>
-    {screen === 'home' && canUse && <Box flexDirection="column" marginTop={1}>
-      <Text>{automatic ? 'Recommended models' : 'Your saved models'}</Text>
-      <Text>Notes: {routes.reconciliation?.model ?? 'Off'} · Chat: {routes.chat?.model ?? 'Not set'}</Text>
-      <Text dimColor>{(proposal?.mode ?? mode) === 'post-session' ? 'Final notes + chat · no live AI calls'
-        : `Live analysis: ${routes.observer?.model ?? 'Not set'}`}</Text>
-    </Box>}
+      : canUse ? `${proposal ? 'Write notes with' : 'Using'} ${providerName}${proposal ? '?' : ''}` : 'No connected AI found. Recording still works.'}</Text>
     <Box flexDirection="column" marginTop={1}>
       {entries.map((label, i) => <Text key={label} color={index === i ? 'cyan' : undefined}>{index === i ? '›' : ' '} {label}</Text>)}
     </Box>
     <Box flexDirection="column" marginTop={1}>
       {screen === 'home' && canUse && <Text dimColor>{backends.some((id) => id !== 'local-openai')
-        ? 'Meeting text uses these accounts. Usage follows your plan; advanced models may use paid credits.'
+        ? `Your meeting text will be sent through your ${providerName} account. Usage follows your plan.`
         : 'Meeting text stays with your configured local model server.'}</Text>}
       {screen === 'providers' && <Text dimColor>{AI_PROVIDERS[index]?.privacy}</Text>}
       {error && <Text color="red">{error.slice(0, 240)}</Text>}
       {!busy && !canUse && screen === 'home' && <Text dimColor>No Seashell account needed. Connect a provider or return to your transcript.</Text>}
     </Box>
-    <Box marginTop={1}><Text dimColor>[↑↓] Choose  [Enter] Continue  [R] Refresh  [Esc] Back</Text></Box>
+    <Box flexGrow={1} />
+    <Box flexShrink={0}><KeyBar help={false} columns={(stdout?.columns ?? 80) - 2} hints={[['↑↓', 'choose'], ['Enter', 'continue'], ['r', 'refresh'], ['Esc', 'back']]} /></Box>
   </Box>;
 }

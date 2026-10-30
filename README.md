@@ -393,7 +393,7 @@ bun run benchmark:live-asr -- ./sample.wav
 ## Terminal UI
 
 Sea Shell opens on the same simple, transcript-first screen used for live
-capture. Press `H` (or `Tab`) to slide open a history drawer with Live at the
+capture. Press `H` (or `Tab`) to open the meetings list with Live at the
 top and saved transcripts below it. Moving through history previews each saved
 transcript in the main panel; `Enter` selects it and closes the drawer.
 
@@ -405,26 +405,25 @@ until it is closed.
 
 | Key | Action |
 | --- | --- |
-| `H` or `Tab` | Open or close transcript history |
-| `↑`/`↓` or `J`/`K` | Preview history items when the drawer is open; otherwise scroll the transcript |
-| `Enter` | Open the selected history item and close the drawer; pause/resume in live view |
-| `Esc` | Close history, a prompt, or help; otherwise quit |
-| `/` | Open history and search saved titles, source names, speaker names, and transcript text |
-| `L` | Return to live transcription |
-| `Space` | Pause/resume live microphone + system-audio capture |
+| `H` or `Tab` | Show or hide the meetings list |
+| `↑`/`↓` or `J`/`K` | Move through the list, showing each meeting; otherwise scroll |
+| `Enter` | Read the selected meeting |
+| `Esc` | Go back one level. It never quits; `Q` does |
+| `/` | Search titles, speakers and transcripts. `Enter` on a result opens it at the match |
+| `L` | Jump to the latest words of a live transcript |
+| `Space` | Pause or resume, in a window that captures by itself. With the background recorder, recording follows the call |
 | `F` | Import audio or video |
 | `Shift+F` | Import and run speaker diarization |
 | `V` | Speaker setup, offline readiness, or identify a saved recording |
-| `M` | Mark the current transcript as a meeting; attach a pending calendar suggestion |
-| `1`–`4` | Open meeting Notes, Transcript, Analysis, or Chat |
-| `G` | Finish a live meeting: stop capture, run final ASR, save raw tracks, then run configured enrichment |
+| `M` | Approve a call Seashell asks about; make a saved transcript a meeting |
+| `1`–`3` | Open meeting Notes, Transcript, or Chat |
+| `G` | Write notes, or finish a meeting this window is capturing. Rewriting asks first |
 | `A` | Ask an evidence-cited question about the current meeting |
 | `T` | Toggle timestamp presentation |
 | `S` | Toggle speaker presentation |
-| `[` / `]` | Select a speaker label |
-| `R` | Rename the selected speaker |
+| `R` | Choose a speaker and name them. Notes and chat stay, with the new name |
 | `E` | Export as SRT, WebVTT, text, or JSON |
-| `C` | Copy the current rendering |
+| `C` | Copy the tab you are reading |
 | `O` | Open the transcript folder in Finder |
 | `D` | Move a saved transcript to recoverable `_Trash` after confirmation |
 | `Delete` | Start a fresh live transcript |
@@ -1066,7 +1065,7 @@ Meet names need macOS Accessibility permission, but no voice model; see
 Once the local model is verified, voices in
 computer audio are separated when the recording finishes. Live labels show
 Meet hints where a whole draft chunk has a consistent speaker, otherwise audio
-sources. Use **[ / ]** then **R** to name a speaker. Shared microphones
+sources. Press **R** to name a speaker. Shared microphones
 and overlapping speech can still need correction.
 
 For an existing saved meeting, choose **Identify saved recording** in that

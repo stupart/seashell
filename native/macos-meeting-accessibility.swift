@@ -182,17 +182,17 @@ private func chromeSpeakers(_ area: AXNode) -> SpeakerEvidence {
 private func analyze(_ tree: BrowserTree) -> Probe {
     let browser = tree.browser
     guard tree.running else { return Probe(state: "idle", detail: "Browser is not running.", browser: browser, absenceConfirmed: true) }
-    guard let root = tree.root else { return Probe(state: "unavailable", detail: "Browser Accessibility tree is unavailable; meeting detection and names are paused.", browser: browser) }
+    guard let root = tree.root else { return Probe(state: "unavailable", detail: "Browser Accessibility tree is unavailable; speaker names are off, and browser calls ask before recording.", browser: browser) }
     let nodes = walk(root)
     guard nodes.count <= maxNodes else {
-        return Probe(state: "unavailable", detail: "Browser Accessibility inspection exceeded its limit; meeting detection and names are paused.", browser: browser)
+        return Probe(state: "unavailable", detail: "Browser Accessibility inspection exceeded its limit; speaker names are off, and browser calls ask before recording.", browser: browser)
     }
     var uncertainty: String? = nodes.contains(where: { $0.incomplete == true })
         ? "Browser Accessibility inspection was incomplete." : nil
     let scaffold = browserScaffold(root)
     let windows = browserScaffold(root, stopAtWindows: true).filter { $0.role == "AXWindow" }
     guard !windows.isEmpty else {
-        if let uncertainty { return Probe(state: "unavailable", detail: uncertainty + " Meeting detection and names are paused.", browser: browser) }
+        if let uncertainty { return Probe(state: "unavailable", detail: uncertainty + " Speaker names are off, and browser calls ask before recording.", browser: browser) }
         if tree.offscreenWindows == true {
             return Probe(state: "unavailable", detail: "Meet is out of view (another desktop or full screen). A call already recording keeps recording; speaker names pause.", browser: browser)
         }
@@ -227,7 +227,7 @@ private func analyze(_ tree: BrowserTree) -> Probe {
         uncertainty = uncertainty ?? "A browser window does not expose its page through Accessibility."
     }
     if calls.isEmpty {
-        if let uncertainty { return Probe(state: "unavailable", detail: uncertainty + " Meeting detection and names are paused.", browser: browser) }
+        if let uncertainty { return Probe(state: "unavailable", detail: uncertainty + " Speaker names are off, and browser calls ask before recording.", browser: browser) }
         // Tab titles are useful discovery hints, not authoritative proof that a
         // previously joined meeting ended (custom/hidden tabs can omit them).
         return Probe(state: "idle", detail: "No visible Google Meet call found.", browser: browser, absenceConfirmed: false)
@@ -263,7 +263,7 @@ private func analyze(_ tree: BrowserTree) -> Probe {
         let detail = remote.count == 1 ? "Meet hint: \(remote[0].name)" : remote.count > 1 ? "Meet connected · overlapping speakers" : namesAvailable ? "Meet connected · waiting for a speaker signal" : browser == "chrome" ? "Meet detected · open Meet’s People panel to identify your tile, or mute your microphone for remote speaker names" : "Meet detected · speaker names currently require Google Chrome"
         return Probe(state: "connected", detail: detail, browser: browser, snapshot: snapshot)
     }
-    if let uncertainty { return Probe(state: "unavailable", detail: uncertainty + " Meeting detection and names are paused.", browser: browser) }
+    if let uncertainty { return Probe(state: "unavailable", detail: uncertainty + " Speaker names are off, and browser calls ask before recording.", browser: browser) }
     return Probe(state: "idle", detail: "Google Meet is at the join or departure screen.", browser: browser, absenceConfirmed: explicitNonCalls == calls.count)
 }
 

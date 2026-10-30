@@ -38,7 +38,7 @@ function calendarReadFailure(error: CalendarProcessError, stderr = ''): Error {
   const normalized = `${error.code ?? ''} ${error.message} ${detail ?? ''}`.toLocaleLowerCase();
   if (error.code === 'ETIMEDOUT' || error.killed || normalized.includes('timed out')) {
     return new Error(
-      'Calendar did not respond. Open Calendar once, then allow the app running Sea Shell in System Settings → Privacy & Security → Calendars. Audio-based meeting detection still works without Calendar.',
+      'Calendar did not respond. Meetings are still noticed without it. Check Calendar in Settings.',
     );
   }
   if (normalized.includes('not authorized') || normalized.includes('not permitted') ||

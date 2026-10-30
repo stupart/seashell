@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased — one layout, and fewer false alarms
+
+- Every screen now shares one title line, one body and one key bar. The stacked
+  status rows, the second key bar and seven kinds of overlay are gone, so a
+  recording shows more than twice as many lines of transcript.
+- Naming a speaker keeps the notes and chat, and carries the name into them.
+  It used to wipe them. Esc goes back and only Q quits.
+- A meeting opens on Notes, which now holds Analysis too: decisions and actions
+  first, then your template. Times replace quoted sources; Chat still cites.
+- Search shows how many meetings matched and opens at the match.
+- `R` lists speakers with something each one said, then asks for a name.
+- An unreadable browser window no longer warns that meeting detection is paused
+  while no call is running. That warning was false: detection from microphone
+  use never stopped. Losing Accessibility access still warns.
+- The app no longer reads the calendar itself when the background recorder is
+  doing it, which was the source of a green "Calendar did not respond".
+- `bun run journeys` renders every journey from the real app with made-up data.
+
 ## Unreleased — try Nemotron 3 on your own calls
 
 - FluidAudio 0.18.0. Its speaker code is now an opt-in package trait, so the

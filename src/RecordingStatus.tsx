@@ -1,5 +1,3 @@
-import React from 'react';
-import { Box, Text } from 'ink';
 import type { CaptureHealthSnapshot, CaptureSourceHealth } from './capture-health.ts';
 
 export type RecordingMode = 'watching' | 'awaiting-consent' | 'starting' | 'recording' | 'no-audio' | 'paused' | 'processing' | 'ready' | 'unavailable';
@@ -59,33 +57,56 @@ export function recordingNeedsAttention(health?: CaptureHealthSnapshot, finished
   ));
 }
 
-/** Keep capture, audible signal, durable save and text generation distinct. */
-export default function RecordingStatus(props: RecordingStatusProps) {
+export interface RecordingSummary {
+  headline: string;
+  color?: 'red' | 'yellow' | 'cyan';
+  /** Mic, computer audio and saved audio, for a wide title line. */
+  detail?: string;
+  /** Rows that appear only when something needs the person. */
+  problems: string[];
+}
+
+/**
+ * One line for the title bar: capture, audible signal, durable save and text
+ * generation stay distinct, but only what is wrong takes up rows. "Recording"
+ * still means observed capture, never the person's intent.
+ */
+export function recordingSummary(props: RecordingStatusProps): RecordingSummary {
   const finished = props.mode === 'ready' || props.mode === 'processing';
   const now = props.nowUnixMs ?? Date.now();
   const attention = recordingNeedsAttention(props.health, finished, now);
-  const heading = props.mode === 'watching' ? 'Not recording · waiting for a meeting'
-    : props.mode === 'awaiting-consent' ? props.approvalPending ? 'Not recording yet · start requested…' : 'Not recording · meeting needs your approval'
+  const label = props.mode === 'watching' ? 'Not recording · waiting for a meeting'
+    : props.mode === 'awaiting-consent' ? props.approvalPending ? 'Not recording yet · start requested…' : 'Not recording · record this?'
     : props.mode === 'unavailable' ? 'Recording status unconfirmed'
     : props.mode === 'no-audio' ? 'Audio unavailable · not capturing'
     : props.mode === 'paused' ? 'Paused · recording stopped'
     : props.mode === 'starting' ? 'Starting recording…'
-    : props.mode === 'processing' ? 'Recording ended · finishing transcript'
+    : props.mode === 'processing' ? 'Finishing transcript'
     : props.mode === 'ready' ? attention ? 'Saved · audio needs review' : 'Saved · transcript ready'
-    : `● Recording ${recordingClock(props.elapsedSeconds)}${attention ? ' · check audio' : ''}`;
+    : `● Recording ${recordingClock(props.elapsedSeconds)}`;
+  const headline = props.title ? `${label} · ${props.title}` : label;
   const showSources = ['starting', 'recording', 'no-audio', 'processing', 'ready'].includes(props.mode);
   const mic = sourceLabel(props.health?.microphone, finished, now);
   const computer = sourceLabel(props.health?.systemAudio, finished, now).replace('check if speaking', 'check if others are speaking');
-  return <Box flexDirection="column" flexShrink={0} marginBottom={1} aria-label="Recording status">
-    <Text bold color={attention || props.mode === 'no-audio' || props.mode === 'unavailable' || props.mode === 'awaiting-consent' ? 'yellow' : props.mode === 'recording' ? 'red' : 'cyan'}>{heading}</Text>
-    {props.title && <Text>{props.title}</Text>}
-    {showSources && <Text>Microphone: {mic}</Text>}
-    {showSources && <Text>Computer audio: {computer}</Text>}
-    {showSources && <Text>{props.savedThroughSeconds === undefined ? 'Saved audio: not confirmed'
-      : props.savedThroughSeconds > 0 ? `Audio saved through ${recordingClock(props.savedThroughSeconds)}` : 'Waiting for the first audio save…'}
-      {props.draftLabel ? ` · ${props.draftLabel}` : ''}</Text>}
-    {attention && !finished && <Text color="yellow">[I] Audio help · Check your input if expected sound is missing.</Text>}
-    {props.mode === 'awaiting-consent' && !props.approvalPending && <Text bold>[M] Record this meeting  [X] Ignore</Text>}
-    {props.warning && <Text color="yellow">{props.warning}</Text>}
-  </Box>;
+  const healthy = (value: string) => ['sound detected', 'sound captured', 'off'].includes(value);
+  const saved = props.savedThroughSeconds === undefined ? 'Saved audio: not confirmed'
+    : props.savedThroughSeconds > 0 ? `Audio saved through ${recordingClock(props.savedThroughSeconds)}` : 'Waiting for the first audio save…';
+  const failing = [
+    ...(showSources && attention && !healthy(mic) ? [`Microphone: ${mic}`] : []),
+    ...(showSources && attention && !healthy(computer) ? [`Computer audio: ${computer}`] : []),
+  ];
+  const problems = [
+    ...(failing.length ? [`${failing.join(' · ')}${finished ? '' : ' · i audio help'}`]
+      : attention && !finished ? ['Check your input if expected sound is missing · i audio help'] : []),
+    ...(props.warning ? [props.warning] : []),
+    ...(props.draftLabel?.includes('delayed') ? [props.draftLabel] : []),
+  ];
+  return {
+    headline,
+    ...(attention || props.mode === 'no-audio' || props.mode === 'unavailable' || props.mode === 'awaiting-consent'
+      ? { color: 'yellow' as const }
+      : props.mode === 'recording' ? { color: 'red' as const } : {}),
+    ...(showSources ? { detail: saved } : {}),
+    problems,
+  };
 }

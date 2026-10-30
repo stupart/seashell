@@ -52,7 +52,7 @@ try {
   await Bun.sleep(150);
   await type('h'); await type('\x1b[B'); await type('\r'); await type('m');
   const before = readFileSync(configPath, 'utf8');
-  await type('a'); await until(() => text().includes('Ready with Codex'));
+  await type('a'); await until(() => text().includes('Write notes with Codex?'));
   assert.equal(readFileSync(configPath, 'utf8'), before);
   await type('\x1b[B'); await type('\x1b[B'); await type('\r');
   await until(() => text().includes('Live analysis (off): Codex / gpt-6-luna'));
@@ -61,7 +61,7 @@ try {
   await type('\x1b'); // Cancel must leave the account choice unapplied.
   assert.equal(readFileSync(configPath, 'utf8'), before);
   rendered = '';
-  await type('a'); await until(() => text().includes('Ready with Codex'));
+  await type('a'); await until(() => text().includes('Write notes with Codex?'));
   await type('\x1b[B'); await type('\r'); // Change provider.
   await type('\x1b[B'); await type('\x1b[B'); await type('\r'); // Unavailable local.
   assert.ok(text().includes('Connect a local server'));

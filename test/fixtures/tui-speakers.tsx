@@ -48,7 +48,7 @@ const speakerFrames: string[] = [];
 const output = Object.assign(new Writable({ write(chunk, _enc, cb) {
   rendered += chunk.toString();
   const frame = stripVTControlCharacters(chunk.toString());
-  if (frame.includes('Speakers') && frame.includes('↑↓ choose')) speakerFrames.push(frame);
+  if (frame.includes('Speaker names') && frame.includes('↑↓ choose')) speakerFrames.push(frame);
   cb();
 } }), { columns, rows: 24 });
 const app = render(<App />, { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
@@ -57,7 +57,7 @@ const until = async (check: () => boolean) => { const end = Date.now() + 3000; w
 const type = async (text: string) => { input.write(text); await Bun.sleep(80); };
 try {
   await until(() => starts === 1);
-  await type('v'); await until(() => plain().includes('Optional setup'));
+  await type('v'); await until(() => plain().includes('Not set up'));
   assert.equal(permissionRequests, 0, 'Opening settings does not request permission');
   await type('\r'); await until(() => plain().includes('Privacy & Security'));
   assert.ok(plain().includes('Background access missing'));
@@ -66,7 +66,7 @@ try {
   assert.equal(permissionRequests, 1, 'Only explicit Connect requests Accessibility');
   assert.equal(JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.speakerBrowser, 'auto');
   assert.equal(starts, 1, 'Connecting Meet preserves the running microphone');
-  await type('\x1b[B'); await type('\r');
+  await type('\r');
   await until(() => plain().includes('This window needs access'));
   await type('\r');
   await until(() => plain().includes('Accessibility enabled'));
@@ -75,14 +75,12 @@ try {
   await type('\r'); assert.equal(setups, 0, 'Do not install while recording');
   assert.equal(stops, 0, 'Opening speaker settings preserves capture');
   await type('\x1b'); await type(' '); await until(() => stops === 1);
-  await type('F'); await until(() => plain().includes('Optional setup'));
-  for (let n = 0; n < 4; n++) await type('\x1b[B');
+  await type('F'); await until(() => plain().lastIndexOf('Not set up') > plain().lastIndexOf('? help'));
+  for (let n = 0; n < 2; n++) await type('\x1b[B');
   await until(() => plain().includes('contact sharing'));
   await type('\r'); await until(() => plain().includes('Model verified offline'));
   assert.equal(setups, 1);
   assert.ok(stripVTControlCharacters(rendered).includes('Ready'));
-  await type('\x1b[B'); await type('\r');
-  assert.ok(plain().includes('Open a saved recording'));
   assert.ok(speakerFrames.length > 0, 'Rendered speaker settings frames were captured');
   for (const frame of speakerFrames) assert.ok(frame.trimEnd().split('\n').length <= 24, 'Speaker settings fit the 24-row terminal');
   if (process.env.SEASHELL_TUI_EVIDENCE) writeFileSync(process.env.SEASHELL_TUI_EVIDENCE, stripVTControlCharacters(rendered));

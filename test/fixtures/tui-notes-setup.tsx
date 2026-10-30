@@ -35,7 +35,7 @@ const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, r
 let rendered = '';
 const output = Object.assign(new Writable({ write(chunk, _enc, cb) { rendered += chunk.toString(); cb(); } }), { columns, rows: 32 });
 const app = render(<App />, { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
-const screen = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('🐚 Sea Shell')));
+const screen = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('🐚')));
 const type = async (key: string) => { input.write(key); await Bun.sleep(100); };
 const until = async (condition: () => boolean, message: string) => {
   const deadline = Date.now() + 3000;
@@ -43,9 +43,9 @@ const until = async (condition: () => boolean, message: string) => {
   assert(condition(), `${message}\n${screen()}`);
 };
 try {
-  await until(() => screen().includes('[H] History'), 'the app is up');
+  await until(() => screen().includes('? help'), 'the app is up');
   await type('h');
-  await until(() => screen().includes('Acme disco'), 'the saved meeting is in history');
+  await until(() => screen().includes('Acme disco'), 'the saved meeting is in the list');
   await type('\x1b[B'); await type('\r');
   await until(() => screen().includes('1 Notes'), 'the meeting opens with its tabs');
   await type('1');
@@ -67,6 +67,6 @@ try {
   await until(() => !screen().includes('Notes setup for this meeting'), 'Esc closes the panel');
   await until(() => screen().includes('AI is off for this meeting.'), 'the Notes tab says AI is off');
   await type('g');
-  await until(() => screen().includes('Press N to turn it on'), 'G refuses instead of sending the meeting to a model');
+  await until(() => screen().includes('Press n to turn it on'), 'G refuses instead of sending the meeting to a model');
   process.stdout.write(JSON.stringify({ passed: true }) + '\n');
 } finally { app.unmount(); input.destroy(); output.destroy(); rmSync(root, { recursive: true, force: true }); }

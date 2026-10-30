@@ -23,7 +23,7 @@ test('meeting views stay concise and show only relevant artifact layers', () => 
     }],
   };
   expect(meetingViewLines(artifact, 'notes')[0]).toBe('The team picked the launch date.');
-  expect(meetingViewLines(artifact, 'analysis')).toContain('- Launch Friday.');
+  expect(meetingViewLines(artifact, 'notes')).toContain('- Launch Friday.');
   expect(meetingViewLines(artifact, 'chat')[0]).toContain('Ask about this meeting');
 });
 
@@ -41,7 +41,8 @@ test('meeting answers and claims expose the exact cited passage, without unrelat
   expect(chat).not.toContain('Unrelated');
   artifact.provisionalClaims = [{ id: 'd1', type: 'decision', text: 'Release Monday.',
     evidenceSegmentIds: ['s1', 's2'], confidence: 0.9 }];
-  expect(meetingViewLines(artifact, 'analysis', record).join('\n')).toContain('Source 00:05–00:09');
+  // Notes point at the moment rather than repeating the quote.
+  expect(meetingViewLines(artifact, 'notes', record)).toContain('- Release Monday.  00:05');
   artifact.chat[0]!.evidenceSegmentIds = ['missing'];
   expect(meetingViewLines(artifact, 'chat', record).join('\n')).toContain('cited passages are unavailable');
   artifact.chat[0]!.evidenceSegmentIds = ['s1'];
@@ -49,4 +50,28 @@ test('meeting answers and claims expose the exact cited passage, without unrelat
   const stale = meetingViewLines(artifact, 'chat', record).join('\n');
   expect(stale).toContain('Source text changed');
   expect(stale).not.toContain('masquerade');
+});
+
+test('notes keep every decision and action, and drop only what a template section already says', () => {
+  const record = createTranscriptRecord({ transcript: [{ id: 's1', start: 5, end: 7, text: 'We settled it.' }], speakers: [] }, { id: 'kept' });
+  const artifact = createMeetingArtifact(record);
+  const claim = (id: string, type: 'decision' | 'action_item', text: string) => ({ id, type, text, evidenceSegmentIds: ['s000001'], confidence: 0.9 });
+  artifact.analysis = {
+    final: true, summary: 'Settled.', runId: 'r', createdAt: new Date().toISOString(),
+    claims: [
+      claim('a', 'decision', 'Ship on Friday.'),
+      claim('b', 'action_item', 'Send the security summary.'),
+      claim('c', 'action_item', 'Book the kickoff room.'),
+      { ...claim('d', 'action_item', 'Dana reviews the security summary by Friday.'), evidenceSegmentIds: ['s000002'] },
+    ],
+    notes: [{ heading: 'Next steps', items: [{ text: 'You send the security summary by Friday.', evidenceSegmentIds: ['s000001'] }] }],
+  };
+  const lines = meetingViewLines(artifact, 'notes');
+  // Citing the same passage as a note is not repeating it.
+  expect(lines).toContain('- Ship on Friday.');
+  expect(lines).toContain('- Book the kickoff room.');
+  // Nor is using the same words about a different moment.
+  expect(lines).toContain('- Dana reviews the security summary by Friday.');
+  expect(lines).not.toContain('- Send the security summary.');
+  expect(lines.indexOf('# Decisions')).toBeLessThan(lines.indexOf('# Next steps'));
 });

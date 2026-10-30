@@ -9,7 +9,7 @@ import {
   saveMeetingArtifact,
 } from '../src/meeting-artifact.ts';
 import { enrichMeeting } from '../src/meeting-enrichment.ts';
-import { saveTranscriptRecord } from '../src/transcript-library.ts';
+import { renameTranscriptSpeaker, saveTranscriptRecord } from '../src/transcript-library.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 
 const roots: string[] = [];
@@ -391,4 +391,28 @@ describe('meeting artifact bundle', () => {
     expect(keys).toHaveLength(2);
     expect(keys[0]).not.toBe(keys[1]);
   });
+});
+
+test('naming a speaker keeps the notes and chat, and later revisions still reset them', () => {
+  const library = mkdtempSync(join(tmpdir(), 'seashell-rename-keeps-notes-'));
+  const record = createTranscriptRecord({
+    transcript: [{ start: 0, end: 2, text: 'We ship Friday.', speaker: 'REMOTE_00' }],
+    speakers: [{ id: 'REMOTE_00', label: 'Remote speaker 1' }],
+  }, { id: 'named-meeting', title: 'Planning' });
+  saveTranscriptRecord(library, record);
+  const artifact = createMeetingArtifact(record);
+  artifact.status = 'ready';
+  artifact.analysis = { final: true, summary: 'Remote speaker 1 said to ship Friday.', claims: [], runId: 'run', createdAt: record.createdAt };
+  artifact.chat = [{ id: 'q', role: 'user', text: 'When?', createdAt: record.createdAt }];
+  saveMeetingArtifact(library, artifact);
+
+  const renamed = renameTranscriptSpeaker(library, record.id, 'REMOTE_00', 'Dana');
+  const kept = loadMeetingArtifact(library, record.id)!;
+  expect(kept.status).toBe('ready');
+  expect(kept.analysis?.summary).toBe('Dana said to ship Friday.');
+  expect(kept.chat).toHaveLength(1);
+
+  // A changed word is a different transcript, and must not hide behind that.
+  saveTranscriptRecord(library, { ...renamed, transcript: [{ ...renamed.transcript[0]!, text: 'We ship Monday.' }] });
+  expect(loadMeetingArtifact(library, record.id)!.analysis).toBeUndefined();
 });
