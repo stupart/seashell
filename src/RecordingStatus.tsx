@@ -81,7 +81,7 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
     : props.mode === 'no-audio' ? 'Audio unavailable · not capturing'
     : props.mode === 'paused' ? 'Paused · recording stopped'
     : props.mode === 'starting' ? 'Starting recording…'
-    : props.mode === 'processing' ? 'Recording ended · finishing transcript'
+    : props.mode === 'processing' ? 'Finishing transcript'
     : props.mode === 'ready' ? attention ? 'Saved · audio needs review' : 'Saved · transcript ready'
     : `● Recording ${recordingClock(props.elapsedSeconds)}`;
   const headline = props.title ? `${label} · ${props.title}` : label;
@@ -106,7 +106,7 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
     ...(attention || props.mode === 'no-audio' || props.mode === 'unavailable' || props.mode === 'awaiting-consent'
       ? { color: 'yellow' as const }
       : props.mode === 'recording' ? { color: 'red' as const } : {}),
-    ...(showSources ? { detail: props.mode === 'processing' && props.draftLabel ? `${saved} · ${props.draftLabel}` : saved } : {}),
+    ...(showSources ? { detail: saved } : {}),
     problems,
   };
 }

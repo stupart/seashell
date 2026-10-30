@@ -68,7 +68,7 @@ chat
 - `H` opens the existing left history drawer. Meetings are marked there without
   adding a second navigation system.
 - Ordinary transcripts show the ordinary reader.
-- Meetings add one compact view strip: Notes, Transcript, Analysis, Chat.
+- Meetings add one compact view strip: Notes, Transcript, Chat.
 - Timestamps and speaker labels stay presentation toggles over the same stored
   transcript.
 - Calendar suggestions are read-only and opt-in. `ask` is the default policy

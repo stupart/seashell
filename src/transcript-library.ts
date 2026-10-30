@@ -175,7 +175,7 @@ function existingRecordPath(libraryDir: string, id: string): string | undefined 
 export function saveTranscriptRecord(
   libraryDir: string,
   record: TranscriptRecord,
-  options: { provisional?: boolean; namesOnly?: boolean } = {},
+  options: { provisional?: boolean; namesOnly?: { from: string; to: string } } = {},
 ): SavedTranscript {
   assertTranscriptId(record.id);
   const existingPath = existingRecordPath(libraryDir, record.id);
@@ -291,9 +291,10 @@ export function renameTranscriptSpeaker(
   }
   const speaker = record.speakers.find((candidate) => candidate.id === speakerId);
   if (!speaker) throw new Error(`Speaker ${speakerId} was not found in transcript ${transcriptId}`);
+  const previous = speaker.label;
   speaker.label = trimmed;
   record.updatedAt = new Date().toISOString();
-  saveTranscriptRecord(libraryDir, record, { namesOnly: true });
+  saveTranscriptRecord(libraryDir, record, { namesOnly: { from: previous, to: trimmed } });
   return record;
 }
 

@@ -56,7 +56,7 @@ GitHub Actions is now disabled to avoid hosted CI charges. Current changes use
 | Project context | Explicit file allow-list, 512 KiB per file and 2 MiB total, plus Calendar/attendee context | No automatic Atlas/Blueprint search |
 | Speaker labeling | Source labels live; verified local diarization after capture; V setup/review copy; manual renaming | Optional model access; no Meet participant connector. See [speaker status](speaker-identification.md) |
 
-The Notes and Analysis tabs are generated views. `documents/*.md` files are
+The Notes tab is a generated view. `documents/*.md` files are
 regenerated from the artifact; they are not an editable notebook with protected
 user corrections. Action claims have text and optional person/speaker fields,
 but no task lifecycle with structured assignee, deadline, completion, or sync.

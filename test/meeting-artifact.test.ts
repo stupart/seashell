@@ -402,14 +402,14 @@ test('naming a speaker keeps the notes and chat, and later revisions still reset
   saveTranscriptRecord(library, record);
   const artifact = createMeetingArtifact(record);
   artifact.status = 'ready';
-  artifact.analysis = { final: true, summary: 'Ship Friday.', claims: [], runId: 'run', createdAt: record.createdAt };
+  artifact.analysis = { final: true, summary: 'Remote speaker 1 said to ship Friday.', claims: [], runId: 'run', createdAt: record.createdAt };
   artifact.chat = [{ id: 'q', role: 'user', text: 'When?', createdAt: record.createdAt }];
   saveMeetingArtifact(library, artifact);
 
   const renamed = renameTranscriptSpeaker(library, record.id, 'REMOTE_00', 'Dana');
   const kept = loadMeetingArtifact(library, record.id)!;
   expect(kept.status).toBe('ready');
-  expect(kept.analysis?.summary).toBe('Ship Friday.');
+  expect(kept.analysis?.summary).toBe('Dana said to ship Friday.');
   expect(kept.chat).toHaveLength(1);
 
   // A changed word is a different transcript, and must not hide behind that.

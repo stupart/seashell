@@ -168,8 +168,10 @@ export default function SettingsScreen(props: {
   </Box>;
 
   const content = !statuses ? <Text dimColor>Checking what works…</Text> : selected ? <>
-    <Text bold>{selected.label}{selected.optional ? ' · optional' : ''}</Text>
-    <Text color={FEATURE_STATE_COLOR[selected.state]}>{FEATURE_STATE_SYMBOL[selected.state]} {selected.summary}</Text>
+    <Box flexDirection="column" flexShrink={0}>
+      <Text bold>{selected.label}{selected.optional ? ' · optional' : ''}</Text>
+      <Text color={FEATURE_STATE_COLOR[selected.state]}>{FEATURE_STATE_SYMBOL[selected.state]} {selected.summary}</Text>
+    </Box>
     <Box marginTop={1}><Text>{selected.detail}</Text></Box>
     {selected.state !== 'ok' && selected.fix && <Box marginTop={1}><Text color="yellow">Next: {selected.fix}</Text></Box>}
     {!selected.action && selected.state !== 'ok' && selected.command ? <Text>Run: {selected.command}</Text> : null}

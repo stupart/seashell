@@ -16,7 +16,7 @@ predates this feature's setup UI. See the PR/local CI receipt for release status
    source-separated microphone text retains its own clock and ID. Live text keeps
    source labels until finalization. Speaker failure falls back to source text
    with a saved explanation, never silently losing the meeting.
-4. **Review and name.** Use **[ / ]** to select a speaker and **R** to rename it.
+4. **Review and name.** Press **R**, choose a speaker and type their name.
    Numbers denote anonymous voice clusters, not verified people.
 5. **Retry old recordings.** Open a saved recording, press **V**, and choose
    **Identify saved recording**. Or run `seashell library speakers <id> identify`.

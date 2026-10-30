@@ -62,6 +62,7 @@ test('notes keep every decision and action, and drop only what a template sectio
       claim('a', 'decision', 'Ship on Friday.'),
       claim('b', 'action_item', 'Send the security summary.'),
       claim('c', 'action_item', 'Book the kickoff room.'),
+      { ...claim('d', 'action_item', 'Dana reviews the security summary by Friday.'), evidenceSegmentIds: ['s000002'] },
     ],
     notes: [{ heading: 'Next steps', items: [{ text: 'You send the security summary by Friday.', evidenceSegmentIds: ['s000001'] }] }],
   };
@@ -69,6 +70,8 @@ test('notes keep every decision and action, and drop only what a template sectio
   // Citing the same passage as a note is not repeating it.
   expect(lines).toContain('- Ship on Friday.');
   expect(lines).toContain('- Book the kickoff room.');
+  // Nor is using the same words about a different moment.
+  expect(lines).toContain('- Dana reviews the security summary by Friday.');
   expect(lines).not.toContain('- Send the security summary.');
   expect(lines.indexOf('# Decisions')).toBeLessThan(lines.indexOf('# Next steps'));
 });

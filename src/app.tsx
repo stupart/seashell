@@ -902,9 +902,22 @@ export default function App(props: { libraryDir?: string } = {}) {
   useEffect(() => {
     if (!jumpTo || !displayRows.length) return;
     const needle = jumpTo.toLocaleLowerCase();
-    const row = displayRows.findIndex((text) => stripVTControlCharacters(text).toLocaleLowerCase().includes(needle));
+    const rows = displayRows.map((text) => stripVTControlCharacters(text).toLocaleLowerCase());
+    const within = rows.findIndex((text) => text.includes(needle));
+    // A phrase can wrap across two rows.
+    const row = within >= 0 ? within
+      : rows.findIndex((text, index) => `${text.trimEnd()} ${(rows[index + 1] ?? '').trim()}`.includes(needle));
     if (row >= 0) setTranscriptScroll(Math.max(0, row - 1));
   }, [jumpTo, displayRows]);
+  // Finished notes arrive by themselves; say so, and show them unless someone is reading.
+  const notesStatus = useRef<{ id?: string; status?: string }>({});
+  useEffect(() => {
+    const previous = notesStatus.current;
+    notesStatus.current = { id: selectedMeeting?.meetingId, status: selectedMeeting?.status };
+    if (previous.id !== selectedMeeting?.meetingId || previous.status === 'ready' || selectedMeeting?.status !== 'ready' || !previous.status) return;
+    setNotice('Notes ready.');
+    if (followLiveTranscript) setMeetingView('notes');
+  }, [selectedMeeting?.meetingId, selectedMeeting?.status, followLiveTranscript]);
   const configuredMeetingRoutes = useMemo(() => ({
     observer: resolveMeetingRoute(config.meeting, 'observer'),
     reconciliation: resolveMeetingRoute(config.meeting, 'reconciliation'),
@@ -1571,6 +1584,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   }, [mouseEnabled, stdin, stdout]);
 
   useInput((input, key) => {
+    setJumpTo(null);
     const mouse = mouseDecoder.current.read(input);
     if (mouse.consumed) {
       if (mouseEnabled && mouse.events.length) {
@@ -1586,7 +1600,6 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
     setError(null);
     setNotice(null);
-    setJumpTo(null);
     if (chatInputState) {
       if (key.escape) {
         setChatInputState(null);
@@ -1745,7 +1758,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       }
       if (key.escape || input === 'n' || key.return && notesSetup.row !== 1) {
         setNotesSetup(null);
-        if (currentMeeting && !currentMeeting.ai?.off) setNotice('Press G to rewrite the notes with these choices.');
+        if (currentMeeting && !currentMeeting.ai?.off) setNotice('Press g to rewrite the notes with these choices.');
         return;
       }
       if (key.upArrow) { setNotesSetup({ ...notesSetup, row: Math.max(0, notesSetup.row - 1) as 0 | 1 | 2 }); return; }
@@ -1893,7 +1906,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
     if (input === 'g' && currentMeeting) {
       if (currentMeeting.ai?.off) {
-        setNotice('AI is off for this meeting. Press N to turn it on.');
+        setNotice('AI is off for this meeting. Press n to turn it on.');
         return;
       }
       if (currentMeeting.analysis?.final) { setConfirmRewrite(true); return; }
@@ -1902,7 +1915,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
     if (input === 'a' && currentMeeting) {
       if (currentMeeting.ai?.off) {
-        setNotice('AI is off for this meeting. Press N to turn it on.');
+        setNotice('AI is off for this meeting. Press n to turn it on.');
         return;
       }
       if (!configuredMeetingRoutes.chat) {
@@ -1955,6 +1968,10 @@ export default function App(props: { libraryDir?: string } = {}) {
     }
     if ((key.delete || key.backspace) && view === 'live') {
       resetLiveSession();
+      return;
+    }
+    if (input === ' ' && activeBackgroundEntry) {
+      setNotice('Recording stops by itself when the call ends.');
       return;
     }
     if (input === ' ' && watchOwnership === 'external' && !activeBackgroundEntry) {
@@ -2128,7 +2145,7 @@ export default function App(props: { libraryDir?: string } = {}) {
 
   const list = (
     <Box width={layout.compact ? undefined : layout.sidebarWidth} flexGrow={layout.compact ? 1 : 0} flexShrink={0}
-      flexDirection="column" overflow="hidden" paddingRight={1}
+      flexDirection="column" overflow="hidden" paddingRight={layout.compact ? 0 : 1}
       {...(layout.compact ? {} : { borderStyle: 'single' as const, borderTop: false, borderBottom: false, borderLeft: false, borderDimColor: true })}
       aria-role="listbox" aria-label="Meetings">
       <Text bold color="cyan" wrap="truncate-end">
@@ -2137,7 +2154,7 @@ export default function App(props: { libraryDir?: string } = {}) {
       {navigationItems.slice(sidebarStart, sidebarStart + layout.visibleLibraryItems).map((item, windowIndex) => {
         const index = sidebarStart + windowIndex;
         const selected = selectionIndex === index;
-        const rowWidth = (layout.compact ? terminal.columns - 3 : layout.sidebarWidth - 2) - 2;
+        const rowWidth = (layout.compact ? terminal.columns - 2 : layout.sidebarWidth - 2) - 2;
         const label = item.kind === 'record' ? meetingEntryRow(item.entry, rowWidth, new Date(statusNow),
           visibleEntries.some((other) => other.id !== item.entry.id && sameDay(other.createdAt, item.entry.createdAt))) : item.label;
         return <Text key={item.kind === 'record' ? item.entry.id : item.kind} inverse={selected} wrap="truncate-end"
@@ -2181,7 +2198,7 @@ export default function App(props: { libraryDir?: string } = {}) {
               </React.Fragment>
             ))}
           </Text>
-          {readerTotal > visibleRows && <Text dimColor>{Math.min(readerTotal, readerScroll + visibleRows)}/{readerTotal}</Text>}
+          {readerTotal > visibleRows && <Text dimColor>{Math.min(readerTotal, readerScroll + visibleRows)}/{readerTotal} lines</Text>}
         </Box>
       )}
       <Box ref={transcriptPaneRef} flexGrow={1} minHeight={2} flexDirection="column" overflow="hidden" aria-label="Transcript reader">
@@ -2240,7 +2257,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const helpSheet = helpMode ? <Sheet title="Keys">
     {HELP_ROWS.map(([group, keys]) => <HelpRow key={group} group={group} keys={keys} />)}
   </Sheet> : null;
-  const audioSheet = audioHelpOpen ? <Sheet title="Is your audio being heard?">
+  const audioSheet = audioHelpOpen ? <Sheet title="Audio help">
     <Text>1. Quiet can just mean you are muted or nobody is speaking.</Text>
     <Text>2. Check the right microphone is chosen and its level moves. <Text bold>o</Text> opens Sound.</Text>
     <Text>3. Check Seashell Microphone is allowed. <Text bold>p</Text> opens Privacy.</Text>
@@ -2250,9 +2267,9 @@ export default function App(props: { libraryDir?: string } = {}) {
   const prompt = chatInputState ? `Ask: ${chatInputState.input}█  Enter send · Esc cancel`
     : renameState ? `Name for ${renameState.label}: ${renameState.input}█  Enter save · Esc cancel`
     : searchMode ? `Search: ${searchQuery}█  Enter choose · Esc clear`
-    : exportMode ? 'Export: s SRT · v WebVTT · t text · j JSON · Esc cancel'
-    : confirmTrashId ? 'Trash this meeting?  y yes  n no'
-    : confirmRewrite ? 'Rewrite these notes? The old ones are kept in history.  y yes  n no'
+    : exportMode ? 'Export  s SRT  v WebVTT  t text  j JSON  Esc cancel'
+    : confirmTrashId ? 'Move to the Trash folder?  y yes  n no'
+    : confirmRewrite ? 'Rewrite these notes? This replaces them.  y yes  n no'
     : notesSetup ? notesSetup.editing !== undefined ? 'Enter save · Esc cancel' : '↑↓ choose · ←→ change · Enter edit note · Esc done'
     : speakerPickerOpen ? '↑↓ choose · Enter name · Esc back'
     : helpMode ? '? or Esc close'
@@ -2306,24 +2323,25 @@ export default function App(props: { libraryDir?: string } = {}) {
   const problems = [
     ...((consentOverRecord || recordingElsewhere) && summary && !quietlyDone ? [summary.headline] : []),
     ...(summary?.problems ?? []),
-    ...(attention.length && !(view === 'live' && statusProps?.mode === 'watching') && !summary?.problems.length
-      ? [`${attention[0]!.label}: ${attention[0]!.summary} · ${attention[0]!.action ? ', to fix' : 'i audio help'}`] : []),
     ...(currentMeeting?.status === 'failed' ? ['The notes failed · g to try again'] : []),
     ...(currentMeeting && meetingView === 'transcript' && reading && showSpeakers &&
       currentRecord?.speakers.some((speaker) => speaker.id === 'SYSTEM')
       ? [currentRecord.speakerAnalysis?.detail ?? 'Source labels only · v to set up speaker names'] : []),
   ];
+  const caution = attention.length && !(view === 'live' && statusProps?.mode === 'watching') && !summary?.problems.length
+    ? attention[0]!.summary.includes('silent') ? `${attention[0]!.id === 'microphone' ? 'Microphone' : 'Computer audio'}: silent last meeting · i audio help`
+    : `${attention[0]!.label}: ${attention[0]!.summary} · , to check` : undefined;
   const toast = error ?? (copied ? 'Copied.' : notice) ?? undefined;
   // Says the recorder is on, so a quiet screen never reads as a stopped one.
   const standing = watchOwnership === 'external' && backgroundWatch?.phase === 'watching' && !recordingElsewhere && !attention.length
-    && !(summary && !quietlyDone && statusProps?.mode !== 'watching') ? 'Watching for calls'
+    && !(summary && !quietlyDone && statusProps?.mode !== 'watching') ? layout.compact ? 'Watching' : 'Watching for calls'
     : currentMeeting?.status === 'reconciling' || currentMeeting?.status === 'observing' ? 'writing notes…' : undefined;
 
   return (
     <Box flexDirection="column" paddingX={1} height={terminal.rows} overflow="hidden">
       <Box flexShrink={0} justifyContent="space-between">
         <Text wrap="truncate-end">
-          🐚{layout.compact ? '' : <Text> <Text bold color="cyan">Sea Shell</Text></Text>}
+          🐚{layout.compact ? '' : <Text> <Text bold color="cyan">Seashell</Text></Text>}
           {heading.text ? '  ' : ''}
           <Text bold={Boolean(heading.color)} {...(heading.color ? { color: heading.color } : {})}>{heading.text}</Text>
           {summary?.detail && !layout.compact && !quietlyDone ? <Text dimColor>  {summary.detail}</Text> : null}
@@ -2331,13 +2349,15 @@ export default function App(props: { libraryDir?: string } = {}) {
         {standing && <Box flexShrink={0} marginLeft={2}><Text dimColor>{standing}</Text></Box>}
       </Box>
       {problems.map((problem) => <Box key={problem} flexShrink={0}><Text color="red" inverse wrap="truncate-end">{` ${problem} `}</Text></Box>)}
+      {caution && <Box flexShrink={0}><Text color="yellow" wrap="truncate-end">{caution}</Text></Box>}
       <Box flexShrink={0}><Text dimColor wrap="truncate-end">{'─'.repeat(Math.max(1, terminal.columns - 2))}</Text></Box>
       {sheet ?? <Box flexDirection="row" flexGrow={1} overflow="hidden">
         {historyOpen && list}
         {!drawerOnly && reader}
       </Box>}
       <Box flexShrink={0}>
-        {prompt ? <Text color={confirmTrashId ? 'red' : 'yellow'} wrap="truncate-start">{prompt}</Text>
+        {prompt ? <Text color={confirmTrashId ? 'red' : 'yellow'}
+          wrap={chatInputState || renameState || searchMode ? 'truncate-start' : 'truncate-end'}>{prompt}</Text>
           : processing ? <Text color="magenta" wrap="truncate-end">◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}</Text>
           : toast ? <Text color={error ? 'red' : 'green'}>{toast}</Text>
           : <KeyBar hints={hints} columns={terminal.columns - 2} />}

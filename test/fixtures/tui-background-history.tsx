@@ -64,8 +64,8 @@ try {
   await until(() => screen().includes('NOT CAPTURING'), 'new meeting opens automatically and exposes microphone failure');
   assert(screen().includes(meetWarning) && screen().includes('● Recording'), 'observer warning remains visible while confirmed audio capture continues');
   if (columns >= 80) assert(screen().includes('Audio saved through 1:50'), 'saved duration comes from committed audio');
-  await type('i'); assert(screen().includes('Is your audio being heard?'), `audio help is reachable\n${screen()}`);
-  await type('\x1b'); assert(!screen().includes('Is your audio being heard?'), 'Escape closes audio help without quitting');
+  await type('i'); assert(screen().includes('Audio help'), `audio help is reachable\n${screen()}`);
+  await type('\x1b'); assert(!screen().includes('Audio help'), 'Escape closes audio help without quitting');
   const transcript = Array.from({ length: 200 }, (_, i) => ({ id: `s${i}`, start: i, end: i + 1, text: `Live sentence ${String(i).padStart(3, '0')}.`, speaker: 'LOCAL' }));
   saveTranscriptRecord(library, { ...first, transcript }, { provisional: true });
   await until(() => screen().includes('Live sentence 199.'), 'draft text appears while recording, not just after finalization');

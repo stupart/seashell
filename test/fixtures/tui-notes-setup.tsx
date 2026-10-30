@@ -67,6 +67,6 @@ try {
   await until(() => !screen().includes('Notes setup for this meeting'), 'Esc closes the panel');
   await until(() => screen().includes('AI is off for this meeting.'), 'the Notes tab says AI is off');
   await type('g');
-  await until(() => screen().includes('Press N to turn it on'), 'G refuses instead of sending the meeting to a model');
+  await until(() => screen().includes('Press n to turn it on'), 'G refuses instead of sending the meeting to a model');
   process.stdout.write(JSON.stringify({ passed: true }) + '\n');
 } finally { app.unmount(); input.destroy(); output.destroy(); rmSync(root, { recursive: true, force: true }); }

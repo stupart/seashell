@@ -96,7 +96,7 @@ try {
   const shell = render(<App />, { stdin: main.input as any, stdout: main.output as any, stderr: main.output as any,
     debug: true, patchConsole: false, exitOnCtrlC: false });
   const press = async (text: string) => { main.input.write(text); await Bun.sleep(80); };
-  await until(() => main.all().includes(', to fix'), 'the app says what is wrong and where to fix it');
+  await until(() => main.all().includes(', to check'), 'the app says what is wrong and where to look');
   await press(',');
   await until(() => main.all().includes('Checking what works') || main.all().includes('thing needs you'), 'comma opens Settings');
   await until(() => main.all().includes('Esc back'), 'settings footer');

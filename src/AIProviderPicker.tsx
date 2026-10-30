@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput, useStdout } from 'ink';
 import { KeyBar, ScreenTitle } from './tui-chrome.tsx';
 import { AI_PROVIDERS, MEETING_ROLES, currentMeetingRoutes, meetingRolesPatch, roleRoute, suggestedMeetingRoutes,
   type MeetingRole, type MeetingRoutes } from './ai-provider.ts';
@@ -16,6 +16,7 @@ export default function AIProviderPicker(props: {
   onSave: (patch: SeashellMeetingConfig) => void;
   onClose: () => void;
 }) {
+  const { stdout } = useStdout();
   const [routes, setRoutes] = useState<MeetingRoutes>(() => currentMeetingRoutes(props.current));
   const [mode, setMode] = useState<NonNullable<SeashellMeetingConfig['mode']>>(props.current?.mode ?? 'post-session');
   const [screen, setScreen] = useState<Screen>('roles');
@@ -139,7 +140,7 @@ export default function AIProviderPicker(props: {
   else entries = ['Provider default', ...(chosen?.efforts ?? [])];
   const offset = Math.max(0, Math.min(index - 3, entries.length - 7));
   const selectedProvider = screen === 'providers' ? AI_PROVIDERS[index]! : provider;
-  return <Box flexDirection="column" paddingX={1}>
+  return <Box flexDirection="column" paddingX={1} height={stdout?.rows ?? 24} overflow="hidden">
     <ScreenTitle name={`AI for notes and chat · ${screen === 'roles' ? 'models by role' : suggesting ? 'Suggested setup' : roleName}`} />
     {props.recording && <Text color="yellow">Recording continues · Esc to return</Text>}
     {screen === 'roles' && <Text dimColor>Each role can use its own provider, model and effort.</Text>}
@@ -163,7 +164,8 @@ export default function AIProviderPicker(props: {
       {notice && screen === 'roles' && <Text color="green">{notice}</Text>}
       {error && <Text color="red">{error.slice(0, 250)}</Text>}
     </Box>
-    <Box marginTop={1} flexShrink={0}><KeyBar help={false} columns={78} hints={screen === 'custom' ? [['Enter', 'use model'], ['Esc', 'back']]
+    <Box flexGrow={1} />
+    <Box flexShrink={0}><KeyBar help={false} columns={(stdout?.columns ?? 80) - 2} hints={screen === 'custom' ? [['Enter', 'use model'], ['Esc', 'back']]
       : [['↑↓', 'choose'], ['Enter', 'select'], ['r', 'refresh'], ['Esc', 'back']]} /></Box>
   </Box>;
 }

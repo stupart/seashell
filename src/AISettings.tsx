@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput, useStdout } from 'ink';
 import AdvancedAISettings from './AIProviderPicker.tsx';
 import { KeyBar, ScreenTitle } from './tui-chrome.tsx';
 import { AI_PROVIDERS, currentMeetingRoutes, preferredAIProvider, recommendedMeetingSetup } from './ai-provider.ts';
@@ -64,11 +64,11 @@ export default function AISettings(props: {
   const routes = proposal?.routes ?? currentRoutes;
   const backends = [...new Set(Object.values(routes).flatMap((route) => route ? [route.backend] : []))];
   const providerName = backends.map((id) => AI_PROVIDERS.find((provider) => provider.id === id)!.name).join(' + ');
-  const automatic = proposal || props.current?.modelSelection === 'automatic';
   const canUse = Boolean(proposal || configured);
+  const { stdout } = useStdout();
   const entries = screen === 'providers'
     ? AI_PROVIDERS.map((provider) => `${provider.name} · ${providers?.find((item) => item.id === provider.id)?.ready ? 'Connected' : 'Not set up'}`)
-    : [proposal ? `Use ${providerName}` : configured ? 'Done' : 'Find connected AI', 'Change provider…', 'Advanced · models and effort…',
+    : [proposal ? `Yes, use ${providerName}` : configured ? 'Done' : 'Find connected AI', 'Choose another AI…', 'Advanced · models and effort…',
       ...(configured ? ['Use recommended models…'] : [])];
 
   useInput((input, key) => {
@@ -107,17 +107,11 @@ export default function AISettings(props: {
   if (screen === 'advanced') return <AdvancedAISettings current={proposal ? { ...props.current, ...proposal } : props.current} recording={props.recording}
     onClose={() => { setScreen('home'); setIndex(2); }}
     onSave={(patch) => props.onSave({ ...patch, modelSelection: 'custom' })} />;
-  return <Box flexDirection="column" paddingX={1}>
+  return <Box flexDirection="column" paddingX={1} height={stdout?.rows ?? 24} overflow="hidden">
     <ScreenTitle name="AI for notes and chat" />
     {props.recording && <Text color="yellow">Recording continues · Esc to return</Text>}
     <Text>{screen === 'providers' ? 'Connect once. Seashell chooses the models.' : busy ? 'Finding your connected AI…'
       : canUse ? `${proposal ? 'Write notes with' : 'Using'} ${providerName}${proposal ? '?' : ''}` : 'No connected AI found. Recording still works.'}</Text>
-    {screen === 'home' && canUse && <Box flexDirection="column" marginTop={1}>
-      <Text>{automatic ? 'Recommended models' : 'Your saved models'}</Text>
-      <Text>Notes: {routes.reconciliation?.model ?? 'Off'} · Chat: {routes.chat?.model ?? 'Not set'}</Text>
-      <Text dimColor>{(proposal?.mode ?? mode) === 'post-session' ? 'Final notes + chat · no live AI calls'
-        : `Live analysis: ${routes.observer?.model ?? 'Not set'}`}</Text>
-    </Box>}
     <Box flexDirection="column" marginTop={1}>
       {entries.map((label, i) => <Text key={label} color={index === i ? 'cyan' : undefined}>{index === i ? '›' : ' '} {label}</Text>)}
     </Box>
@@ -129,6 +123,7 @@ export default function AISettings(props: {
       {error && <Text color="red">{error.slice(0, 240)}</Text>}
       {!busy && !canUse && screen === 'home' && <Text dimColor>No Seashell account needed. Connect a provider or return to your transcript.</Text>}
     </Box>
-    <Box marginTop={1} flexShrink={0}><KeyBar help={false} columns={78} hints={[['↑↓', 'choose'], ['Enter', 'continue'], ['r', 'refresh'], ['Esc', 'back']]} /></Box>
+    <Box flexGrow={1} />
+    <Box flexShrink={0}><KeyBar help={false} columns={(stdout?.columns ?? 80) - 2} hints={[['↑↓', 'choose'], ['Enter', 'continue'], ['r', 'refresh'], ['Esc', 'back']]} /></Box>
   </Box>;
 }

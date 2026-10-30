@@ -603,10 +603,27 @@ function retainMeetingRevision(directory: string, artifact: MeetingArtifact, tra
 }
 
 /** Also repairs interruption between transcript replacement and projection refresh. */
+/**
+ * Notes written before a speaker had a name say "Remote speaker 1". Only such
+ * placeholders are replaced: an ordinary name could also be an ordinary word.
+ */
+function renamedInNotes(artifact: MeetingArtifact, rename: { from: string; to: string }): MeetingArtifact {
+  if (!/^(?:Remote speaker \d+|SPEAKER_\d+)$/u.test(rename.from)) return artifact;
+  const pattern = new RegExp(`\\b${rename.from}\\b`, 'gu');
+  const renamed = <T>(value: T): T => JSON.parse(JSON.stringify(value), (_key, item: unknown) =>
+    (typeof item === 'string' ? item.replace(pattern, rename.to) : item)) as T;
+  return {
+    ...artifact,
+    provisionalClaims: renamed(artifact.provisionalClaims),
+    chat: renamed(artifact.chat),
+    ...(artifact.analysis ? { analysis: renamed(artifact.analysis) } : {}),
+  };
+}
+
 export function synchronizeMeetingTranscript(
   directory: string,
   record: TranscriptRecord,
-  options: { namesOnly?: boolean } = {},
+  options: { namesOnly?: { from: string; to: string } } = {},
 ): MeetingArtifact | undefined {
   const path = join(directory, 'meeting.json');
   if (!existsSync(path)) return undefined;
@@ -618,7 +635,8 @@ export function synchronizeMeetingTranscript(
   // The evidence hash includes labels, and stored hashes depend on that, so the
   // caller says so rather than the hash changing.
   if (options.namesOnly) {
-    const updated: MeetingArtifact = { ...artifact, transcriptEvidence: evidence, updatedAt: new Date().toISOString() };
+    const updated: MeetingArtifact = { ...renamedInNotes(artifact, options.namesOnly),
+      transcriptEvidence: evidence, updatedAt: new Date().toISOString() };
     atomicWrite(path, `${JSON.stringify(updated, null, 2)}\n`);
     writeMeetingProjections(directory, updated, record);
     return updated;

@@ -1,4 +1,4 @@
-import type { MeetingArtifact, MeetingClaimType } from './meeting-artifact.ts';
+import type { MeetingArtifact, MeetingClaim, MeetingClaimType } from './meeting-artifact.ts';
 import { transcriptSegmentId } from './meeting-artifact.ts';
 import { compareMeetingEvidence, meetingEvidence } from './meeting-evidence.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
@@ -78,10 +78,10 @@ export function meetingViewLines(
   if (view === 'chat') {
     const sources = createSources(artifact, record);
     if (artifact.chat.length === 0) {
-      return ['Ask about this meeting with A.', 'Answers cite the transcript segments they use.'];
+      return ['Ask about this meeting with a.', 'Answers cite the transcript segments they use.'];
     }
     return artifact.chat.slice(-8).flatMap((message) => [
-      `${message.role === 'user' ? 'You' : 'Sea Shell'}: ${message.text}`,
+      `${message.role === 'user' ? 'You' : 'Seashell'}: ${message.text}`,
       ...(message.role === 'assistant' ? sources(message.evidenceSegmentIds) : []),
     ]);
   }
@@ -90,7 +90,7 @@ export function meetingViewLines(
     return [
       'AI is off for this meeting.',
       'Seashell sends it to no model: no live analysis, notes or chat, and agents using the meetings server are refused it.',
-      'The transcript is here as usual. Press N to turn AI back on.',
+      'The transcript is here as usual. Press n to turn AI back on.',
     ];
   }
 
@@ -102,21 +102,24 @@ export function meetingViewLines(
   const claims = artifact.analysis?.claims ?? artifact.provisionalClaims;
   const summary = artifact.analysis?.summary || (
     artifact.status === 'failed'
-      ? 'The transcript is safe, but the notes failed. Press G to try again.'
+      ? 'The transcript is safe, but the notes failed. Press g to try again.'
       : artifact.status === 'reconciling' ? 'Writing the notes…'
-      : claims.length ? 'Notes so far. Press G for final notes.' : 'No notes yet. Press G to write them.'
+      : claims.length ? 'Notes so far. Press g for final notes.' : 'No notes yet. Press g to write them.'
   );
   // Decisions and actions lead, so they are never a scroll away. A template is
-  // the layout the owner chose, so its sections follow. Anything saying what a
-  // section already says goes; what merely cites the same passage stays.
+  // the layout the owner chose, so its sections follow. A claim goes only when a
+  // section says the same thing about the same moment: either alone can be a
+  // different point, and losing one is worse than reading it twice.
   const sections = artifact.analysis?.notes ?? [];
-  const said = sections.flatMap((section) => section.items.map((item) => wordsOf(item.text)));
-  const repeated = (text: string) => {
-    const words = wordsOf(text);
-    return said.some((other) => [...words].filter((word) => other.has(word)).length >= Math.max(2, words.size * 0.7));
+  const said = sections.flatMap((section) => section.items.map((item) =>
+    ({ words: wordsOf(item.text), passages: new Set(item.evidenceSegmentIds) })));
+  const repeated = (claim: MeetingClaim) => {
+    const words = wordsOf(claim.text);
+    return said.some((other) => claim.evidenceSegmentIds.some((id) => other.passages.has(id)) &&
+      [...words].filter((word) => other.words.has(word)).length >= Math.max(2, words.size * 0.7));
   };
   const group = ([title, types]: [string, MeetingClaimType[]]) => {
-    const items = claims.filter((claim) => types.includes(claim.type) && !repeated(claim.text));
+    const items = claims.filter((claim) => types.includes(claim.type) && !repeated(claim));
     return items.length ? ['', `${HEADING}${title}`, ...items.map((claim) => bullet(claim.text, claim.evidenceSegmentIds))] : [];
   };
   const stale = record && artifact.transcriptEvidence &&
@@ -132,6 +135,6 @@ export function meetingViewLines(
         : ['- Not discussed.']),
     ]),
     ...CLAIM_GROUPS.slice(2).flatMap(group),
-    ...(stale ? ['', 'The transcript changed since these notes. Press G to rewrite them.'] : []),
+    ...(stale ? ['', 'The transcript changed since these notes. Press g to rewrite them.'] : []),
   ];
 }
