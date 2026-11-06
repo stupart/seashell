@@ -803,7 +803,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       const browsers = saved?.browserWithoutCalendar ?? DEFAULT_MEETING_AUTOMATION.browserWithoutCalendar;
       const word = (value: string) => value === 'automatic' ? 'records by itself' : value === 'ask' ? 'asks first' : 'never records';
       print(command.json ? JSON.stringify({ mode, browserWithoutCalendar: browsers, apps: saved?.apps ?? {} }, null, 2) : [
-        `Calls ${word(mode)} unless an app says otherwise. Browser calls without a calendar event: ${word(browsers)}.`,
+        `Calls: ${word(mode)}, unless an app says otherwise. Browser calls with no calendar event: ${word(browsers)}.`,
         '',
         ...apps.map((app) => {
           const own = saved?.apps?.[app.id];
