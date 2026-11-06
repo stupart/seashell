@@ -12,6 +12,7 @@ import * as computer from '../../src/live-system-audio.ts';
 const root = mkdtempSync(join(tmpdir(), 'seashell-foreground-health-'));
 process.env.SEASHELL_CONFIG = join(root, 'config.json');
 process.env.SEASHELL_LIBRARY_DIR = join(root, 'library');
+process.env.SEASHELL_MEETING_COMMAND_PATH = join(root, 'meeting-command.json');
 delete process.env.SEASHELL_DISABLE_LISTENER;
 delete process.env.SEASHELL_DISABLE_SYSTEM_AUDIO;
 writeFileSync(process.env.SEASHELL_CONFIG, JSON.stringify({ meeting: { automation: { enabled: false } } }));

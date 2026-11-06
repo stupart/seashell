@@ -190,7 +190,15 @@ private func analyze(_ tree: BrowserTree) -> Probe {
     var uncertainty: String? = nodes.contains(where: { $0.incomplete == true })
         ? "Browser Accessibility inspection was incomplete." : nil
     let scaffold = browserScaffold(root)
-    let windows = browserScaffold(root, stopAtWindows: true).filter { $0.role == "AXWindow" }
+    // Settings, downloads and similar windows have no tabs and no page, so they
+    // say nothing about calls. Counting them made every Meet window "uncertain"
+    // for as long as one was open.
+    // A window that could not be read could still hold a call, so it counts.
+    let windows = browserScaffold(root, stopAtWindows: true).filter { window in
+        guard window.role == "AXWindow" else { return false }
+        let contents = browserScaffold(window)
+        return contents.count == 1 || contents.contains { $0.incomplete == true || $0.role == "AXWebArea" || $0.role == "AXTabGroup" }
+    }
     guard !windows.isEmpty else {
         if let uncertainty { return Probe(state: "unavailable", detail: uncertainty + " Speaker names are off, and browser calls ask before recording.", browser: browser) }
         if tree.offscreenWindows == true {

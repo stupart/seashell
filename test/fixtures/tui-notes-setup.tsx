@@ -15,6 +15,7 @@ const root = mkdtempSync(join(tmpdir(), 'seashell-notes-setup-ui-'));
 const library = join(root, 'library');
 process.env.SEASHELL_CONFIG = join(root, 'config.json');
 process.env.SEASHELL_LIBRARY_DIR = library;
+process.env.SEASHELL_MEETING_COMMAND_PATH = join(root, 'meeting-command.json');
 process.env.SEASHELL_TEMPLATES_DIR = join(root, 'Templates');
 process.env.SEASHELL_DISABLE_SYSTEM_AUDIO = '1';
 process.env.SEASHELL_DISABLE_LISTENER = '1';

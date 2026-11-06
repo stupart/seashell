@@ -61,7 +61,7 @@ export const HELP_ROWS: ReadonlyArray<readonly [string, string]> = [
   ['Meeting', '1 notes · 2 transcript · 3 chat · a ask · g write notes · n notes options · r name speakers · c copy · e export · o open folder · d move to Trash'],
   ['Transcript', 't times · s speaker names · l latest words'],
   ['When asked', 'm record · x ignore'],
-  ['Recording', 'starts and stops with the call · i audio help'],
+  ['Recording', 'starts and stops with the call · space record or stop by hand · i audio help'],
   ['Add', 'f import a file · F import and separate speakers'],
   ['Setup', ', settings · p AI · v speaker names'],
 ];

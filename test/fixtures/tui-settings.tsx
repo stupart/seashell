@@ -12,6 +12,7 @@ import type { FeatureStatusDependencies } from '../../src/feature-status.ts';
 const root = mkdtempSync(join(tmpdir(), 'seashell-settings-ui-'));
 process.env.SEASHELL_CONFIG = join(root, 'config.json');
 process.env.SEASHELL_LIBRARY_DIR = join(root, 'library');
+process.env.SEASHELL_MEETING_COMMAND_PATH = join(root, 'meeting-command.json');
 process.env.SEASHELL_DISABLE_SYSTEM_AUDIO = '1';
 // Never open real audio devices or ask macOS for permission from a test.
 process.env.SEASHELL_DISABLE_LISTENER = '1';

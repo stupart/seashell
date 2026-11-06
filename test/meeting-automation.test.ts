@@ -181,6 +181,81 @@ setInterval(() => {}, 1000);
   });
 });
 
+describe('never missing a scheduled call', () => {
+  const safari = parseMeetingSignalSnapshot({ schemaVersion: 1, capturedAtUnixMs: 1_000, supported: true,
+    inputProcesses: [{ pid: 1594, bundleId: 'com.apple.WebKit.GPU', name: 'Safari Graphics and Media' }] });
+  const unreadable = { state: 'unavailable' as const, detail: 'Meet is out of view (another desktop or full screen).',
+    browser: 'safari' as const, source: 'google-meet-accessibility' as const, accessibilityTrusted: true };
+  const meetEvent = { ...calendar, joinUrl: 'https://meet.google.com/abc-defg-hij' };
+
+  test('a Meet call on the calendar records by itself even when Meet cannot be read', () => {
+    // This is how calls were missed: Meet on another desktop, so only the browser's mic was seen.
+    expect(resolveMeetingCandidate(safari, meetEvent, {}, unreadable)?.requiresConsent).toBe(false);
+  });
+
+  test('an ordinary calendar event with browser audio still asks while Meet is unreadable', () => {
+    expect(resolveMeetingCandidate(safari, calendar, {}, unreadable)?.requiresConsent).toBe(true);
+  });
+
+  test('choosing to record browser calls automatically means never being asked', () => {
+    const automatic = { mode: 'automatic' as const, browserWithoutCalendar: 'automatic' as const };
+    expect(resolveMeetingCandidate(safari, undefined, automatic, unreadable)?.requiresConsent).toBe(false);
+    expect(resolveMeetingCandidate(safari, calendar, automatic, unreadable)?.requiresConsent).toBe(false);
+  });
+
+  test('an app can be off, ask first, or record by itself, whatever the default', () => {
+    const facetime = parseMeetingSignalSnapshot({ schemaVersion: 1, capturedAtUnixMs: 1_000, supported: true,
+      inputProcesses: [{ pid: 9, bundleId: 'com.apple.avconferenced', name: 'FaceTime' }] });
+    expect(resolveMeetingCandidate(facetime, undefined, { apps: { facetime: 'off' } })).toBeUndefined();
+    expect(resolveMeetingCandidate(facetime, undefined, { apps: { facetime: 'ask' } })?.requiresConsent).toBe(true);
+    expect(resolveMeetingCandidate(safari, undefined, { apps: { safari: 'automatic' } }, unreadable)?.requiresConsent).toBe(false);
+    const joined = { state: 'connected' as const, detail: 'Joined', browser: 'safari' as const,
+      snapshot: { meeting: '/abc-defg-hij', joined: true, participants: [] } };
+    expect(resolveMeetingCandidate(safari, undefined, { apps: { safari: 'off' } }, joined)).toBeUndefined();
+  });
+
+  test('a call recorded from its mic stays one recording when Meet becomes readable', () => {
+    const controller = new MeetingAutomationController({ confirmationPolls: 1 });
+    const fromMic = resolveMeetingCandidate(safari, meetEvent, {}, unreadable)!;
+    expect(controller.step(fromMic, 0).kind).toBe('start');
+    const joined = resolveMeetingCandidate(safari, meetEvent, {}, { state: 'connected', detail: 'Joined', browser: 'safari',
+      snapshot: { meeting: '/abc-defg-hij', joined: true, participants: [] } })!;
+    const kept = preserveMeetingCandidateDuringObservationGap(joined, controller.state, safari);
+    expect(kept?.id).toBe(fromMic.id);
+    for (let at = 3_000; at < 60_000; at += 3_000) expect(controller.step(kept, at).kind).toBe('none');
+  });
+});
+
+describe('recording by hand', () => {
+  const manual: MeetingCandidate = { id: 'manual:1', appName: 'Seashell', bundleId: '', pid: 0, kind: 'manual',
+    title: 'Recording', evidence: ['manual'], requiresConsent: false };
+
+  test('a recording started by hand runs until it is stopped, with no app behind it', () => {
+    const controller = new MeetingAutomationController({ confirmationPolls: 1, endGraceSeconds: 20 });
+    expect(controller.startByHand(manual, 0)).toBe(manual);
+    for (let at = 3_000; at < 600_000; at += 30_000) expect(controller.step(undefined, at).kind).toBe('none');
+    expect(controller.stopByHand(600_000)).toBe(manual);
+    expect(controller.state.phase).toBe('watching');
+  });
+
+  test('stopping a call by hand keeps it stopped until that call really ends', () => {
+    const controller = new MeetingAutomationController({ confirmationPolls: 1, endGraceSeconds: 20 });
+    expect(controller.step(zoom, 0).kind).toBe('start');
+    expect(controller.stopByHand(10_000)).toEqual(zoom);
+    for (let at = 13_000; at < 300_000; at += 3_000) expect(controller.step(zoom, at).kind).toBe('none');
+    // The call ends, then a new one starts: that one records.
+    for (let at = 300_000; at <= 321_000; at += 3_000) controller.step(undefined, at);
+    expect(controller.step(zoom, 330_000).kind).toBe('start');
+  });
+
+  test('pressing record while being asked about a call records that call', () => {
+    const controller = new MeetingAutomationController({ confirmationPolls: 1 });
+    const asking = { ...zoom, requiresConsent: true };
+    expect(controller.step(asking, 0).kind).toBe('suggest');
+    expect(controller.startByHand(manual, 1_000)).toEqual(asking);
+  });
+});
+
 describe('automatic meeting controller', () => {
   test('confirms, records, tolerates a dropout, then finishes', () => {
     const controller = new MeetingAutomationController({

@@ -64,6 +64,7 @@ export type MeetingCommand = {
     | { kind: 'meeting-ai'; id: string; off?: boolean }
     | { kind: 'watch'; once: boolean }
     | { kind: 'consent'; decision: 'approve' | 'decline' }
+    | { kind: 'apps'; app?: string; policy?: 'off' | 'ask' | 'automatic' }
     | { kind: 'autostart'; operation: 'enable' | 'disable' | 'status' };
   libraryDir?: string;
   json: boolean;
@@ -113,6 +114,7 @@ export type CliCommand =
   | { kind: 'status'; json: boolean }
   | { kind: 'mcp'; action: 'serve' | 'install'; json: boolean }
   | { kind: 'templates'; json: boolean }
+  | { kind: 'record'; command: 'start' | 'stop'; json: boolean }
   | { kind: 'speaker-compare'; ids: string[]; last?: number; open: boolean; json: boolean }
   | { kind: 'speaker-use'; engine: 'native' | 'nemotron3'; json: boolean }
   | { kind: 'setup'; autostart: boolean; json: boolean }
@@ -617,6 +619,15 @@ function parseMeeting(args: string[]): MeetingCommand {
       if (positional.length > 0) throw new Error('meeting watch accepts no positional arguments');
       action = { kind: 'watch', once };
       break;
+    case 'apps': {
+      if (positional.length === 0) { action = { kind: 'apps' }; break; }
+      const value = positional[1];
+      const policy = value === 'on' || value === 'auto' || value === 'automatic' ? 'automatic' as const
+        : value === 'off' ? 'off' as const : value === 'ask' ? 'ask' as const : undefined;
+      if (positional.length !== 2 || !policy) throw new Error('Usage: seashell meeting apps [<app> on|off|ask]');
+      action = { kind: 'apps', app: positional[0]!.toLocaleLowerCase(), policy };
+      break;
+    }
     case 'consent': {
       const decision = positional[0];
       if (decision !== 'approve' && decision !== 'decline') {
@@ -759,6 +770,13 @@ export function parseCliArgs(args: string[]): CliCommand {
     if (unknown.length) throw new Error('Usage: seashell templates [--json]');
     return { kind: 'templates', json: args.includes('--json') };
   }
+  if (args[0] === 'record') {
+    const rest = args.slice(1).filter((arg) => arg !== '--json');
+    if (rest.length > 1 || (rest[0] !== undefined && rest[0] !== 'stop' && rest[0] !== 'start')) {
+      throw new Error('Usage: seashell record [stop] [--json]');
+    }
+    return { kind: 'record', command: rest[0] === 'stop' ? 'stop' : 'start', json: args.includes('--json') };
+  }
   if (args[0] === 'speakers') {
     const usage = 'Usage: seashell speakers compare [<id> ...] [--last <n>] [--open] [--json] | seashell speakers use <nemotron3|community-1> [--json]';
     const json = args.includes('--json');
@@ -847,6 +865,8 @@ Usage:
   seashell mcp                              Read-only meetings server for Claude Code/Codex (stdio)
   seashell mcp install [--json]             Add that server and its skill to Claude Code and Codex
   seashell templates [--json]               Your notes templates and "About me", in an editable folder
+  seashell record [stop]                    Record now, by hand, or stop the recording
+  seashell meeting apps [<app> on|off|ask]  Which apps record by themselves, ask first, or never
   seashell speakers compare [--last <n>]    Try Nemotron 3 on past calls and listen where the engines disagree
   seashell speakers use <engine>            Separate voices with nemotron3 or community-1
   seashell doctor [--json]                  Check dependencies and models

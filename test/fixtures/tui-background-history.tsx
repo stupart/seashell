@@ -17,6 +17,7 @@ const root = mkdtempSync(join(tmpdir(), 'seashell-background-ui-'));
 const library = join(root, 'library');
 process.env.SEASHELL_CONFIG = join(root, 'config.json');
 process.env.SEASHELL_LIBRARY_DIR = library;
+process.env.SEASHELL_MEETING_COMMAND_PATH = join(root, 'meeting-command.json');
 delete process.env.SEASHELL_DISABLE_LISTENER;
 writeFileSync(process.env.SEASHELL_CONFIG, '{}');
 const columns = process.argv[2] === 'narrow' ? 48 : 110;

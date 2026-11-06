@@ -13,6 +13,7 @@ const root = mkdtempSync(join(tmpdir(), 'seashell-history-refresh-'));
 const library = join(root, 'library');
 process.env.SEASHELL_CONFIG = join(root, 'config.json');
 process.env.SEASHELL_LIBRARY_DIR = library;
+process.env.SEASHELL_MEETING_COMMAND_PATH = join(root, 'meeting-command.json');
 process.env.SEASHELL_DISABLE_LISTENER = '1';
 writeFileSync(process.env.SEASHELL_CONFIG, '{}');
 Object.defineProperty(process.stdout, 'columns', { value: 100 });

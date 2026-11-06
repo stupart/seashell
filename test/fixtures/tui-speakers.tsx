@@ -10,6 +10,7 @@ import { join } from 'path';
 const root = mkdtempSync(join(tmpdir(), 'seashell-speakers-ui-'));
 process.env.SEASHELL_CONFIG = join(root, 'config.json');
 process.env.SEASHELL_LIBRARY_DIR = join(root, 'library');
+process.env.SEASHELL_MEETING_COMMAND_PATH = join(root, 'meeting-command.json');
 process.env.SEASHELL_DISABLE_SYSTEM_AUDIO = '1';
 writeFileSync(process.env.SEASHELL_CONFIG, JSON.stringify({ meeting: { automation: { enabled: false } } }));
 let starts = 0, stops = 0, setups = 0, ready = false, permissionRequests = 0, connectionChecks = 0;

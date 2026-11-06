@@ -51,11 +51,14 @@ import {
 } from './transcription-routing.ts';
 import { acquireMeetingWatchLock } from './watch-lock.ts';
 import { buildMeetingContext } from './meeting-context.ts';
-import { consumeMeetingConsent } from './meeting-consent.ts';
+import { consumeMeetingConsent, writeMeetingConsent } from './meeting-consent.ts';
+import { consumeMeetingCommand } from './meeting-command.ts';
 
 export type AutomaticMeetingWatchEvent =
   | { readonly type: 'watch.ready'; readonly at: string }
-  | { readonly type: 'meeting.suggested'; readonly at: string; readonly candidate: MeetingCandidate }
+  /** `why` says what kept it from recording by itself, so a missed call can be explained. */
+  | { readonly type: 'meeting.suggested'; readonly at: string; readonly candidate: MeetingCandidate; readonly why?: string }
+  | { readonly type: 'meeting.stopped'; readonly at: string; readonly candidate: MeetingCandidate }
   | { readonly type: 'meeting.started'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string }
   | { readonly type: 'meeting.resumed'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string; readonly pausedSeconds: number }
   | { readonly type: 'meeting.capture-finished'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string }
@@ -74,6 +77,13 @@ export interface AutomaticMeetingWatchDependencies {
   readonly finalizeCapture?: typeof finalizeCaptureTranscript;
   readonly enrich?: typeof enrichMeeting;
   readonly consumeConsent?: typeof consumeMeetingConsent;
+  readonly consumeCommand?: typeof consumeMeetingCommand;
+  /**
+   * Ask the person directly whether to record, when no Seashell window may be
+   * open to ask. Resolves with their answer, or undefined if they did not
+   * answer. Only the login agent passes one: tests and embedders never prompt.
+   */
+  readonly askToRecord?: (candidate: MeetingCandidate, signal: AbortSignal) => Promise<'approve' | 'decline' | undefined>;
 }
 
 export interface AutomaticMeetingWatchOptions {
@@ -142,6 +152,7 @@ export class AutomaticMeetingWatchService {
   #shuttingDown = false;
   #meetWarning?: string;
   #consentId?: string;
+  #asking?: AbortController;
   #lastNowUnixMs = Date.now();
 
   constructor(options: AutomaticMeetingWatchOptions = {}) {
@@ -164,6 +175,8 @@ export class AutomaticMeetingWatchService {
       finalizeCapture: options.dependencies?.finalizeCapture ?? finalizeCaptureTranscript,
       enrich: options.dependencies?.enrich ?? enrichMeeting,
       consumeConsent: options.dependencies?.consumeConsent ?? consumeMeetingConsent,
+      consumeCommand: options.dependencies?.consumeCommand ?? consumeMeetingCommand,
+      askToRecord: options.dependencies?.askToRecord ?? (async () => undefined),
     };
   }
 
@@ -210,11 +223,33 @@ export class AutomaticMeetingWatchService {
       resolveMeetingCandidate(snapshot, calendar, this.#config.meeting?.automation, meet),
       this.#controller.state, snapshot, meet, this.#parked?.candidate,
     );
+    const command = this.#dependencies.consumeCommand(undefined, now.getTime());
+    if (command === 'stop' && this.#active) {
+      const stopped = this.#controller.stopByHand(now.getTime()) ?? this.#active.candidate;
+      this.emit({ type: 'meeting.stopped', at: now.toISOString(), candidate: stopped });
+      await this.finish(this.#active.candidate, 'stopped-by-hand');
+      this.projectWatch();
+      return { kind: 'none' };
+    }
+    if (command === 'start' && !this.#active) {
+      const manual = Object.freeze({
+        id: `manual:${randomUUID()}`, appName: 'Seashell', bundleId: '', pid: 0, kind: 'manual' as const,
+        title: calendar?.title?.trim() || 'Recording', ...(calendar ? { calendar } : {}),
+        evidence: Object.freeze(['manual' as const]), requiresConsent: false,
+      });
+      const started = this.#controller.startByHand(manual, now.getTime());
+      if (started && this.start(started, now)) {
+        this.projectWatch();
+        return { kind: 'start', candidate: started };
+      }
+    }
     const action = this.#controller.step(candidate, now.getTime(),
       hasConfirmedMeetingEnd(this.#controller.state.candidate, meet));
     if (action.kind === 'suggest') {
       this.#consentId = randomUUID();
-      this.emit({ type: 'meeting.suggested', at: now.toISOString(), candidate: action.candidate });
+      const why = meet && meet.state !== 'connected' ? meet.detail : undefined;
+      this.emit({ type: 'meeting.suggested', at: now.toISOString(), candidate: action.candidate, ...(why ? { why } : {}) });
+      this.askToRecord(action.candidate, this.#consentId);
     } else if (action.kind === 'start') {
       if (!this.start(action.candidate, now)) { this.projectWatch(); return { kind: 'none' }; }
     } else if (action.kind === 'finish') {
@@ -229,9 +264,28 @@ export class AutomaticMeetingWatchService {
       }
       if (decision === 'decline') this.declineSuggestion();
     }
-    if (this.#controller.state.phase !== 'awaiting-consent') this.#consentId = undefined;
+    if (this.#controller.state.phase !== 'awaiting-consent') {
+      this.#consentId = undefined;
+      // Answered somewhere else, or the call went away: the question is moot.
+      this.#asking?.abort();
+      this.#asking = undefined;
+    }
     this.projectWatch();
     return action;
+  }
+
+  /** The answer goes through the consent file, so the next poll acts on it like any other. */
+  private askToRecord(candidate: MeetingCandidate, consentId: string): void {
+    this.#asking?.abort();
+    const asking = new AbortController();
+    this.#asking = asking;
+    void this.#dependencies.askToRecord(candidate, asking.signal).then((answer) => {
+      if (!answer || asking.signal.aborted || this.#consentId !== consentId) return;
+      writeMeetingConsent(answer, undefined, this.#dependencies.now().getTime(), consentId);
+    }).catch((error: unknown) => {
+      this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(),
+        message: `Could not ask whether to record: ${errorMessage(error)}` });
+    });
   }
 
   approveSuggestion(): MeetingCandidate | undefined {
@@ -254,6 +308,7 @@ export class AutomaticMeetingWatchService {
     this.#shuttingDown = true;
     this.#signalMonitor?.stop();
     this.#calendarAbort.abort();
+    this.#asking?.abort();
     if (this.#active) await this.finish(this.#active.candidate, 'watch-stopped');
     this.finalizeParked();
     await this.#calendarRead?.catch(() => {});

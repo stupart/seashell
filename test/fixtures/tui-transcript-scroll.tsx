@@ -16,6 +16,7 @@ Object.defineProperty(process.stdout, 'rows', { value: rows });
 process.env.SEASHELL_DISABLE_LISTENER = '1';
 process.env.SEASHELL_CONFIG = join(root, 'config.json');
 process.env.SEASHELL_LIBRARY_DIR = join(root, 'library');
+process.env.SEASHELL_MEETING_COMMAND_PATH = join(root, 'meeting-command.json');
 writeFileSync(process.env.SEASHELL_CONFIG, '{}');
 saveTranscriptRecord(process.env.SEASHELL_LIBRARY_DIR, createTranscriptRecord({
   transcript: [{ start: 0, end: 300, text: Array.from({ length: 300 }, (_, i) => `word${i}`).join(' '), speaker: 'LOCAL' }],

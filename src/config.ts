@@ -10,7 +10,7 @@ import {
 import { homedir } from 'os';
 import { dirname, isAbsolute, join, resolve } from 'path';
 import type { MeetingCapturePolicy } from './calendar.ts';
-import type { MeetingAutomationConfig } from './meeting-automation.ts';
+import { meetingApps, type MeetingAutomationConfig } from './meeting-automation.ts';
 import { MODEL_EFFORTS, type ModelEffort, type HumainBackend, type HumainMeetingRoute } from './humain-client.ts';
 import type { MeetingEnrichmentMode } from './meeting-artifact.ts';
 import {
@@ -212,6 +212,7 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
       'resumeWindowSeconds',
       'maxDurationMinutes',
       'launchAtLogin',
+      'apps',
     ]);
     const unknown = Object.keys(candidate).find((key) => !allowed.has(key));
     if (unknown) throw new Error(`Sea Shell config meeting.automation.${unknown} is not supported`);
@@ -230,7 +231,16 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
         !browserPolicies.includes(candidate.browserWithoutCalendar as string)) {
       throw new Error('Sea Shell config meeting.automation.browserWithoutCalendar is invalid');
     }
+    if (candidate.apps !== undefined) {
+      const apps = candidate.apps as Record<string, unknown>;
+      const known = new Set(meetingApps().map((app) => app.id));
+      if (!apps || typeof apps !== 'object' || Array.isArray(apps) || Object.entries(apps).some(([id, value]) =>
+        !known.has(id) || !['off', 'ask', 'automatic'].includes(value as string))) {
+        throw new Error(`Sea Shell config meeting.automation.apps maps ${[...known].join(', ')} to off, ask or automatic`);
+      }
+    }
     automation = {
+      ...(candidate.apps === undefined ? {} : { apps: candidate.apps as MeetingAutomationConfig['apps'] }),
       ...(candidate.enabled === undefined ? {} : { enabled: candidate.enabled }),
       ...(candidate.mode === undefined ? {} : { mode: candidate.mode as MeetingAutomationConfig['mode'] }),
       ...(candidate.browserWithoutCalendar === undefined
