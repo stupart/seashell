@@ -79,6 +79,7 @@ import { startMeetSpeakerReader, meetBrowserMatchesApp, probeMeetSpeakers, type 
 import { backgroundMeetingMessage } from './background-meeting-status.ts';
 import { readBackgroundWatchStatus, type BackgroundWatchStatus } from './background-watch-status.ts';
 import { writeMeetingConsent } from './meeting-consent.ts';
+import { writeMeetingCommand } from './meeting-command.ts';
 import { CaptureHealthTracker, type CaptureHealthSnapshot } from './capture-health.ts';
 import { captureRecordingMode, recordingSummary, type RecordingMode } from './RecordingStatus.tsx';
 import { diarizationStatus } from './diarization-environment.ts';
@@ -278,6 +279,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const [renameState, setRenameState] = useState<RenameState | null>(null);
   const [speakerPickerOpen, setSpeakerPickerOpen] = useState(false);
   const [confirmRewrite, setConfirmRewrite] = useState(false);
+  const [confirmStop, setConfirmStop] = useState(false);
   const [jumpTo, setJumpTo] = useState<string | null>(null);
   const [exportMode, setExportMode] = useState(false);
   const [helpMode, setHelpMode] = useState(false);
@@ -1717,6 +1719,17 @@ export default function App(props: { libraryDir?: string } = {}) {
       return;
     }
 
+    if (confirmStop) {
+      setConfirmStop(false);
+      if (input.toLowerCase() === 'y') {
+        try {
+          writeMeetingCommand('stop');
+          setNotice('Stopping. The transcript and notes are written next.');
+        } catch (cause) { setError(`Could not stop recording: ${cause instanceof Error ? cause.message : String(cause)}`); }
+      }
+      return;
+    }
+
     if (confirmRewrite) {
       setConfirmRewrite(false);
       if (input.toLowerCase() === 'y') runCurrentMeetingEnrichment(view === 'live');
@@ -1970,19 +1983,16 @@ export default function App(props: { libraryDir?: string } = {}) {
       resetLiveSession();
       return;
     }
-    if (input === ' ' && activeBackgroundEntry) {
-      setNotice('Recording stops by itself when the call ends.');
-      return;
-    }
-    if (input === ' ' && watchOwnership === 'external' && !activeBackgroundEntry) {
-      setNotice('Recording starts by itself when you join a call. Recording by hand is not available yet.');
+    // With the background recorder, Space records by hand and stops any recording.
+    if (input === ' ' && watchOwnership === 'external') {
+      if (activeBackgroundEntry) { setConfirmStop(true); return; }
+      try {
+        writeMeetingCommand('start');
+        setNotice('Starting a recording…');
+      } catch (cause) { setError(`Could not start recording: ${cause instanceof Error ? cause.message : String(cause)}`); }
       return;
     }
     if ((input === ' ' || key.return) && view === 'live' && !historyOpen) {
-      if (pausedRef.current && watchOwnership === 'external') {
-        setNotice('Recording starts by itself when you join a call. Recording by hand is not available yet.');
-        return;
-      }
       if (pausedRef.current && automaticCandidate) {
         meetingAutomationController.current.decline();
         setAutomationPhase(meetingAutomationController.current.state.phase);
@@ -2128,13 +2138,16 @@ export default function App(props: { libraryDir?: string } = {}) {
   const reading = !historyOpen;
   const hasNotes = Boolean(currentMeeting?.analysis);
   const atHome = view === 'live' && paused && !currentMeeting;
+  const byHand: Hint[] = watchOwnership === 'external' ? [['space', activeBackgroundEntry ? 'stop' : 'record']] : [];
   const hints: Hint[] = consentPending ? [['m', 'record'], ['x', 'ignore']]
     : atHome && attention.length ? [[',', 'fix setup'], ['f', 'import']]
+    : !historyOpen && activeBackgroundEntry && currentRecordBusy ? [['space', 'stop'], ['↑↓', 'scroll'],
+      ...(followLiveTranscript ? [] : [['l', 'latest'] as Hint]), ['h', 'meetings'], ['i', 'audio']]
     : !navigationItems.some((item) => item.kind === 'record') && historyOpen ? [['f', 'import'], ['/', 'search']]
-    : historyOpen ? [['↑↓', 'choose'], ['Enter', 'read'], ['/', 'search'], ['f', 'import']]
+    : historyOpen ? [['↑↓', 'choose'], ['Enter', 'read'], ...byHand, ['/', 'search'], ['f', 'import']]
     : currentRecordBusy ? [['↑↓', 'scroll'], ...(followLiveTranscript ? [] : [['l', 'latest'] as Hint]), ['h', 'meetings'], ['i', 'audio']]
     : showingLiveTranscript ? [['↑↓', 'scroll'], ...(followLiveTranscript ? [] : [['l', 'latest'] as Hint]), ['h', 'meetings'], ['i', 'audio']]
-    : !currentRecord?.transcript.length ? [['h', 'meetings'], ['f', 'import']]
+    : !currentRecord?.transcript.length ? [...byHand, ['h', 'meetings'], ['f', 'import']]
     : !currentMeeting ? [['↑↓', 'scroll'], ['r', 'name speakers'], ['m', 'make it a meeting'], ['c', 'copy'], ['h', 'meetings']]
     : meetingView === 'notes' ? [
       ...(hasNotes ? [['↑↓', 'scroll'], ['h', 'meetings'], ['a', 'ask'], ['c', 'copy'], ['g', 'rewrite notes']] as Hint[] : [['g', 'write notes'], ['h', 'meetings']] as Hint[]),
@@ -2270,6 +2283,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     : exportMode ? 'Export  s SRT  v WebVTT  t text  j JSON  Esc cancel'
     : confirmTrashId ? 'Move to the Trash folder?  y yes  n no'
     : confirmRewrite ? 'Rewrite these notes? This replaces them.  y yes  n no'
+    : confirmStop ? 'Stop recording? Everything so far is kept.  y yes  n no'
     : notesSetup ? notesSetup.editing !== undefined ? 'Enter save · Esc cancel' : '↑↓ choose · ←→ change · Enter edit note · Esc done'
     : speakerPickerOpen ? '↑↓ choose · Enter name · Esc back'
     : helpMode ? '? or Esc close'

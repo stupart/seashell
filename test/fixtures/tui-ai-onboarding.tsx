@@ -14,6 +14,7 @@ const root = mkdtempSync(join(tmpdir(), 'seashell-onboarding-'));
 const configPath = join(root, 'config.json');
 process.env.SEASHELL_CONFIG = configPath;
 process.env.SEASHELL_LIBRARY_DIR = join(root, 'library');
+process.env.SEASHELL_MEETING_COMMAND_PATH = join(root, 'meeting-command.json');
 process.env.SEASHELL_DISABLE_LISTENER = '1';
 writeFileSync(configPath, '{}');
 saveTranscriptRecord(process.env.SEASHELL_LIBRARY_DIR, createTranscriptRecord({

@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased — never miss a call
+
+- Google Meet calls stopped recording on their own from late October. Seashell
+  starts a browser call once it reads the Meet page, and it cannot read Meet in
+  full screen, on another desktop or in a background tab, nor while any other
+  window without a page, such as Settings, is open. It fell back to asking first,
+  and the question only appeared inside an open Seashell window, so calls went
+  unrecorded.
+- A Meet, Zoom or Teams call on your calendar now records by itself from the
+  browser's microphone. Choosing to record browser calls automatically now means
+  never being asked, even when Meet is unreadable.
+- Windows with no tabs and no page no longer make Meet unreadable.
+- When a call does need a yes, a dialog asks directly. The old notification only
+  said to run a command.
+- The log says why a call was asked about instead of recorded.
+- Record by hand: Space in Seashell, or `seashell record`. Stop any recording
+  with Space or `seashell record stop`; a call stopped by hand stays stopped
+  until it ends.
+- `seashell meeting apps` lists each app; `seashell meeting apps facetime off`
+  turns one off. Each app can be on, off or ask.
+
 ## Unreleased — one layout, and fewer false alarms
 
 - Every screen now shares one title line, one body and one key bar. The stacked

@@ -390,6 +390,26 @@ mono WAV:
 bun run benchmark:live-asr -- ./sample.wav
 ```
 
+## Recording settings
+
+Seashell records calls by itself. To record anything else, press **Space** in
+Seashell or run `seashell record`; stop with **Space** or `seashell record stop`.
+A recording started by hand runs until you stop it. Stopping a call by hand keeps
+that call stopped until it ends.
+
+Whether a call records by itself, asks first, or never records:
+
+```bash
+seashell meeting setup --automation automatic --browser-without-calendar automatic   # never ask
+seashell meeting apps                     # each app and its setting
+seashell meeting apps facetime off        # on, off or ask, per app
+```
+
+A Google Meet, Zoom or Teams call on your calendar records by itself even when
+Seashell cannot read the Meet page, which happens whenever Meet is full screen,
+on another desktop or in a background tab. When a call does need a yes, Seashell
+asks with a dialog, so it is answered even with no Seashell window open.
+
 ## Terminal UI
 
 Sea Shell opens on the same simple, transcript-first screen used for live
@@ -411,7 +431,7 @@ until it is closed.
 | `Esc` | Go back one level. It never quits; `Q` does |
 | `/` | Search titles, speakers and transcripts. `Enter` on a result opens it at the match |
 | `L` | Jump to the latest words of a live transcript |
-| `Space` | Pause or resume, in a window that captures by itself. With the background recorder, recording follows the call |
+| `Space` | Record by hand, or stop the recording (it asks first). In a window that captures by itself, pause or resume |
 | `F` | Import audio or video |
 | `Shift+F` | Import and run speaker diarization |
 | `V` | Speaker setup, offline readiness, or identify a saved recording |

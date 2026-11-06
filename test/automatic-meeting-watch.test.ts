@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from 'bun:test';
 import { readBackgroundWatchStatus } from '../src/background-watch-status.ts';
+import type { MeetingCandidate } from '../src/meeting-automation.ts';
 import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -382,7 +383,8 @@ test('hidden Meet tree keeps one recording beyond grace with matching browser au
   expect(stops).toBe(1);
 });
 
-function resumableWatch(root: string, options: { resumeWindowSeconds?: number } = {}) {
+function resumableWatch(root: string, options: { resumeWindowSeconds?: number; commands?: Array<'start' | 'stop' | undefined>;
+  ask?: (candidate: MeetingCandidate) => Promise<'approve' | 'decline' | undefined> } = {}) {
   const state = {
     now: 0,
     probe: { state: 'connected', detail: 'Joined', browser: 'safari',
@@ -402,6 +404,8 @@ function resumableWatch(root: string, options: { resumeWindowSeconds?: number } 
       now: () => new Date(state.now),
       readMeet: async () => state.probe,
       readSignals: () => ({ schemaVersion: 1, capturedAtUnixMs: state.now, supported: true, inputProcesses: state.input }),
+      consumeCommand: () => options.commands?.shift(),
+      ...(options.ask ? { askToRecord: options.ask } : {}),
       startCapture: capture => {
         state.starts.push({ sessionId: capture.sessionId, startedAt: capture.startedAt?.getTime() });
         const id = capture.sessionId ?? `call-${++created}`;
@@ -564,4 +568,45 @@ test('a background meeting goes straight to final notes instead of replaying liv
   await service.pollOnce();
   await service.shutdown();
   expect(modes).toEqual(['post-session']);
+});
+
+test('recording by hand starts with no call, keeps going, and stops when asked', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-by-hand-'));
+  roots.push(root);
+  const commands: Array<'start' | 'stop' | undefined> = ['start'];
+  const { state, service } = resumableWatch(root, { commands });
+  state.input = [];
+  state.probe = { state: 'idle', detail: 'No call', source: 'google-meet-accessibility', absenceConfirmed: true };
+  try {
+    expect((await service.pollOnce()).kind).toBe('start');
+    expect(state.starts).toHaveLength(1);
+    for (let poll = 0; poll < 40; poll++) { state.now += 3_000; await service.pollOnce(); }
+    expect(service.phase).toBe('recording');
+    commands.push('stop');
+    state.now += 3_000;
+    await service.pollOnce();
+    expect(service.phase).toBe('watching');
+    expect(state.events.some((event) => event.type === 'meeting.stopped')).toBe(true);
+  } finally { await service.shutdown(); }
+  expect(state.finalized).toHaveLength(1);
+});
+
+test('a call that needs a yes is asked about directly, and the answer starts it', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-ask-'));
+  roots.push(root);
+  let asked = 0;
+  const { state, service } = resumableWatch(root, { ask: async () => { asked += 1; return 'approve'; } });
+  state.probe = { state: 'unavailable', detail: 'A Google Meet tab is not exposed through Accessibility.', source: 'google-meet-accessibility', accessibilityTrusted: true };
+  const original = process.env.HOME;
+  process.env.HOME = root;
+  try {
+    const first = await service.pollOnce();
+    expect(first.kind).toBe('suggest');
+    expect(asked).toBe(1);
+    const suggested = state.events.find((event) => event.type === 'meeting.suggested');
+    expect(suggested && 'why' in suggested ? suggested.why : undefined).toContain('not exposed');
+    await Bun.sleep(20);
+    state.now += 3_000;
+    expect((await service.pollOnce()).kind).toBe('start');
+  } finally { process.env.HOME = original; await service.shutdown(); }
 });

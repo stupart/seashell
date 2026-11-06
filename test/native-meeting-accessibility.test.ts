@@ -143,6 +143,17 @@ describe.skipIf(!available)('native Accessibility classifier', () => {
   test('room URL alone does not prove joined or ended', () => {
     expect(probe([browser([window(page([]))])]).state).toBe('unavailable');
   });
+  test('a settings window with no tabs or page does not make a readable call uncertain', () => {
+    const settings = window({ role: 'AXGroup', children: [{ role: 'AXCheckBox' }, { role: 'AXComboBox' }] }, { role: 'AXToolbar', children: [{ role: 'AXButton' }] });
+    const call = window({ role: 'AXTabGroup', children: [page([leave])] });
+    const result = probe([browser([call, settings], 'safari')]);
+    expect(result.state).toBe('connected');
+    expect(result.snapshot.joined).toBe(true);
+    expect(probe([browser([settings], 'safari')]).state).toBe('idle');
+  });
+  test('a browser window whose tab shows no page is still uncertain', () => {
+    expect(probe([browser([window({ role: 'AXTabGroup', children: [] })], 'safari')]).state).toBe('unavailable');
+  });
   test('an unexposed background Meet tab prevents a false departure', () => {
     expect(probe([browser([window(page([], 'https://example.com/'), { role: 'AXRadioButton', description: 'Meet - abc-defg-hij' })])]).state).toBe('unavailable');
   });

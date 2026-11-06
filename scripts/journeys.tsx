@@ -307,6 +307,7 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
   process.env.SEASHELL_LIBRARY_DIR = library;
   process.env.SEASHELL_TEMPLATES_DIR = join(root, 'Templates');
   process.env.SEASHELL_DISABLE_SYSTEM_AUDIO = '1';
+  process.env.SEASHELL_MEETING_COMMAND_PATH = join(root, 'meeting-command.json');
   if (journey.standalone) process.env.SEASHELL_DISABLE_LISTENER = '1';
   else delete process.env.SEASHELL_DISABLE_LISTENER;
   const config = journey.standalone ? { meeting: { automation: { enabled: false } } }

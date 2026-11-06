@@ -14,7 +14,8 @@ export const MEETING_SIGNALS_HELPER = join(
   'seashell-meeting-signals',
 );
 
-export type MeetingApplicationKind = 'dedicated' | 'browser' | 'ambiguous';
+/** `manual` is a recording someone started by hand: no app signal ends it, only a stop. */
+export type MeetingApplicationKind = 'dedicated' | 'browser' | 'ambiguous' | 'manual';
 export type MeetingAutomationMode = 'off' | 'ask' | 'automatic';
 export type BrowserMeetingPolicy = 'off' | 'ask' | 'automatic';
 
@@ -30,7 +31,11 @@ export interface MeetingAutomationConfig {
   resumeWindowSeconds?: number;
   maxDurationMinutes?: number;
   launchAtLogin?: boolean;
+  /** Per app, by id (facetime, zoom, chrome, safari…): never record, ask first, or record by itself. */
+  apps?: Partial<Record<string, AppRecordingPolicy>>;
 }
+
+export type AppRecordingPolicy = 'off' | 'ask' | 'automatic';
 
 export const DEFAULT_MEETING_AUTOMATION = Object.freeze({
   enabled: true,
@@ -67,7 +72,7 @@ export interface MeetingCandidate {
   readonly kind: MeetingApplicationKind;
   readonly title: string;
   readonly calendar?: MeetingCalendarEvent;
-  readonly evidence: readonly ('audio-input-process' | 'calendar' | 'frontmost' | 'joined-meet')[];
+  readonly evidence: readonly ('audio-input-process' | 'calendar' | 'frontmost' | 'joined-meet' | 'manual')[];
   readonly requiresConsent: boolean;
 }
 
@@ -76,6 +81,11 @@ interface AppPattern {
   readonly name: string;
   readonly kind: MeetingApplicationKind;
   readonly bundleIds: readonly string[];
+}
+
+/** The apps Seashell recognises, by the id used in settings. */
+export function meetingApps(): ReadonlyArray<{ id: string; name: string }> {
+  return APP_PATTERNS.map(({ id, name }) => ({ id, name }));
 }
 
 const APP_PATTERNS: readonly AppPattern[] = Object.freeze([
@@ -428,12 +438,26 @@ export function preserveMeetingCandidateDuringObservationGap(
   held?: MeetingCandidate,
 ): MeetingCandidate | undefined {
   const active = state.phase === 'recording' || state.phase === 'ending' ? state.candidate : held;
+  // A call recorded from its browser's microphone that Meet later becomes
+  // readable for is the same call, not a second one starting.
+  if (active?.evidence.includes('audio-input-process') && active.kind === 'browser' &&
+      candidate?.evidence.includes('joined-meet') && sameApplicationFamily(candidate.bundleId, active.bundleId)) {
+    return Object.freeze({ ...active, pid: candidate.pid || active.pid });
+  }
   const unobservable = meet?.state === 'unavailable' || meet?.state === 'permission' ||
     (meet?.state === 'idle' && meet.source === 'google-meet-accessibility' && meet.absenceConfirmed !== true);
   if (!active?.evidence.includes('joined-meet') || !unobservable ||
       meet?.snapshot?.joined || !snapshot.supported) return candidate;
   const input = snapshot.inputProcesses.find(process => sameApplicationFamily(process.bundleId, active.bundleId));
   return input ? Object.freeze({ ...active, pid: input.pid }) : candidate;
+}
+
+const VIDEO_CALL_HOSTS = ['meet.google.com', 'zoom.us', 'teams.microsoft.com', 'teams.live.com', 'webex.com', 'whereby.com', 'around.co'];
+
+/** A calendar event that is itself a video call, by its join link or location. */
+export function isVideoCallEvent(calendar?: MeetingCalendarEvent): boolean {
+  const text = `${calendar?.joinUrl ?? ''} ${calendar?.location ?? ''}`.toLocaleLowerCase();
+  return VIDEO_CALL_HOSTS.some((host) => text.includes(host));
 }
 
 /** Calendar alone never starts capture. A joined Meet call also works with the mic muted. */
@@ -444,7 +468,8 @@ export function resolveMeetingCandidate(
   meet?: MeetProbe,
 ): MeetingCandidate | undefined {
   if (automation.enabled === false || automation.mode === 'off') return undefined;
-  if (meet?.snapshot?.joined && meet.browser) {
+  const policy = (id: string) => automation.apps?.[id];
+  if (meet?.snapshot?.joined && meet.browser && policy(meet.browser) !== 'off') {
     const bundleId = meet.browser === 'chrome' ? 'com.google.Chrome' : 'com.apple.Safari';
     // Only attach a calendar event when its URL identifies this call.
     const matchingCalendar = calendar?.joinUrl?.includes(`meet.google.com${meet.snapshot.meeting}`)
@@ -457,13 +482,13 @@ export function resolveMeetingCandidate(
       title: matchingCalendar?.title?.trim() || 'Google Meet',
       ...(matchingCalendar ? { calendar: matchingCalendar } : {}),
       evidence: Object.freeze(['joined-meet' as const, ...(matchingCalendar ? ['calendar' as const] : [])]),
-      requiresConsent: automation.mode === 'ask',
+      requiresConsent: policy(meet.browser) === 'ask' || (automation.mode === 'ask' && policy(meet.browser) !== 'automatic'),
     });
   }
   if (!snapshot.supported) return undefined;
   const mapped = snapshot.inputProcesses.flatMap((process) => {
     const pattern = patternFor(process.bundleId);
-    return pattern ? [{ process, pattern }] : [];
+    return pattern && policy(pattern.id) !== 'off' ? [{ process, pattern }] : [];
   });
   const ranked = mapped.toSorted((left, right) => {
     const weight = (kind: MeetingApplicationKind) => kind === 'dedicated' ? 3 : kind === 'browser' ? 2 : 1;
@@ -481,12 +506,17 @@ export function resolveMeetingCandidate(
   const frontmost = snapshot.frontmostBundleId !== undefined &&
     bundleMatches(selected.process.bundleId, snapshot.frontmostBundleId);
   // A connected reader seeing no joined call must not auto-record a prejoin
-  // preview or a voice form, even if a calendar event happens to overlap.
-  const requiresConsent = automation.mode === 'ask' || Boolean(meet &&
-    selected.pattern.kind === 'browser' && ['chrome', 'safari'].includes(selected.pattern.id)) || (!calendar && (
-    selected.pattern.kind === 'ambiguous' ||
-    (selected.pattern.kind === 'browser' && browserPolicy !== 'automatic')
-  ));
+  // preview or a voice form. A video call on the calendar right now is the
+  // exception: Meet is often unreadable (full screen, another desktop, a
+  // background tab), and missing the call costs far more than recording its lobby.
+  // Someone who chose to record every browser call has already answered.
+  const appPolicy = policy(selected.pattern.id);
+  const requiresConsent = appPolicy === 'automatic' ? false : appPolicy === 'ask' || automation.mode === 'ask' ||
+    Boolean(meet && browserPolicy !== 'automatic' && !isVideoCallEvent(calendar) &&
+      selected.pattern.kind === 'browser' && ['chrome', 'safari'].includes(selected.pattern.id)) || (!calendar && (
+      selected.pattern.kind === 'ambiguous' ||
+      (selected.pattern.kind === 'browser' && browserPolicy !== 'automatic')
+    ));
   return Object.freeze({
     id: `audio:${selected.pattern.id}`,
     appName: selected.pattern.name,
@@ -525,6 +555,8 @@ export interface MeetingAutomationState {
   readonly recordingStartedAtUnixMs?: number;
   readonly missingSinceUnixMs?: number;
   readonly cooldownUntilUnixMs?: number;
+  /** Stopped by hand: stays stopped while this same call continues. */
+  readonly stoppedByHand?: boolean;
 }
 
 const NONE = Object.freeze({ kind: 'none' as const });
@@ -532,7 +564,7 @@ const NONE = Object.freeze({ kind: 'none' as const });
 /** Deterministic hysteresis controller; all system reads and side effects stay outside. */
 export class MeetingAutomationController {
   #state: MeetingAutomationState = Object.freeze({ phase: 'watching', confirmations: 0 });
-  readonly #config: Required<Omit<MeetingAutomationConfig, 'launchAtLogin' | 'resumeWindowSeconds'>>;
+  readonly #config: Required<Omit<MeetingAutomationConfig, 'launchAtLogin' | 'resumeWindowSeconds' | 'apps'>>;
 
   constructor(config: MeetingAutomationConfig = {}) {
     this.#config = {
@@ -556,6 +588,19 @@ export class MeetingAutomationController {
       this.#state = Object.freeze({ phase: 'watching', confirmations: 0 });
       return NONE;
     }
+    if (this.#state.phase === 'cooldown' && this.#state.stoppedByHand) {
+      // Someone stopped this call; it does not restart until it has really ended.
+      if (candidate?.id === this.#state.candidate?.id) {
+        this.#state = Object.freeze({ ...this.#state, missingSinceUnixMs: undefined });
+        return NONE;
+      }
+      const missingSince = this.#state.missingSinceUnixMs ?? nowUnixMs;
+      if (nowUnixMs - missingSince < this.#config.endGraceSeconds * 1_000) {
+        this.#state = Object.freeze({ ...this.#state, missingSinceUnixMs: missingSince });
+        return NONE;
+      }
+      this.#state = Object.freeze({ phase: 'watching', confirmations: 0 });
+    }
     if (this.#state.phase === 'cooldown') {
       if (nowUnixMs < (this.#state.cooldownUntilUnixMs ?? 0) &&
           (!candidate || candidate.id === this.#state.candidate?.id)) return NONE;
@@ -567,8 +612,15 @@ export class MeetingAutomationController {
         this.reset();
         return Object.freeze({ kind: 'finish', candidate: ending, reason: 'signal-ended' });
       }
-      const active = candidate?.id === this.#state.candidate?.id;
       const startedAt = this.#state.recordingStartedAtUnixMs ?? nowUnixMs;
+      // A recording started by hand ends by hand, or at the maximum length.
+      if (this.#state.candidate?.kind === 'manual') {
+        if (nowUnixMs - startedAt < this.#config.maxDurationMinutes * 60_000) return NONE;
+        const ending = this.#state.candidate;
+        this.reset();
+        return Object.freeze({ kind: 'finish' as const, candidate: ending, reason: 'maximum-duration' as const });
+      }
+      const active = candidate?.id === this.#state.candidate?.id;
       if (nowUnixMs - startedAt >= this.#config.maxDurationMinutes * 60_000) {
         const ending = this.#state.candidate;
         if (!ending) return NONE;
@@ -642,6 +694,24 @@ export class MeetingAutomationController {
 
   decline(nowUnixMs = Date.now()): void {
     this.beginCooldown(nowUnixMs);
+  }
+
+  /** Record now, by hand. A call already being asked about is that call. */
+  startByHand(candidate: MeetingCandidate, nowUnixMs = Date.now()): MeetingCandidate | undefined {
+    if (this.#state.phase === 'recording' || this.#state.phase === 'ending') return undefined;
+    if (this.#state.phase === 'awaiting-consent') return this.approve(nowUnixMs);
+    this.#state = Object.freeze({ phase: 'recording', candidate, confirmations: 0, recordingStartedAtUnixMs: nowUnixMs });
+    return candidate;
+  }
+
+  /** Stop now, by hand. The same call is not recorded again until it ends. */
+  stopByHand(nowUnixMs = Date.now()): MeetingCandidate | undefined {
+    if (this.#state.phase !== 'recording' && this.#state.phase !== 'ending') return undefined;
+    const stopped = this.#state.candidate;
+    if (!stopped || stopped.kind === 'manual') this.reset();
+    else this.#state = Object.freeze({ phase: 'cooldown', candidate: stopped, confirmations: 0, stoppedByHand: true,
+      cooldownUntilUnixMs: nowUnixMs });
+    return stopped;
   }
 
   reset(): void {

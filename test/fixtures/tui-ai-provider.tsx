@@ -9,7 +9,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 const root=mkdtempSync(join(tmpdir(),'seashell-picker-ui-'));
 const config=join(root,'config.json');
-process.env.SEASHELL_CONFIG=config; process.env.SEASHELL_LIBRARY_DIR=join(root,'library'); process.env.SEASHELL_DISABLE_SYSTEM_AUDIO='1';
+process.env.SEASHELL_CONFIG=config; process.env.SEASHELL_MEETING_COMMAND_PATH=join(root,'meeting-command.json'); process.env.SEASHELL_LIBRARY_DIR=join(root,'library'); process.env.SEASHELL_DISABLE_SYSTEM_AUDIO='1';
 writeFileSync(config,JSON.stringify({meeting:{automation:{enabled:false}},transcription:{mode:'local',canonicalFinal:'local'}}));
 const original=readFileSync(config,'utf8');
 const mic={...await import('../../src/live-microphone.ts')};

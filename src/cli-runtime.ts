@@ -80,6 +80,9 @@ import {
 import { MEETING_SIGNALS_HELPER, readMeetingSignalSnapshot } from './meeting-automation.ts';
 import { buildMeetingContext, loadMeetingContextFiles } from './meeting-context.ts';
 import { writeMeetingConsent } from './meeting-consent.ts';
+import { writeMeetingCommand } from './meeting-command.ts';
+import { readBackgroundWatchStatus } from './background-watch-status.ts';
+import { DEFAULT_MEETING_AUTOMATION, meetingApps, type MeetingCandidate } from './meeting-automation.ts';
 import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { setupDiarization } from './diarization-setup.ts';
@@ -761,16 +764,9 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
               ...(process.env.SEASHELL_PACKAGE_ROOT ? { packageRoot: process.env.SEASHELL_PACKAGE_ROOT } : {}),
               codeRoot: PROJECT_ROOT }),
           } : {}),
+          // The login agent has no window of its own, so it asks with a dialog.
+          ...(!once ? { dependencies: { askToRecord: askToRecordWithDialog } } : {}),
           onEvent: (event) => {
-            // The login agent uses JSON logging; prompts must still be visible.
-            if (event.type === 'meeting.suggested' && !once) {
-              spawnSync('osascript', [
-                '-e', 'on run argv',
-                '-e', 'display notification (item 1 of argv) with title "Sea Shell"',
-                '-e', 'end run',
-                `Possible ${event.candidate.appName} meeting. Run seashell meeting consent approve to record.`,
-              ], { stdio: 'ignore', timeout: 2_000 });
-            }
             if (command.json) {
               print(JSON.stringify(event));
               return;
@@ -784,6 +780,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
             else if (event.type === 'meeting.suggested') {
               print(`Possible ${event.candidate.appName} meeting detected; run \`seashell meeting consent approve\` to record it.`);
             }
+            else if (event.type === 'meeting.stopped') print(`Stopped recording ${event.candidate.title}.`);
             else process.stderr.write(`${event.type}: ${event.message}\n`);
           },
         });
@@ -791,6 +788,30 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
         process.off('SIGINT', stop);
         process.off('SIGTERM', stop);
       }
+      return 0;
+    }
+    case 'apps': {
+      const apps = meetingApps();
+      const { app: wanted, policy } = command.action;
+      if (wanted && policy) {
+        const app = apps.find((candidate) => candidate.id === wanted || candidate.name.toLocaleLowerCase() === wanted);
+        if (!app) throw new Error(`Unknown app. Choose one of: ${apps.map((candidate) => candidate.id).join(', ')}`);
+        updateMeetingConfig({ automation: { apps: { ...config.meeting?.automation?.apps, [app.id]: policy } } });
+      }
+      const saved = loadConfig().meeting?.automation;
+      const mode = saved?.mode ?? DEFAULT_MEETING_AUTOMATION.mode;
+      const browsers = saved?.browserWithoutCalendar ?? DEFAULT_MEETING_AUTOMATION.browserWithoutCalendar;
+      const word = (value: string) => value === 'automatic' ? 'records by itself' : value === 'ask' ? 'asks first' : 'never records';
+      print(command.json ? JSON.stringify({ mode, browserWithoutCalendar: browsers, apps: saved?.apps ?? {} }, null, 2) : [
+        `Calls ${word(mode)} unless an app says otherwise. Browser calls without a calendar event: ${word(browsers)}.`,
+        '',
+        ...apps.map((app) => {
+          const own = saved?.apps?.[app.id];
+          return `  ${app.id.padEnd(10)} ${app.name.padEnd(16)} ${own ? word(own) : 'default'}`;
+        }),
+        '',
+        'Change one: seashell meeting apps facetime off   (on, off or ask)',
+      ].join('\n'));
       return 0;
     }
     case 'consent': {
@@ -975,6 +996,38 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
       ].join('\n'));
       return 0;
     }
+    case 'record': {
+      const libraryDir = resolveLibraryDir(undefined, process.env, loadConfig());
+      const before = readBackgroundWatchStatus(libraryDir);
+      if (!before || before.phase === 'unavailable' || before.phase === 'stopped') {
+        throw new Error('The background recorder is not running. Start it in Settings (press , in Seashell) and try again.');
+      }
+      if (command.command === 'stop' && before.phase !== 'recording') {
+        print(command.json ? JSON.stringify({ recording: false }) : 'Nothing is recording.');
+        return 0;
+      }
+      if (command.command === 'start' && before.phase === 'recording') {
+        print(command.json ? JSON.stringify({ recording: true, title: before.candidate?.title })
+          : `Already recording${before.candidate?.title ? ` ${before.candidate.title}` : ''}.`);
+        return 0;
+      }
+      writeMeetingCommand(command.command);
+      // The recorder picks commands up on its next check, every few seconds.
+      const deadline = Date.now() + 12_000;
+      let now = before;
+      while (Date.now() < deadline) {
+        await Bun.sleep(500);
+        now = readBackgroundWatchStatus(libraryDir) ?? now;
+        if ((command.command === 'start') === (now.phase === 'recording')) break;
+      }
+      const recording = now.phase === 'recording';
+      const done = command.command === 'start' ? recording : !recording;
+      print(command.json ? JSON.stringify({ recording, title: now.candidate?.title })
+        : !done ? 'The recorder has not answered yet. Check seashell status in a moment.'
+        : recording ? `Recording${now.candidate?.title ? ` ${now.candidate.title}` : ''}. Stop with: seashell record stop`
+        : 'Stopped. The transcript and notes are being written.');
+      return done ? 0 : 1;
+    }
     case 'speaker-compare': {
       const config = loadConfig();
       const libraryDir = resolveLibraryDir(undefined, process.env, config);
@@ -1040,3 +1093,26 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
       return executeMeeting(command);
   }
 }
+
+/** A real question, with the call's name, that waits about as long as the answer is useful. */
+async function askToRecordWithDialog(candidate: MeetingCandidate, signal: AbortSignal): Promise<'approve' | 'decline' | undefined> {
+  const where = candidate.kind === 'browser' ? `a call in ${candidate.appName}` : candidate.appName;
+  const question = candidate.calendar ? `Seashell heard ${where} during “${candidate.title}”. Record it?`
+    : `Seashell heard ${where}. Record it?`;
+  const child = Bun.spawn(['osascript',
+    '-e', 'on run argv',
+    '-e', 'set answer to display dialog (item 1 of argv) with title "Seashell" buttons {"Don’t record", "Record"} default button "Record" giving up after 100 with icon note',
+    '-e', 'if gave up of answer then return ""',
+    '-e', 'return button returned of answer',
+    '-e', 'end run', question], { stdout: 'pipe', stderr: 'ignore' });
+  const stop = () => child.kill();
+  signal.addEventListener('abort', stop, { once: true });
+  try {
+    const answer = (await new Response(child.stdout).text()).trim();
+    await child.exited;
+    return answer === 'Record' ? 'approve' : answer ? 'decline' : undefined;
+  } finally {
+    signal.removeEventListener('abort', stop);
+  }
+}
+

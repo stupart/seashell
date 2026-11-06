@@ -14,6 +14,7 @@ import type { MeetingSignalSnapshot } from '../../src/meeting-automation.ts';
 const root = mkdtempSync(join(tmpdir(), 'seashell-tui-clock-'));
 process.env.SEASHELL_CONFIG = join(root, 'config.json');
 process.env.SEASHELL_LIBRARY_DIR = join(root, 'library');
+process.env.SEASHELL_MEETING_COMMAND_PATH = join(root, 'meeting-command.json');
 writeFileSync(process.env.SEASHELL_CONFIG, JSON.stringify({
   meeting: { automation: { enabled: true } },
 }));

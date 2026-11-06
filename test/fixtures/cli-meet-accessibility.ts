@@ -8,6 +8,7 @@ import type { MeetingCommand } from '../../src/cli-args.ts';
 const root = mkdtempSync(join(tmpdir(), 'seashell-cli-accessibility-'));
 process.env.SEASHELL_CONFIG = join(root, 'config.json');
 process.env.SEASHELL_LIBRARY_DIR = join(root, 'library');
+process.env.SEASHELL_MEETING_COMMAND_PATH = join(root, 'meeting-command.json');
 const initial = { meeting: { speakerBrowser: 'off', mode: 'post-session' } };
 writeFileSync(process.env.SEASHELL_CONFIG, JSON.stringify(initial));
 let permissionRequests = 0, checks = 0, trusted = false, output = '';
