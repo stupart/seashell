@@ -1,3 +1,4 @@
+import { liveSpeechGateArguments } from './speech-gate.ts';
 import { spawn, type ChildProcess } from 'child_process';
 import { readFile } from 'fs/promises';
 import { createServer } from 'net';
@@ -174,6 +175,7 @@ export class OwnedWhisperServer {
       '--host', '127.0.0.1',
       '--port', String(port),
       '-nlp',
+      ...liveSpeechGateArguments(),
     ], { stdio: ['ignore', 'ignore', 'pipe'] });
     const endManagedSession = beginManagedProcessSession();
     const stopTrackingChild = trackChildProcess(child);

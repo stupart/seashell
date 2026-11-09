@@ -106,3 +106,10 @@ test('a recorder that keeps exiting is retried for the whole meeting, not twice'
   await handle.done;
   expect(attempts).toBeGreaterThanOrEqual(6);
 });
+
+test.skipIf(process.platform !== 'darwin' || !Bun.file(`${import.meta.dir}/../native/bin/seashell-microphone`).size)(
+  'a built-in microphone shape, three discrete channels, comes out as sound and not silence', () => {
+    const result = Bun.spawnSync([`${import.meta.dir}/../native/bin/seashell-microphone`, '--mix-check']);
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout.toString()).peak).toBeGreaterThan(4_000);
+  });

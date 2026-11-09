@@ -9,6 +9,7 @@ import {
   trackTempDirectory,
 } from './process-lifecycle.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
+import { dropPhantomUnits } from './speech-gate.ts';
 import type { TimedTranscriptUnit } from './transcript-types.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -318,7 +319,7 @@ export async function transcribeWithTimestamps(
       throw new Error(`Could not parse whisper.cpp timestamp JSON: ${message}`);
     }
 
-    return timedUnitsFromWhisperJson(parsed);
+    return await dropPhantomUnits(timedUnitsFromWhisperJson(parsed), filePath);
   } finally {
     rmSync(tempDirectory, { recursive: true, force: true });
     stopTrackingTemp();

@@ -87,7 +87,7 @@ if [ "$(git -C whisper.cpp rev-parse HEAD)" != "$WHISPER_REVISION" ]; then
 fi
 cmake -S whisper.cpp -B whisper.cpp/build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build whisper.cpp/build --config Release --parallel "$(sysctl -n hw.ncpu)" \
-    --target whisper-cli whisper-server
+    --target whisper-cli whisper-server whisper-vad-speech-segments
 
 # SHA-256 values are the publishers' LFS object IDs. Never trust presence alone.
 bash scripts/download-model.sh models/ggml-large-v3-turbo-q5_0.bin \

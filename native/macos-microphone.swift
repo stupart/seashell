@@ -31,7 +31,7 @@ private func argument(_ name: String, in args: [String]) -> String? {
 }
 
 private let arguments = Array(CommandLine.arguments.dropFirst())
-private let flags = ["--status", "--request-permission", "--no-disclaim"]
+private let flags = ["--status", "--request-permission", "--no-disclaim", "--mix-check"]
 private let valued = ["--sample-rate", "--seconds"]
 do {
     var index = 0
@@ -126,6 +126,78 @@ private func printStatus(_ status: AVAuthorizationStatus) {
 }
 
 private let permissionHelp = "Microphone access is off for Seashell Microphone. Allow it in System Settings → Privacy & Security → Microphone, or run: seashell meeting microphone setup"
+
+/// Mono at the capture rate. AVAudioConverter's downmix needs a spatial channel
+/// layout, and a built-in microphone array reports a discrete one, for which it
+/// silently outputs zeros. So average the channels first and only resample here.
+final class MonoConverter {
+    private let mono: AVAudioFormat?
+    private let converter: AVAudioConverter
+    private let target: AVAudioFormat
+    private let sourceRate: Double
+
+    init?(from input: AVAudioFormat, to target: AVAudioFormat) {
+        let canMix = input.commonFormat == .pcmFormatFloat32 && !input.isInterleaved
+        let mono = canMix ? AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: input.sampleRate, channels: 1, interleaved: false) : nil
+        guard let converter = AVAudioConverter(from: mono ?? input, to: target) else { return nil }
+        converter.downmix = true
+        self.mono = mono
+        self.converter = converter
+        self.target = target
+        self.sourceRate = input.sampleRate
+    }
+
+    private func mixed(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let mono else { return buffer }
+        guard let source = buffer.floatChannelData,
+              let output = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: buffer.frameLength),
+              let destination = output.floatChannelData?[0] else { return nil }
+        output.frameLength = buffer.frameLength
+        let channels = Int(buffer.format.channelCount)
+        for frame in 0..<Int(buffer.frameLength) {
+            var sum: Float = 0
+            for channel in 0..<channels { sum += source[channel][frame] }
+            destination[frame] = sum / Float(channels)
+        }
+        return output
+    }
+
+    func convert(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard let input = mixed(buffer) else { return nil }
+        let capacity = AVAudioFrameCount((Double(buffer.frameLength) * target.sampleRate / sourceRate).rounded(.up)) + 1
+        guard let converted = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return nil }
+        var supplied = false
+        var error: NSError?
+        let status = converter.convert(to: converted, error: &error) { _, inputStatus in
+            if supplied { inputStatus.pointee = .noDataNow; return nil }
+            supplied = true
+            inputStatus.pointee = .haveData
+            return input
+        }
+        return status == .error || converted.frameLength == 0 ? nil : converted
+    }
+}
+
+// Runs the real conversion on a tone shaped like a built-in microphone: three
+// discrete channels. No microphone is opened and nothing is recorded.
+if arguments.contains("--mix-check") {
+    guard let layout = AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | 3),
+          let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true) else { exit(1) }
+    let input = AVAudioFormat(standardFormatWithSampleRate: 48_000, channelLayout: layout)
+    guard let tone = AVAudioPCMBuffer(pcmFormat: input, frameCapacity: 48_000),
+          let channels = tone.floatChannelData, let mono = MonoConverter(from: input, to: target) else { exit(1) }
+    tone.frameLength = 48_000
+    for frame in 0..<48_000 {
+        let sample = Float(0.25 * sin(2 * Double.pi * 440 * Double(frame) / 48_000))
+        for channel in 0..<3 { channels[channel][frame] = sample }
+    }
+    var peak: Int32 = 0
+    if let output = mono.convert(tone), let samples = output.int16ChannelData?[0] {
+        for frame in 0..<Int(output.frameLength) { peak = max(peak, abs(Int32(samples[frame]))) }
+    }
+    print("{\"peak\":\(peak)}")
+    exit(0)
+}
 
 if arguments.contains("--status") {
     printStatus(AVCaptureDevice.authorizationStatus(for: .audio))
@@ -259,27 +331,15 @@ private final class MicrophoneRecorder {
                 NSLocalizedDescriptionKey: "No microphone input is available. Check Sound → Input.",
             ])
         }
-        guard let converter = AVAudioConverter(from: inputFormat, to: format) else {
+        guard let converter = MonoConverter(from: inputFormat, to: format) else {
             throw NSError(domain: "SeashellMicrophone", code: 2, userInfo: [
                 NSLocalizedDescriptionKey: "Cannot convert microphone audio from \(inputFormat).",
             ])
         }
-        converter.downmix = true
         let output = self.output
-        let format = self.format
         input.installTap(onBus: 0, bufferSize: 4_096, format: inputFormat) { [weak self] buffer, _ in
             self?.lastBufferAt = ProcessInfo.processInfo.systemUptime
-            let capacity = AVAudioFrameCount((Double(buffer.frameLength) * format.sampleRate / inputFormat.sampleRate).rounded(.up)) + 64
-            guard let converted = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else { return }
-            var supplied = false
-            var error: NSError?
-            let status = converter.convert(to: converted, error: &error) { _, inputStatus in
-                if supplied { inputStatus.pointee = .noDataNow; return nil }
-                supplied = true
-                inputStatus.pointee = .haveData
-                return buffer
-            }
-            guard status != .error, converted.frameLength > 0, let samples = converted.int16ChannelData?[0] else { return }
+            guard let converted = converter.convert(buffer), let samples = converted.int16ChannelData?[0] else { return }
             output.write(samples, frames: Int(converted.frameLength))
         }
         configurationObserver = NotificationCenter.default.addObserver(
