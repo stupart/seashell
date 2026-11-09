@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — your side of the call, and no more phantom words
+
+- The microphone recorded digital silence whenever the input was a built-in Mac
+  microphone. It reports three discrete channels, and the conversion to mono
+  output zeros for that layout. Channels are now averaged before resampling.
+  macOS asks to allow Seashell Microphone once more after this update.
+- Whisper no longer invents "Thank you" and "Okay" over silence. Speech detection
+  now gates both the live draft and the final transcript. A line is removed only
+  if no speech touches it and it is quiet, so loud lines always stay. On three
+  AMI meetings all 12,116 hand-labelled words survived the gate, including 998
+  short replies such as "okay".
+
 ## Unreleased — never miss a call
 
 - Google Meet calls stopped recording on their own from late October. Seashell
