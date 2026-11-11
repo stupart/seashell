@@ -385,14 +385,18 @@ function vocabularyStatus(libraryDir: string, vocabulary: ReturnType<typeof load
 
 const BRIEFS_DETAIL = 'About 15 minutes before a calendar meeting, Seashell writes a brief from past meetings with the same title or the same people, and tells you once. A meeting with no history gets none. Private meetings are never read.';
 
-/** Briefs before meetings: on by default, and only as useful as the calendar and the AI it needs. Off is never a nag. */
+/**
+ * Briefs before meetings: on by default, and only as useful as the calendar and the AI it needs. Off is
+ * never a nag; on but waiting for one of them is something to check, and Enter does that step here.
+ */
 function briefsStatus(config: SeashellConfig, ready: { calendarOn: boolean; aiConfigured: boolean; older: boolean }): FeatureStatus {
   // Each says the one step that lets briefs happen; once they can, the command makes one now.
   const base = { id: 'briefs', label: 'Briefs before meetings', optional: true, detail: BRIEFS_DETAIL } as const;
   if (!briefsEnabled(config)) return { ...base, state: 'off', summary: 'Off', action: 'turn-on-briefs' };
-  if (!ready.calendarOn) return { ...base, state: 'off', summary: 'On · needs calendar titles', fix: 'Turn on calendar titles, under Extras.',
-    command: 'seashell meeting calendar setup' };
-  if (!ready.aiConfigured) return { ...base, state: 'off', summary: 'On · needs AI notes', fix: 'Choose an AI under AI notes.', command: 'seashell ai setup' };
+  if (!ready.calendarOn) return { ...base, state: 'attention', summary: 'On · needs calendar titles', action: 'allow-calendar',
+    fix: 'Turn on calendar titles, so Seashell knows what is coming up.', command: 'seashell meeting calendar setup' };
+  if (!ready.aiConfigured) return { ...base, state: 'attention', summary: 'On · needs AI notes', action: 'open-ai',
+    fix: 'Choose which AI writes your notes; it writes the briefs too.', command: 'seashell ai setup' };
   if (ready.older) return { ...base, state: 'attention', summary: 'On · AI engine too old',
     fix: 'This AI engine is too old to write briefs. AI notes says what to do.', command: 'seashell ai install <package.tgz>' };
   return { ...base, state: 'ok', summary: 'On · 15 minutes before', command: 'seashell brief next' };

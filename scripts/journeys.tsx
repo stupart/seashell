@@ -57,6 +57,8 @@ interface Step {
   press?: string[];
   /** More keys, only on a narrow window: there, Enter opens a Settings row before it acts. */
   narrowPress?: string[];
+  /** Other keys altogether on a narrow window, where a row's detail is left with Esc. */
+  narrowInstead?: string[];
   /** How the keys read to a person, when they are not printable. */
   keys?: string;
   /** Change the world before the frame: a meeting starts, a recording fails. */
@@ -260,8 +262,11 @@ export const JOURNEYS: Journey[] = [
         note: 'Names and words to spell right, as a file. Wide, Enter opens it in the text editor.' },
       { title: 'Extractors', press: [LEFT, DOWN, ENTER], keys: '← ↓ Enter', until: 'Customer pains', note: 'A file that does not load is red. Wide, Enter opens the folder.' },
       { title: 'Automations', press: [LEFT, DOWN, ENTER], keys: '← ↓ Enter', until: 'Last runs', note: 'And how their last runs went.' },
-      { title: 'Briefs', press: [LEFT, DOWN], narrowPress: [ENTER], keys: '← ↓', until: '15 minutes', note: 'On by default; waits quietly for calendar titles.' },
-      { title: 'Video', press: [LEFT, DOWN, DOWN], keys: '← ↓ ↓', note: 'On, but macOS has not allowed Screen Recording yet.' },
+      { title: 'Briefs', press: [LEFT, DOWN], narrowPress: [ENTER], keys: '← ↓', until: '15 minutes',
+        note: 'On by default, waiting for calendar titles: Enter turns those on here, and ←→ switch briefs.' },
+      { title: 'Calendar titles on, from Briefs', press: [ENTER], keys: 'Enter', until: 'Calendar titles on',
+        note: 'The same setup as the Calendar titles row.' },
+      { title: 'Video', press: [DOWN, DOWN], narrowInstead: [ESC, DOWN, DOWN], keys: '↓ ↓', note: 'On, but macOS has not allowed Screen Recording yet.' },
       { title: 'Video off', press: [ENTER], keys: 'Enter', note: 'Enter switches video. Wide, it turns off; narrow, it opens the item first.' },
       { title: 'Video on, Screen Recording allowed', press: [ENTER], keys: 'Enter', note: 'Turning it on asks macOS for Screen Recording.' },
       { title: 'Computer audio', press: [LEFT, ...Array(13).fill(UP)], keys: '← ↑ × 13',
@@ -738,7 +743,8 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
       await step.world?.(context);
       if (step.world) await sleep(900);
       if (step.history && !stripVTControlCharacters(latest).includes('Meetings')) await type('h');
-      for (const key of [...step.press ?? [], ...size === NARROW ? step.narrowPress ?? [] : []]) await type(key);
+      const keys = size === NARROW && step.narrowInstead ? step.narrowInstead : [...step.press ?? [], ...size === NARROW ? step.narrowPress ?? [] : []];
+      for (const key of keys) await type(key);
       if (step.until) {
         const deadline = Date.now() + 2500;
         while (!stripVTControlCharacters(latest).includes(step.until) && Date.now() < deadline) await sleep(40);

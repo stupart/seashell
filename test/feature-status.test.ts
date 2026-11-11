@@ -270,8 +270,11 @@ test('Briefs are on by default, wait quietly for a calendar and an AI, and say w
   const rev3 = async () => new Set(['observe', 'reconcile', 'chat', 'extract']);
   const calendar = { enabled: true, policy: 'ask' };
   const calendarOk = { calendar: async () => ({ authorization: 'authorized', detail: 'Allowed.', calendars: 2 }) } as FeatureStatusDependencies;
-  expect((await byId({})).briefs).toMatchObject({ state: 'off', summary: 'On · needs calendar titles', command: 'seashell meeting calendar setup' });
-  expect((await byId(calendarOk, { calendar })).briefs).toMatchObject({ state: 'off', summary: 'On · needs AI notes', command: 'seashell ai setup' });
+  // On, but waiting for calendar titles or an AI: something to check, and Enter does that step.
+  expect((await byId({})).briefs).toMatchObject({ state: 'attention', summary: 'On · needs calendar titles', action: 'allow-calendar',
+    command: 'seashell meeting calendar setup' });
+  expect((await byId(calendarOk, { calendar })).briefs).toMatchObject({ state: 'attention', summary: 'On · needs AI notes', action: 'open-ai',
+    command: 'seashell ai setup' });
   const ready = { calendar, backend: 'codex', model: 'fixture' };
   expect((await byId({ ...calendarOk, engine: async () => undefined }, ready)).briefs).toMatchObject({ state: 'ok', summary: 'On · 15 minutes before' });
   expect((await byId({ ...calendarOk, engine: rev3 }, ready)).briefs).toMatchObject({ state: 'attention', summary: 'On · AI engine too old' });

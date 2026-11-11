@@ -541,6 +541,11 @@ export default function SettingsScreen(props: SetupActionProps & {
     }
     // A confirmation stays in the key bar until the next key.
     if (setup.message?.tone === 'done') setup.setMessage(undefined);
+    // Briefs are a switch: ←→ turn them on and off wherever the row is shown, so Enter can do the step they wait on.
+    if ((key.leftArrow || key.rightArrow) && selected?.kind === 'status' && selected.status.id === 'briefs' && (!compact || inDetail)) {
+      switchBriefs(selected.status.action !== 'turn-on-briefs');
+      return;
+    }
     const editingRows = inDetail && list !== undefined;
     if (key.escape || key.leftArrow && inDetail && list !== 'recording') {
       if (inDetail) { setInDetail(false); setup.setMessage(undefined); return; }
@@ -587,7 +592,8 @@ export default function SettingsScreen(props: SetupActionProps & {
     if (selected?.kind === 'guide') props.onOpenGuide?.();
     else if (compact && !inDetail || list !== undefined && listLength > 0) { setInDetail(true); setRowIndex(0); setup.setMessage(undefined); }
     else if (key.return && selected?.kind === 'status' && selected.status.id === 'video') switchVideo(selected.status.state !== 'off');
-    else if (key.return && selected?.kind === 'status' && selected.status.id === 'briefs') switchBriefs(selected.status.action !== 'turn-on-briefs');
+    // Briefs that work: Enter turns them off. Otherwise Enter does what they wait on, below.
+    else if (key.return && selected?.kind === 'status' && selected.status.id === 'briefs' && !selected.status.action) switchBriefs(true);
     else if (key.return && selected?.kind === 'status' && selected.status.action) void setup.run(selected.status.action);
     // Only hearing it proves a microphone or the Mac's sound works, and the guide listens.
     else if (key.return && selected?.kind === 'status' && testable(selected)) {
@@ -763,7 +769,8 @@ export default function SettingsScreen(props: SetupActionProps & {
       ...(retryRun ? [['r', 'try again'] as Hint] : []),
       ...(selected?.kind === 'recording' ? [['Enter', 'change'] as Hint] : selected?.kind === 'guide' ? [['Enter', 'start'] as Hint]
         : video ? [['Enter', video.state === 'off' ? 'turn on' : 'turn off'] as Hint]
-        : briefs ? [['Enter', briefs.action === 'turn-on-briefs' ? 'turn on' : 'turn off'] as Hint]
+        : briefs ? !briefs.action ? [['Enter', 'turn off'] as Hint] : briefs.action === 'turn-on-briefs' ? [['Enter', 'turn on'] as Hint]
+          : [['Enter', lowerFirst(FEATURE_ACTION_LABEL[briefs.action])] as Hint, ['←→', 'on/off'] as Hint]
         : list === 'prompts' ? [['Enter', 'choose a prompt'] as Hint] : list === 'voices' && listLength ? [['Enter', 'choose someone'] as Hint]
         : action ? [['Enter', lowerFirst(FEATURE_ACTION_LABEL[action])] as Hint] : selected && testable(selected) ? [['Enter', 'test it now'] as Hint] : []),
       ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ...(retryRun ? [] : [['r', 'recheck'] as Hint]), ['Esc', 'back'],
