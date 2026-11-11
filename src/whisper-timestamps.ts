@@ -10,7 +10,8 @@ import {
 } from './process-lifecycle.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
 import { finalTranscriptionThreads, transcriptionHardware, transcriptionUsesGpu, type TranscriptionHardware } from './local-asr-profile.ts';
-import { detectSpeechRegions, dropPhantomUnits } from './speech-gate.ts';
+import { detectSpeechRegions, dropPhantomUnits, type SpeechRegion } from './speech-gate.ts';
+import { packSpeech, unpackUnits, type SpeechPacking } from './speech-packing.ts';
 import type { TimedTranscriptUnit } from './transcript-types.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -222,10 +223,11 @@ export function timedUnitsFromWhisperJson(value: unknown): TimedTranscriptUnit[]
 export interface TimestampTranscriptionOptions {
   onProgress?: (percentage: number) => void;
   onFallback?: (message: string) => void;
-  /** Test seams: the whisper.cpp build and model, and the Mac to size the run for. */
+  /** Test seams: the whisper.cpp build and model, the Mac to size the run for, and speech detection. */
   whisperCli?: string;
   modelPath?: string;
   hardware?: TranscriptionHardware;
+  detectSpeech?: (wavPath: string) => Promise<SpeechRegion[] | undefined>;
 }
 
 /** whisper.cpp started and then failed; spawn failures are plain errors. */
@@ -260,19 +262,33 @@ export async function transcribeWithTimestamps(
   const stopTrackingTemp = trackTempDirectory(tempDirectory);
   const outputBase = join(tempDirectory, 'transcript');
   const outputJson = `${outputBase}.json`;
+  const packedPath = join(tempDirectory, 'speech.wav');
 
   try {
+    // Speech detection comes first: Whisper hears only the speech it finds,
+    // and the phantom-word check reuses the same regions afterwards.
+    const speech = await (options.detectSpeech ?? detectSpeechRegions)(filePath);
+    let packing: SpeechPacking | undefined;
+    try {
+      packing = speech && packSpeech(filePath, speech, packedPath);
+    } catch {
+      // A track that can't be packed is transcribed whole, as before.
+      packing = undefined;
+    }
+    const audioPath = packing ? packedPath : filePath;
+
     const runWhisper = (disableGpu: boolean) => new Promise<void>((resolve, reject) => {
       const proc = spawn(whisperCli, [
         ...(disableGpu ? ['-ng'] : []),
         '-m', modelPath,
-        '-f', filePath,
+        '-f', audioPath,
         '-l', 'en',
         '-t', String(finalTranscriptionThreads(hardware)),
         // Do not combine canonical word timestamps with --vad: our pinned CLI
         // maps segment times but emits token/DTW times on compressed audio
-        // (ggml-org/whisper.cpp#4046). Live draft VAD is independent of this path.
-        // Keep DTW on original audio; flash attention must be off for this build.
+        // (ggml-org/whisper.cpp#4046). speech-packing.ts does that job instead,
+        // and maps every time back. Live draft VAD is independent of this path.
+        // Flash attention must be off for DTW in this build.
         '-nfa',
         '-dtw', 'large.v3.turbo',
         '-np',
@@ -317,9 +333,6 @@ export async function transcribeWithTimestamps(
       });
     });
 
-    // Speech detection for the phantom-word check needs only the audio, so it
-    // runs on the CPU while Whisper works instead of adding seconds after it.
-    const speech = detectSpeechRegions(filePath);
     const forceCpu = !transcriptionUsesGpu(hardware);
     try {
       await runWhisper(forceCpu);
@@ -347,7 +360,9 @@ export async function transcribeWithTimestamps(
       throw new Error(`Could not parse whisper.cpp timestamp JSON: ${message}`);
     }
 
-    return await dropPhantomUnits(timedUnitsFromWhisperJson(parsed), filePath, () => speech);
+    const units = timedUnitsFromWhisperJson(parsed);
+    // The phantom check runs on the track's own clock, against its own audio.
+    return await dropPhantomUnits(packing ? unpackUnits(units, packing) : units, filePath, async () => speech);
   } finally {
     rmSync(tempDirectory, { recursive: true, force: true });
     stopTrackingTemp();

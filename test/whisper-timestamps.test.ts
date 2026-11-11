@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pcmS16leToWav } from '../src/live-system-audio.ts';
 import type { TranscriptionHardware } from '../src/local-asr-profile.ts';
+import { readMonoPcm } from '../src/speech-gate.ts';
 
 describe('timedUnitsFromWhisperJson', () => {
   test('real VAD mixed-clock output preserves whole sentences instead of collapsing words at the segment start', () => {
@@ -168,6 +169,28 @@ printf '%s' '{"transcription":[{"text":" Made-up words.","offsets":{"from":0,"to
     writeFileSync(audio, pcmS16leToWav(pcm));
     return { cli, model, audio, calls: () => readFileSync(calls, 'utf8').trim().split('\n') };
   }
+  /** A 60-second track, loud only at 10-12 s and 40-41 s, and a whisper-cli that keeps what it heard. */
+  function packingWhisper(response: unknown) {
+    const root = mkdtempSync(join(tmpdir(), 'seashell-packing-whisper-'));
+    roots.push(root);
+    const cli = join(root, 'whisper-cli');
+    writeFileSync(join(root, 'response.json'), JSON.stringify(response));
+    writeFileSync(cli, `#!/bin/sh
+while [ $# -gt 0 ]; do [ "$1" = -of ] && out="$2"; [ "$1" = -f ] && heard="$2"; shift; done
+cp "$heard" '${join(root, 'heard.wav')}'
+cp '${join(root, 'response.json')}' "$out.json"
+`);
+    chmodSync(cli, 0o755);
+    const model = join(root, 'model.bin');
+    writeFileSync(model, '');
+    const pcm = Buffer.alloc(60 * 16_000 * 2);
+    for (const [from, to] of [[10, 12], [40, 41]] as const) {
+      for (let index = from * 16_000; index < to * 16_000; index++) pcm.writeInt16LE(Math.round(Math.sin(index / 8) * 16_000), index * 2);
+    }
+    const audio = join(root, 'audio.wav');
+    writeFileSync(audio, pcmS16leToWav(pcm));
+    return { cli, model, audio, heardSeconds: () => (readMonoPcm(readFileSync(join(root, 'heard.wav')))?.length ?? 0) / 16_000 };
+  }
   const mac: TranscriptionHardware = { appleSilicon: true, performanceCores: 6, memoryBytes: 16 * 2 ** 30 };
   const intel: TranscriptionHardware = { appleSilicon: false, performanceCores: 4, memoryBytes: 8 * 2 ** 30 };
 
@@ -195,5 +218,45 @@ printf '%s' '{"transcription":[{"text":" Made-up words.","offsets":{"from":0,"to
     expect(whisper.calls()).toHaveLength(1);
     expect(whisper.calls()[0]).toStartWith('-ng ');
     expect(whisper.calls()[0]).toContain('-t 4');
+  });
+
+  test('Whisper hears only the speech, and every time comes back on the track’s clock', async () => {
+    // On the packed audio: 2.8 s around the first speech, 1 s of silence, then 1.8 s around the second.
+    const whisper = packingWhisper({ transcription: [
+      { offsets: { from: 0, to: 2800 }, text: ' Hello', tokens: [{ text: ' Hello', offsets: { from: 400, to: 900 }, t_dtw: 90 }] },
+      { offsets: { from: 3000, to: 3500 }, text: ' Thanks.' },
+      { offsets: { from: 3800, to: 5600 }, text: ' again', tokens: [{ text: ' again', offsets: { from: 4200, to: 4700 }, t_dtw: 470 }] },
+    ] });
+    let detections = 0;
+    const units = await transcribeWithTimestamps(whisper.audio, {
+      whisperCli: whisper.cli, modelPath: whisper.model, hardware: mac,
+      detectSpeech: async () => { detections += 1; return [{ start: 10, end: 12 }, { start: 40, end: 41 }]; },
+    });
+    expect(whisper.heardSeconds()).toBe(5.6);
+    // "Thanks." was heard in the packed silence: it maps to quiet audio after
+    // the first speech, and the phantom check, reusing the same regions, drops it.
+    expect(units).toEqual([
+      { start: 10, end: 10.5, anchor: 10.5, text: 'Hello' },
+      { start: 40, end: 40.5, anchor: 40.5, text: 'again' },
+    ]);
+    expect(detections).toBe(1);
+  });
+
+  test('without speech detection, Whisper hears the whole track as before', async () => {
+    const whisper = packingWhisper({ transcription: [{ offsets: { from: 10000, to: 10500 }, text: ' Hello' }] });
+    const units = await transcribeWithTimestamps(whisper.audio, {
+      whisperCli: whisper.cli, modelPath: whisper.model, hardware: mac, detectSpeech: async () => undefined,
+    });
+    expect(whisper.heardSeconds()).toBe(60);
+    expect(units).toEqual([{ start: 10, end: 10.5, text: 'Hello' }]);
+  });
+
+  test('a track that is mostly speech is transcribed whole', async () => {
+    const whisper = packingWhisper({ transcription: [{ offsets: { from: 10000, to: 10500 }, text: ' Hello' }] });
+    const units = await transcribeWithTimestamps(whisper.audio, {
+      whisperCli: whisper.cli, modelPath: whisper.model, hardware: mac, detectSpeech: async () => [{ start: 1, end: 59 }],
+    });
+    expect(whisper.heardSeconds()).toBe(60);
+    expect(units).toEqual([{ start: 10, end: 10.5, text: 'Hello' }]);
   });
 });
