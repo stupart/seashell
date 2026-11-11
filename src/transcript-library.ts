@@ -33,6 +33,8 @@ export interface TranscriptLibraryEntry {
   captureHealth?: CaptureHealthSnapshot;
   audioSavedThroughMs?: number;
   draftStatus?: BackgroundDraftStatus;
+  /** From a search: the first line that says what was searched for, and when. */
+  match?: { start: number; text: string };
 }
 
 export interface SavedTranscript {
@@ -214,6 +216,8 @@ interface CachedTranscript {
   readonly summary?: TranscriptSummary;
   /** Lowercase title, source, speaker names and text, built on the first search. */
   searchText?: string;
+  /** Each line and when it was said, so a search can show where it matched. */
+  searchLines?: ReadonlyArray<{ start: number; text: string }>;
 }
 
 /**
@@ -261,7 +265,8 @@ function cachedTranscripts(libraryDir: string, options: { search?: boolean } = {
     if (cached?.stamp !== stamp || (options.search && cached.summary && cached.searchText === undefined)) {
       try {
         const record = loadTranscriptPath(path);
-        cached = { stamp, summary: summarize(record), ...(options.search ? { searchText: searchText(record) } : {}) };
+        cached = { stamp, summary: summarize(record), ...(options.search ? { searchText: searchText(record),
+          searchLines: record.transcript.map((segment) => ({ start: segment.start, text: segment.text.replace(/\s+/gu, ' ').trim() })) } : {}) };
       } catch {
         cached = { stamp };
       }
@@ -316,8 +321,11 @@ export function searchTranscriptRecords(
   const normalized = query.trim().toLocaleLowerCase();
   if (!normalized) return listTranscriptRecords(libraryDir);
   return cachedTranscripts(libraryDir, { search: true })
-    .flatMap(({ path, cached }) => cached.summary && cached.searchText?.includes(normalized)
-      ? [toEntry(path, cached.summary)] : [])
+    .flatMap(({ path, cached }) => {
+      if (!cached.summary || !cached.searchText?.includes(normalized)) return [];
+      const match = cached.searchLines?.find((line) => line.text.toLocaleLowerCase().includes(normalized));
+      return [{ ...toEntry(path, cached.summary), ...(match ? { match } : {}) }];
+    })
     .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 

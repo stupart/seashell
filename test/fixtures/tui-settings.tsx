@@ -72,8 +72,9 @@ try {
   { stdin: t.input as any, stdout: t.output as any, stderr: t.output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
   const type = async (text: string) => { t.input.write(text); await Bun.sleep(60); };
 
-  await until(() => t.all().includes('thing needs you'), 'summary line');
-  assert.ok(t.all().includes('Optional'));
+  // The title counts from the rows the list marks: the microphone to fix, then the extras.
+  await until(() => t.all().includes('Recording needs 1 fix') || t.all().includes('1 to fix'), 'summary line');
+  assert.ok(t.all().includes('Speakers') && t.all().includes('Extras'), 'the list has sections');
   assert.equal(permissionRequests, 0, 'Opening Settings never asks for permission');
   if (narrow) {
     await until(() => t.frame().includes('Not allowed yet'), 'the list says how each item stands');
@@ -115,10 +116,10 @@ try {
     onConnectMeet={() => {}} onEnableCalendar={() => {}} onOpenSpeakers={() => {}} onOpenAI={() => {}} onClose={() => {}} />,
   { stdin: r.input as any, stdout: r.output as any, stderr: r.output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
   const key = async (text: string) => { r.input.write(text); await Bun.sleep(60); };
-  await until(() => r.all().includes('Guided setup'), 'Recording and the guide lead the list');
+  await until(() => r.all().includes('Which calls'), 'Which calls leads the list');
   for (let n = 0; n < 6; n++) await key('\x1b[A');
   await key('\r');
-  await until(() => r.all().includes('Apps on Default follow this'), 'Enter changes the recording rows');
+  await until(() => r.all().includes('Apps left blank follow this'), 'Enter changes the recording rows');
   // The fixture's settings turned recording off the old way; choosing a mode must turn it back on.
   await key('\x1b[C');
   await until(() => saved().mode === 'automatic' && saved().enabled === true, 'mode saved and in effect');
@@ -133,11 +134,13 @@ try {
   await key('\x1b[D');
   await until(() => saved().apps?.facetime === 'off', 'FaceTime off again');
   await key('\x1b');
-  await until(() => r.all().lastIndexOf('Records by itself') > r.all().lastIndexOf('Esc done'), 'back on the list');
-  await key('\x1b[B');
+  await until(() => r.all().lastIndexOf('r recheck') > r.all().lastIndexOf('←→ change'), 'back on the list');
+  // The guided setup is the last row.
+  for (let n = 0; n < 20; n++) await key('\x1b[B');
   await key('\r');
   assert.equal(guides, 1, 'The guided setup starts from Settings');
   // A microphone that was silent is tested by listening to it, from its own item.
+  for (let n = 0; n < 20; n++) await key('\x1b[A');
   for (let n = 0; n < 3; n++) await key('\x1b[B');
   if (narrow) await key('\r');
   await until(() => r.all().includes('Enter test it now'), 'a silent microphone offers a test');
@@ -153,9 +156,10 @@ try {
   const shell = render(<App />, { stdin: main.input as any, stdout: main.output as any, stderr: main.output as any,
     debug: true, patchConsole: false, exitOnCtrlC: false });
   const press = async (text: string) => { main.input.write(text); await Bun.sleep(80); };
-  await until(() => main.all().includes(', to check'), 'the app says what is wrong and where to look');
+  // In the title's status slot; narrow, the key gives way to the words.
+  await until(() => main.all().includes('Mic not allowed · , fixes') || narrow && main.all().includes('Mic not allowed'), 'the app says what is wrong and where to look');
   await press(',');
-  await until(() => main.all().includes('Checking what works') || main.all().includes('thing needs you'), 'comma opens Settings');
+  await until(() => main.all().includes('Checking what works') || main.all().includes('to fix') || main.all().includes('needs 1 fix'), 'comma opens Settings');
   await until(() => main.all().includes('Esc back'), 'settings footer');
   await press('\x1b');
   await until(() => main.all().lastIndexOf('? help') > main.all().lastIndexOf('Esc back'), 'Esc returns to the app');

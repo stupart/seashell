@@ -43,6 +43,6 @@ try {
   mics[1]!.onLevel?.(level); systems[1]!.onLevel?.(level); await tick();
   assert(screen().includes('● Recording') && !screen().includes('sound detected'), 'healthy sources stay out of the way');
   mics[1]!.onState({ state: 'unavailable' }); await tick();
-  assert(screen().includes('● Recording') && screen().includes('NOT CAPTURING'), 'one useful source keeps recording with a visible warning');
+  assert(screen().includes('● Recording') && screen().includes('Mic not heard · i help'), 'one useful source keeps recording with a visible warning');
   process.stdout.write(JSON.stringify({ passed: true }) + '\n');
 } finally { app.unmount(); input.destroy(); output.destroy(); rmSync(root, { recursive: true, force: true }); }
