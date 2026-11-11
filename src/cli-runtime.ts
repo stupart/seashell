@@ -1,6 +1,6 @@
 import { installHumainPackage, requireHumainNode } from './humain-install.ts';
 import { checkMeetConnection, requestMeetAccessibilityPermission, meetPermissionHelp, MEETING_ACCESSIBILITY_HELPER } from './meet-speakers.ts';
-import { microphonePermission } from './microphone-permission.ts';
+import { microphonePermission, microphoneStartNotifier, microphoneUpdateNotice } from './microphone-permission.ts';
 import { calendarPermission } from './calendar-permission.ts';
 import { readFeatureStatuses, renderFeatureStatusTable } from './feature-status.ts';
 import { oneSidedNotifier } from './capture-health.ts';
@@ -845,12 +845,20 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
     case 'watch': {
       const once = command.action.once;
       const notifyOneSided = oneSidedNotifier(notify);
+      const notifyMicrophone = microphoneStartNotifier(notify);
+      // A new Seashell Microphone copy macOS has not decided on would ask mid-call: ask now, at a calm moment.
+      if (process.env.XPC_SERVICE_NAME === SEASHELL_LAUNCH_AGENT_LABEL && !once) {
+        void microphoneUpdateNotice().then((message) => { if (message) notify(message); }).catch(() => {});
+      }
       const controller = new AbortController();
       const stop = () => controller.abort();
       process.once('SIGINT', stop);
       process.once('SIGTERM', stop);
-      const warnings = new WarningRateLimit();
       const writeEvent = command.json ? watchLogWriter(meetingWatchLogFiles(), { fallback: print }) : print;
+      // A warning that stopped recurring is forgotten with how often it came back unseen.
+      const warnings = new WarningRateLimit(undefined, (message, repeats) => command.json
+        ? writeEvent(JSON.stringify({ type: 'watch.warning', at: new Date().toISOString(), message, repeats, final: true }))
+        : process.stderr.write(`watch.warning: ${message} (repeated ${repeats} more times)\n`));
       // After a meeting is ready: extractors, then automations, one meeting at a time.
       let followUps: Promise<void> = Promise.resolve();
       const followUp = (transcriptId: string, app: string) => {
@@ -885,7 +893,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
           ...(!once ? { dependencies: { askToRecord: askToRecordWithDialog } } : {}),
           onEvent: (event) => {
             // Like the dialog, the notice is for someone at the Mac, not a one-shot check.
-            if (!once) notifyOneSided(event);
+            if (!once) { notifyOneSided(event); notifyMicrophone(event); }
             // The same warning at most once per 10 minutes, with how often it recurred.
             let repeats = 0;
             if (event.type === 'watch.warning') {

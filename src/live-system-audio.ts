@@ -1,11 +1,14 @@
 import { spawn, type ChildProcess } from 'child_process';
 import { randomUUID } from 'crypto';
-import { existsSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { basename, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
-import { computerAudioConfirmed, forgetAudioCheck, readAudioChecks, type AudioChecks } from './audio-checks.ts';
-import { terminateManagedChild } from './process-lifecycle.ts';
+import {
+  computerAudioConfirmed, countSilentOwnStart, forgetAudioCheck, readAudioChecks, rememberInheritedComputerAudio,
+  resetSilentOwnStarts, type AudioChecks,
+} from './audio-checks.ts';
+import { onChildSettled, terminateManagedChild } from './process-lifecycle.ts';
 import {
   prepareRuntimeHelper,
   SYSTEM_AUDIO_RUNTIME_HELPER,
@@ -70,11 +73,61 @@ export function systemAudioIdentityArguments(identity: SystemAudioIdentity): str
 }
 
 const BACK_TO_INHERITED = 'Computer audio is recording with the background recorder\'s permission';
+/** Said once in a recording that leaves its own identity. Silence alone is never said: a quiet lobby sounds the same. */
 export const OWN_IDENTITY_WARNINGS = {
   refused: `${BACK_TO_INHERITED}: macOS refused Seashell System Audio. Check computer audio in Settings (,) to switch again.`,
   failed: `${BACK_TO_INHERITED}: Seashell System Audio could not start.`,
-  silence: `${BACK_TO_INHERITED}: Seashell System Audio sent only silence for a minute.`,
 } as const;
+
+/**
+ * macOS rarely says it refused a process tap: a refused identity records
+ * silence. So the own identity hearing only silence from the start for this
+ * long hands over to the inherited one…
+ */
+export const OWN_SILENCE_MS = 60_000;
+/** …or for this long once the inherited identity is known to record, when handing over costs a moment, not the call. */
+export const OWN_SILENCE_KNOWN_GOOD_MS = 20_000;
+/** The inherited attempt that took over hearing sound this soon shows macOS refused the own identity. */
+export const INHERITED_VERDICT_MS = 10_000;
+/** Recordings in a row silent through both identities before the own one is set aside: a refusal and a lobby look alike. */
+export const SILENT_OWN_STARTS_LIMIT = 2;
+
+/** What recordings learn about computer audio's two identities, kept between them. */
+export interface SystemAudioIdentityHistory {
+  /** A recording run by this same program, as installed now, has heard sound through the inherited identity. */
+  readonly inheritedHeard: boolean;
+  noteInheritedHeard(): void;
+  /** The own identity heard sound: the silent starts before it were quiet ones. */
+  noteOwnHeard(): void;
+  /** The own identity heard only silence, and so did the inherited one that took over. Returns how many recordings in a row. */
+  noteOwnSilent(): number;
+}
+
+/**
+ * Whose permission "inherited" is: the program running Seashell, as installed
+ * now. The background recorder's Seashell Background and a terminal's Bun hold
+ * different permissions, and a replaced copy may hold none, so sound heard
+ * through one says nothing about another.
+ */
+function inheritedPermissionHolder(): string {
+  try {
+    const path = realpathSync(process.execPath);
+    const installed = statSync(path);
+    return `${path}:${installed.ino}:${installed.mtimeMs}`;
+  } catch { return process.execPath; }
+}
+
+/** Kept in audio-checks.json beside Seashell's settings. Nothing here may stop the audio. */
+function savedIdentityHistory(): SystemAudioIdentityHistory {
+  const holder = inheritedPermissionHolder();
+  const checks = readAudioChecks();
+  return {
+    inheritedHeard: checks.computerInherited !== undefined && checks.computerInheritedBy === holder,
+    noteInheritedHeard: () => { try { rememberInheritedComputerAudio(holder); } catch {} },
+    noteOwnHeard: () => { try { resetSilentOwnStarts(); } catch {} },
+    noteOwnSilent: () => { try { return countSilentOwnStart(); } catch { return 1; } },
+  };
+}
 
 export const LIVE_CAPTURE_SAMPLE_RATE = 16_000;
 export const LIVE_CAPTURE_CHUNK_MILLISECONDS = 10_000;
@@ -430,8 +483,13 @@ export interface StartSystemAudioOptions {
   readonly stalledTimeoutMs?: number;
   /** Whose permission to record under (systemAudioIdentity). Chosen by the gate when Seashell runs its own helper; inherited for any other. */
   readonly identity?: SystemAudioIdentity;
-  /** Under its own identity, the helper sending only silence this long counts as refused. */
+  /** Under its own identity, the helper sending only silence this long hands over to the inherited one.
+   * OWN_SILENCE_MS, or OWN_SILENCE_KNOWN_GOOD_MS once the inherited identity is known to record. */
   readonly ownSilenceMs?: number;
+  /** INHERITED_VERDICT_MS. */
+  readonly inheritedVerdictMs?: number;
+  /** What earlier recordings learned. Kept in audio-checks.json when the gate chooses the identity; none otherwise. */
+  readonly identityHistory?: SystemAudioIdentityHistory;
   /** Something to tell the person that does not stop the audio. */
   readonly onWarning?: (message: string) => void;
   /** macOS refused the helper's own identity: later recordings should not start with it. */
@@ -489,7 +547,14 @@ export function startSystemAudioCapture(
   const gated = options.identity === undefined && options.helperPath === undefined;
   let identity: SystemAudioIdentity = options.identity ?? (gated ? systemAudioIdentity(helperPath) : 'inherited');
   const ownRefused = options.onOwnIdentityRefused ?? (gated ? () => { try { forgetAudioCheck('computer'); } catch {} } : undefined);
-  const ownSilenceSeconds = (options.ownSilenceMs ?? 60_000) / 1_000;
+  const history = options.identityHistory ?? (gated ? savedIdentityHistory() : undefined);
+  const ownSilenceSeconds = (options.ownSilenceMs ??
+    (history?.inheritedHeard ? OWN_SILENCE_KNOWN_GOOD_MS : OWN_SILENCE_MS)) / 1_000;
+  const verdictSeconds = (options.inheritedVerdictMs ?? INHERITED_VERDICT_MS) / 1_000;
+  /** Set once the own identity heard only silence: the inherited attempt that takes over tells a refusal from a lobby. */
+  let verdict: { from?: number } | undefined;
+  let ownHeard = false;
+  let inheritedHeard = false;
   /** Set while an own-identity attempt ends so an inherited one can take over. */
   let switching = false;
   const maximumRestarts = options.maxRestarts ?? Number.POSITIVE_INFINITY;
@@ -504,14 +569,35 @@ export function startSystemAudioCapture(
   let waitingForRestartChunk = false;
   // The audio never waits on the helper's own identity: anything that looks
   // like macOS refusing it goes straight back to the inherited one, which works.
-  const fallBack = (reason: keyof typeof OWN_IDENTITY_WARNINGS, attempt: { stop(): void } | undefined) => {
+  const fallBack = (reason: keyof typeof OWN_IDENTITY_WARNINGS | 'silence', attempt: { stop(): void } | undefined) => {
     if (identity !== 'own' || stopped) return;
     identity = 'inherited';
     switching = true;
     if (reason === 'refused') ownRefused?.();
     options.onState({ state: 'starting', code: 'system_audio_reconnecting', message: 'Switching computer audio to the background recorder…' });
-    options.onWarning?.(OWN_IDENTITY_WARNINGS[reason]);
+    // Silence may be a quiet lobby: what the inherited attempt hears decides whether anything is said.
+    if (reason === 'silence') verdict = {};
+    else options.onWarning?.(OWN_IDENTITY_WARNINGS[reason]);
     attempt?.stop();
+  };
+  /**
+   * The inherited attempt after a silent own one. Sound within seconds means
+   * the call was audible all along and macOS refused the own identity: forget
+   * its check, so the next call starts inherited, and say so once. Silence
+   * means a quiet start, or a refusal that cannot be told from one: nothing
+   * is said, and the second recording in a row like it sets the own identity
+   * aside too, so no call keeps losing its first minute to it.
+   */
+  const judge = (chunk: SystemAudioChunk) => {
+    const from = verdict!.from ??= chunk.startSeconds;
+    if (chunk.audible && chunk.startSeconds - from < verdictSeconds) {
+      verdict = undefined;
+      ownRefused?.();
+      options.onWarning?.(OWN_IDENTITY_WARNINGS.refused);
+    } else if (chunk.endSeconds - from >= verdictSeconds) {
+      verdict = undefined;
+      if ((history?.noteOwnSilent() ?? 0) >= SILENT_OWN_STARTS_LIMIT) ownRefused?.();
+    }
   };
   const start = () => {
     retryEligible = false;
@@ -531,11 +617,13 @@ export function startSystemAudioCapture(
       waitingForRestartChunk = false;
       options.onChunk(chunk);
       lastChunkEnd = chunk.endSeconds;
+      if (chunk.audible && attemptIdentity === 'own' && !ownHeard) { ownHeard = true; history?.noteOwnHeard(); }
+      if (chunk.audible && attemptIdentity === 'inherited' && !inheritedHeard) { inheritedHeard = true; history?.noteInheritedHeard(); }
       // A refused identity can look like a working one that hears only silence.
       if (attemptIdentity === 'own' && !audible) {
         if (chunk.audible) audible = true;
         else if (chunk.endSeconds - (silentFrom ??= chunk.startSeconds) >= ownSilenceSeconds) fallBack('silence', attempt);
-      }
+      } else if (attemptIdentity === 'inherited' && verdict) judge(chunk);
     }, onState(update) {
       // The attempt this switch ended: its stop is not the recording's.
       if (switching && !stopped && update.state === 'stopped') return;
@@ -640,7 +728,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
     if (requestedStop || lastDataAt === undefined || Date.now() - lastDataAt < stalledTimeoutMs) return;
     lastDataAt = undefined;
     nativeError = { type: 'error', code: 'system_audio_stalled', message: 'Computer audio stopped arriving.' };
-    void terminateManagedChild(child);
+    void terminateManagedChild(child, undefined, { group: true });
   }, Math.max(10, Math.min(1_000, stalledTimeoutMs / 4)));
   watchdog.unref();
 
@@ -680,7 +768,9 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
     ...(options.helperArgs ?? []),
     '--sample-rate', String(LIVE_CAPTURE_SAMPLE_RATE),
     '--chunk-ms', '100',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    // Its own process group: the helper relaunches itself, and only a group
+    // signal reaches that copy once its proxy can no longer forward one.
+  ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
 
   child.stdout?.on('data', (data: Buffer) => {
     if (nativeError?.code !== 'system_audio_stalled') lastDataAt = Date.now();
@@ -697,7 +787,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
         code: 'chunk_failed',
         message: error instanceof Error ? error.message : String(error),
       };
-      child.kill('SIGTERM');
+      void terminateManagedChild(child, undefined, { group: true });
     }
   });
 
@@ -785,7 +875,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
   child.on('error', (error) => {
     nativeError = { type: 'error', code: 'spawn_failed', message: error.message };
   });
-  child.on('close', (code, signal) => {
+  onChildSettled(child, (code, signal) => {
     clearInterval(watchdog);
     if (stderr.trim()) consumeEventLine(stderr);
     const final = chunker.flush();
@@ -808,7 +898,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
       message: permissionMessage(failure),
     });
     resolveDone();
-  });
+  }, { group: true });
 
   return {
     process: child,
@@ -816,7 +906,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
     stop() {
       if (requestedStop) return;
       requestedStop = true;
-      void terminateManagedChild(child);
+      void terminateManagedChild(child, undefined, { group: true });
     },
   };
 }

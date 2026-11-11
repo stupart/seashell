@@ -3,7 +3,7 @@ import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, sta
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { meetingWatchLogFiles, readMeetingWatchLog } from '../src/launch-at-login.ts';
-import { WarningRateLimit, watchLogWriter } from '../src/watch-log.ts';
+import { WARNING_REPEAT_MS, WarningRateLimit, watchLogWriter } from '../src/watch-log.ts';
 
 const roots: string[] = [];
 const descriptors: number[] = [];
@@ -38,6 +38,41 @@ test('the same warning shows at most once per 10 minutes, and alternating warnin
     ['Meet is out of view.', 99],
   ]);
   expect(limit.admit('A different warning', 25 * MINUTE)).toBe(0);
+});
+
+test('a warning that stops recurring is forgotten after two windows, with the repeats nobody saw', () => {
+  const forgotten: Array<[string, number]> = [];
+  const limit = new WarningRateLimit(undefined, (message, repeats) => forgotten.push([message, repeats]));
+  expect(limit.admit('Made-up device warning.', 0)).toBe(0);
+  for (let at = MINUTE; at <= 3 * MINUTE; at += MINUTE) expect(limit.admit('Made-up device warning.', at)).toBeUndefined();
+  // Shown once and never repeated: forgotten after one window, with nothing to say.
+  expect(limit.admit('Made-up one-off warning.', 5 * MINUTE)).toBe(0);
+  // One window later the repeated warning would still show its count if it came back.
+  expect(limit.admit('Another made-up warning.', 15 * MINUTE)).toBe(0);
+  expect(forgotten).toEqual([]);
+  expect(limit.size).toBe(2);
+  // Two windows after it last showed, it is dropped and its three unseen repeats are said.
+  expect(limit.admit('A last made-up warning.', 20 * MINUTE)).toBe(0);
+  expect(forgotten).toEqual([['Made-up device warning.', 3]]);
+  expect(limit.size).toBe(2);
+});
+
+test('the warning limit never holds more than 256 messages, however many distinct ones arrive', () => {
+  const forgotten: Array<[string, number]> = [];
+  const limit = new WarningRateLimit(undefined, (message, repeats) => forgotten.push([message, repeats]));
+  // A thousand distinct messages inside one window, each repeated once, as a
+  // message carrying a changing number or path would arrive.
+  for (let index = 0; index < 1_000; index++) {
+    expect(limit.admit(`Made-up chunk ${index} failed.`, index)).toBe(0);
+    expect(limit.admit(`Made-up chunk ${index} failed.`, index)).toBeUndefined();
+    expect(limit.size).toBeLessThanOrEqual(256);
+  }
+  // The oldest go first, each with its unseen repeat.
+  expect(forgotten).toHaveLength(1_000 - 256);
+  expect(forgotten[0]).toEqual(['Made-up chunk 0 failed.', 1]);
+  expect(forgotten.at(-1)).toEqual([`Made-up chunk ${1_000 - 257} failed.`, 1]);
+  // A message still held keeps its count.
+  expect(limit.admit('Made-up chunk 999 failed.', WARNING_REPEAT_MS + 999)).toBe(1);
 });
 
 test('the watch log is capped in place and keeps one rotated file, like launchd appending stdout', () => {

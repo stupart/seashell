@@ -9,7 +9,7 @@ import { CaptureSessionStore } from '../src/capture-session.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 import type { DurableLiveCaptureHandle } from '../src/durable-live-capture.ts';
 import { findTranscriptRecord } from '../src/transcript-library.ts';
-import { loadMeetingArtifact } from '../src/meeting-artifact.ts';
+import { loadMeetingArtifact, type MeetingCalendarEvent } from '../src/meeting-artifact.ts';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -611,16 +611,18 @@ test('a call that needs a yes is asked about directly, and the answer starts it'
   } finally { process.env.HOME = original; await service.shutdown(); }
 });
 
-test('the watcher hands the calendar invitees to the finalizer as a speaker ceiling', async () => {
+const inviteAttendees = [
+  { name: 'Ada Example', email: 'ada@example.com', response: 'accepted' },
+  { name: 'Grace Example', email: 'grace@example.com', response: 'accepted' },
+];
+
+/** The invitees a Zoom call recorded at 15:05 hands the finalizer, with this event on the calendar. */
+async function inviteesHanded(event: Partial<MeetingCalendarEvent>): Promise<unknown> {
   const root = mkdtempSync(join(tmpdir(), 'seashell-auto-attendees-'));
   roots.push(root);
   let now = Date.parse('2026-11-10T15:05:00Z');
   let active = true;
-  const attendees = [
-    { name: 'Ada Example', email: 'ada@example.com', response: 'accepted' },
-    { name: 'Grace Example', email: 'grace@example.com', response: 'accepted' },
-  ];
-  let handed: unknown;
+  let handed: unknown = 'never finalized';
   const service = new AutomaticMeetingWatchService({
     config: { libraryDir: root, meeting: {
       calendar: { enabled: true, policy: 'all' },
@@ -629,7 +631,7 @@ test('the watcher hands the calendar invitees to the finalizer as a speaker ceil
     dependencies: {
       now: () => new Date(now),
       readCalendar: async () => [{ provider: 'macos-eventkit', eventId: 'e1', title: 'Design review',
-        startAt: '2026-11-10T15:00:00Z', endAt: '2026-11-10T15:30:00Z', attendees }],
+        startAt: '2026-11-10T15:00:00Z', endAt: '2026-11-10T15:30:00Z', attendees: inviteAttendees, ...event }],
       readSignals: () => ({ schemaVersion: 1, capturedAtUnixMs: now, supported: true,
         inputProcesses: active ? [{ pid: 42, bundleId: 'us.zoom.xos', name: 'Zoom' }] : [] }),
       startCapture: () => {
@@ -650,10 +652,24 @@ test('the watcher hands the calendar invitees to the finalizer as a speaker ceil
     now += 1_000;
   }
   active = false;
-  for (let poll = 0; poll < 4 && handed === undefined; poll += 1) {
+  for (let poll = 0; poll < 4 && handed === 'never finalized'; poll += 1) {
     await service.pollOnce();
     now += 1_000;
   }
   await service.shutdown();
-  expect(handed).toEqual(attendees);
+  return handed;
+}
+
+test('the watcher hands the invitees of an event proven to be this call to the finalizer as a speaker ceiling', async () => {
+  // A Zoom link, and the event started five minutes before the recording.
+  expect(await inviteesHanded({ joinUrl: 'https://us02web.zoom.us/j/123456789' })).toEqual(inviteAttendees);
+});
+
+test('a nearby event that is not proven to be this call caps nothing, and nothing falls back to meeting.json', async () => {
+  // No link at all: the nearest event in the window, attached for its title only.
+  expect(await inviteesHanded({})).toEqual([]);
+  // A Meet link while the call is in Zoom.
+  expect(await inviteesHanded({ joinUrl: 'https://meet.google.com/abc-defg-hij' })).toEqual([]);
+  // A Zoom link, but the event started 20 minutes before the recording.
+  expect(await inviteesHanded({ joinUrl: 'https://zoom.us/j/123456789', startAt: '2026-11-10T14:45:00Z' })).toEqual([]);
 });

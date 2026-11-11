@@ -5,6 +5,7 @@ import { join } from 'path';
 import { finalizeCaptureTranscript } from '../src/capture-finalizer.ts';
 import { CaptureSessionStore } from '../src/capture-session.ts';
 import { remoteVoiceCeiling } from '../src/diarize.ts';
+import { calendarEventIsThisCall } from '../src/meeting-automation.ts';
 import { pcmS16leToWav } from '../src/live-system-audio.ts';
 import { createMeetingArtifact, type MeetingCalendarEvent } from '../src/meeting-artifact.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
@@ -74,4 +75,30 @@ test('separating a saved meeting again reads its invite from meeting.json', asyn
     // Ten people besides Tyler: past Nemotron 3's eight slots, so the helper uses community-1.
     expect((await separationOptions(join(meeting, 'capture', 'manifest.json'))).maxSpeakers).toBe(11);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('only an event proven to be the call may cap its voices: its Meet code, or its app\'s link and a start within 10 minutes', () => {
+  const startedAt = Date.parse('2026-11-10T15:04:00Z');
+  const event = (overrides: Partial<MeetingCalendarEvent>) => ({ ...invite(['accepted', 'accepted']), ...overrides });
+  const zoom = (calendar: MeetingCalendarEvent) => ({ id: 'audio:zoom', bundleId: 'us.zoom.xos', kind: 'dedicated' as const, calendar });
+  const chrome = (calendar: MeetingCalendarEvent) => ({ id: 'audio:chrome', bundleId: 'com.google.Chrome', kind: 'browser' as const, calendar });
+  const slack = (calendar: MeetingCalendarEvent) => ({ id: 'audio:slack', bundleId: 'com.tinyspeck.slackmacgap', kind: 'ambiguous' as const, calendar });
+  const joined = (calendar: MeetingCalendarEvent) => ({ id: 'meet:chrome:/abc-defg-hij', bundleId: 'com.google.Chrome', kind: 'browser' as const, calendar });
+
+  expect(calendarEventIsThisCall(zoom(event({ joinUrl: 'https://us02web.zoom.us/j/123?pwd=x' })), startedAt)).toBe(true);
+  expect(calendarEventIsThisCall(zoom(event({ location: 'Zoom: https://zoom.us/j/123' })), startedAt)).toBe(true);
+  // The nearest event, with nothing tying it to the call.
+  expect(calendarEventIsThisCall(zoom(event({})), startedAt)).toBe(false);
+  // Another service's link, or a look-alike host.
+  expect(calendarEventIsThisCall(zoom(event({ joinUrl: 'https://teams.microsoft.com/l/meetup-join/1' })), startedAt)).toBe(false);
+  expect(calendarEventIsThisCall(zoom(event({ joinUrl: 'https://notzoom.us/j/123' })), startedAt)).toBe(false);
+  // The right link, but the event started 11 minutes from the recording.
+  expect(calendarEventIsThisCall(zoom(event({ joinUrl: 'https://zoom.us/j/1', startAt: '2026-11-10T14:53:00Z' })), startedAt)).toBe(false);
+  // A browser can run any video call; Slack's calls have no link to match.
+  expect(calendarEventIsThisCall(chrome(event({ joinUrl: 'https://meet.google.com/xyz-abcd-efg' })), startedAt)).toBe(true);
+  expect(calendarEventIsThisCall(slack(event({ joinUrl: 'https://zoom.us/j/1' })), startedAt)).toBe(false);
+  // A joined Meet call is proven by its code alone, however late it was joined.
+  expect(calendarEventIsThisCall(joined(event({ joinUrl: 'https://meet.google.com/abc-defg-hij', startAt: '2026-11-10T14:00:00Z' })), startedAt)).toBe(true);
+  expect(calendarEventIsThisCall(joined(event({ joinUrl: 'https://meet.google.com/xyz-abcd-efg' })), startedAt)).toBe(false);
+  expect(calendarEventIsThisCall({ ...zoom(event({})), calendar: undefined }, startedAt)).toBe(false);
 });

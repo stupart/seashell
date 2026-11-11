@@ -45,6 +45,8 @@ function sourceLabel(source: CaptureSourceHealth | undefined, finished: boolean,
     if (source.warnings.some(w => w.resolvedAtUnixMs === undefined && w.kind === 'quiet')) return 'sound captured · quiet at end';
     return 'sound captured';
   }
+  // The recorder keeps checking, and starts the moment macOS allows it.
+  if (source.state === 'unavailable' && source.code === MICROPHONE_NOT_ALLOWED) return 'not allowed';
   if (source.state === 'unavailable' || source.state === 'stopped') return 'not capturing';
   if (source.state === 'reconnecting') return 'reconnecting…';
   if (source.state === 'starting') return 'opening…';
@@ -107,6 +109,10 @@ export interface RecordingSummary {
 
 const MIC_HELP: Hint = ['i', 'mic help'];
 const AUDIO_HELP: Hint = ['i', 'audio help'];
+/** Enter asks macOS for the microphone, or opens its Privacy pane once macOS has said no. */
+export const ALLOW_MIC: Hint = ['Enter', 'allow mic'];
+/** A recording's microphone that macOS has not allowed (src/live-microphone.ts). */
+const MICROPHONE_NOT_ALLOWED = 'microphone_permission';
 
 /** A recorder warning for the title's status slot: whole when it is short, its first sentence when narrow. */
 function warningAlert(warning: string): { text: string; short?: string; fix?: Hint } {
@@ -152,8 +158,9 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
     ...(micBad ? [`Microphone: ${mic}`] : []),
     ...(computerBad ? [`Computer audio: ${computer}`] : []),
   ];
+  const notAllowed = micBad && mic === 'not allowed';
   const problems = [
-    ...(failing.length ? [`${failing.join(' · ')}${finished ? '' : ' · i audio help'}`]
+    ...(failing.length ? [`${failing.join(' · ')}${finished ? '' : notAllowed ? ' · Enter to allow' : ' · i audio help'}`]
       : attention && !finished ? ['Check your input if expected sound is missing · i audio help'] : []),
     ...(props.warning ? [props.warning] : []),
     ...(props.draftLabel?.includes('delayed') ? [props.draftLabel] : []),
@@ -161,14 +168,15 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
   // Not capturing at all is a failure; quiet, one-sided or unconfirmed sound needs a look.
   const failed = (source?: CaptureSourceHealth) => !finished && (source?.state === 'unavailable' || source?.state === 'stopped');
   // One name for a microphone Seashell cannot hear, whether it stopped or sends silence.
-  const micWords = mic.startsWith('quiet') ? 'Mic quiet' : mic === 'your side wasn’t recorded' ? 'Your side not recorded'
+  const micWords = notAllowed ? 'Mic not allowed' : mic.startsWith('quiet') ? 'Mic quiet' : mic === 'your side wasn’t recorded' ? 'Your side not recorded'
     : finished ? 'Mic interrupted' : 'Mic silent';
   const computerWords = computer.startsWith('quiet') ? 'Call audio quiet' : finished ? 'Computer audio interrupted' : 'Computer audio silent';
-  const sourceAlert = micBad && computerBad ? finished ? 'Audio interrupted' : 'Nothing heard'
+  // A microphone macOS has not allowed is said as such: Enter fixes it, whatever else is wrong.
+  const sourceAlert = notAllowed ? micWords : micBad && computerBad ? finished ? 'Audio interrupted' : 'Nothing heard'
     : micBad ? micWords : computerBad ? computerWords
     : attention && !finished ? 'Check your input' : undefined;
   // Audio help opens on whatever is wrong; once the call is over there is nothing left to check.
-  const help = finished ? {} : { fix: micBad && !computerBad ? MIC_HELP : AUDIO_HELP };
+  const help = finished ? {} : { fix: notAllowed ? ALLOW_MIC : micBad && !computerBad ? MIC_HELP : AUDIO_HELP };
   const alert = sourceAlert
     ? { text: sourceAlert, ...help,
       color: failed(props.health?.microphone) || failed(props.health?.systemAudio) ? 'red' as const : 'yellow' as const }

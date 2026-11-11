@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import { existsSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
-import { terminateManagedChild } from './process-lifecycle.ts';
+import { onChildSettled, terminateManagedChild } from './process-lifecycle.ts';
 import { prepareMicrophoneRuntimeHelper } from './runtime-host.ts';
 import {
   hasAudiblePcmSignal,
@@ -60,7 +60,17 @@ export interface StartMicrophoneOptions {
   /** First retry delay; later retries back off to restartDelayMaxMs. */
   readonly restartDelayMs?: number;
   readonly restartDelayMaxMs?: number;
+  /** MICROPHONE_PERMISSION_RECHECK_MS. */
+  readonly permissionRecheckMs?: number;
 }
+
+/**
+ * While macOS has not allowed the microphone, check again this often, for the
+ * whole recording. Permission can be granted mid-call (a protocol bump resets
+ * it, and a prompt dismissed by accident denies it), and your side should be
+ * recorded from that moment, not lost for the rest of the call.
+ */
+export const MICROPHONE_PERMISSION_RECHECK_MS = 10_000;
 
 export const MICROPHONE_HELPER = join(dirname(fileURLToPath(import.meta.url)), '..', 'native', 'bin', 'seashell-microphone');
 /** The native helper's exit status when macOS Microphone access is off. */
@@ -115,12 +125,23 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
   const maximumDelay = Math.max(firstDelay, options.restartDelayMaxMs ?? 15_000);
   let restarts = 0;
   let stopped = false;
-  let permissionDenied = false;
+  /** The last attempt ended because macOS has not allowed the microphone. */
+  let refused = false;
+  /** That was said, and rechecks say nothing until the microphone opens or fails another way. */
+  let awaitingPermission = false;
   let cancelDelay: (() => void) | undefined;
   const retryLabel = () => Number.isFinite(maximumRestarts) ? `${restarts + 1}/${maximumRestarts}` : String(restarts + 1);
   const start = () => startMicrophoneAttempt({ ...options, onState(update) {
-    if (update.diagnostic?.reason === 'permission') permissionDenied = true;
-    if (update.state === 'unavailable' && !stopped && !permissionDenied && restarts < maximumRestarts) {
+    refused = update.diagnostic?.reason === 'permission';
+    if (refused) {
+      if (!awaitingPermission && !stopped) options.onState(update);
+      awaitingPermission = true;
+      return;
+    }
+    // A recheck opening the helper again is not news; what it finds is.
+    if (awaitingPermission && update.state === 'starting' && update.code === undefined) return;
+    awaitingPermission = false;
+    if (update.state === 'unavailable' && !stopped && restarts < maximumRestarts) {
       options.onState({ ...update, state: 'starting', code: 'microphone_reconnecting',
         message: `${update.message ?? 'Microphone capture failed.'} Retrying (${retryLabel()})…` });
     } else options.onState(update);
@@ -131,11 +152,16 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
     while (true) {
       const attemptStartedAt = Date.now();
       await current.done;
-      if (stopped || permissionDenied || restarts >= maximumRestarts) return;
-      // A recorder that ran for a while before failing is a fresh problem.
-      if (Date.now() - attemptStartedAt >= 60_000) restarts = 0;
-      const delay = Math.min(maximumDelay, firstDelay * 2 ** Math.min(restarts, 10));
-      restarts++;
+      if (stopped) return;
+      let delay = options.permissionRecheckMs ?? MICROPHONE_PERMISSION_RECHECK_MS;
+      // Permission is never given up on during a recording, whatever the restart limit.
+      if (!refused) {
+        if (restarts >= maximumRestarts) return;
+        // A recorder that ran for a while before failing is a fresh problem.
+        if (Date.now() - attemptStartedAt >= 60_000) restarts = 0;
+        delay = Math.min(maximumDelay, firstDelay * 2 ** Math.min(restarts, 10));
+        restarts++;
+      }
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => { cancelDelay = undefined; resolve(); }, delay);
         cancelDelay = () => { clearTimeout(timer); cancelDelay = undefined; resolve(); };
@@ -181,7 +207,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
     settleStartup();
     options.onState({ state: 'starting', code: 'microphone_no_audio',
       message: failure });
-    void terminateManagedChild(child);
+    void terminateManagedChild(child, undefined, { group: true });
   }, options.startupTimeoutMs ?? 8_000);
   startupTimer.unref();
   const watchdog = setInterval(() => {
@@ -191,7 +217,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
       endingForFailure = true;
       failureReason = 'stalled';
       failure = 'Microphone stopped delivering audio. Check Sound → Input and reconnect your microphone.';
-      void terminateManagedChild(child);
+      void terminateManagedChild(child, undefined, { group: true });
     } else if (!quietWarning && now - lastAudibleAt >= (options.quietWarningMs ?? 30000)) {
       quietWarning = true;
       options.onState({ state: 'active', code: 'microphone_quiet',
@@ -233,7 +259,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
       failure = error instanceof Error ? error.message : String(error);
       failureReason = 'chunk-error';
       endingForFailure = true;
-      void terminateManagedChild(child);
+      void terminateManagedChild(child, undefined, { group: true });
     }
   };
 
@@ -242,7 +268,9 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
     ? { command: options.command, args: options.commandArgs ?? SOX_ARGUMENTS }
     : defaultMicrophoneRecorder();
   const child = spawn(recorder.command, [...recorder.args], {
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // Its own process group: the helper relaunches itself, and only a group
+    // signal reaches that copy once its proxy can no longer forward one.
+    stdio: ['ignore', 'pipe', 'pipe'], detached: true,
   });
 
   let stderr = '';
@@ -270,7 +298,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
     for (const chunk of chunker.append(data)) publish(chunk);
   });
   child.on('error', (error) => { failure = error.message; failureReason = 'spawn-error'; });
-  child.on('close', (code, signal) => {
+  onChildSettled(child, (code, signal) => {
     clearTimeout(startupTimer);
     clearInterval(watchdog);
     settleStartup();
@@ -298,7 +326,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
           }),
     });
     resolveDone();
-  });
+  }, { group: true });
 
   return {
     process: child,
@@ -311,7 +339,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
       clearInterval(watchdog);
       child.kill('SIGINT');
       const terminate = setTimeout(() => {
-        void terminateManagedChild(child);
+        void terminateManagedChild(child, undefined, { group: true });
       }, 1_500);
       terminate.unref();
       void done.then(() => clearTimeout(terminate));
