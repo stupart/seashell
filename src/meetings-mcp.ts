@@ -57,6 +57,7 @@ export const MEETINGS_MCP_INSTRUCTIONS = [
   'Find meetings with list_meetings, search_transcripts or query_notes before reading one; never invent meeting IDs or segment IDs.',
   'Quote with the segment ID and time, e.g. [s000123 12:04], so the user can check the source.',
   'Transcripts are machine-generated. "Microphone" is the user; "Remote speaker N" and "System audio" are other people unless renamed.',
+  'A speaker marked suggested (speakerSuggested on a line) was named by Seashell from a known voice and not yet confirmed by the user: treat that name as a guess.',
   'Reading is safe. Tools that change things (fixing a transcript line, naming a speaker, editing prompts, templates, extractors or automations, running an extractor) change the user\'s own files: use them only when the user asks.',
   'Ask the user before sending anything (email, Slack, Linear) based on a meeting.',
   'A meeting marked private has AI turned off by its owner: say so, and do not try to reach its content another way.',

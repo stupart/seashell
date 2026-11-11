@@ -48,11 +48,21 @@ export function clock(seconds: number): string {
   return hours ? `${hours}:${rest}` : rest;
 }
 
-function labels(record: TranscriptRecord): Map<string, string> {
-  const names = new Map(record.speakers.map(speaker => [speaker.id, speaker.label]));
-  names.set('LOCAL', names.get('LOCAL') ?? 'Microphone');
-  names.set('SYSTEM', names.get('SYSTEM') ?? 'System audio');
+/**
+ * Each speaker's label. One Seashell matched from a known voice, which nobody
+ * has confirmed, is marked suggested so an agent does not take it as fact.
+ */
+function labels(record: TranscriptRecord): Map<string, { label: string; suggested?: true }> {
+  const names = new Map(record.speakers.map(speaker => [speaker.id, { label: speaker.label, ...(speaker.suggestion ? { suggested: true as const } : {}) }]));
+  if (!names.has('LOCAL')) names.set('LOCAL', { label: 'Microphone' });
+  if (!names.has('SYSTEM')) names.set('SYSTEM', { label: 'System audio' });
   return names;
+}
+
+/** Who said a line, for agents: the label, and whether it is only a suggestion. */
+function saidBy(names: ReturnType<typeof labels>, speaker: string | undefined) {
+  const name = names.get(speaker ?? 'SYSTEM');
+  return { speaker: name?.label ?? speaker ?? 'Unknown', ...(name?.suggested ? { speakerSuggested: true } : {}) };
 }
 
 function segmentId(record: TranscriptRecord, index: number): string {
@@ -140,7 +150,7 @@ export function getMeeting(libraryDir: string, args: Arguments) {
     ...(artifact?.calendar ? { calendar: { title: artifact.calendar.title, startAt: artifact.calendar.startAt,
       attendees: artifact.calendar.attendees.map(person => ({ name: person.name, ...(person.email ? { email: person.email } : {}) })) } } : {}),
     speakers: [...new Set(record.transcript.map(segment => segment.speaker ?? 'SYSTEM'))]
-      .map(id => ({ id, label: names.get(id) ?? id })),
+      .map(id => ({ id, label: names.get(id)?.label ?? id, ...(names.get(id)?.suggested ? { suggested: true } : {}) })),
     notes: {
       status: artifact?.analysis?.final ? 'final' : artifact?.analysis ? 'draft' : claims.length ? 'live-draft' : 'none',
       ...(artifact?.notesOutdated ? { possiblyOutOfDate: artifact.notesOutdated.reason } : {}),
@@ -173,7 +183,7 @@ export function getTranscript(libraryDir: string, args: Arguments) {
   const names = labels(record);
   const segments = record.transcript.map((segment, index) => ({
     id: segmentId(record, index), at: clock(segment.start), start: segment.start, end: segment.end,
-    speaker: names.get(segment.speaker ?? 'SYSTEM') ?? segment.speaker ?? 'Unknown', text: segment.text,
+    ...saidBy(names, segment.speaker), text: segment.text,
   })).filter(segment => !speaker || segment.speaker.toLocaleLowerCase().includes(speaker));
   const page = segments.slice(offset, offset + limit);
   return { id: record.id, title: record.title, total: segments.length, offset, segments: page,
@@ -194,7 +204,7 @@ export function searchTranscripts(libraryDir: string, args: Arguments) {
       if (!words.every(word => lower.includes(word))) continue;
       matches.push({ meetingId: record.id, title: record.title, startedAt: record.createdAt,
         segmentId: segmentId(record, index), at: clock(segment.start),
-        speaker: names.get(segment.speaker ?? 'SYSTEM') ?? segment.speaker ?? 'Unknown', text: segment.text });
+        ...saidBy(names, segment.speaker), text: segment.text });
       if (matches.length >= limit) return { matches, truncated: true };
     }
   }
@@ -270,7 +280,7 @@ export function queryNotes(libraryDir: string, args: Arguments = {}) {
     const said = new Map(record.transcript.map((segment, index) => [segmentId(record, index), segment.text]));
     const cite = citer(record);
     for (const claim of claims) {
-      const speaker = claim.speakerId ? names.get(claim.speakerId) : undefined;
+      const speaker = claim.speakerId ? names.get(claim.speakerId)?.label : undefined;
       if (person && ![claim.person, speaker].some(name => name?.toLocaleLowerCase().includes(person))) continue;
       const quotes = claim.evidenceSegmentIds.flatMap(id => said.get(id) ?? []);
       const haystack = [claim.text, ...quotes].join('\n').toLocaleLowerCase();

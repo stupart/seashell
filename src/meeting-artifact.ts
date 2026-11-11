@@ -783,21 +783,63 @@ function retainMeetingRevision(directory: string, artifact: MeetingArtifact, tra
 }
 
 /** Also repairs interruption between transcript replacement and projection refresh. */
+/** The same name, or one a fuller form of the other: "Dana" and "Dana Lee". */
+function sameName(left: string, right: string): boolean {
+  const words = (name: string): string[] => name.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}]+/gu) ?? [];
+  const [a, b] = [words(left), words(right)];
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  return shorter.length > 0 && shorter.every((word, index) => word === longer[index]);
+}
+
+/** `name` as a whole word, exactly as written: "Dana", not "Danae" or "dana". */
+function wholeName(name: string): RegExp {
+  return new RegExp(`(?<![\\p{L}\\p{N}_])${name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(?![\\p{L}\\p{N}_])`, 'gu');
+}
+
 /**
- * Notes written before a speaker had a name say "Remote speaker 1". Only such
- * placeholders are replaced: an ordinary name could also be an ordinary word.
+ * Notes written before a speaker had a name say "Remote speaker 1": every such
+ * placeholder takes the name, and the notes stand. A real name that changes,
+ * a suggested "Dana" undone or a misheard name corrected, may have put the
+ * wrong person in them. An action Dana owned moves to the new name, and so
+ * does "Dana" written as a whole word, unless another speaker here is also
+ * called that. Either way the notes are marked out of date, since "Dana"
+ * might also be someone the meeting only talked about.
  */
-function renamedInNotes(artifact: MeetingArtifact, rename: { from: string; to: string }): MeetingArtifact {
-  if (!/^(?:Remote speaker \d+|SPEAKER_\d+)$/u.test(rename.from)) return artifact;
-  const pattern = new RegExp(`\\b${rename.from}\\b`, 'gu');
-  const renamed = <T>(value: T): T => JSON.parse(JSON.stringify(value), (_key, item: unknown) =>
-    (typeof item === 'string' ? item.replace(pattern, rename.to) : item)) as T;
+function renamedInNotes(
+  artifact: MeetingArtifact, rename: { from: string; to: string }, speakers: TranscriptRecord['speakers'],
+): { artifact: MeetingArtifact; outdated?: string } {
+  if (/^(?:Remote speaker \d+|SPEAKER_\d+)$/u.test(rename.from)) {
+    const pattern = new RegExp(`\\b${rename.from}\\b`, 'gu');
+    const renamed = <T>(value: T): T => JSON.parse(JSON.stringify(value), (_key, item: unknown) =>
+      (typeof item === 'string' ? item.replace(pattern, rename.to) : item)) as T;
+    return { artifact: {
+      ...artifact,
+      provisionalClaims: renamed(artifact.provisionalClaims),
+      chat: renamed(artifact.chat),
+      ...(artifact.analysis ? { analysis: renamed(artifact.analysis) } : {}),
+      ...(artifact.insights ? { insights: renamed(artifact.insights) } : {}),
+    } };
+  }
+  // "Microphone" and "System audio" name a source, not a person; a fuller or shorter form names the same one.
+  if (/^(?:Microphone|System audio)$/u.test(rename.from) || sameName(rename.from, rename.to)) return { artifact };
+  const pattern = wholeName(rename.from);
+  const shared = speakers.some((speaker) => speaker.label !== rename.to && wholeName(rename.from).test(speaker.label));
+  const say = (text: string) => shared || wholeName(rename.from).test(rename.to) ? text : text.replace(pattern, rename.to);
+  const claim = (item: MeetingClaim): MeetingClaim => ({ ...item, text: say(item.text),
+    ...(item.person === undefined ? {} : { person: !shared && item.person === rename.from ? rename.to : item.person }) });
+  const point = <T extends { text: string }>(item: T): T => ({ ...item, text: say(item.text) });
   return {
-    ...artifact,
-    provisionalClaims: renamed(artifact.provisionalClaims),
-    chat: renamed(artifact.chat),
-    ...(artifact.analysis ? { analysis: renamed(artifact.analysis) } : {}),
-    ...(artifact.insights ? { insights: renamed(artifact.insights) } : {}),
+    artifact: {
+      ...artifact,
+      provisionalClaims: artifact.provisionalClaims.map(claim),
+      chat: artifact.chat.map(point),
+      ...(artifact.analysis ? { analysis: { ...artifact.analysis, summary: say(artifact.analysis.summary), claims: artifact.analysis.claims.map(claim),
+        ...(artifact.analysis.notes ? { notes: artifact.analysis.notes.map((section) => ({ ...section, items: section.items.map(point) })) } : {}) } } : {}),
+      ...(artifact.insights ? { insights: artifact.insights.map((insight) => ({ ...insight,
+        ...(insight.summary === undefined ? {} : { summary: say(insight.summary) }),
+        fields: insight.fields.map((field) => ({ ...field, items: field.items.map(point) })) })) } : {}),
+    },
+    outdated: `${rename.from} was renamed to ${rename.to}`,
   };
 }
 
@@ -816,8 +858,10 @@ export function synchronizeMeetingTranscript(
   // The evidence hash includes labels, and stored hashes depend on that, so the
   // caller says so rather than the hash changing.
   if (options.namesOnly) {
-    const updated: MeetingArtifact = { ...renamedInNotes(artifact, options.namesOnly),
-      transcriptEvidence: evidence, updatedAt: new Date().toISOString() };
+    const renamed = renamedInNotes(artifact, options.namesOnly, record.speakers);
+    const updated: MeetingArtifact = { ...renamed.artifact, transcriptEvidence: evidence, updatedAt: new Date().toISOString(),
+      ...(renamed.outdated && (artifact.analysis || artifact.provisionalClaims.length || artifact.chat.length || artifact.insights?.length)
+        ? { notesOutdated: { at: new Date().toISOString(), reason: renamed.outdated } } : {}) };
     atomicWrite(path, `${JSON.stringify(updated, null, 2)}\n`);
     writeMeetingProjections(directory, updated, record);
     return updated;

@@ -19,8 +19,9 @@ content somewhere, so only do that when the user asks.
 - When `get_meeting` notes carry `sections`, they follow the user's own notes
   template (for example "Goals and pain points", "Next steps"); prefer them
   for the layout of a summary or follow-up, and keep their citations.
-- `possiblyOutOfDate` means words changed after the notes were written (a
-  corrected line, removed silence). Check the transcript before relying on them.
+- `possiblyOutOfDate` means words or a name changed after the notes were
+  written (a corrected line, removed silence, "Dana was renamed to Remote
+  speaker 1"). Check the transcript before relying on them.
 - A meeting listed as `private` has AI turned off by the user. Tell them it is
   private rather than reading its files directly. Every tool refuses it.
 
@@ -43,6 +44,9 @@ content somewhere, so only do that when the user asks.
 - "Microphone" is the user. "Remote speaker N", "System audio" and
   "Unknown remote speaker" are other people. Calendar attendees (in
   `get_meeting`) suggest who they are, but say when a name is a guess.
+- A speaker marked `suggested` (`speakerSuggested` on a transcript line) was
+  named by Seashell from a voice it knows, and the user has not confirmed it.
+  Say it is a guess.
 
 ## Always cite
 Quote or attribute with the segment ID and time, like `[s000123 12:04]`, so the
