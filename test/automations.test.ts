@@ -390,3 +390,29 @@ test('approvals are signed with a key from the Keychain, or a private file besid
   expect(statSync(join(home, 'Support', 'automation-approvals.key')).mode & 0o777).toBe(0o600);
   expect(approvalKey(approvals, {}, undefined).key.equals(locked.key)).toBe(true);
 });
+
+test('a meeting made private while its automation runs sends nothing more', async () => {
+  const { home, root, record, env } = library();
+  const folder = join(home, 'Notes');
+  automation(env, 'send.md', `---\nname: Send\n---\n- shell: ./file.sh\n- webhook: https://hooks.example.com/x\n- write: ${folder}\n`);
+  const posted: string[] = [];
+  let asked = 0;
+  const [run] = await runAutomations(root, record.id, { env, trigger: 'manual',
+    ask: async () => { asked++; return 'allow'; },
+    // The owner turns AI off for the meeting while the first action runs.
+    shell: async () => { saveMeetingArtifact(root, { ...loadMeetingArtifact(root, record.id)!, ai: { off: true } }); return { code: 0 }; },
+    fetch: (async (url: string) => { posted.push(url); return new Response(null, { status: 204 }); }) as unknown as typeof fetch });
+  expect(run!.actions.map((action) => [action.kind, action.status, action.detail])).toEqual([
+    ['shell', 'ok', undefined], ['webhook', 'skipped', 'The meeting was made private, so this was not sent.'],
+    ['write', 'skipped', 'The meeting was made private, so this was not sent.']]);
+  expect([posted, existsSync(folder), asked]).toEqual([[], false, 1]);
+
+  // Made private while the dialog was open: nothing runs, even with a yes.
+  saveMeetingArtifact(root, { ...loadMeetingArtifact(root, record.id)!, ai: undefined });
+  automation(env, 'send.md', '---\nname: Send\n---\n- shell: ./other.sh\n');
+  const ran: string[] = [];
+  const [later] = await runAutomations(root, record.id, { env, trigger: 'manual',
+    ask: async () => { saveMeetingArtifact(root, { ...loadMeetingArtifact(root, record.id)!, ai: { off: true } }); return 'allow'; },
+    shell: async (command: string) => { ran.push(command); return { code: 0 }; } });
+  expect([later!.actions[0]!.status, ran]).toEqual(['skipped', []]);
+});

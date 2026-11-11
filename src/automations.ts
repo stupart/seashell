@@ -10,7 +10,9 @@ import { approvalKey, signApproval, validApproval } from './approval-key.ts';
 import { defaultConfigPath } from './config.ts';
 import { runAutomaticExtractors, runExtractor } from './extractors.ts';
 import type { HumainMeetingRoute, runHumainMeeting } from './humain-client.ts';
-import { insightFileName, loadMeetingArtifact, saveMeetingArtifact, transcriptSegmentId, type MeetingArtifact } from './meeting-artifact.ts';
+import {
+  insightFileName, loadMeetingArtifact, meetingIsPrivateAt, saveMeetingArtifact, transcriptSegmentId, type MeetingArtifact,
+} from './meeting-artifact.ts';
 import { meaningful, parseFrontmatter, phraseMatches } from './meeting-templates.ts';
 import { HEADING, meetingViewLines, plainMeetingLines, SUBHEADING } from './meeting-tui.ts';
 import { findTranscriptRecord } from './transcript-library.ts';
@@ -66,6 +68,7 @@ export interface Automation {
   hash: string;
 }
 
+const PRIVATE_NOW = 'The meeting was made private, so this was not sent.';
 const SHELL_TIMEOUT_MS = 2 * 60_000;
 const WEBHOOK_TIMEOUT_MS = 20_000;
 
@@ -723,8 +726,11 @@ export async function runAutomations(libraryDir: string, transcriptId: string, o
           result('ok');
           continue;
         }
+        // The owner may have made the meeting private since the run began, even while a dialog was open.
+        const nowPrivate = () => meetingIsPrivateAt(directory);
+        if (nowPrivate()) { result('skipped', PRIVATE_NOW); continue; }
         // Anything that leaves Seashell waits for the owner's yes, once per version of this file.
-        if (approvalLabel(action, libraryDir) !== undefined) {
+        if (approvalLabel(action, libraryDir, directory) !== undefined) {
           if (decision === undefined && !asked && options.ask) {
             asked = true;
             decision = await options.ask({ automation: automation.name, meeting: artifact?.title ?? record.title, actions: outward }, options.signal);
@@ -740,6 +746,7 @@ export async function runAutomations(libraryDir: string, transcriptId: string, o
             continue;
           }
         }
+        if (nowPrivate()) { result('skipped', PRIVATE_NOW); continue; }
         if (action.kind === 'write') {
           const file = writeTargetPath(action.target, record, artifact?.title ?? record.title);
           result('ok', saveNotesFile(libraryDir, file, meetingMarkdown(artifact, record), record.id));

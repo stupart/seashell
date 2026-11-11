@@ -880,8 +880,10 @@ each is signed with a key Seashell keeps in your login Keychain ("Seashell
 automation approvals"), so an approval written there by anything else counts
 for nothing. Without the Keychain the key is a private file beside the
 approvals, and `seashell automations` says so.
-Each automation runs once per meeting, private meetings never run, and every
-run is logged to `automation-runs.jsonl` in your library.
+Each automation runs once per meeting and private meetings never run. Seashell
+looks again just before each `shell`, `webhook` or `write`, so a meeting you
+make private while its automation runs, or while its dialog is open, sends
+nothing more. Every run is logged to `automation-runs.jsonl` in your library.
 
 ```sh
 seashell automations                             # create and list, with last runs
