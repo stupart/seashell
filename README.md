@@ -7,10 +7,12 @@ To see what works, what is off, and how to fix each item, press **,** in
 Seashell for Settings or run `seashell status`.
 
 To use your meetings from Claude Code or Codex, run `seashell mcp install` once.
-It adds a local, read-only meetings server and a skill, so you can ask things
-like "what did we decide in my last call with Dana?" or "draft a follow-up from
-today's sync". Answers cite transcript segments, and nothing is sent anywhere
-unless you approve it.
+It adds a local meetings server and a skill, so you can ask things like "what
+did we decide in my last call with Dana?", "what has Dana committed to since
+October?" or "draft a follow-up from today's sync". Answers cite transcript
+segments, and nothing is sent anywhere unless you approve it. When you ask, the
+agent can also fix a misheard line, name a speaker, or edit your prompts,
+templates, extractors and automations; see [Meetings in Claude Code and Codex](#meetings-in-claude-code-and-codex).
 
 For optional summaries and meeting chat, press **P** in Seashell or run
 `seashell ai setup` to choose models and supported effort levels for live analysis,
@@ -496,10 +498,21 @@ seashell library speakers <id> set SPEAKER_00 "Tyler"
 seashell library speakers <id> identify  # separate review copy
 seashell library open <id>
 seashell library trash <id> --confirm
+seashell library clean-phantoms --dry-run   # count lines heard in silence
+seashell library clean-phantoms [<id>...]   # remove them
 ```
 
 Trash is recoverable inside `<library>/_Trash`; Sea Shell does not permanently
 delete records from its TUI or CLI.
+
+Whisper sometimes writes "Thank you" or "Okay" over silence. New recordings
+drop those lines; `library clean-phantoms` does the same for meetings saved
+before, using each meeting's saved audio. A line goes only when there is no
+speech under it and no sound above a whisper on its own source (the microphone
+for "Microphone", computer audio for everyone else). The dry run reports how
+many lines each meeting would lose. A real run keeps the old transcript in the
+meeting's `history/transcripts` folder first, and keeps the notes, marked as
+possibly out of date.
 
 ## Meeting mode
 
@@ -627,6 +640,140 @@ meeting note shape focus and wording only; they cannot loosen the rule that
 every point needs transcript evidence. Until you run `seashell templates`, the
 built-in templates are used as shipped. Templated notes need a Humain engine
 with owner instructions; an older engine still writes the summary and claims.
+
+Notes lead with what the meeting settled and left open: decisions, actions
+(with the owner and due date when someone said them), risks, open questions
+and follow-ups. Your template's sections come next, then dates, facts and the
+rest. Risks, open questions, follow-ups and due dates need Humain prompt
+revision 3 or later.
+
+### Prompts
+
+What each meeting AI role is told sits in `~/Documents/Sea Shell/Prompts`, next
+to Templates: `live.md` (live analysis), `notes.md` (final notes) and `chat.md`
+(meeting chat). Each is sent to its role after "About me". Comments in a file
+are notes to you and are never sent; an empty file sends nothing. Prompts
+steer focus and style. What the notes cover, their shape and the citation
+rules are fixed in Humain.
+
+```sh
+seashell prompts                 # create and list the files
+seashell prompts reset notes     # put one back the way it shipped
+```
+
+### Asking across meetings
+
+```sh
+seashell query actions --person Dana            # what Dana owns, newest first
+seashell query decisions --about pricing --since 2026-10-01
+seashell query questions --meeting "hiring sync"
+```
+
+Kinds are decisions, actions, risks, questions and follow-ups (all five when
+left out). Each line names its meeting and the transcript moment it came from;
+`--json` adds a quote. Seashell does not track whether an action was done.
+Private meetings never appear.
+
+### Insight extractors
+
+An extractor pulls the same few things out of a meeting every time, each one
+cited: objections, pricing signals, hiring needs. Each is a Markdown file in
+`~/Documents/Sea Shell/Extractors`:
+
+```markdown
+---
+name: Customer pains
+when: always
+fields:
+  Pains: What is hard or slow for them today, in their words
+  Budget: Any budget, price or spend they mentioned
+---
+Look for what the customer says about their own work, not what we pitched.
+```
+
+`when: always` runs it after every meeting's final notes; `when: manual` (the
+default) only when asked; or list words, any of which runs it:
+
+```markdown
+when:
+  title: [discovery, demo]
+  attendee: [acme.com]
+  app: [Zoom]
+```
+
+```sh
+seashell extractors                              # create and list the folder
+seashell extract <id> "Customer pains"           # run one now
+```
+
+Results show under **Insights** in the meeting's notes and are saved beside it
+as `insights/<name>.json` and `.md`. Private meetings are never sent.
+Extractors need Humain prompt revision 3 or later.
+
+### Automations
+
+An automation runs when a meeting is ready. Each is a Markdown file in
+`~/Documents/Sea Shell/Automations`:
+
+```markdown
+---
+name: File customer calls
+when: meeting ready
+title: [discovery, demo]
+---
+- extract: Customer pains
+- write: ~/Documents/Customer calls
+- shell: ~/bin/file-call.sh
+- webhook: https://hooks.example.com/meetings
+```
+
+`title`, `attendee`, `app` and `calendar` narrow which meetings it runs for;
+every one you list must match. `write` saves the notes and transcript as
+Markdown in a folder (or at a `.md` path using `{date}`, `{title}` and `{id}`).
+`shell` runs a command with the meeting's JSON on stdin, and
+`SEASHELL_MEETING_ID` and `SEASHELL_MEETING_DIR` set. `webhook` posts the same
+JSON.
+
+Anything sent outside Seashell asks first. The first time a `shell` or
+`webhook` action would run, the background recorder shows a dialog naming the
+automation, the meeting and exactly what would run or where it would go. Your
+answer is remembered for that version of the file; any edit asks again.
+Approvals live beside Seashell's settings, not in the Automations folder.
+Each automation runs once per meeting, private meetings never run, and every
+run is logged to `automation-runs.jsonl` in your library.
+
+```sh
+seashell automations                             # create and list, with last runs
+seashell automations run <id> ["<name>"]         # run now for one meeting
+```
+
+### Checking the AI connection
+
+```sh
+seashell ai test
+```
+
+Sends one short, fixed message (never meeting text) through each AI route in
+use and reports how long it took, or why it failed in plain words: the engine
+is not installed, the provider is not signed in, the model is not offered, or
+it timed out.
+
+### Meetings in Claude Code and Codex
+
+`seashell mcp install` adds the meetings server and its skill. Reading tools:
+`list_meetings`, `get_meeting`, `get_transcript`, `search_transcripts`,
+`list_action_items`, `query_notes`, `get_insights`, `get_video_moment` (the
+screen recording and offset for a transcript moment, when there is one),
+`list_extractors`, `list_automations`, `list_prompts` and `list_templates`.
+
+Tools that change your files, which the agent uses only when you ask:
+`edit_segment` (fix a line), `rename_speaker`, `update_prompt`,
+`update_template`, `create_extractor`, `update_extractor`, `delete_extractor`,
+`run_extractor`, `create_automation`, `update_automation` and
+`delete_automation`. A corrected line keeps the old transcript in the meeting's
+history and keeps the notes, marked as possibly out of date. Automations an
+agent writes still ask you before sending anything outside. Every tool refuses
+private meetings.
 
 ### Google Meet status
 
@@ -1020,6 +1167,8 @@ seashell transcribe input.mp4 --format json --no-save --quiet > transcript.json
 seashell library list --json
 seashell library show <id> --format json
 seashell meeting show <id> --json
+seashell query actions --person Dana --json
+seashell ai test --json
 ```
 
 ## Privacy

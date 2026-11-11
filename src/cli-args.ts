@@ -78,7 +78,8 @@ export type LibraryAction =
   | { kind: 'speakers-identify'; id: string }
   | { kind: 'speakers-set'; id: string; speakerId: string; label: string }
   | { kind: 'open'; id?: string }
-  | { kind: 'trash'; id: string; confirmed: boolean };
+  | { kind: 'trash'; id: string; confirmed: boolean }
+  | { kind: 'clean-phantoms'; ids: string[]; dryRun: boolean };
 
 export interface LibraryCommand {
   kind: 'library';
@@ -103,9 +104,30 @@ export interface CaptureCommand {
   json: boolean;
 }
 
+/** Prompts, extractors, automations and cross-meeting queries: how the meeting AI is steered and asked. */
+export type MeetingIntelligenceCommand =
+  | { kind: 'prompts'; action: 'list'; json: boolean }
+  | { kind: 'prompts'; action: 'reset'; name: string; json: boolean }
+  | { kind: 'extractors'; json: boolean }
+  | { kind: 'extract'; id: string; extractor: string; json: boolean }
+  | { kind: 'automations'; action: 'list'; json: boolean }
+  | { kind: 'automations'; action: 'run'; id: string; name?: string; json: boolean }
+  | {
+      kind: 'query';
+      noteKind?: string;
+      person?: string;
+      about?: string;
+      meeting?: string;
+      since?: string;
+      until?: string;
+      limit?: number;
+      json: boolean;
+    };
+
 export type CliCommand =
   | { kind: 'ai'; action: 'install'; tarball: string; json: boolean }
-  | { kind: 'ai'; action: 'status' | 'providers'; json: boolean }
+  | { kind: 'ai'; action: 'status' | 'providers' | 'test'; json: boolean }
+  | MeetingIntelligenceCommand
   | { kind: 'ai-setup' }
   | { kind: 'help' }
   | { kind: 'tui'; libraryDir?: string }
@@ -291,6 +313,7 @@ function parseLibrary(args: string[]): LibraryCommand {
   let speakers = false;
   let libraryDir: string | undefined;
   let confirmed = false;
+  let dryRun = false;
 
   for (let index = 2; index < args.length; index += 1) {
     const arg = args[index]!;
@@ -307,6 +330,7 @@ function parseLibrary(args: string[]): LibraryCommand {
       case '--speakers': speakers = true; break;
       case '--library-dir': libraryDir = next(); break;
       case '--confirm': confirmed = true; break;
+      case '--dry-run': dryRun = true; break;
       default:
         if (arg.startsWith('-')) throw new Error(`Unknown library option: ${arg}`);
         positional.push(arg);
@@ -352,9 +376,13 @@ function parseLibrary(args: string[]): LibraryCommand {
       if (!positional[0]) throw new Error('library trash requires a transcript ID');
       action = { kind: 'trash', id: positional[0], confirmed };
       break;
+    case 'clean-phantoms':
+      action = { kind: 'clean-phantoms', ids: positional, dryRun };
+      break;
     default:
       throw new Error(`Unknown library action: ${actionName}`);
   }
+  if (dryRun && action.kind !== 'clean-phantoms') throw new Error('--dry-run only applies to library clean-phantoms');
 
   return {
     kind: 'library',
@@ -739,6 +767,53 @@ function parseCapture(args: string[]): CaptureCommand {
   };
 }
 
+function parseMeetingIntelligence(args: string[]): MeetingIntelligenceCommand {
+  const json = args.includes('--json');
+  const rest = args.slice(1).filter((arg) => arg !== '--json');
+  switch (args[0]) {
+    case 'prompts':
+      if (rest.length === 0) return { kind: 'prompts', action: 'list', json };
+      if (rest[0] === 'reset' && rest.length === 2) return { kind: 'prompts', action: 'reset', name: rest[1]!, json };
+      throw new Error('Usage: seashell prompts [reset <live|notes|chat>] [--json]');
+    case 'extractors':
+      if (rest.length) throw new Error('Usage: seashell extractors [--json]');
+      return { kind: 'extractors', json };
+    case 'extract':
+      if (rest.length < 2 || rest.some((arg) => arg.startsWith('-'))) throw new Error('Usage: seashell extract <meeting-id> <extractor> [--json]');
+      return { kind: 'extract', id: rest[0]!, extractor: rest.slice(1).join(' '), json };
+    case 'automations':
+      if (rest.length === 0) return { kind: 'automations', action: 'list', json };
+      if (rest[0] === 'run' && rest[1] && !rest.slice(1).some((arg) => arg.startsWith('-'))) {
+        return { kind: 'automations', action: 'run', id: rest[1], ...(rest.length > 2 ? { name: rest.slice(2).join(' ') } : {}), json };
+      }
+      throw new Error('Usage: seashell automations [run <meeting-id> [<name>]] [--json]');
+    default: {
+      const usage = 'Usage: seashell query [decisions|actions|risks|questions|follow-ups] [--person <name>] [--about <words>] [--meeting <title words>] [--since <date>] [--until <date>] [--limit <n>] [--json]';
+      const command: Extract<MeetingIntelligenceCommand, { kind: 'query' }> = { kind: 'query', json };
+      for (let index = 0; index < rest.length; index += 1) {
+        const arg = rest[index]!;
+        const next = () => {
+          const [value, consumedIndex] = takeValue(rest, index, arg);
+          index = consumedIndex;
+          return value;
+        };
+        switch (arg) {
+          case '--person': command.person = next(); break;
+          case '--about': command.about = next(); break;
+          case '--meeting': command.meeting = next(); break;
+          case '--since': command.since = next(); break;
+          case '--until': command.until = next(); break;
+          case '--limit': command.limit = positiveInteger(arg, next()); break;
+          default:
+            if (arg.startsWith('-') || command.noteKind) throw new Error(usage);
+            if (arg !== 'all') command.noteKind = arg;
+        }
+      }
+      return command;
+    }
+  }
+}
+
 export function parseCliArgs(args: string[]): CliCommand {
   if (args.length === 0) return { kind: 'tui' };
   if (args.includes('--help') || args.includes('-h') || args[0] === 'help') {
@@ -754,11 +829,11 @@ export function parseCliArgs(args: string[]): CliCommand {
   if (args[0] === 'ai') {
     const rest = args.slice(1).filter((arg) => arg !== '--json');
     if (rest[0] === 'setup' && rest.length === 1 && !args.includes('--json')) return { kind: 'ai-setup' };
-    if ((rest[0] === 'status' || rest[0] === 'providers') && rest.length === 1) return { kind: 'ai', action: rest[0], json: args.includes('--json') };
+    if ((rest[0] === 'status' || rest[0] === 'providers' || rest[0] === 'test') && rest.length === 1) return { kind: 'ai', action: rest[0], json: args.includes('--json') };
     if (rest[0] === 'install' && rest.length === 2 && !rest[1]!.startsWith('-')) {
       return { kind: 'ai', action: 'install', tarball: rest[1]!, json: args.includes('--json') };
     }
-    throw new Error('Usage: seashell ai install <trusted-package.tgz> | seashell ai setup | status | providers [--json]');
+    throw new Error('Usage: seashell ai install <trusted-package.tgz> | seashell ai setup | status | providers | test [--json]');
   }
   if (args[0] === 'mcp') {
     const rest = args.slice(1).filter((arg) => arg !== '--json');
@@ -838,6 +913,7 @@ export function parseCliArgs(args: string[]): CliCommand {
     if (unknown.length) throw new Error(`Unknown update option: ${unknown[0]}`);
     return { kind: 'update', check: args.includes('--check'), json: args.includes('--json') };
   }
+  if (['prompts', 'extractors', 'extract', 'automations', 'query'].includes(args[0]!)) return parseMeetingIntelligence(args);
   if (args[0] === 'capture') return parseCapture(args);
   if (args[0] === 'meeting') return parseMeeting(args);
   if (args[0] === 'library') return parseLibrary(args);
@@ -857,14 +933,23 @@ Usage:
   seashell ai status [--json]             Check engine and Node readiness
   seashell ai setup                       Choose meeting AI interactively
   seashell ai providers [--json]          Discover providers and login/setup steps
+  seashell ai test [--json]               Send one tiny fixed prompt through each AI route in use
   seashell setup [--no-autostart] [--json]  Apply safe defaults on a true first install
   seashell library speakers <id> identify   Separate saved voices into a review copy
   seashell setup --speakers [--login]       Set up optional local speaker identification
   seashell setup --speakers --check [--json] Verify the cached speaker model offline
   seashell status [--json]                  What works, what is off, and the next step for each
-  seashell mcp                              Read-only meetings server for Claude Code/Codex (stdio)
+  seashell mcp                              Meetings server for Claude Code/Codex (stdio)
   seashell mcp install [--json]             Add that server and its skill to Claude Code and Codex
   seashell templates [--json]               Your notes templates and "About me", in an editable folder
+  seashell prompts [--json]                 What each meeting AI role is told, as files you can edit
+  seashell prompts reset <live|notes|chat>  Put one prompt back the way it shipped
+  seashell query [decisions|actions|risks|questions|follow-ups] [--person <name>] [--about <words>] [--since <date>]
+                                            Notes across all meetings, each with its source
+  seashell extractors [--json]              Your insight extractors, in an editable folder
+  seashell extract <id> <extractor>         Run one extractor on one meeting
+  seashell automations [--json]             What runs when a meeting is ready, and its recent runs
+  seashell automations run <id> [<name>]    Run automations for one meeting now
   seashell record [stop]                    Record now, by hand, or stop the recording
   seashell meeting apps [<app> on|off|ask]  Which apps record by themselves, ask first, or never
   seashell speakers compare [--last <n>]    Try Nemotron 3 on past calls and listen where the engines disagree
@@ -902,6 +987,7 @@ Library actions:
   library speakers <id> set <speaker-id> <name> [--json]
   library open [id]
   library trash <id> --confirm
+  library clean-phantoms [<id>...] [--dry-run] [--json]  Remove lines Whisper heard in silence
 
 Capture actions:
   capture test [--seconds 5] [--json]       Prove mic + system signal, then discard test audio
