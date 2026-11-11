@@ -157,3 +157,36 @@ test('insights name each extractor once, label their fields, and leave out what 
   // The only field left needs no label of its own.
   expect(lines.slice(lines.indexOf('# Insights'))).toEqual(['# Insights', `${SUBHEADING}Customer pains`, `- Legal needs it in writing.${META}${META}00:14`]);
 });
+
+test('a template line never hides a different action, nor lends it the wrong owner', () => {
+  const record = createTranscriptRecord({ transcript: [
+    { start: 12, end: 18, text: 'Sam, send the contract to Globex by Monday, and I will send the signed contract to Acme.' }], speakers: [] }, { id: 'contracts' });
+  const artifact = createMeetingArtifact(record);
+  const action = (id: string, text: string, person: string, due?: string) =>
+    ({ id, type: 'action_item' as const, text, person, ...(due ? { due } : {}), evidenceSegmentIds: ['s000001'], confidence: 0.9 });
+  artifact.analysis = { final: true, summary: 'Contracts.', runId: 'r', createdAt: new Date().toISOString(),
+    claims: [action('g', 'Send the contract to Globex.', 'Sam', 'Monday'), action('a', 'Send the contract to Acme.', 'You')],
+    notes: [{ heading: 'Next steps', items: [{ text: 'Send the contract to Acme.', evidenceSegmentIds: ['s000001'] }] }] };
+  const actions = (lines: string[]) => plainMeetingLines(lines.slice(lines.indexOf('# Actions') + 1));
+  // "the" and "to" are not what makes two actions the same: Globex stays, with Sam's owner and date.
+  expect(actions(meetingViewLines(artifact, 'notes', record))).toEqual([
+    '- Send the contract to Acme.  You  00:12', '- Send the contract to Globex.  Sam · Monday  00:12']);
+
+  // A line that matches two actions stands in for neither, and takes no owner.
+  artifact.analysis.notes = [{ heading: 'Next steps', items: [{ text: 'Send the signed contract.', evidenceSegmentIds: ['s000001'] }] }];
+  artifact.analysis.claims = [action('g', 'Send the signed contract to Globex.', 'Sam', 'Monday'), action('a', 'Send the signed contract to Acme.', 'You')];
+  expect(actions(meetingViewLines(artifact, 'notes', record))).toEqual([
+    '- Send the signed contract.  00:12', '- Send the signed contract to Globex.  Sam · Monday  00:12',
+    '- Send the signed contract to Acme.  You  00:12']);
+});
+
+test('an insight that says more than a line of the notes is not left out as a repeat', () => {
+  const record = createTranscriptRecord({ transcript: [{ start: 7, end: 12, text: 'Budget is the main question for Acme; it is tight.' }], speakers: [] }, { id: 'budget' });
+  const artifact = createMeetingArtifact(record);
+  artifact.analysis = { final: true, summary: 'Budget.', runId: 'r', createdAt: new Date().toISOString(), claims: [],
+    notes: [{ heading: 'Where they stand', items: [{ text: 'The budget for Acme is the main question.', evidenceSegmentIds: ['s000001'] }] }] };
+  artifact.insights = [{ extractor: 'Customer pains', createdAt: new Date().toISOString(), runId: 'i', fields: [
+    { name: 'Budget', items: [{ text: 'Acme budget is tight.', evidenceSegmentIds: ['s000001'] }] }] }];
+  const lines = meetingViewLines(artifact, 'notes', record);
+  expect(lines.slice(lines.indexOf('# Insights'))).toEqual(['# Insights', `${SUBHEADING}Customer pains`, `- Acme budget is tight.${META}${META}00:07`]);
+});

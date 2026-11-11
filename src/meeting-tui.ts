@@ -53,8 +53,19 @@ function createStart(artifact: MeetingArtifact, record?: TranscriptRecord): (ids
   };
 }
 
+/** Words that say nothing about which point a line is: "send the contract to Acme" is send, contract, Acme. */
+const STOP_WORDS = new Set(`a an the and or but nor so to of in on at by for with from into onto about over as than then
+  is are was were be been being am will would shall should can could may might must do does did done have has had
+  it its this that these those there here i me my we us our you your he him his she her they them their who whom
+  what which when where how why if not no yes up out also just all any each some let lets s t d ll re ve m`.split(/\s+/u));
+
 function wordsOf(text: string): Set<string> {
   return new Set(text.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+}
+
+/** The words that tell one point from another. */
+function contentWords(text: string): Set<string> {
+  return new Set([...wordsOf(text)].filter((word) => !STOP_WORDS.has(word)));
 }
 
 /** Lines starting with this are headings; wrappedMeetingRows keeps them, the app makes them bold. */
@@ -153,19 +164,27 @@ export function meetingViewLines(
   // different point, and losing one is worse than reading it twice.
   const sections = artifact.analysis?.notes ?? [];
   type Said = { words: Set<string>; passages: Set<string> };
-  const saying = (text: string, ids: readonly string[]): Said => ({ words: wordsOf(text), passages: new Set(ids) });
+  const saying = (text: string, ids: readonly string[]): Said => ({ words: contentWords(text), passages: new Set(ids) });
+  // The same moment, and most of the words of the longer of the two, so a short
+  // line cannot stand in for a longer one that says more ("to Globex", "by Monday").
   const echoes = (line: Said, other: Said) => [...line.passages].some((id) => other.passages.has(id)) &&
-    [...line.words].filter((word) => other.words.has(word)).length >= Math.max(2, line.words.size * 0.7);
-  const said = sections.flatMap((section) => section.items.map((item) => saying(item.text, item.evidenceSegmentIds)));
-  const repeated = (claim: MeetingClaim) => said.some((other) => echoes(saying(claim.text, claim.evidenceSegmentIds), other));
+    [...line.words].filter((word) => other.words.has(word)).length >= Math.max(2, Math.max(line.words.size, other.words.size) * 0.7);
   // An action or follow-up says who and by when, as it was said.
   const ownerOf = (claim: MeetingClaim) =>
     claim.type === 'action_item' || claim.type === 'follow_up' ? claimOwnerAndDue(claim) : undefined;
-  // A template's wording of an action keeps the owner and due date the action itself recorded.
-  const ownerFor = (item: { text: string; evidenceSegmentIds: string[] }) => {
+  // A template's line restates at most one claim. It stands in for that claim, and
+  // shows the owner and due date the claim recorded, only when no other claim
+  // also matches it; otherwise every claim stays, with its own owner.
+  const restated = new Map(sections.flatMap((section) => section.items).map((item) => {
     const line = saying(item.text, item.evidenceSegmentIds);
-    const action = claims.find((claim) => ownerOf(claim) && echoes(saying(claim.text, claim.evidenceSegmentIds), line));
-    return action && ownerOf(action);
+    const matches = claims.filter((claim) => echoes(saying(claim.text, claim.evidenceSegmentIds), line));
+    return [item, { line, claim: matches.length === 1 ? matches[0] : undefined }] as const;
+  }));
+  const said = [...restated.values()].map(({ line }) => line);
+  const repeated = (claim: MeetingClaim) => [...restated.values()].some((line) => line.claim === claim);
+  const ownerFor = (item: (typeof sections)[number]['items'][number]) => {
+    const claim = restated.get(item)?.claim;
+    return claim && ownerOf(claim);
   };
   const shown = [...said];
   const fromClaims = (types: MeetingClaimType[]): Item[] => {
