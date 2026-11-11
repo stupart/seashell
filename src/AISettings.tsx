@@ -16,7 +16,7 @@ import {
 type Providers = Awaited<ReturnType<typeof discoverHumainProviders>>['integrations'];
 type HomeEntry = 'use' | 'test' | 'another' | 'advanced' | 'recommended';
 
-const ROLE_WORDS: Record<MeetingAiRole, string> = { observer: 'live', reconciliation: 'notes', chat: 'chat' };
+const ROLE_WORDS: Record<MeetingAiRole, string> = { observer: 'live analysis', reconciliation: 'final notes', chat: 'chat' };
 const nameOf = (id: HumainBackend) => AI_PROVIDERS.find((provider) => provider.id === id)?.name ?? id;
 
 /** Each route the test tried: ✓ with how long it took, or ✗ with what to do. */
@@ -30,7 +30,7 @@ function ConnectionTest(props: { test: MeetingAiTest; width: number }) {
     const roles = route.roles.map((role) => ROLE_WORDS[role]).join(', ');
     return <Box key={`${route.backend}-${route.model}-${roles}`} flexDirection="column" flexShrink={0}>
       <Text wrap="truncate-end"><Text color={route.ok ? 'green' : 'red'}>{route.ok ? '✓' : '✗'}</Text> {name}
-        <Text dimColor>{'  '}{roles}{route.ok && route.latencyMs !== undefined ? ` · answered in ${(route.latencyMs / 1000).toFixed(1)} s` : ''}</Text></Text>
+        <Text dimColor>{'  '}{route.ok && route.latencyMs !== undefined ? `answered in ${(route.latencyMs / 1000).toFixed(1)} s · ` : ''}{roles}</Text></Text>
       {!route.ok && <Box paddingLeft={2}><Paragraph width={props.width - 2} color="red" text={route.reason ?? route.failure?.message ?? 'It did not answer.'} /></Box>}
     </Box>;
   })}</>;

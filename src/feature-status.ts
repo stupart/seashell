@@ -348,7 +348,7 @@ export async function readFeatureStatuses(options: {
   return statuses;
 }
 
-const VIDEO_DETAIL = 'Records the call\'s window beside its audio, two frames a second, about 60 MB an hour. In a meeting, w plays it from the line you are reading.';
+const VIDEO_DETAIL = 'Records the call\'s window beside its audio, about 60 MB an hour. In a meeting, w plays it from the line you are reading.';
 
 /** Video with calls: on or off, and whether macOS lets Seashell Screen Capture record. */
 function videoStatus(on: boolean, permission: HelperPermissionStatus | undefined): FeatureStatus {
@@ -392,7 +392,7 @@ function extractorsStatus(libraryDir: string): FeatureStatus {
     detail: 'Pull the same few things out of a meeting every time, each one cited. Results show under Insights in the notes. Each is a Markdown file.' } as const;
   const { extractors, problems } = loadExtractors(libraryDir);
   if (problems.length) return { ...base, state: 'broken', summary: `${problems.length} ${problems.length === 1 ? 'file does' : 'files do'} not load`,
-    fix: problems[0]!.message };
+    fix: 'Fix the file marked ✗ below. Until then it never runs.' };
   if (!extractors.length) return { ...base, state: 'off', summary: existsSync(extractorsDirectory(libraryDir)) ? 'None' : 'None yet',
     fix: 'Open the folder; it starts with an example.' };
   const automatic = extractors.filter(extractor => extractor.when.kind !== 'manual').length;
@@ -405,7 +405,7 @@ function automationsStatus(libraryDir: string): FeatureStatus {
     detail: 'Do something by themselves when a meeting is ready: save the notes to a folder, run a command, or post to a web address.' } as const;
   const { automations, problems } = loadAutomations(libraryDir);
   if (problems.length) return { ...base, state: 'broken', summary: `${problems.length} ${problems.length === 1 ? 'file does' : 'files do'} not load`,
-    fix: problems[0]!.message };
+    fix: 'Fix the file marked ✗ below. Until then it never runs.' };
   const on = automations.filter(automation => automation.enabled);
   if (!on.length) return { ...base, state: 'off', summary: automations.length ? `${automations.length} · all off`
     : existsSync(automationsDirectory(libraryDir)) ? 'None' : 'None yet', fix: 'Open the folder; it starts with an example that is off.' };

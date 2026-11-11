@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { spawnSync } from 'child_process';
 import { existsSync } from 'fs';
+import { homedir } from 'os';
 import { Box, Text, useInput } from 'ink';
 import { defaultConfigPath, updateMeetingConfig, type SeashellConfig } from './config.ts';
 import {
@@ -61,6 +62,9 @@ export interface SettingsActions {
   /** A prompt, in the person's text editor. */
   openFile?: (path: string) => void;
 }
+
+/** A path as people write it, with ~ for their home folder. */
+const tildified = (path: string) => path.startsWith(`${homedir()}/`) ? `~${path.slice(homedir().length)}` : path;
 
 /** Opens a folder in Finder. */
 export function openFolder(directory: string): void {
@@ -130,8 +134,8 @@ export function useSetupActions(props: SetupActionProps & { onFinished?: () => v
         const directory = action === 'open-extractors' ? ensureExtractorsDirectory(props.libraryDir) : ensureAutomationsDirectory(props.libraryDir);
         (props.actions?.openFolder ?? openFolder)(directory);
         setMessage(action === 'open-extractors'
-          ? `Opened ${directory}. Each extractor is a Markdown file; the example shows how.`
-          : `Opened ${directory}. Each automation is a Markdown file; the example stays off until you turn it on.`);
+          ? `Opened ${tildified(directory)}. Each extractor is a Markdown file; the example shows how.`
+          : `Opened ${tildified(directory)}. Each automation is a Markdown file; the example stays off until you turn it on.`);
         return true;
       } catch (cause) {
         setMessage(cause instanceof Error ? cause.message : String(cause));
@@ -141,7 +145,8 @@ export function useSetupActions(props: SetupActionProps & { onFinished?: () => v
     if (action === 'turn-on-video') {
       try {
         props.onConfigChange?.(updateMeetingConfig({ video: { enabled: true } }));
-        setMessage('Video is on. Calls record their window from now on.');
+        // The item's own state line says it is on.
+        setMessage(undefined);
         return true;
       } catch (cause) {
         setMessage(cause instanceof Error ? cause.message : String(cause));
@@ -307,6 +312,7 @@ export default function SettingsScreen(props: SetupActionProps & {
   const [rowIndex, setRowIndex] = useState(0);
   const [refresh, setRefresh] = useState(0);
   const [loadError, setLoadError] = useState<string>();
+  const opened = useRef(false);
   /** A yes-or-no question in the key bar's row, before anything is lost. */
   const [confirm, setConfirm] = useState<{ text: string; run: () => void }>();
   // Recording rows show what was just saved, whether or not the caller passes it back down.
@@ -314,14 +320,24 @@ export default function SettingsScreen(props: SetupActionProps & {
   useEffect(() => setConfig(props.config), [props.config]);
   const setup = useSetupActions({ ...props, onFinished: () => setRefresh(value => value + 1) });
 
+  // Read from the settings as just saved here, so a change shows even before the caller passes it back.
   useEffect(() => {
     const controller = new AbortController();
-    void readFeatureStatuses({ config: props.config, libraryDir: props.libraryDir, signal: controller.signal,
+    void readFeatureStatuses({ config, libraryDir: props.libraryDir, signal: controller.signal,
       ...(props.dependencies ? { dependencies: props.dependencies } : {}) })
-      .then(next => { if (!controller.signal.aborted) setStatuses(next); })
+      .then(next => {
+        if (controller.signal.aborted) return;
+        setStatuses(next);
+        // Open on what needs the person; when nothing does, on the first row. Set with the list
+        // itself, so a key pressed as it appears is never undone.
+        if (opened.current) return;
+        opened.current = true;
+        const first = next.findIndex(status => !status.optional && status.state !== 'ok');
+        if (first >= 0) setIndex(first + 2);
+      })
       .catch(cause => { if (!controller.signal.aborted) setLoadError(cause instanceof Error ? cause.message : String(cause)); });
     return () => controller.abort();
-  }, [refresh, props.config]);
+  }, [refresh, config]);
 
   // The lists behind Prompts, Extractors, Automations and Saved voices; read again after every change.
   const files = useMemo(() => {
@@ -339,14 +355,6 @@ export default function SettingsScreen(props: SetupActionProps & {
 
   const items: MenuItem[] = [{ kind: 'recording' }, { kind: 'guide' },
     ...(statuses ?? []).map(status => ({ kind: 'status' as const, status }))];
-  // Open on what needs the person; when nothing does, on the first row.
-  const opened = useRef(false);
-  useEffect(() => {
-    if (!statuses || opened.current) return;
-    opened.current = true;
-    const first = items.findIndex(item => item.kind === 'status' && !item.status.optional && item.status.state !== 'ok');
-    setIndex(Math.max(0, first));
-  }, [statuses]);
   const selected = items[Math.min(index, items.length - 1)];
   const rows = recordingRows(config);
   const compact = props.columns < 72;
@@ -372,7 +380,7 @@ export default function SettingsScreen(props: SetupActionProps & {
       setup.setMessage(cause instanceof Error ? cause.message : String(cause));
     }
   };
-  const attempt = (work: () => string) => {
+  const attempt = (work: () => string | undefined) => {
     try { setup.setMessage(work()); }
     catch (cause) { setup.setMessage(cause instanceof Error ? cause.message : String(cause)); }
     setRefresh(value => value + 1);
@@ -381,7 +389,8 @@ export default function SettingsScreen(props: SetupActionProps & {
     const saved = updateMeetingConfig({ video: { enabled: !on } });
     setConfig(saved);
     props.onConfigChange?.(saved);
-    return on ? 'Video is off. Calls record audio only.' : 'Video is on. Calls record their window from now on.';
+    // The item's own state line says what changed.
+    return undefined;
   });
 
   useInput((input, key) => {
@@ -510,8 +519,9 @@ export default function SettingsScreen(props: SetupActionProps & {
         {files.runs.map((run, i) => {
           const [symbol, color] = RUN_SYMBOL[run.status];
           const why = run.detail ?? run.actions.find(action => action.status === run.status && action.detail)?.detail;
-          return <Text key={`${run.at}-${i}`} wrap="truncate-end"><Text color={color}>{symbol}</Text> {run.automation} · {run.title}
-            <Text dimColor> · {meetingWhen(run.at)}{run.status !== 'ok' && why ? ` · ${why}` : ''}</Text></Text>;
+          // What went wrong leads, so a narrow window still shows it.
+          return <Text key={`${run.at}-${i}`} wrap="truncate-end"><Text color={color}>{symbol}</Text> {run.automation}
+            {run.status !== 'ok' && why ? <Text color={color}> · {why}</Text> : null}<Text dimColor> · {run.title} · {meetingWhen(run.at)}</Text></Text>;
         })}
       </Box>}
     </>;
@@ -542,7 +552,7 @@ export default function SettingsScreen(props: SetupActionProps & {
     <Box flexDirection="column" flexShrink={1} overflow="hidden">
       <Box marginTop={1} flexShrink={0}><Paragraph width={width} text={selected.status.detail} /></Box>
       {selected.status.state !== 'ok' && selected.status.fix && <Box marginTop={1} flexShrink={0}>
-        <Paragraph width={width} color={selected.status.state === 'broken' ? 'red' : 'yellow'} text={`Next: ${selected.status.fix}`} /></Box>}
+        <Paragraph width={width} color="yellow" text={`Next: ${selected.status.fix}`} /></Box>}
       {!selected.status.action && selected.status.state !== 'ok' && selected.status.command
         ? <Paragraph width={width} text={`Run: ${selected.status.command}`} /> : null}
       {['prompts', 'voices', 'extractors', 'automations'].includes(selected.status.id) &&
@@ -561,7 +571,7 @@ export default function SettingsScreen(props: SetupActionProps & {
       ...(selected?.kind === 'recording' ? [['Enter', 'change'] as Hint] : selected?.kind === 'guide' ? [['Enter', 'start'] as Hint]
         : list === 'prompts' ? [['Enter', 'choose a prompt'] as Hint] : list === 'voices' && listLength ? [['Enter', 'choose someone'] as Hint]
         : action ? [['Enter', lowerFirst(FEATURE_ACTION_LABEL[action])] as Hint] : selected && testable(selected) ? [['Enter', 'test it now'] as Hint] : []),
-      ...(videoOn ? [['space', 'turn video off'] as Hint] : []),
+      ...(videoOn ? [['space', 'turn off'] as Hint] : []),
       ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ['r', 'recheck'], ['Esc', 'back'],
     ];
   const titleDetail = statuses ? <Text color={needs.length ? 'yellow' : 'green'}>
