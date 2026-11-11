@@ -82,7 +82,7 @@ test('meeting rows show the time for today and the day before that, against the 
   const today = new Date(2026, 9, 2, 10, 3);
   const day = earlier.toLocaleDateString([], { month: 'short', day: 'numeric' });
   expect(meetingEntryRow(entry(earlier.toISOString(), 2_064), 30, now)).toBe(`Google Meet${' '.repeat(30 - 12 - day.length)} ${day}`);
-  expect(meetingEntryRow(entry(today.toISOString(), 4_400), 30, now)).toEndWith(' 10:03a');
+  expect(meetingEntryRow(entry(today.toISOString(), 4_400), 30, now)).toEndWith(' 10:03 am');
   expect(meetingEntryRow(entry(today.toISOString(), 300, 'recording'), 30, now)).toStartWith('● Google Meet');
   expect(meetingEntryRow({ ...entry(earlier.toISOString()), title: 'A very long meeting title that cannot fit' }, 24, now)).toEndWith(`… ${day}`);
   // A meeting kept with its video has ▶ beside its date.
@@ -107,7 +107,7 @@ test("every row's date ends in the same terminal column, whatever its title is w
   const rows = list.map(([title, at], index) => `${index === 0 ? '› ' : '  '}${meetingEntryRow(entry(title, at), 52, now, column)}`);
   for (const row of rows) expect(Bun.stringWidth(row)).toBe(54);
   // Today's rows end in a time, older rows in a day; all in one column.
-  expect(rows.slice(0, 2).every((row) => /\d[ap]$/u.test(row))).toBeTrue();
+  expect(rows.slice(0, 2).every((row) => /\d [ap]m$/u.test(row))).toBeTrue();
   expect(rows.slice(2).every((row) => /[A-Z][a-z]{2} \d{1,2}$/u.test(row))).toBeTrue();
 });
 

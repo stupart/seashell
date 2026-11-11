@@ -67,12 +67,14 @@ try {
   writeBackgroundMeetingState(saved.directory, 'recording', { captureHealth: health.snapshot, audioSavedThroughMs: 110_000,
     draftStatus: { stage: 'waiting', detail: 'Waiting for speech', queueDepth: 0 } });
   writeBackgroundWatchStatus(library, { phase: 'recording', sessionId: first.id, warning: meetWarning });
-  await until(() => screen().includes('Mic not heard'), 'new meeting opens automatically and exposes microphone failure');
+  await until(() => screen().includes('Mic silent'), 'new meeting opens automatically and exposes microphone failure');
   // One status slot, most urgent first: the microphone outranks the observer's warning.
   assert(screen().includes('● Recording'), 'confirmed audio capture continues');
   if (columns >= 80) assert(screen().includes('Audio saved through 1:50'), 'saved duration comes from committed audio');
-  await type('i'); assert(screen().includes('Audio help'), `audio help is reachable\n${screen()}`);
-  await type('\x1b'); assert(!screen().includes('Audio help'), 'Escape closes audio help without quitting');
+  // With the mic the problem, help is about the mic and leads with what Seashell found.
+  await type('i'); assert(screen().includes('Mic help') && screen().replace(/\s+/gu, ' ').includes('Your mic has sent nothing since the call started.'),
+    `audio help is reachable\n${screen()}`);
+  await type('\x1b'); assert(!screen().includes('Mic help'), 'Escape closes audio help without quitting');
   const transcript = Array.from({ length: 200 }, (_, i) => ({ id: `s${i}`, start: i, end: i + 1, text: `Live sentence ${String(i).padStart(3, '0')}.`, speaker: 'LOCAL' }));
   saveTranscriptRecord(library, { ...first, transcript }, { provisional: true });
   await until(() => screen().includes('Live sentence 199.'), 'draft text appears while recording, not just after finalization');
@@ -101,7 +103,8 @@ try {
   await until(() => screen().includes('Second meeting live text.'), 'next meeting opens in its own transcript');
   await type('h'); await type('\x1b[B'); await type('\r');
   // Narrow, the slot is cut short; the title still names the meeting being read.
-  assert(screen().includes(columns >= 80 ? 'Design meeting' : 'Saved · audio needs review') && screen().includes(columns >= 80 ? '● Another call is recording · l opens it' : '● Another'),
+  assert(screen().includes(columns >= 80 ? 'Design meeting' : 'Saved · audio needs review') && screen().includes(columns >= 80 ? '● Another call is recording' : '● Another')
+    && screen().includes('l go to the call'),
     `history view keeps its identity while another call records\n${screen()}`);
   await type('l');
   writeBackgroundWatchStatus(library, { phase: 'recording', sessionId: second.id }, Date.now() - 31_000);

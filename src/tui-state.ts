@@ -29,11 +29,11 @@ export function sameDay(left: string, right: string): boolean {
 }
 
 const clockTime = (date: Date) => date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-  .replace(/\s?([ap])\.?m\.?/iu, (_, half: string) => half.toLowerCase());
+  .replace(/\s?([ap])\.?\s?m\.?/iu, (_, half: string) => ` ${half.toLowerCase()}m`);
 
 /**
  * When something happened, in local time, the one way Seashell writes it:
- * "6:44p" today, "Nov 7 2:30p" before. Without the time, an older day is just "Nov 7".
+ * "6:44 pm" today, "Nov 7 2:30 pm" before. Without the time, an older day is just "Nov 7".
  */
 export function meetingWhen(createdAt: string, now = new Date(), withTime = true): string {
   const created = new Date(createdAt);
@@ -117,13 +117,22 @@ export function filterLibraryEntries(
   ].some((value) => value.toLocaleLowerCase().includes(normalized)));
 }
 
-/** Yellow and red are left out: they mean attention and failure everywhere else. */
+/** Yellow, red and green are left out: they mean attention, failure and confirmation everywhere else. */
 export const SPEAKER_COLORS = [
   'cyan',
   'magenta',
-  'green',
   'blue',
+  'magentaBright',
 ] as const;
+
+/**
+ * A speaker as the screen names them: "You" for your own microphone, "Speaker 1" for a voice
+ * Seashell numbered. The saved label, which agents and exports read, is left as it is.
+ */
+export function speakerDisplayName(id: string | undefined, label: string): string {
+  if (id === 'LOCAL' && label === 'Microphone') return 'You';
+  return label.replace(/^Remote speaker (\d+)$/u, 'Speaker $1');
+}
 
 export function speakerColorIndex(speakerId: string): number {
   let hash = 0;

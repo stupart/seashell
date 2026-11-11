@@ -23,8 +23,11 @@ export default function SpeakerSettings(props: {
   columns: number;
   rows?: number;
   modelSize?: string;
+  /** Whether Settings says speaker separation is ready, so both screens say the same. */
+  ready?: boolean;
 }) {
-  const [ready, setReady] = useState(() => diarizationStatus().ready);
+  const [ready, setReady] = useState(() => props.ready ?? diarizationStatus().ready);
+  useEffect(() => { if (props.ready !== undefined) setReady(props.ready); }, [props.ready]);
   const [engine] = useState(() => diarizationStatus().engine);
   const [index, setIndex] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -42,7 +45,7 @@ export default function SpeakerSettings(props: {
   const entries: Array<[Action, string, string, string]> = [
     ['meet', 'Google Meet names', meetOn ? 'On' : 'Off', meetOn ? 'turn off' : 'turn on'],
     ['voices', 'Who said what', ready ? 'Ready' : `Not set up · ${props.modelSize ?? '21 MB'}`, ready ? 'check' : 'download'],
-    ...(props.canIdentify && ready ? [['redo', 'Redo speakers for this meeting', 'Copy to review', 'redo'] as [Action, string, string, string]] : []),
+    ...(props.canIdentify && ready ? [['redo', 'Redo speakers for this meeting', 'Keeps the old version', 'redo'] as [Action, string, string, string]] : []),
   ];
   const action = entries[Math.min(index, entries.length - 1)]![0];
   const checkMeet = async (browser: MeetBrowserMode, connect = false) => {

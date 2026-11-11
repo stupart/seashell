@@ -14,11 +14,11 @@ import {
 } from './humain-client.ts';
 
 type Providers = Awaited<ReturnType<typeof discoverHumainProviders>>['integrations'];
-type HomeEntry = 'use' | 'test' | 'another' | 'advanced' | 'recommended';
+type HomeEntry = 'use' | 'test' | 'another' | 'models';
 
 const ROLE_WORDS: Record<MeetingAiRole, string> = { observer: 'live analysis', reconciliation: 'final notes', chat: 'chat' };
 
-/** Each AI the test tried: ✓ with how long it took, or ✗ with what to do. The models are in Advanced. */
+/** Each AI the test tried: ✓ with how long it took, or ✗ with what to do. The models are under Models. */
 function ConnectionTest(props: { test: MeetingAiTest; width: number }) {
   if (!props.test.routes.length) {
     return <Paragraph width={props.width} color={props.test.engine.ready ? 'yellow' : 'red'}
@@ -39,7 +39,7 @@ function ConnectionTest(props: { test: MeetingAiTest; width: number }) {
   })}</>;
 }
 
-/** One provider confirmation; individual models and effort remain in Advanced. */
+/** One provider confirmation; each role's model and effort, and the recommended ones, are under Models. */
 export default function AISettings(props: {
   current?: SeashellMeetingConfig;
   recording?: boolean;
@@ -105,8 +105,7 @@ export default function AISettings(props: {
   const home: Array<[HomeEntry, string]> = [
     ...(proposal ? [['use', `Yes, use ${providerNames}`] as [HomeEntry, string]] : configured ? [] : [['use', 'Find connected AI'] as [HomeEntry, string]]),
     ...(configured && !proposal ? [['test', 'Test connection'] as [HomeEntry, string]] : []),
-    ['another', 'Choose another AI…'], ['advanced', 'Advanced · models and effort…'],
-    ...(configured ? [['recommended', 'Use recommended models…'] as [HomeEntry, string]] : []),
+    ['another', 'Choose another AI…'], ['models', 'Models…'],
   ];
   const entries = screen === 'providers'
     ? AI_PROVIDERS.map((provider) => `${provider.name} · ${providers?.find((item) => item.id === provider.id)?.ready ? 'Connected' : 'Not set up'}`)
@@ -153,16 +152,11 @@ export default function AISettings(props: {
       } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     } else if (entry === 'test') runTest();
     else if (entry === 'another') { setScreen('providers'); setIndex(0); setRefresh((value) => value + 1); }
-    else if (entry === 'advanced') { request.current?.abort(); setBusy(false); setScreen('advanced'); }
-    else {
-      const backend = backends.length === 1 ? backends[0] : preferredAIProvider(providers ?? []);
-      if (backend) chooseProvider(backend);
-      else { setScreen('providers'); setIndex(0); }
-    }
+    else if (entry === 'models') { request.current?.abort(); setBusy(false); setScreen('advanced'); }
   }, { isActive: screen !== 'advanced' });
 
   if (screen === 'advanced') return <AdvancedAISettings current={proposal ? { ...props.current, ...proposal } : props.current} recording={props.recording}
-    onClose={() => { setScreen('home'); setIndex(Math.max(0, home.findIndex(([entry]) => entry === 'advanced'))); }}
+    onClose={() => { setScreen('home'); setIndex(Math.max(0, home.findIndex(([entry]) => entry === 'models'))); }}
     onSave={(patch) => props.onSave({ ...patch, modelSelection: 'custom' })} />;
   return <Box flexDirection="column" paddingX={1} height={stdout?.rows ?? 24} overflow="hidden">
     <ScreenTitle name="AI for notes and chat" status={props.recording ? { text: 'Recording continues', color: 'yellow' } : undefined} />

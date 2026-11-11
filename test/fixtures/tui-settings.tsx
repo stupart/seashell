@@ -156,8 +156,8 @@ try {
   const shell = render(<App />, { stdin: main.input as any, stdout: main.output as any, stderr: main.output as any,
     debug: true, patchConsole: false, exitOnCtrlC: false });
   const press = async (text: string) => { main.input.write(text); await Bun.sleep(80); };
-  // In the title's status slot; narrow, the key gives way to the words.
-  await until(() => main.all().includes('Mic not allowed · , fixes') || narrow && main.all().includes('Mic not allowed'), 'the app says what is wrong and where to look');
+  // The title's status slot says what is wrong; the key that fixes it leads the key bar.
+  await until(() => main.all().includes('Mic not allowed') && main.all().includes(', allow mic'), 'the app says what is wrong and where to look');
   await press(',');
   await until(() => main.all().includes('Checking what works') || main.all().includes('to fix') || main.all().includes('needs 1 fix'), 'comma opens Settings');
   await until(() => main.all().includes('Esc back'), 'settings footer');

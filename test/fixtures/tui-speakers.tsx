@@ -58,7 +58,12 @@ const until = async (check: () => boolean) => { const end = Date.now() + 10_000;
 const type = async (text: string) => { input.write(text); await Bun.sleep(80); };
 try {
   await until(() => starts === 1);
-  await type('v'); await until(() => plain().includes('Not set up'));
+  // Speaker setup is a row in Settings: Who said what, the eighth row; narrow, Enter opens the row first.
+  await type(','); await until(() => plain().includes('Who said what'));
+  for (let n = 0; n < 20; n++) await type('\x1b[A');
+  for (let n = 0; n < 7; n++) await type('\x1b[B');
+  await type('\r'); if (columns < 72) await type('\r');
+  await until(() => plain().includes('Speaker setup') && plain().lastIndexOf('Not set up') > plain().lastIndexOf('Speaker setup'));
   assert.equal(permissionRequests, 0, 'Opening settings does not request permission');
   await type('\r'); await until(() => plain().includes('Privacy & Security'));
   assert.ok(plain().includes('Background access missing'));
@@ -74,7 +79,8 @@ try {
   for (let n = 0; n < 2; n++) await type('\x1b[B');
   await type('\r'); assert.equal(setups, 0, 'Do not install while recording');
   assert.equal(stops, 0, 'Opening speaker settings preserves capture');
-  await type('\x1b'); await type(' '); await until(() => stops === 1);
+  // Back to Settings, which opened it, then back to the app.
+  await type('\x1b'); await type('\x1b'); await type(' '); await until(() => stops === 1);
   await type('F'); await until(() => plain().lastIndexOf('Not set up') > plain().lastIndexOf('? help'));
   for (let n = 0; n < 2; n++) await type('\x1b[B');
   await until(() => plain().includes('contact sharing'));

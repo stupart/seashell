@@ -100,16 +100,33 @@ export function Prompt(props: {
 
 /** What just happened, in the key bar's row until the next key: green when it worked, red when it failed. */
 export function Toast(props: { text: string; columns: number; color?: Tone }) {
-  // A toast has no keys to keep, so a long one wraps rather than loses its end.
-  return <Paragraph text={props.text} width={props.columns} color={props.color ?? 'green'} />;
+  const color = props.color ?? 'green';
+  // A confirmation keeps to the key bar's one row: too long for it, its first sentence says enough.
+  // A warning or a failure has no keys to keep, so a long one wraps rather than loses its end.
+  const first = props.text.match(/^.+?[.!?](?=\s|$)/u)?.[0];
+  const text = color === 'green' && width(props.text) > props.columns && first && width(first) <= props.columns ? first : props.text;
+  return <Paragraph text={text} width={props.columns} color={color} />;
 }
 
 /** The status slot at the right of the title line: what needs the person, or what Seashell is doing. */
 export interface TitleStatus {
+  /** The problem or the state alone, never a key: "Mic silent", not "Mic silent · i help". */
   text: string;
   /** For a narrow window, where the whole of text would push the title off its line. */
   short?: string;
   color?: Tone;
+  /** The key that fixes it, which leads the key bar. */
+  fix?: Hint;
+}
+
+/** The key that fixes what the title says goes first in the key bar; the same key later in it gives way. */
+export function withFix(hints: readonly Hint[], status?: TitleStatus): Hint[] {
+  return status?.fix ? [status.fix, ...hints.filter(([key]) => key !== status.fix![0])] : [...hints];
+}
+
+/** A recording's ● is red wherever it leads a line; the words after it keep the line's own colour. */
+function Marked(props: { text: string }) {
+  return props.text.startsWith('● ') ? <><Text color="red">●</Text>{props.text.slice(1)}</> : <>{props.text}</>;
 }
 
 /**
@@ -138,11 +155,11 @@ export function ScreenTitle(props: { name: string; color?: Tone; bold?: boolean;
     <Box justifyContent="space-between">
       {/* Keyed by its shape, as the key bar is, so a longer title is measured afresh. */}
       <Text key={`${brand}-${Boolean(detail)}`} wrap="truncate-end">🐚{brand ? <Text> <Text bold color="cyan">Seashell</Text></Text> : ''}{props.name ? '  ' : ''}
-        <Text bold={props.bold ?? true} {...(props.color ? { color: props.color } : {})}>{props.name}</Text>
+        <Text bold={props.bold ?? true} {...(props.color ? { color: props.color } : {})}><Marked text={props.name} /></Text>
         {detail ? <Text dimColor>  {detail}</Text> : null}
       </Text>
       {statusText && <Box flexShrink={0} marginLeft={2}>
-        <Text {...(props.status?.color ? { color: props.status.color } : { dimColor: true })}>{statusText}</Text>
+        <Text {...(props.status?.color ? { color: props.status.color } : { dimColor: true })}><Marked text={statusText} /></Text>
       </Box>}
     </Box>
     <Text dimColor wrap="truncate-end">{'─'.repeat(Math.max(1, room))}</Text>
@@ -178,11 +195,11 @@ export function Paragraph(props: { text: string; width: number; color?: Tone; di
 }
 
 export const HELP_ROWS: ReadonlyArray<readonly [string, string]> = [
-  ['Move', 'Enter read · h meetings · / search · ↑↓ move · Esc back · q quit, recording carries on'],
-  ['Meeting', '1 notes · 2 transcript · 3 chat · a ask · g write notes · n notes options · r name speakers · w watch video · c copy · e export · o open folder · d move to Trash'],
+  ['Go', 'Enter read · h meetings · / search · ↑↓ move · Esc back · q quit, recording carries on'],
+  ['Meeting', '1 notes · 2 transcript · 3 chat · a ask · g write notes, with a template · r name speakers · w watch video · c copy · e export · o open folder · d move to Trash'],
   ['Transcript', 't show/hide times · s show/hide speakers · l latest words · n next match'],
   ['When asked', 'm record · x ignore'],
   ['Recording', 'starts and stops with the call · space record or stop by hand · V record with video · i audio help'],
   ['Add', 'f import a file · F import and separate speakers'],
-  ['Setup', ', settings · p AI · v speaker setup'],
+  ['Setup', ', settings: speakers, AI and everything else'],
 ];

@@ -152,6 +152,8 @@ export default function Onboarding(props: SetupActionProps & {
   rememberHeard?: (source: AudioCheckSource) => void;
   fromSettings?: boolean;
   dependencies?: FeatureStatusDependencies;
+  /** Only this test, as a Settings row asks: "Microphone test", with nothing before or after it. */
+  test?: 'microphone' | 'computer';
 }) {
   const [statuses, setStatuses] = useState<FeatureStatus[]>();
   const [refresh, setRefresh] = useState(0);
@@ -170,7 +172,7 @@ export default function Onboarding(props: SetupActionProps & {
   }, [refresh, props.config]);
   // The plan is made once, so a step that gets done does not vanish from under the person.
   useEffect(() => {
-    if (statuses && !props.progress) props.onProgress(current => current ?? { steps: planGuide(statuses), at: 0, heard: {} });
+    if (statuses && !props.progress) props.onProgress(current => current ?? { steps: props.test ? [props.test] : planGuide(statuses), at: 0, heard: {} });
   }, [statuses, props.progress]);
 
   const progress = props.progress;
@@ -214,7 +216,7 @@ export default function Onboarding(props: SetupActionProps & {
     // A confirmation stays in the key bar until the next key.
     if (setup.message?.tone === 'done') setup.setMessage(undefined);
     if (key.escape) { props.onClose(); return; }
-    if (input === 's' && step !== 'done') { next(); return; }
+    if (input === 's' && step !== 'done' && !props.test) { next(); return; }
     if (step === 'recorder') {
       if (!key.return) return;
       if (recorder?.state === 'ok') next();
@@ -223,13 +225,14 @@ export default function Onboarding(props: SetupActionProps & {
         catch (cause) { setup.failure(cause); }
       } else if (recorder?.action) void runQuietly(recorder.action);
     } else if (step === 'microphone') {
+      // The same keys as audio help: o for Sound settings, p for Privacy.
       if (input === 'o') open('sound-input');
-      else if (input === 'u') open('microphone-privacy');
+      else if (input === 'p') open('microphone-privacy');
       else if (key.return && mic.heard) next();
       else if (key.return && !micAllowed && microphone?.action) void runQuietly(microphone.action);
     } else if (step === 'computer') {
       if (input === 'o') open('sound-output');
-      else if (input === 'u') open('audio-recording-privacy');
+      else if (input === 'p') open('audio-recording-privacy');
       else if (key.return && computer.heard) next();
     } else if (step === 'extras') {
       if (key.upArrow || input === 'k') setExtraIndex(value => Math.max(0, value - 1));
@@ -336,19 +339,22 @@ export default function Onboarding(props: SetupActionProps & {
     </>;
 
   // Started from Settings, Esc goes back there; on a first run it goes back to the app and leaves setup for later.
-  const meterHints = (meter: Meter, done: boolean): Hint[] => done ? [['Enter', 'next'], ['Esc', 'back']]
-    : [['o', 'Sound settings'], ...(meter.problem?.kind === 'permission' ? [['u', 'Privacy'] as Hint] : []), ['s', 'skip'], ['Esc', 'back']];
+  // A test on its own is done once it hears something; there is nothing to skip to.
+  const skip: Hint[] = props.test ? [] : [['s', 'skip']];
+  const meterHints = (meter: Meter, done: boolean): Hint[] => done ? [['Enter', props.test ? 'done' : 'next'], ['Esc', 'back']]
+    : [['o', 'Sound settings'], ...(meter.problem?.kind === 'permission' ? [['p', 'Privacy'] as Hint] : []), ...skip, ['Esc', 'back']];
   const hints: Hint[] = !progress ? [['Esc', 'back']]
     : step === 'recorder' ? [['Enter', recorder?.state === 'ok' ? 'next' : recorder?.state === 'off' ? 'turn on' : 'start it'], ['s', 'skip'], ['Esc', 'back']]
-    : step === 'microphone' ? !micAllowed ? [['Enter', 'allow'], ['s', 'skip'], ['Esc', 'back']] : meterHints(mic, Boolean(mic.heard || heard.microphone))
+    : step === 'microphone' ? !micAllowed ? [['Enter', 'allow'], ...skip, ['Esc', 'back']] : meterHints(mic, Boolean(mic.heard || heard.microphone))
     : step === 'computer' ? meterHints(computer, Boolean(computer.heard || heard.computer))
     : step === 'extras' ? [['Enter', extraIndex < extras.length ? 'set up' : 'finish'], ['s', 'skip'], ['↑↓', 'choose'], ['Esc', 'back']]
     : [['Enter', 'done']];
   const counted = progress?.steps.filter(candidate => candidate !== 'done') ?? [];
-  const place = step && step !== 'done' ? `Step ${counted.indexOf(step) + 1} of ${counted.length}` : '';
+  const place = step && step !== 'done' && !props.test ? `Step ${counted.indexOf(step) + 1} of ${counted.length}` : '';
+  const name = props.test === 'microphone' ? 'Microphone test' : props.test === 'computer' ? 'Computer audio test' : 'Guided setup';
 
   return <Box flexDirection="column" paddingX={1} {...(props.rows ? { height: props.rows } : {})} overflow="hidden">
-    <ScreenTitle name="Guided setup" status={place ? { text: place } : undefined} />
+    <ScreenTitle name={name} status={place ? { text: place } : undefined} />
     <Box flexDirection="column" flexGrow={1} overflow="hidden">
       {body}
       {setup.message && setup.message.tone !== 'done' && <Box marginTop={1} flexShrink={0}>

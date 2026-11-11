@@ -128,7 +128,7 @@ export default function AIProviderPicker(props: {
       const route = routes[id];
       const inactive = id === 'observer' && mode === 'post-session' || id === 'reconciliation' && mode === 'streaming';
       return `${name}${inactive ? ' (off)' : ''}: ${route ? `${AI_PROVIDERS.find((p) => p.id === route.backend)?.name} / ${route.model} · ${route.effort ?? 'default effort'}` : 'Choose model'}`;
-    }), 'Suggest models for all roles…', `Mode: ${MODE_NAMES[mode]}`, 'Save choices',
+    }), 'Use recommended models…', `Mode: ${MODE_NAMES[mode]}`, 'Save choices',
   ];
   else if (screen === 'providers') entries = AI_PROVIDERS.map((p) => `${p.name} · ${providers ? providers.find((s) => s.id === p.id)?.ready ? 'Ready' : 'Setup needed' : 'Checking…'}`);
   else if (screen === 'models') entries = [...models.map((m) => `${m.name}${m.id !== m.name ? ` · ${m.id}` : ''}`), 'Enter a custom model ID…'];

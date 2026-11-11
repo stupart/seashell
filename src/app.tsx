@@ -40,7 +40,7 @@ import {
 import { chatWithMeeting, enrichMeeting } from './meeting-enrichment.ts';
 import { Chalk } from 'chalk';
 import { HEADING, meetingViewLines, plainMeetingLines, SUBHEADING, type MeetingView } from './meeting-tui.ts';
-import { HELP_ROWS, HelpRow, KeyBar, Prompt, ScreenTitle, Sheet, Toast, type Hint, type TitleStatus } from './tui-chrome.tsx';
+import { HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
 import { timedTranscriptRows, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
   renderText,
@@ -76,7 +76,7 @@ import { providerName } from './ai-provider.ts';
 import SpeakerSettings from './SpeakerSettings.tsx';
 import SettingsScreen, { MENU_LABEL, type SettingsActions } from './SettingsScreen.tsx';
 import Onboarding, { DEFAULT_LEVEL_SOURCES, switchedOff, type GuideProgress, type LevelSources, type SystemSettingsPane } from './Onboarding.tsx';
-import { FEATURE_STATE_COLOR, FEATURE_STATE_SYMBOL, readFeatureStatuses, type FeatureStatus } from './feature-status.ts';
+import { FEATURE_STATE_COLOR, FEATURE_STATE_SYMBOL, readFeatureStatuses, type FeatureId, type FeatureStatus } from './feature-status.ts';
 import { stripVTControlCharacters } from 'util';
 import { startMeetSpeakerReader, meetBrowserMatchesApp, probeMeetSpeakers, type MeetSpeakerReader, type MeetProbe } from './meet-speakers.ts';
 import { backgroundMeetingMessage } from './background-meeting-status.ts';
@@ -84,7 +84,7 @@ import { readBackgroundWatchStatus, type BackgroundWatchStatus } from './backgro
 import { writeMeetingConsent } from './meeting-consent.ts';
 import { writeMeetingCommand } from './meeting-command.ts';
 import { CaptureHealthTracker, readMeetingCoverage, yourSideNotice, type CaptureHealthSnapshot } from './capture-health.ts';
-import { captureRecordingMode, recordingSummary, type RecordingMode } from './RecordingStatus.tsx';
+import { captureRecordingMode, recordingSummary, sourceFinding, type RecordingMode } from './RecordingStatus.tsx';
 import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { runHumainTranscription } from './humain-client.ts';
@@ -100,6 +100,7 @@ import {
   moveSelection,
   moveTranscriptScroll,
   formatTuiClock,
+  speakerDisplayName,
   tuiLayout,
 } from './tui-state.ts';
 import {
@@ -226,14 +227,22 @@ export default function App(props: {
   const [captureAppBundle, setCaptureAppBundle] = useState<string>();
   const [aiSetupOpen, setAiSetupOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** The row Settings opens on, when a fix in the title's status slot sent the person there. */
+  const [settingsFocus, setSettingsFocus] = useState<FeatureId>();
+  /** What the title's status slot showed last, for the key that fixes it. */
+  const shownSlot = useRef<TitleStatus & { focus?: FeatureId }>(undefined);
   const [guideOpen, setGuideOpen] = useState(Boolean(props.guide));
   const [guideProgress, setGuideProgress] = useState<GuideProgress>();
+  /** A test of one source from its Settings row, rather than the whole guide. */
+  const [guideTest, setGuideTest] = useState<'microphone' | 'computer'>();
   // The guide offers itself once, on a first run that still needs it.
   const guideOffered = useRef(Boolean(props.guide));
   // Speakers and AI return to whatever opened them; the guide returns to Settings when started there.
   const [returnTo, setReturnTo] = useState<'settings' | 'guide'>();
   const [guideFromSettings, setGuideFromSettings] = useState(false);
   const [attention, setAttention] = useState<FeatureStatus[]>([]);
+  /** Everything Settings checks, read once more whenever Settings or the guide closes. Speaker setup reads it too. */
+  const [featureStatuses, setFeatureStatuses] = useState<FeatureStatus[]>();
   const [setupNeeded, setSetupNeeded] = useState(false);
   const [aiSetupIntent, setAiSetupIntent] = useState<'notes' | 'chat' | null>(null);
   const libraryRoot = useMemo(
@@ -281,8 +290,9 @@ export default function App(props: {
   const [liveMeeting, setLiveMeeting] = useState<MeetingArtifact | null>(null);
   const [meetingView, setMeetingView] = useState<MeetingView>('transcript');
   const [chatInputState, setChatInputState] = useState<ChatInputState | null>(null);
-  /** [N] Notes setup for the open meeting: its template, its note, and whether AI may see it. */
-  const [notesSetup, setNotesSetup] = useState<{ row: 0 | 1 | 2; options: string[]; editing?: string } | null>(null);
+  /** [G] Notes setup for the open meeting: its template, its note, and whether AI may see it. Enter writes the notes.
+   * `opened` is the meeting's AI choices when the sheet opened, so leaving says something only after a change. */
+  const [notesSetup, setNotesSetup] = useState<{ row: 0 | 1 | 2; options: string[]; editing?: string; opened: string } | null>(null);
   const [calendarSuggestion, setCalendarSuggestion] = useState<MeetingCalendarEvent | null>(null);
   const [automaticCandidate, setAutomaticCandidate] = useState<MeetingCandidate | null>(null);
   const [automationPhase, setAutomationPhase] = useState<MeetingAutomationPhase>('watching');
@@ -959,6 +969,20 @@ export default function App(props: {
     // A phrase can wrap across rows, so the line is read whole.
     return [...lines.values()].filter((line) => line.text.replace(/\s+/gu, ' ').toLocaleLowerCase().includes(needle)).map((line) => line.first);
   }, [timedRows, searchQuery, meetingView]);
+  // Choosing among search results, the reader shows the chosen meeting's lines that say it, whole.
+  const searchPane = historyOpen && !drawerOnly && Boolean(searchQuery.trim()) && view === 'record'
+    && visibleEntries.some((entry) => entry.id === selectedRecord?.id);
+  const searchLines = useMemo(() => {
+    const needle = searchQuery.trim().toLocaleLowerCase();
+    if (!searchPane || !needle) return [];
+    const lines = new Map<number | undefined, { rows: string[]; text: string }>();
+    timedRows.forEach((row) => {
+      const line = lines.get(row.start);
+      if (line) { line.rows.push(row.text); line.text += ` ${stripVTControlCharacters(row.text).trim()}`; }
+      else lines.set(row.start, { rows: [row.text], text: stripVTControlCharacters(row.text) });
+    });
+    return [...lines.values()].filter((line) => line.text.replace(/\s+/gu, ' ').toLocaleLowerCase().includes(needle));
+  }, [timedRows, searchQuery, searchPane]);
   // The rows rewrap once the list closes, so the match is found again whenever they do.
   useEffect(() => {
     if (searchHit === null || !matchRows.length) return;
@@ -1796,12 +1820,11 @@ export default function App(props: {
       // A name Seashell suggested from a known voice: keep it, which also teaches the voice, or say it is not them.
       else if (input === 'y' && suggested) renameSpeaker(suggested.id, suggested.label, `Kept ${suggested.label}.`);
       else if (input === 'n' && suggested) renameSpeaker(suggested.id, suggested.suggestion!.previous,
-        `${suggested.label} is ${suggested.suggestion!.previous} again.`);
+        `${suggested.label} is ${speakerDisplayName(suggested.id, suggested.suggestion!.previous)} again.`);
       else if (key.return) {
         const speaker = speakers[speakerSelection];
         setSpeakerPickerOpen(false);
-        if (speaker) setRenameState({ speakerId: speaker.id, input: '',
-          label: speaker.id === 'LOCAL' && speaker.label === 'Microphone' ? 'You' : speaker.label });
+        if (speaker) setRenameState({ speakerId: speaker.id, input: '', label: speakerDisplayName(speaker.id, speaker.label) });
       }
       return;
     }
@@ -1896,9 +1919,20 @@ export default function App(props: {
         if (input && !key.ctrl && !key.meta) setNotesSetup({ ...notesSetup, editing: notesSetup.editing + input });
         return;
       }
-      if (key.escape || input === 'n' || key.return && notesSetup.row !== 1) {
+      if (key.escape) {
         setNotesSetup(null);
-        if (currentMeeting && !currentMeeting.ai?.off) setCaution('Press g to rewrite the notes with these choices.');
+        const changed = JSON.stringify(currentMeeting?.ai ?? {}) !== notesSetup.opened;
+        if (changed && currentMeeting && !currentMeeting.ai?.off) {
+          setNotice(`Saved for this meeting. Press g to ${currentMeeting.analysis ? 'rewrite' : 'write'} the notes with them.`);
+        }
+        return;
+      }
+      // Enter writes the notes with these choices; on the note, it edits the note.
+      if (key.return && notesSetup.row !== 1) {
+        if (!currentMeeting || currentMeeting.ai?.off) return;
+        setNotesSetup(null);
+        if (currentMeeting.analysis?.final) setConfirmRewrite(true);
+        else runCurrentMeetingEnrichment(view === 'live');
         return;
       }
       if (key.upArrow) { setNotesSetup({ ...notesSetup, row: Math.max(0, notesSetup.row - 1) as 0 | 1 | 2 }); return; }
@@ -1924,8 +1958,8 @@ export default function App(props: {
 
     if (audioHelpOpen) {
       if (input === 'i' || key.escape) { setAudioHelpOpen(false); return; }
-      // u, not p: p opens AI everywhere else.
-      if (input === 'o' || input === 'u') {
+      // The same keys as the guided setup: o for Sound settings, p for Privacy.
+      if (input === 'o' || input === 'p') {
         const target = input === 'o' ? 'x-apple.systempreferences:com.apple.preference.sound?input'
           : 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone';
         const opened = spawnSync('/usr/bin/open', [target], { stdio: 'ignore' });
@@ -1982,9 +2016,13 @@ export default function App(props: {
       setCaution('Review and edit this when it finishes.');
       return;
     }
-    if (input === ',') { setSettingsOpen(true); return; }
-    if (input === 'v') { setSpeakerSetupOpen(true); return; }
-    if (input === 'p') { setAiSetupIntent(null); setAiSetupOpen(true); return; }
+    // Speaker setup and AI are rows in Settings, so they have no keys of their own here.
+    if (input === ',') {
+      const fixing = shownSlot.current;
+      setSettingsFocus(fixing?.fix?.[0] === ',' ? fixing.focus : undefined);
+      setSettingsOpen(true);
+      return;
+    }
     if (key.tab || input === '\t' || input === 'h') {
       toggleHistory();
       return;
@@ -2039,28 +2077,21 @@ export default function App(props: {
       setNotice(`Ignored ${automaticCandidate.appName} for this detection window.`);
       return;
     }
+    // n only ever moves to the next match.
     if (input === 'n' && searchHit !== null && matchRows.length && meetingView === 'transcript') {
       setSearchHit((hit) => ((hit ?? 0) + 1) % matchRows.length);
       return;
     }
-    if (input === 'n' && currentMeeting) {
+    // g opens the notes setup, where Enter writes the notes; with AI off it opens on the switch.
+    if (input === 'g' && currentMeeting) {
       let names: string[] = [];
       try { names = loadMeetingTemplates(libraryRoot).map((template) => template.name); } catch {}
-      setNotesSetup({ row: 0, options: ['auto', ...names, NO_TEMPLATE] });
-      return;
-    }
-    if (input === 'g' && currentMeeting) {
-      if (currentMeeting.ai?.off) {
-        setCaution('AI is off for this meeting. Press n to turn it on.');
-        return;
-      }
-      if (currentMeeting.analysis?.final) { setConfirmRewrite(true); return; }
-      runCurrentMeetingEnrichment(view === 'live');
+      setNotesSetup({ row: currentMeeting.ai?.off ? 2 : 0, options: ['auto', ...names, NO_TEMPLATE], opened: JSON.stringify(currentMeeting.ai ?? {}) });
       return;
     }
     if (input === 'a' && currentMeeting) {
       if (currentMeeting.ai?.off) {
-        setCaution('AI is off for this meeting. Press n to turn it on.');
+        setCaution('AI is off for this meeting. Press g to turn it on.');
         return;
       }
       if (!configuredMeetingRoutes.chat) {
@@ -2222,6 +2253,7 @@ export default function App(props: {
     void readFeatureStatuses({ config, libraryDir: libraryRoot, signal: controller.signal })
       .then(statuses => {
         if (controller.signal.aborted) return;
+        setFeatureStatuses(statuses);
         setAttention(statuses.filter(status => !status.optional && (status.state === 'broken' ||
           (status.state === 'attention' && (status.id === 'microphone' && !heard?.microphone || status.id === 'computer-audio' && !heard?.computer)))));
         setSetupNeeded(statuses.some(status => (status.id === 'recorder' || status.id === 'microphone') && status.state !== 'ok' && Boolean(status.action)));
@@ -2242,8 +2274,9 @@ export default function App(props: {
       : DEFAULT_LEVEL_SOURCES.computer,
   }, [props.levels, listenerDisabled, systemAudioDisabled]);
 
-  const openGuide = (fromSettings: boolean) => {
+  const openGuide = (fromSettings: boolean, test?: 'microphone' | 'computer') => {
     setGuideProgress(undefined);
+    setGuideTest(test);
     setGuideFromSettings(fromSettings);
     setSettingsOpen(false);
     setGuideOpen(true);
@@ -2279,9 +2312,11 @@ export default function App(props: {
   };
 
   if (settingsOpen) return <SettingsScreen {...setupActionProps} config={config} columns={terminal.columns} rows={terminal.rows}
+    {...(settingsFocus ? { focus: settingsFocus } : {})}
     onOpenSpeakers={() => openSpeakers('settings')}
     onOpenAI={() => openAI('settings')}
     onOpenGuide={() => openGuide(true)}
+    onTest={(source) => openGuide(true, source)}
     onClose={() => setSettingsOpen(false)} />;
 
   if (guideOpen) return <Onboarding {...setupActionProps} config={config} columns={terminal.columns} rows={terminal.rows}
@@ -2291,10 +2326,13 @@ export default function App(props: {
     onOpenSpeakers={() => openSpeakers('guide')}
     onOpenAI={() => openAI('guide')}
     fromSettings={guideFromSettings}
+    {...(guideTest ? { test: guideTest } : {})}
     onClose={() => { setGuideOpen(false); if (guideFromSettings) setSettingsOpen(true); }} />;
 
+  const separation = featureStatuses?.find((status) => status.id === 'speaker-separation');
   if (speakerSetupOpen) return <SpeakerSettings columns={terminal.columns} rows={terminal.rows}
     modelSize={speakerModelSize(speakerEngine())}
+    {...(separation ? { ready: separation.state === 'ok' } : {})}
     recording={Boolean(activeBackgroundEntry) || (!paused && !listenerDisabled)}
     browser={config.meeting?.speakerBrowser ?? 'off'}
     meetStatus={meetSpeakerStatus}
@@ -2349,8 +2387,8 @@ export default function App(props: {
   // One order everywhere: what can be done here, then moving, then Esc. The way back to
   // the meetings comes early, so a narrow window keeps it.
   const hints: Hint[] = atHome && attention.length ? [['Enter', 'guided setup'], ...byHand, ['f', 'import']]
-    : historyOpen && searchQuery.trim() ? visibleEntries.length ? [['Enter', 'read'], ['/', 'search again'], ['↑↓', 'choose'], ['Esc', 'cancel']]
-      : [['/', 'search again'], ['Esc', 'cancel']]
+    : historyOpen && searchQuery.trim() ? visibleEntries.length ? [['Enter', 'read'], ['/', 'search again'], ['Esc', 'clear search'], ['↑↓', 'choose']]
+      : [['/', 'search again'], ['Esc', 'clear search']]
     : historyOpen && !navigationItems.some((item) => item.kind === 'record') ? [...byHand, ['f', 'import'], ['/', 'search']]
     : historyOpen ? [['Enter', 'read'], ...byHand, ['/', 'search'], ['f', 'import'], ['↑↓', 'choose']]
     : currentRecordBusy || showingLiveTranscript ? [
@@ -2358,9 +2396,11 @@ export default function App(props: {
       ...latest, ['h', 'meetings'], ['i', 'audio help'], ['↑↓', 'scroll']]
     : !currentRecord?.transcript.length ? [...byHand, ['h', 'meetings'], ['f', 'import']]
     : !currentMeeting ? [...watch, ['h', 'meetings'], ['r', 'name speakers'], ['m', 'make it a meeting'], ['c', 'copy'], ['↑↓', 'scroll']]
-    : meetingView === 'notes' ? hasNotes
-      ? [['a', 'ask'], ['h', 'meetings'], ...watch, ['g', 'rewrite notes'], ['n', 'notes options'], ['c', 'copy'], ['↑↓', 'scroll']]
-      : [['g', 'write notes'], ['h', 'meetings'], ...watch, ['n', 'notes options']]
+    : meetingView === 'notes' ? [
+      // A call where your side was missing says what to do next, first.
+      ...(yourSide ? [['i', 'check your mic'] as Hint] : []),
+      ...(hasNotes ? [['a', 'ask'], ['h', 'meetings'], ...watch, ['g', 'rewrite notes'], ['c', 'copy'], ['↑↓', 'scroll']] as Hint[]
+        : [['g', 'write notes'], ['h', 'meetings'], ...watch] as Hint[])]
     : meetingView === 'chat' ? [['a', 'ask'], ['h', 'meetings'], ['c', 'copy'], ['↑↓', 'scroll']]
     : [...nextMatch, ...watch, ['h', 'meetings'], ['r', 'name speakers'], ['a', 'ask'], ['e', 'export'], ['c', 'copy'], ['↑↓', 'scroll']];
 
@@ -2373,7 +2413,7 @@ export default function App(props: {
       flexDirection="column" overflow="hidden" paddingRight={layout.compact ? 0 : 1}
       {...(layout.compact ? {} : { borderStyle: 'single' as const, borderTop: false, borderBottom: false, borderLeft: false, borderDimColor: true })}
       aria-role="listbox" aria-label="Meetings">
-      <Text bold color="cyan" wrap="truncate-end">{searchQuery.trim() ? `Meetings · ${visibleEntries.length} found` : 'Meetings'}</Text>
+      <Text bold color="cyan" wrap="truncate-end">{searchQuery.trim() ? searchHeading(visibleEntries.length, searchQuery.trim()) : 'Meetings'}</Text>
       {navigationItems.slice(sidebarStart, sidebarStart + listCapacity).map((item, windowIndex) => {
         const index = sidebarStart + windowIndex;
         const selected = selectionIndex === index;
@@ -2384,18 +2424,17 @@ export default function App(props: {
         return <React.Fragment key={item.kind === 'record' ? item.entry.id : item.kind}>
           <Text inverse={selected} wrap="truncate-end" aria-role="option" aria-state={{ selected }}>{selected ? '› ' : '  '}{title}
             {date !== undefined && <><Text dimColor={!selected}>{VIDEO_MARK}</Text>{date}</>}</Text>
-          {match && <Text dimColor wrap="truncate-end">{'  '}{formatTuiClock(match.start)}  {snippetAround(match.text, searchQuery.trim(), listRowWidth - 7)}</Text>}
+          {match && <Text wrap="truncate-end">{'  '}<Text dimColor>{formatTuiClock(match.start)}  </Text>
+            <Highlighted text={snippetAround(match.text, searchQuery.trim(), listRowWidth - 7)} query={searchQuery} /></Text>}
         </React.Fragment>;
       })}
-      {searchQuery && visibleEntries.length === 0 && <Text dimColor>Nothing found.</Text>}
       {!searchQuery && libraryEntries.length === 0 && <Text dimColor>Your meetings will appear here.</Text>}
     </Box>
   );
 
   const readerTotal = currentMeeting && meetingView !== 'transcript' ? auxiliaryMeetingLines.length : displayRows.length;
   const readerScroll = currentMeeting && meetingView !== 'transcript' ? transcriptScroll : visibleTranscriptScroll;
-  const searchHighlight = searchQuery.trim() && meetingView === 'transcript'
-    ? new RegExp(searchQuery.trim().replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'giu') : undefined;
+  const searchHighlight = meetingView === 'transcript' ? searchQuery : '';
   // The title says whether Seashell can record; the body says what is missing, or what happens next.
   const homeMessage = attention.length ? <>
     {attention.map((status) => <Text key={status.id} wrap="truncate-end">
@@ -2406,7 +2445,21 @@ export default function App(props: {
     <Text dimColor>Notes are written when the call ends.</Text>
   </>;
 
-  const reader = (
+  const reader = searchPane ? (
+    <Box flexDirection="column" flexGrow={1} minWidth={0} paddingLeft={1} overflow="hidden" aria-label="Matching lines">
+      <Box flexShrink={0} marginBottom={1}>
+        <Text dimColor wrap="truncate-end">{searchLines.length
+          ? `${searchLines.length} ${searchLines.length === 1 ? 'line mentions' : 'lines mention'} "${searchQuery.trim()}"`
+          : `Its title mentions "${searchQuery.trim()}"; no line does.`}</Text>
+      </Box>
+      {/* Measured as the reader is, so the lines wrap to the room beside the list. */}
+      <Box ref={transcriptPaneRef} flexGrow={1} flexDirection="column" overflow="hidden">
+        {searchLines.flatMap((line) => line.rows).slice(0, visibleRows).map((row, index) => <Box key={index} flexShrink={0} height={1}>
+          <Text wrap="truncate-end">{highlighted(row, searchQuery) || ' '}</Text>
+        </Box>)}
+      </Box>
+    </Box>
+  ) : (
     <Box flexDirection="column" flexGrow={1} minWidth={0} paddingLeft={layout.compact ? 0 : 1} overflow="hidden">
       {currentMeeting && !drawerOnly && (
         <Box flexShrink={0} marginBottom={1} justifyContent="space-between">
@@ -2440,7 +2493,7 @@ export default function App(props: {
               : backgroundMessage ?? 'No transcript text'}</Text>
           )
         ) : visibleTranscriptRows.map((row, index) => <Box key={index} flexShrink={0} height={1}>
-          <Text wrap="truncate-end">{(searchHighlight ? row.replace(searchHighlight, (match) => HIGHLIGHT(match)) : row) || ' '}</Text>
+          <Text wrap="truncate-end">{highlighted(row, searchHighlight) || ' '}</Text>
         </Box>)}
       </Box>
     </Box>
@@ -2471,7 +2524,7 @@ export default function App(props: {
   })() : null;
   const namedSpeakers = currentRecord?.speakers ?? [];
   const speakerName = (speaker: (typeof namedSpeakers)[number]) =>
-    `${speaker.id === 'LOCAL' && speaker.label === 'Microphone' ? 'You' : speaker.label}${speaker.suggestion ? ' · suggested' : ''}`;
+    `${speakerDisplayName(speaker.id, speaker.label)}${speaker.suggestion ? ' · suggested' : ''}`;
   const speakerColumn = Math.min(32, Math.max(18, ...namedSpeakers.map((speaker) => speakerName(speaker).length))) + 2;
   const speakerSheet = speakerPickerOpen && currentRecord ? <Sheet title="Name a speaker">
     {namedSpeakers.map((speaker, index) => {
@@ -2488,12 +2541,6 @@ export default function App(props: {
   const helpSheet = helpMode ? <Sheet title="Keys">
     {HELP_ROWS.map(([group, keys]) => <HelpRow key={group} group={group} keys={keys} />)}
   </Sheet> : null;
-  const audioSheet = audioHelpOpen ? <Sheet title="Audio help">
-    <Text>1. Quiet can just mean you are muted or nobody is speaking.</Text>
-    <Text>2. Check the right microphone is chosen and its level moves.</Text>
-    <Text>3. Check Seashell Microphone is allowed in Privacy & Security.</Text>
-  </Sheet> : null;
-  const sheet = helpSheet ?? audioSheet ?? notesSheet ?? speakerSheet;
 
   // Questions and typed answers take the key bar's row. Their keys are never cut.
   const suggested = speakerPickerOpen ? currentRecord?.speakers[speakerSelection]?.suggestion ? currentRecord.speakers[speakerSelection] : undefined : undefined;
@@ -2509,12 +2556,13 @@ export default function App(props: {
     : consentPending && !approvalPending && consentTitle ? { text: `Record "${consentTitle}"?`, short: 'Record this call?',
       hints: [['m', 'record'], ['x', 'ignore']] }
     : undefined;
+  const write: Hint[] = currentMeeting?.ai?.off ? [] : [['Enter', hasNotes ? 'rewrite notes' : 'write notes']];
   const sheetHints: Hint[] | undefined = notesSetup ? notesSetup.editing !== undefined ? [['Enter', 'save'], ['Esc', 'cancel']]
-      : [notesSetup.row === 1 ? ['Enter', 'edit note'] : ['←→', 'change'], ['↑↓', 'choose'], ['Esc', 'back']]
+      : [...(notesSetup.row === 1 ? [['Enter', 'edit note'] as Hint] : [...write, ['←→', 'change'] as Hint]), ['↑↓', 'choose'], ['Esc', 'back']]
     : speakerPickerOpen ? suggested ? [['y', 'keep'], ['n', `not ${suggested.label}`], ['Enter', 'rename'], ['↑↓', 'choose'], ['Esc', 'back']]
       : [['Enter', 'name'], ['↑↓', 'choose'], ['Esc', 'back']]
     : helpMode ? [['Esc', 'back']]
-    : audioHelpOpen ? [['o', 'Sound'], ['u', 'Privacy'], ['Esc', 'back']]
+    : audioHelpOpen ? [['o', 'Sound settings'], ['p', 'Privacy'], ['Esc', 'back']]
     : undefined;
 
   const statusProps = showBackgroundStatus ? {
@@ -2550,7 +2598,7 @@ export default function App(props: {
     nowUnixMs: statusNow,
   } : undefined;
   const summary = statusProps ? recordingSummary(statusProps) : undefined;
-  const quietlyDone = statusProps?.mode === 'ready' && !summary?.alert && summary?.color === undefined;
+  const quietlyDone = statusProps?.mode === 'ready' && !summary?.alert && summary?.label === 'Saved · transcript ready';
   const recordingElsewhere = activeBackgroundEntry && backgroundEntry?.id !== activeBackgroundEntry.id ? activeBackgroundEntry : undefined;
   // Home, before Seashell can record: the title says so, the body says what is missing.
   const settingUp = attention.length > 0 && view === 'live' && statusProps?.mode === 'watching';
@@ -2558,9 +2606,10 @@ export default function App(props: {
     ...(currentEntry?.duration ? [`${Math.max(1, Math.round(currentEntry.duration / 60))} min`] : [])].join(' · ') } : undefined;
   // The title names what is on screen; a call waiting to be recorded is asked about in the key bar,
   // and another call recording is said in the status slot.
-  const heading: { text: string; color?: 'red' | 'yellow' | 'cyan'; keep?: number } = settingUp ? { text: "Can't record yet", color: 'yellow' }
-    // Narrow, the meeting's title gives way before what is happening to it.
-    : summary && !quietlyDone ? { text: summary.headline, ...(summary.color ? { color: summary.color } : {}), keep: Bun.stringWidth(summary.label) }
+  const heading: { text: string; color?: 'yellow'; keep?: number } = settingUp ? { text: "Can't record yet", color: 'yellow' }
+    // Narrow, the meeting's title gives way before what is happening to it. What is happening keeps the
+    // title's colour whatever happens: only the alert beside it says something is wrong.
+    : summary && !quietlyDone ? { text: summary.headline, keep: Bun.stringWidth(summary.label) }
     // A long meeting title is cut before a warning beside it.
     : recordHeading ? { ...recordHeading, keep: 24 } : { text: '' };
   // Says the recorder is on, so a quiet screen never reads as a stopped one.
@@ -2568,14 +2617,44 @@ export default function App(props: {
     && !(summary && !quietlyDone) ? { text: 'Watching for calls', short: 'Watching' }
     : currentMeeting?.status === 'reconciling' || currentMeeting?.status === 'observing' ? { text: 'Writing notes…' } : undefined;
   // Warnings take the title's status slot, most urgent first; nothing adds a row under the title.
-  const slot: TitleStatus | undefined = recordingElsewhere ? { text: '● Another call is recording · l opens it', short: '● Another call', color: 'red' }
+  // The slot says only what is wrong; the key that fixes it leads the key bar, and a fix in
+  // Settings opens Settings on the row that fixes it.
+  const slot: (TitleStatus & { focus?: FeatureId }) | undefined = recordingElsewhere
+    ? { text: '● Another call is recording', short: '● Another call', fix: ['l', 'go to the call'] }
     : summary?.alert && !quietlyDone ? summary.alert
-    : currentMeeting?.status === 'failed' ? { text: 'Notes failed · g retry', color: 'red' }
+    : currentMeeting?.status === 'failed' ? { text: 'Notes failed', color: 'red', fix: ['g', 'retry notes'] }
     : attention[0] && !settingUp ? attentionStatus(attention[0])
     : currentMeeting && meetingView === 'transcript' && reading && showSpeakers && currentRecord?.speakers.some((speaker) => speaker.id === 'SYSTEM')
-      ? { text: 'Voices not separated · v setup', short: 'v speaker setup', color: 'yellow' }
+      ? { text: 'Voices not separated', color: 'yellow', fix: [',', 'speaker setup'], focus: 'speaker-separation' }
     : standing;
+  shownSlot.current = slot;
   const toast = error ? { text: error, color: 'red' as const } : copied ? { text: 'Copied.', color: 'green' as const } : notice ?? undefined;
+
+  // Audio help leads with what Seashell found: during a call, what the source sent and since when;
+  // after one, that your side was missing; at home, what the last meeting heard.
+  const startedAt = showBackgroundStatus ? backgroundEntry ? Date.parse(backgroundEntry.createdAt) : undefined
+    : liveSessionStartedAt.current ?? undefined;
+  const silentSetup = attention.find((status) => (status.id === 'microphone' || status.id === 'computer-audio') && status.summary.includes('silent'));
+  const live = summary?.alert && statusProps?.mode !== 'ready' && statusProps?.mode !== 'processing'
+    ? sourceFinding(statusProps?.health, startedAt, statusNow) : undefined;
+  const finding: { text: string; source: 'microphone' | 'computer'; color: 'red' | 'yellow' } | undefined = live
+    ? { ...live, color: summary!.alert!.color }
+    : yourSide && view === 'record' ? { text: yourSide, source: 'microphone', color: 'yellow' }
+    : silentSetup ? { text: silentSetup.detail, source: silentSetup.id === 'microphone' ? 'microphone' : 'computer', color: 'yellow' }
+    : undefined;
+  const sheetWidth = terminal.columns - 2;
+  // Each step's wrapped lines hang under its words, not its number.
+  const step = (number: number, text: string) => <Box key={number} flexShrink={0}>
+    <Box width={3} flexShrink={0}><Text>{number}.</Text></Box>
+    <Paragraph text={text} width={sheetWidth - 3} />
+  </Box>;
+  const audioSheet = audioHelpOpen ? <Sheet title={finding?.source === 'microphone' ? 'Mic help' : 'Audio help'}>
+    {finding && <Box flexShrink={0} marginBottom={1}><Paragraph text={finding.text} width={sheetWidth} color={finding.color} /></Box>}
+    {step(1, 'Quiet can just mean you are muted or nobody is speaking.')}
+    {step(2, 'Check the right microphone is chosen and its level moves.')}
+    {step(3, 'Check Seashell Microphone is allowed in Privacy & Security.')}
+  </Sheet> : null;
+  const sheet = helpSheet ?? audioSheet ?? notesSheet ?? speakerSheet;
 
   return (
     <Box flexDirection="column" paddingX={1} height={terminal.rows} overflow="hidden">
@@ -2591,19 +2670,43 @@ export default function App(props: {
           : processing ? <Text color="magenta" wrap="truncate-end">◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}</Text>
           : toast ? <Toast text={toast.text} color={toast.color} columns={terminal.columns - 2} />
           : sheetHints ? <KeyBar hints={sheetHints} columns={terminal.columns - 2} help={false} />
-          : <KeyBar hints={hints} columns={terminal.columns - 2} />}
+          : <KeyBar hints={withFix(hints, slot)} columns={terminal.columns - 2} />}
       </Box>
     </Box>
   );
 }
 
-/** A setup problem in the title's status slot: what is wrong in a word or two, and the key that helps. */
-function attentionStatus(status: FeatureStatus): TitleStatus {
+const searchPattern = (needle: string, flags: string) => new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), flags);
+
+/** Every place a row says what was searched for, in the transcript's yellow. */
+function highlighted(row: string, query: string): string {
+  const needle = query.trim();
+  return needle ? row.replace(searchPattern(needle, 'giu'), (match) => HIGHLIGHT(match)) : row;
+}
+
+/** A dim line with what was searched for in the transcript's yellow, at full strength. */
+function Highlighted(props: { text: string; query: string }) {
+  const needle = props.query.trim();
+  // Split around a captured match, the text and the matches alternate.
+  const parts = needle ? props.text.split(new RegExp(`(${searchPattern(needle, 'u').source})`, 'giu')) : [props.text];
+  return <>{parts.map((part, index) => index % 2
+    ? <Text key={index} color="black" backgroundColor="yellow">{part}</Text>
+    : <Text key={index} dimColor>{part}</Text>)}</>;
+}
+
+/** The list's heading during a search: how many meetings say it, and what was searched for. */
+function searchHeading(count: number, query: string): string {
+  return `${count === 0 ? 'No meeting mentions' : count === 1 ? '1 meeting mentions' : `${count} meetings mention`} "${query}"`;
+}
+
+/** A setup problem in the title's status slot: what is wrong in a word or two. The key that helps
+ * leads the key bar: audio help for a silent source, otherwise Settings, opened on the row that fixes it. */
+function attentionStatus(status: FeatureStatus): TitleStatus & { focus: FeatureId } {
   const silent = status.summary.includes('silent');
-  const what = status.id === 'recorder' ? status.state === 'attention' ? 'Recorder not responding' : 'Recorder off'
-    : status.id === 'microphone' ? silent ? 'Mic silent' : 'Mic not allowed'
-    : status.id === 'computer-audio' ? silent ? 'Computer audio silent' : 'Computer audio unconfirmed'
-    : status.id === 'detection' ? 'Meet not connected'
-    : `${MENU_LABEL[status.id]} needs you`;
-  return { text: `${what} · ${silent ? 'i help' : ', fixes'}`, short: what, color: 'yellow' };
+  const [what, fix] = status.id === 'recorder' ? [status.state === 'attention' ? 'Recorder not responding' : 'Recorder off', 'fix recorder']
+    : status.id === 'microphone' ? silent ? ['Mic silent', 'mic help'] : ['Mic not allowed', 'allow mic']
+    : status.id === 'computer-audio' ? silent ? ['Computer audio silent', 'audio help'] : ['Computer audio unconfirmed', 'check audio']
+    : status.id === 'detection' ? ['Meet not connected', 'connect Meet']
+    : [`${MENU_LABEL[status.id]} needs you`, 'settings'];
+  return { text: what, color: 'yellow', fix: [silent ? 'i' : ',', fix], focus: status.id };
 }

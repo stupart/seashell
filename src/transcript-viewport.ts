@@ -3,8 +3,8 @@ import wrapAnsi from 'wrap-ansi';
 import { stripVTControlCharacters } from 'util';
 import { coalesceTranscriptSegments, speakerLabel } from './transcript-renderer.ts';
 import type { StructuredTranscript } from './transcript-types.ts';
-import { formatTuiClock, SPEAKER_COLORS, speakerColorIndex } from './tui-state.ts';
-import { META } from './meeting-tui.ts';
+import { formatTuiClock, SPEAKER_COLORS, speakerColorIndex, speakerDisplayName } from './tui-state.ts';
+import { bulletParts } from './meeting-tui.ts';
 
 const color = new Chalk({ level: 1 });
 const MAX_NAME_COLUMN = 18;
@@ -41,7 +41,7 @@ export function timedTranscriptRows(
   const names = new Map(segments.map((segment) => {
     const label = options.speakers ? speakerLabel(record, segment.speaker) : undefined;
     const name = label ? stripVTControlCharacters(label) : '';
-    return [segment.speaker ?? '', segment.speaker === 'LOCAL' && name === 'Microphone' ? 'You' : name];
+    return [segment.speaker ?? '', name ? speakerDisplayName(segment.speaker, name) : ''];
   }));
   const nameWidth = Math.min(MAX_NAME_COLUMN, Math.max(0, ...[...names.values()].map((name) => name.length)));
   const clockWidth = options.timestamps ? formatTuiClock(segments.at(-1)?.start ?? 0).length : 0;
@@ -64,22 +64,31 @@ export function timedTranscriptRows(
   });
 }
 
-/** Notes and chat as terminal rows: bullets hang under their dash, and their meta sits at the right. */
+/**
+ * Notes and chat as terminal rows. Bullets hang under their dash; who owns one and by when sits
+ * against the right edge, in the text's own weight, then when it was said, dim. Where the
+ * transcript stacks its lines, a bullet starts with its time instead, as the transcript's lines do.
+ */
 export function wrappedMeetingRows(lines: readonly string[], columns: number): string[] {
   const width = Math.max(1, Math.floor(columns));
+  const timeFirst = width < MIN_COLUMNS_FOR_NAME_COLUMN;
   return lines.flatMap((line) => {
-    const [body = '', meta] = line.split(META);
+    const { body, owner, clock } = bulletParts(line);
     const clean = stripVTControlCharacters(body) || ' ';
     if (!clean.startsWith('- ')) return wrapAnsi(clean, width, { hard: true }).split('\n');
-    const rows = wrapAnsi(clean.slice(2), Math.max(1, width - 2), { hard: true }).split('\n')
-      .map((row, index) => (index === 0 ? `- ${row}` : `  ${row}`));
-    if (!meta) return rows;
-    // Who owns it and when it was said sit dim against the right edge: on the
-    // bullet's last row when there is room, otherwise on a row of their own.
+    const timed = timeFirst && clock !== undefined;
+    const indent = timed ? clock.length + 2 : 2;
+    const rows = wrapAnsi(clean.slice(2), Math.max(1, width - indent), { hard: true }).split('\n')
+      .map((row, index) => index > 0 ? `${' '.repeat(indent)}${row}` : timed ? `${color.dim(clock)}  ${row}` : `- ${row}`);
+    const meta = [owner, timed ? undefined : clock].filter((part): part is string => Boolean(part));
+    if (!meta.length) return rows;
+    // On the bullet's last row when there is room, otherwise on a row of their own.
+    const shown = meta.length === 2 ? `${meta[0]}  ${color.dim(meta[1]!)}` : owner ? meta[0]! : color.dim(meta[0]!);
+    const metaWidth = Bun.stringWidth(meta.join('  '));
     const last = rows.at(-1)!;
-    const gap = width - Bun.stringWidth(last) - Bun.stringWidth(meta);
-    if (gap >= 3) rows[rows.length - 1] = `${last}${' '.repeat(gap)}${color.dim(meta)}`;
-    else rows.push(`${' '.repeat(Math.max(2, width - Bun.stringWidth(meta)))}${color.dim(meta)}`);
+    const gap = width - Bun.stringWidth(stripVTControlCharacters(last)) - metaWidth;
+    if (gap >= 3) rows[rows.length - 1] = `${last}${' '.repeat(gap)}${shown}`;
+    else rows.push(`${' '.repeat(Math.max(2, width - metaWidth))}${shown}`);
     return rows;
   });
 }
