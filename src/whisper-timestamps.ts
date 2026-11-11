@@ -10,7 +10,8 @@ import {
 } from './process-lifecycle.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
 import { finalTranscriptionThreads, transcriptionHardware, transcriptionUsesGpu, type TranscriptionHardware } from './local-asr-profile.ts';
-import { detectSpeechRegions, dropPhantomUnits } from './speech-gate.ts';
+import { detectSpeechRegions, dropPhantomUnits, type SpeechRegion } from './speech-gate.ts';
+import { packSpeech, unpackUnits, type SpeechPacking } from './speech-packing.ts';
 import type { TimedTranscriptUnit } from './transcript-types.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -50,16 +51,31 @@ function roundSeconds(value: number): number {
   return Math.round(value * 1000) / 1000;
 }
 
+/**
+ * How long a word with no usable offsets is taken to last before its DTW
+ * anchor: a typical word. On AMI anything from 0.05 to 0.6 s timed words alike,
+ * because the previous word's anchor bounds all but a segment's first word.
+ */
+const UNKNOWN_WORD_SECONDS = 0.3;
+
 function isSpecialToken(text: string): boolean {
   const trimmed = text.trim();
   return /^\[_.*\]$/u.test(trimmed) || /^<\|.*\|>$/u.test(trimmed);
+}
+
+/** A word being read from its tokens. Offsets are unknown when every token's were reversed. */
+interface WordDraft {
+  text: string;
+  start?: number;
+  end?: number;
+  dtwAnchors: number[];
 }
 
 function timedTokens(segment: WhisperJsonSegment): TimedTranscriptUnit[] {
   if (!Array.isArray(segment.tokens)) return [];
 
   const units: TimedTranscriptUnit[] = [];
-  let current: (TimedTranscriptUnit & { dtwAnchors: number[] }) | undefined;
+  let current: WordDraft | undefined;
   let missingLexicalTiming = false;
   const segmentStart = milliseconds(segment.offsets?.from) ?? 0;
   const segmentEnd = milliseconds(segment.offsets?.to);
@@ -83,15 +99,17 @@ function timedTokens(segment: WhisperJsonSegment): TimedTranscriptUnit[] {
 
   const flush = () => {
     if (current && current.text.trim()) {
-      const { dtwAnchors, ...unit } = current;
-      unit.text = unit.text.trim();
+      const { dtwAnchors, start, end } = current;
+      const unit: TimedTranscriptUnit = { start: start ?? segmentStart, end: end ?? segmentStart, text: current.text.trim() };
 
       if (dtwAnchors.length > 0) {
         const firstAnchor = dtwAnchors[0]!;
         const lastAnchor = dtwAnchors.at(-1)!;
-        const heuristicDuration = Math.min(
+        // A word with no usable offsets still starts no earlier than the
+        // previous word's anchor or its segment, which bound it below.
+        const heuristicDuration = start === undefined || end === undefined ? UNKNOWN_WORD_SECONDS : Math.min(
           1.5,
-          Math.max(0.05, unit.end - unit.start),
+          Math.max(0.05, end - start),
         );
         unit.start = roundSeconds(
           Math.max(segmentStart, firstAnchor - heuristicDuration),
@@ -105,6 +123,8 @@ function timedTokens(segment: WhisperJsonSegment): TimedTranscriptUnit[] {
           unit.end = Math.max(unit.start, Math.min(unit.end, segmentEnd));
         }
         unit.anchor = roundSeconds(firstAnchor);
+      } else if (start === undefined || end === undefined) {
+        missingLexicalTiming = true;
       }
 
       units.push(unit);
@@ -119,30 +139,37 @@ function timedTokens(segment: WhisperJsonSegment): TimedTranscriptUnit[] {
 
     const start = milliseconds(token.offsets?.from);
     const end = milliseconds(token.offsets?.to);
-    if (start === undefined || end === undefined || end < start) {
-      if (token.text.trim()) missingLexicalTiming = true;
-      continue;
-    }
+    const lexical = /[\p{L}\p{N}]/u.test(token.text);
     // Punctuation may be aligned far into the following silence. Fold its text
     // into the word, but only lexical tokens may extend that word's DTW span.
-    const dtwAnchor = /[\p{L}\p{N}]/u.test(token.text) && typeof token.t_dtw === 'number' &&
+    const dtwAnchor = lexical && typeof token.t_dtw === 'number' &&
       Number.isFinite(token.t_dtw) &&
       token.t_dtw >= 0
       ? token.t_dtw / 100
       : undefined;
+    // whisper.cpp's energy heuristic can end a token before it starts, often
+    // for every later segment in a 30-second window. Its DTW anchor still times
+    // the word, and punctuation only lends its text, so keep both.
+    const reversed = start !== undefined && end !== undefined && end < start;
+    if (start === undefined || end === undefined || (reversed && lexical && dtwAnchor === undefined)) {
+      if (token.text.trim()) missingLexicalTiming = true;
+      continue;
+    }
 
     const startsNewWord = /^\s/u.test(token.text);
     if (startsNewWord && current) flush();
 
     if (!current) {
       current = {
-        start,
-        end,
+        ...(reversed ? {} : { start, end }),
         text: token.text,
         dtwAnchors: dtwAnchor === undefined ? [] : [dtwAnchor],
       };
     } else {
-      current.end = Math.max(current.end, end);
+      if (!reversed) {
+        current.start ??= start;
+        current.end = Math.max(current.end ?? end, end);
+      }
       current.text += token.text;
       if (dtwAnchor !== undefined) current.dtwAnchors.push(dtwAnchor);
     }
@@ -196,10 +223,11 @@ export function timedUnitsFromWhisperJson(value: unknown): TimedTranscriptUnit[]
 export interface TimestampTranscriptionOptions {
   onProgress?: (percentage: number) => void;
   onFallback?: (message: string) => void;
-  /** Test seams: the whisper.cpp build and model, and the Mac to size the run for. */
+  /** Test seams: the whisper.cpp build and model, the Mac to size the run for, and speech detection. */
   whisperCli?: string;
   modelPath?: string;
   hardware?: TranscriptionHardware;
+  detectSpeech?: (wavPath: string) => Promise<SpeechRegion[] | undefined>;
 }
 
 /** whisper.cpp started and then failed; spawn failures are plain errors. */
@@ -234,19 +262,33 @@ export async function transcribeWithTimestamps(
   const stopTrackingTemp = trackTempDirectory(tempDirectory);
   const outputBase = join(tempDirectory, 'transcript');
   const outputJson = `${outputBase}.json`;
+  const packedPath = join(tempDirectory, 'speech.wav');
 
   try {
+    // Speech detection comes first: Whisper hears only the speech it finds,
+    // and the phantom-word check reuses the same regions afterwards.
+    const speech = await (options.detectSpeech ?? detectSpeechRegions)(filePath);
+    let packing: SpeechPacking | undefined;
+    try {
+      packing = speech && packSpeech(filePath, speech, packedPath);
+    } catch {
+      // A track that can't be packed is transcribed whole, as before.
+      packing = undefined;
+    }
+    const audioPath = packing ? packedPath : filePath;
+
     const runWhisper = (disableGpu: boolean) => new Promise<void>((resolve, reject) => {
       const proc = spawn(whisperCli, [
         ...(disableGpu ? ['-ng'] : []),
         '-m', modelPath,
-        '-f', filePath,
+        '-f', audioPath,
         '-l', 'en',
         '-t', String(finalTranscriptionThreads(hardware)),
         // Do not combine canonical word timestamps with --vad: our pinned CLI
         // maps segment times but emits token/DTW times on compressed audio
-        // (ggml-org/whisper.cpp#4046). Live draft VAD is independent of this path.
-        // Keep DTW on original audio; flash attention must be off for this build.
+        // (ggml-org/whisper.cpp#4046). speech-packing.ts does that job instead,
+        // and maps every time back. Live draft VAD is independent of this path.
+        // Flash attention must be off for DTW in this build.
         '-nfa',
         '-dtw', 'large.v3.turbo',
         '-np',
@@ -291,9 +333,6 @@ export async function transcribeWithTimestamps(
       });
     });
 
-    // Speech detection for the phantom-word check needs only the audio, so it
-    // runs on the CPU while Whisper works instead of adding seconds after it.
-    const speech = detectSpeechRegions(filePath);
     const forceCpu = !transcriptionUsesGpu(hardware);
     try {
       await runWhisper(forceCpu);
@@ -321,7 +360,9 @@ export async function transcribeWithTimestamps(
       throw new Error(`Could not parse whisper.cpp timestamp JSON: ${message}`);
     }
 
-    return await dropPhantomUnits(timedUnitsFromWhisperJson(parsed), filePath, () => speech);
+    const units = timedUnitsFromWhisperJson(parsed);
+    // The phantom check runs on the track's own clock, against its own audio.
+    return await dropPhantomUnits(packing ? unpackUnits(units, packing) : units, filePath, async () => speech);
   } finally {
     rmSync(tempDirectory, { recursive: true, force: true });
     stopTrackingTemp();

@@ -1,8 +1,8 @@
 import { afterEach, expect, test } from 'bun:test';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { detectSpeechRegions, dropPhantomUnits, isPhantomUnit, liveSpeechGateArguments, parseSpeechRegions, peakFrameDbfs, readMonoPcm } from '../src/speech-gate.ts';
+import { detectSpeechRegions, dropPhantomUnits, isPhantomUnit, liveSpeechGateArguments, parseSpeechRegions, peakFrameDbfs, quietCuts, readMonoPcm } from '../src/speech-gate.ts';
 
 const directories: string[] = [];
 afterEach(() => { for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true }); });
@@ -91,6 +91,43 @@ test('speech regions are read from the tool, in seconds and in order', async () 
   writeFileSync(tool, '#!/bin/sh\nexit 3\n');
   expect(await detectSpeechRegions('/x.wav', tool, model)).toBeUndefined();
   expect(await detectSpeechRegions('/x.wav', join(root, 'missing'), model)).toBeUndefined();
+});
+
+/** Steady hiss over `seconds`, except digital silence for half a second at each of `quiet`. */
+function hiss(seconds: number, quiet: number[]): Int16Array {
+  const pcm = new Int16Array(seconds * 16_000).map((_, index) => (index % 2 ? 300 : -300));
+  for (const at of quiet) pcm.fill(0, Math.round((at - 0.25) * 16_000), Math.round((at + 0.25) * 16_000));
+  return pcm;
+}
+
+test('a long track is cut at its quietest moment near each even split, on Silero’s frame grid', () => {
+  const cuts = quietCuts(hiss(600, [146, 302, 457]));
+  expect(cuts).toHaveLength(3);
+  for (const [index, at] of [146, 302, 457].entries()) {
+    expect(cuts[index]! % 512).toBe(0);
+    expect(Math.abs(cuts[index]! / 16_000 - at)).toBeLessThan(0.02);
+  }
+  expect(quietCuts(hiss(239, []))).toEqual([]);
+  expect(quietCuts(hiss(360, [175]))).toHaveLength(2);
+});
+
+test('each piece of a long track is read, and its regions put back on the track’s clock', async () => {
+  const root = directory();
+  const path = join(root, 'long.wav');
+  writeFileSync(path, wav(hiss(600, [146, 302, 457])));
+  const cuts = quietCuts(hiss(600, [146, 302, 457])).map((cut) => cut / 16_000);
+  const tool = join(root, 'tool');
+  const model = join(root, 'model');
+  writeFileSync(model, '');
+  writeFileSync(tool, `#!/bin/sh\necho "$2" >> '${join(root, 'pieces.log')}'\necho "Speech segment 0: start = 100.00, end = 250.00"\n`);
+  chmodSync(tool, 0o755);
+  const regions = await detectSpeechRegions(path, tool, model);
+  expect(regions?.map((region) => [region.start, region.end].map((time) => Math.round(time * 1000) / 1000)))
+    .toEqual([0, ...cuts].map((offset) => [offset + 1, offset + 2.5].map((time) => Math.round(time * 1000) / 1000)));
+  expect(readFileSync(join(root, 'pieces.log'), 'utf8').trim().split('\n')).toHaveLength(4);
+
+  writeFileSync(tool, `#!/bin/sh\ncase "$2" in *2.wav) exit 3 ;; esac\necho "Speech segment 0: start = 100.00, end = 250.00"\n`);
+  expect(await detectSpeechRegions(path, tool, model)).toBeUndefined();
 });
 
 test('the live server only gets speech detection when its model is there', () => {
