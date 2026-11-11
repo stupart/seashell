@@ -130,7 +130,7 @@ export default function SpeakerSettings(props: {
       {selected[0] === 'redo' && <Paragraph width={width} text="Separates voices again and saves a copy. This meeting and its notes stay as they are." />}
       {message && <Paragraph width={width} color="yellow" text={message} />}
     </Box>
-    {busy ? <Prompt text="◐ Working…" color="magenta" hints={[['Esc', 'cancel']]} columns={props.columns - 2} />
+    {busy ? <Prompt text="◐ Working…" dimColor hints={[['Esc', 'cancel']]} columns={props.columns - 2} />
       : toast ? <Toast text={toast} columns={props.columns - 2} />
       : <KeyBar hints={[['Enter', selected[3]], ['↑↓', 'choose'], ['Esc', 'back']]} columns={props.columns - 2} help={false} />}
   </Box>;

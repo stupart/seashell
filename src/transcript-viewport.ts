@@ -3,7 +3,7 @@ import wrapAnsi from 'wrap-ansi';
 import { stripVTControlCharacters } from 'util';
 import { coalesceTranscriptSegments, speakerLabel } from './transcript-renderer.ts';
 import type { StructuredTranscript } from './transcript-types.ts';
-import { formatTuiClock, SPEAKER_COLORS, speakerColorIndex, speakerDisplayName, wrapWords } from './tui-state.ts';
+import { formatTuiClock, speakerColors, speakerDisplayName, wrapWords, YOUR_SPEAKER_ID } from './tui-state.ts';
 import { bulletParts } from './meeting-tui.ts';
 
 const color = new Chalk({ level: 1 });
@@ -69,17 +69,20 @@ export function timedTranscriptRows(
   const clockWidth = options.timestamps ? formatTuiClock(segments.at(-1)?.start ?? 0).length : 0;
   // Below this, a name column leaves too little room for the words themselves.
   const stacked = options.speakers && width < MIN_COLUMNS_FOR_NAME_COLUMN;
+  // You in plain bold; everyone else in a hue of their own, in the order the transcript lists them.
+  const colors = speakerColors([...record.speakers.map((speaker) => speaker.id), ...segments.map((segment) => segment.speaker ?? '')]);
+  const styled = (id: string, text: string) => id === YOUR_SPEAKER_ID ? color.bold(text) : color[colors.get(id)!](text);
   return segments.flatMap((segment) => {
-    const speakerColor = SPEAKER_COLORS[speakerColorIndex(segment.speaker ?? '')]!;
-    const name = names.get(segment.speaker ?? '') ?? '';
+    const id = segment.speaker ?? '';
+    const name = names.get(id) ?? '';
     const clock = options.timestamps ? color.dim(formatTuiClock(segment.start).padStart(clockWidth)) : '';
     const text = stripVTControlCharacters(segment.text);
     const timed = (row: string) => ({ text: row, start: segment.start });
     if (stacked) {
-      const heading = [clock, color[speakerColor](name)].filter(Boolean).join('  ');
+      const heading = [clock, styled(id, name)].filter(Boolean).join('  ');
       return [timed(heading), ...wrapAnsi(text, width, { hard: true }).split('\n').map((line) => ({ ...timed(line), heading }))];
     }
-    const label = options.speakers ? color[speakerColor](name.slice(0, nameWidth).padEnd(nameWidth)) : '';
+    const label = options.speakers ? styled(id, name.slice(0, nameWidth).padEnd(nameWidth)) : '';
     const prefix = [clock, label].filter(Boolean).join('  ');
     const indent = (clockWidth ? clockWidth + 2 : 0) + (options.speakers ? nameWidth + 2 : 0);
     return wrapAnsi(text, Math.max(1, width - indent), { hard: true }).split('\n')

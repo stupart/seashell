@@ -3,7 +3,7 @@ import { Box, Text, useStdout } from 'ink';
 import wrapAnsi from 'wrap-ansi';
 
 export type Hint = readonly [key: string, label: string];
-type Tone = 'red' | 'yellow' | 'green' | 'cyan' | 'magenta';
+type Tone = 'red' | 'yellow' | 'green' | 'cyan';
 
 const ALWAYS: readonly Hint[] = [[',', 'settings'], ['?', 'help']];
 const width = (text: string) => Bun.stringWidth(text);
@@ -81,6 +81,8 @@ export function Prompt(props: {
   hints?: readonly Hint[];
   columns: number;
   color?: Tone;
+  /** Work in progress ("◐ Working…") is dim: it is neither a question nor anyone's colour. */
+  dimColor?: boolean;
 }) {
   const hints = props.hints ?? [];
   const room = Math.max(4, props.columns - (hints.length ? hintsWidth(hints) + 2 : 0));
@@ -92,7 +94,7 @@ export function Prompt(props: {
     : props.short && width(props.short) <= room ? props.short
     : cutEnd(props.short ?? props.text, room);
   return <Text key={shapeOf(hints)} wrap="truncate-end">
-    <Text {...(props.color ? { color: props.color } : {})}>{text}</Text>
+    <Text {...(props.color ? { color: props.color } : {})} dimColor={props.dimColor ?? false}>{text}</Text>
     {typed !== undefined ? ` ${typed}` : ''}
     {hints.length ? <>{'  '}<Hints hints={hints} /></> : null}
   </Text>;

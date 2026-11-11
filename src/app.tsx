@@ -2680,7 +2680,7 @@ export default function App(props: {
       </Box>}
       <Box flexShrink={0}>
         {prompt ? <Prompt {...prompt} color="yellow" columns={terminal.columns - 2} />
-          : processing ? <Text color="magenta" wrap="truncate-end">◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}</Text>
+          : processing ? <Text dimColor wrap="truncate-end">◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}</Text>
           : toast ? <Toast text={toast.text} color={toast.color} columns={terminal.columns - 2} />
           : sheetHints ? <KeyBar hints={sheetHints} columns={terminal.columns - 2} help={false} />
           : <KeyBar hints={withFix(hints, slot)} columns={terminal.columns - 2} />}

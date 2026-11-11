@@ -7,7 +7,7 @@ import {
   formatTuiClock,
   moveSelection,
   moveTranscriptScroll,
-  speakerColorIndex,
+  speakerColors,
   tuiLayout,
   wrapWords,
 } from '../src/tui-state.ts';
@@ -46,10 +46,11 @@ describe('TUI navigation state', () => {
     expect(entries).toHaveLength(1);
   });
 
-  test('assigns stable speaker colors', () => {
-    expect(speakerColorIndex('SPEAKER_00')).toBe(speakerColorIndex('SPEAKER_00'));
-    expect(speakerColorIndex('SPEAKER_00')).toBeGreaterThanOrEqual(0);
-    expect(speakerColorIndex('SPEAKER_00')).toBeLessThan(6);
+  test('gives other speakers distinct hues in order, never red, yellow or green, and you none', () => {
+    const colors = speakerColors(['LOCAL', 'REMOTE_00', 'REMOTE_01', 'REMOTE_00', 'REMOTE_02']);
+    expect(colors.has('LOCAL')).toBe(false);
+    expect([...colors.values()]).toEqual(['cyan', 'magenta', 'blue']);
+    expect([...colors.values()].some((value) => /red|yellow|green/iu.test(value))).toBe(false);
   });
 
   test('formats a compact media-relative clock for the terminal', () => {

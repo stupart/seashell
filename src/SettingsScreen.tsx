@@ -737,7 +737,7 @@ export default function SettingsScreen(props: SetupActionProps & {
         {failed && <Box marginTop={1} flexShrink={0}><Paragraph width={width} color="red" text={failed} /></Box>}
       </Box>}
     </Box>
-    {setup.busy ? <Prompt text="◐ Working…" color="magenta" hints={[['Esc', 'cancel']]} columns={props.columns - 2} />
+    {setup.busy ? <Prompt text="◐ Working…" dimColor hints={[['Esc', 'cancel']]} columns={props.columns - 2} />
       : confirm ? <Prompt text={confirm.text} {...(confirm.short ? { short: confirm.short } : {})} color="yellow"
         hints={[['y', confirm.yes], ['n', 'keep']]} columns={props.columns - 2} />
       : setup.message?.tone === 'done' ? <Toast text={setup.message.text} columns={props.columns - 2} />

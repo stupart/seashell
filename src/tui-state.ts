@@ -136,13 +136,28 @@ export function filterLibraryEntries(
   ].some((value) => value.toLocaleLowerCase().includes(normalized)));
 }
 
-/** Yellow, red and green are left out: they mean attention, failure and confirmation everywhere else. */
+/** Speakers other than you, each in a hue of their own. Yellow, red and green are left out: they mean
+ * attention, failure and confirmation everywhere else. */
 export const SPEAKER_COLORS = [
   'cyan',
   'magenta',
   'blue',
+  'cyanBright',
   'magentaBright',
+  'blueBright',
 ] as const;
+
+/** Your own microphone: your name is plain bold, in no speaker's colour. */
+export const YOUR_SPEAKER_ID = 'LOCAL';
+
+/** Each other speaker's colour, in the order they are listed, so no two of the first three share a hue. */
+export function speakerColors(ids: Iterable<string>): Map<string, (typeof SPEAKER_COLORS)[number]> {
+  const colors = new Map<string, (typeof SPEAKER_COLORS)[number]>();
+  for (const id of ids) {
+    if (id !== YOUR_SPEAKER_ID && !colors.has(id)) colors.set(id, SPEAKER_COLORS[colors.size % SPEAKER_COLORS.length]!);
+  }
+  return colors;
+}
 
 /**
  * A speaker as the screen names them: "You" for your own microphone, "Speaker 1" for a voice
@@ -151,12 +166,6 @@ export const SPEAKER_COLORS = [
 export function speakerDisplayName(id: string | undefined, label: string): string {
   if (id === 'LOCAL' && label === 'Microphone') return 'You';
   return label.replace(/^Remote speaker (\d+)$/u, 'Speaker $1');
-}
-
-export function speakerColorIndex(speakerId: string): number {
-  let hash = 0;
-  for (const character of speakerId) hash = ((hash * 31) + character.codePointAt(0)!) >>> 0;
-  return hash % SPEAKER_COLORS.length;
 }
 
 /** Compact media-relative clock for the TUI; exports retain millisecond detail. */

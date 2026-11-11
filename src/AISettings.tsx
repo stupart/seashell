@@ -179,7 +179,7 @@ export default function AISettings(props: {
       {!busy && !canUse && screen === 'home' && <Text dimColor>No Seashell account needed. Connect a provider or return to your transcript.</Text>}
     </Box>
     <Box flexGrow={1} />
-    <Box flexShrink={0}>{testing ? <Prompt text="◐ Testing…" color="magenta" hints={[['Esc', 'cancel']]} columns={(stdout?.columns ?? 80) - 2} />
+    <Box flexShrink={0}>{testing ? <Prompt text="◐ Testing…" dimColor hints={[['Esc', 'cancel']]} columns={(stdout?.columns ?? 80) - 2} />
       : <KeyBar help={false} columns={(stdout?.columns ?? 80) - 2}
         hints={[['Enter', screen === 'home' && home[index]?.[0] === 'test' ? test ? 'test again' : 'test' : 'continue'], ['↑↓', 'choose'], ['Esc', 'back']]} />}</Box>
   </Box>;

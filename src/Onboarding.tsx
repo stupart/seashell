@@ -360,7 +360,7 @@ export default function Onboarding(props: SetupActionProps & {
       {setup.message && setup.message.tone !== 'done' && <Box marginTop={1} flexShrink={0}>
         <Paragraph width={width} color={setup.message.tone === 'failed' ? 'red' : 'yellow'} text={setup.message.text} /></Box>}
     </Box>
-    {setup.busy ? <Prompt text="◐ Working…" color="magenta" hints={[['Esc', 'cancel']]} columns={width} />
+    {setup.busy ? <Prompt text="◐ Working…" dimColor hints={[['Esc', 'cancel']]} columns={width} />
       : setup.message?.tone === 'done' ? <Toast text={setup.message.text} columns={width} />
       : <KeyBar hints={hints} columns={width} help={false} />}
   </Box>;
