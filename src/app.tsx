@@ -963,6 +963,20 @@ export default function App(props: {
     // A phrase can wrap across rows, so the line is read whole.
     return [...lines.values()].filter((line) => line.text.replace(/\s+/gu, ' ').toLocaleLowerCase().includes(needle)).map((line) => line.first);
   }, [timedRows, searchQuery, meetingView]);
+  // Choosing among search results, the reader shows the chosen meeting's lines that say it, whole.
+  const searchPane = historyOpen && !drawerOnly && Boolean(searchQuery.trim()) && view === 'record'
+    && visibleEntries.some((entry) => entry.id === selectedRecord?.id);
+  const searchLines = useMemo(() => {
+    const needle = searchQuery.trim().toLocaleLowerCase();
+    if (!searchPane || !needle) return [];
+    const lines = new Map<number | undefined, { rows: string[]; text: string }>();
+    timedRows.forEach((row) => {
+      const line = lines.get(row.start);
+      if (line) { line.rows.push(row.text); line.text += ` ${stripVTControlCharacters(row.text).trim()}`; }
+      else lines.set(row.start, { rows: [row.text], text: stripVTControlCharacters(row.text) });
+    });
+    return [...lines.values()].filter((line) => line.text.replace(/\s+/gu, ' ').toLocaleLowerCase().includes(needle));
+  }, [timedRows, searchQuery, searchPane]);
   // The rows rewrap once the list closes, so the match is found again whenever they do.
   useEffect(() => {
     if (searchHit === null || !matchRows.length) return;
@@ -2359,8 +2373,8 @@ export default function App(props: {
   // One order everywhere: what can be done here, then moving, then Esc. The way back to
   // the meetings comes early, so a narrow window keeps it.
   const hints: Hint[] = atHome && attention.length ? [['Enter', 'guided setup'], ...byHand, ['f', 'import']]
-    : historyOpen && searchQuery.trim() ? visibleEntries.length ? [['Enter', 'read'], ['/', 'search again'], ['↑↓', 'choose'], ['Esc', 'cancel']]
-      : [['/', 'search again'], ['Esc', 'cancel']]
+    : historyOpen && searchQuery.trim() ? visibleEntries.length ? [['Enter', 'read'], ['/', 'search again'], ['Esc', 'clear search'], ['↑↓', 'choose']]
+      : [['/', 'search again'], ['Esc', 'clear search']]
     : historyOpen && !navigationItems.some((item) => item.kind === 'record') ? [...byHand, ['f', 'import'], ['/', 'search']]
     : historyOpen ? [['Enter', 'read'], ...byHand, ['/', 'search'], ['f', 'import'], ['↑↓', 'choose']]
     : currentRecordBusy || showingLiveTranscript ? [
@@ -2383,7 +2397,7 @@ export default function App(props: {
       flexDirection="column" overflow="hidden" paddingRight={layout.compact ? 0 : 1}
       {...(layout.compact ? {} : { borderStyle: 'single' as const, borderTop: false, borderBottom: false, borderLeft: false, borderDimColor: true })}
       aria-role="listbox" aria-label="Meetings">
-      <Text bold color="cyan" wrap="truncate-end">{searchQuery.trim() ? `Meetings · ${visibleEntries.length} found` : 'Meetings'}</Text>
+      <Text bold color="cyan" wrap="truncate-end">{searchQuery.trim() ? searchHeading(visibleEntries.length, searchQuery.trim()) : 'Meetings'}</Text>
       {navigationItems.slice(sidebarStart, sidebarStart + listCapacity).map((item, windowIndex) => {
         const index = sidebarStart + windowIndex;
         const selected = selectionIndex === index;
@@ -2394,18 +2408,17 @@ export default function App(props: {
         return <React.Fragment key={item.kind === 'record' ? item.entry.id : item.kind}>
           <Text inverse={selected} wrap="truncate-end" aria-role="option" aria-state={{ selected }}>{selected ? '› ' : '  '}{title}
             {date !== undefined && <><Text dimColor={!selected}>{VIDEO_MARK}</Text>{date}</>}</Text>
-          {match && <Text dimColor wrap="truncate-end">{'  '}{formatTuiClock(match.start)}  {snippetAround(match.text, searchQuery.trim(), listRowWidth - 7)}</Text>}
+          {match && <Text wrap="truncate-end">{'  '}<Text dimColor>{formatTuiClock(match.start)}  </Text>
+            <Highlighted text={snippetAround(match.text, searchQuery.trim(), listRowWidth - 7)} query={searchQuery} /></Text>}
         </React.Fragment>;
       })}
-      {searchQuery && visibleEntries.length === 0 && <Text dimColor>Nothing found.</Text>}
       {!searchQuery && libraryEntries.length === 0 && <Text dimColor>Your meetings will appear here.</Text>}
     </Box>
   );
 
   const readerTotal = currentMeeting && meetingView !== 'transcript' ? auxiliaryMeetingLines.length : displayRows.length;
   const readerScroll = currentMeeting && meetingView !== 'transcript' ? transcriptScroll : visibleTranscriptScroll;
-  const searchHighlight = searchQuery.trim() && meetingView === 'transcript'
-    ? new RegExp(searchQuery.trim().replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'giu') : undefined;
+  const searchHighlight = meetingView === 'transcript' ? searchQuery : '';
   // The title says whether Seashell can record; the body says what is missing, or what happens next.
   const homeMessage = attention.length ? <>
     {attention.map((status) => <Text key={status.id} wrap="truncate-end">
@@ -2416,7 +2429,21 @@ export default function App(props: {
     <Text dimColor>Notes are written when the call ends.</Text>
   </>;
 
-  const reader = (
+  const reader = searchPane ? (
+    <Box flexDirection="column" flexGrow={1} minWidth={0} paddingLeft={1} overflow="hidden" aria-label="Matching lines">
+      <Box flexShrink={0} marginBottom={1}>
+        <Text dimColor wrap="truncate-end">{searchLines.length
+          ? `${searchLines.length} ${searchLines.length === 1 ? 'line mentions' : 'lines mention'} "${searchQuery.trim()}"`
+          : `Its title mentions "${searchQuery.trim()}"; no line does.`}</Text>
+      </Box>
+      {/* Measured as the reader is, so the lines wrap to the room beside the list. */}
+      <Box ref={transcriptPaneRef} flexGrow={1} flexDirection="column" overflow="hidden">
+        {searchLines.flatMap((line) => line.rows).slice(0, visibleRows).map((row, index) => <Box key={index} flexShrink={0} height={1}>
+          <Text wrap="truncate-end">{highlighted(row, searchQuery) || ' '}</Text>
+        </Box>)}
+      </Box>
+    </Box>
+  ) : (
     <Box flexDirection="column" flexGrow={1} minWidth={0} paddingLeft={layout.compact ? 0 : 1} overflow="hidden">
       {currentMeeting && !drawerOnly && (
         <Box flexShrink={0} marginBottom={1} justifyContent="space-between">
@@ -2450,7 +2477,7 @@ export default function App(props: {
               : backgroundMessage ?? 'No transcript text'}</Text>
           )
         ) : visibleTranscriptRows.map((row, index) => <Box key={index} flexShrink={0} height={1}>
-          <Text wrap="truncate-end">{(searchHighlight ? row.replace(searchHighlight, (match) => HIGHLIGHT(match)) : row) || ' '}</Text>
+          <Text wrap="truncate-end">{highlighted(row, searchHighlight) || ' '}</Text>
         </Box>)}
       </Box>
     </Box>
@@ -2610,6 +2637,29 @@ export default function App(props: {
       </Box>
     </Box>
   );
+}
+
+const searchPattern = (needle: string, flags: string) => new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), flags);
+
+/** Every place a row says what was searched for, in the transcript's yellow. */
+function highlighted(row: string, query: string): string {
+  const needle = query.trim();
+  return needle ? row.replace(searchPattern(needle, 'giu'), (match) => HIGHLIGHT(match)) : row;
+}
+
+/** A dim line with what was searched for in the transcript's yellow, at full strength. */
+function Highlighted(props: { text: string; query: string }) {
+  const needle = props.query.trim();
+  // Split around a captured match, the text and the matches alternate.
+  const parts = needle ? props.text.split(new RegExp(`(${searchPattern(needle, 'u').source})`, 'giu')) : [props.text];
+  return <>{parts.map((part, index) => index % 2
+    ? <Text key={index} color="black" backgroundColor="yellow">{part}</Text>
+    : <Text key={index} dimColor>{part}</Text>)}</>;
+}
+
+/** The list's heading during a search: how many meetings say it, and what was searched for. */
+function searchHeading(count: number, query: string): string {
+  return `${count === 0 ? 'No meeting mentions' : count === 1 ? '1 meeting mentions' : `${count} meetings mention`} "${query}"`;
 }
 
 /** A setup problem in the title's status slot: what is wrong in a word or two. The key that helps
