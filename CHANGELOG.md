@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — your own notes, and briefs before meetings
+
+- **Your notes:** during a call, `+` writes a one-line note, timed when you
+  pressed it and kept with the call's audio. `seashell note "…"` does the same
+  from a terminal. After a call, `+` adds a note to the meeting. Final notes
+  read them, and mark what came from them with ✎.
+- **What did I miss?** During a call, `A` then Enter asks about the minutes
+  since you last looked, or any question of your own. The answer says when
+  each point was said, and recording carries on.
+- **Briefs:** about 15 minutes before a calendar meeting with history, Seashell
+  writes a brief from past meetings with the same title or people, saves it in
+  the Briefs folder and tells you once. `B` reads it; `seashell brief` too.
+  Settings → Briefs turns it off.
+- **Follow-ups:** `U` drafts an email or a Slack message from a meeting. Copy
+  it, or open it in Mail as a draft. Nothing is ever sent.
+  `seashell draft <id>` does the same.
+- **Vocabulary:** names and words to spell right, one per line in
+  Vocabulary.txt beside Prompts. Transcription and the AI both use them.
+  Settings → Vocabulary opens it; `seashell vocabulary` lists it.
+- The meetings server can add a note, read a brief, draft a follow-up, and read
+  or change the vocabulary.
+- Notes, briefs, follow-ups and vocabulary in the AI need Humain prompt
+  revision 4. With an older engine, Seashell says so and keeps working.
+
 ## Unreleased — watch a call back, and notes that do more
 
 **Video**
