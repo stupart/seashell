@@ -70,10 +70,10 @@ export function Paragraph(props: { text: string; width: number; color?: 'red' | 
 
 export const HELP_ROWS: ReadonlyArray<readonly [string, string]> = [
   ['Move', '↑↓ move · Enter read · h meetings · Esc back · / search · q quit, recording carries on'],
-  ['Meeting', '1 notes · 2 transcript · 3 chat · a ask · g write notes · n notes options · r name speakers · c copy · e export · o open folder · d move to Trash'],
+  ['Meeting', '1 notes · 2 transcript · 3 chat · a ask · g write notes · n notes options · r name speakers · w watch video · c copy · e export · o open folder · d move to Trash'],
   ['Transcript', 't times · s speaker names · l latest words'],
   ['When asked', 'm record · x ignore'],
-  ['Recording', 'starts and stops with the call · space record or stop by hand · i audio help'],
+  ['Recording', 'starts and stops with the call · space record or stop by hand · V record with video · i audio help'],
   ['Add', 'f import a file · F import and separate speakers'],
   ['Setup', ', settings · p AI · v speaker names'],
 ];

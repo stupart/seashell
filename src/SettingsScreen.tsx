@@ -1,6 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { spawnSync } from 'child_process';
 import { existsSync } from 'fs';
+import { homedir } from 'os';
 import { Box, Text, useInput } from 'ink';
 import { defaultConfigPath, updateMeetingConfig, type SeashellConfig } from './config.ts';
 import {
@@ -20,6 +21,14 @@ import { microphonePermission } from './microphone-permission.ts';
 import { calendarPermission } from './calendar-permission.ts';
 import { join } from 'path';
 import { ensureTemplatesDirectory, PROFILE_FILE } from './meeting-templates.ts';
+import { ensurePromptsDirectory, listPrompts, resetPrompt, type PromptSummary } from './prompts.ts';
+import { ensureExtractorsDirectory, loadExtractors, type ExtractorWhen } from './extractors.ts';
+import { ensureAutomationsDirectory, loadAutomations, readAutomationRuns, type AutomationRun } from './automations.ts';
+import { forgetVoiceprint, listVoiceprints } from './voiceprints.ts';
+import { screenCapturePermission } from './video-capture.ts';
+import { checkComputerAudio, type ComputerAudioCheck } from './audio-levels.ts';
+import { listTranscriptRecords } from './transcript-library.ts';
+import { meetingWhen } from './tui-state.ts';
 import { DEFAULT_MEETING_AUTOMATION, meetingApps, type AppRecordingPolicy } from './meeting-automation.ts';
 import { KeyBar, Paragraph, ScreenTitle, type Hint } from './tui-chrome.tsx';
 
@@ -32,9 +41,14 @@ export const MENU_LABEL: Record<FeatureId, string> = {
   transcription: 'Transcription',
   'meet-names': 'Google Meet names',
   'speaker-separation': 'Who said what',
+  voices: 'Saved voices',
   'ai-notes': 'AI notes',
   'notes-templates': 'Templates',
+  prompts: 'Prompts',
+  extractors: 'Extractors',
+  automations: 'Automations',
   calendar: 'Calendar titles',
+  video: 'Video',
 };
 
 export interface SettingsActions {
@@ -42,7 +56,31 @@ export interface SettingsActions {
   connectMeet?: (signal: AbortSignal) => Promise<{ detail: string }>;
   allowMicrophone?: (signal: AbortSignal) => Promise<{ authorization: string; detail: string }>;
   allowCalendar?: (signal: AbortSignal) => Promise<{ authorization: string; detail: string }>;
+  allowScreenRecording?: (signal: AbortSignal) => Promise<{ authorization: string; detail: string }>;
+  /** The one-time check that lets the recorder use Seashell System Audio. */
+  checkComputerAudio?: (signal: AbortSignal) => Promise<ComputerAudioCheck>;
   openTemplates?: (directory: string) => void;
+  /** Extractors and automations: the folder in Finder. */
+  openFolder?: (directory: string) => void;
+  /** A prompt, in the person's text editor. */
+  openFile?: (path: string) => void;
+}
+
+/** A path as people write it, with ~ for their home folder. */
+const tildified = (path: string) => path.startsWith(`${homedir()}/`) ? `~${path.slice(homedir().length)}` : path;
+
+/** Opens a folder in Finder. */
+export function openFolder(directory: string): void {
+  const result = spawnSync('/usr/bin/open', [directory], { stdio: 'ignore', timeout: 5_000 });
+  if (result.error || result.status !== 0) throw new Error(`Could not open ${directory}`);
+}
+
+/** Opens a file in the person's text editor, as templates' "About me" opens; Finder shows it when that fails. */
+export function openTextFile(path: string): void {
+  const result = spawnSync('/usr/bin/open', ['-t', path], { stdio: 'ignore', timeout: 5_000 });
+  if (!result.error && result.status === 0) return;
+  const shown = spawnSync('/usr/bin/open', ['-R', path], { stdio: 'ignore', timeout: 5_000 });
+  if (shown.error || shown.status !== 0) throw new Error(`Could not open ${path}`);
 }
 
 /** What Settings and the guided setup both need to fix things. */
@@ -94,6 +132,30 @@ export function useSetupActions(props: SetupActionProps & { onFinished?: () => v
         return false;
       } finally { props.onFinished?.(); }
     }
+    if (action === 'open-extractors' || action === 'open-automations') {
+      try {
+        const directory = action === 'open-extractors' ? ensureExtractorsDirectory(props.libraryDir) : ensureAutomationsDirectory(props.libraryDir);
+        (props.actions?.openFolder ?? openFolder)(directory);
+        setMessage(action === 'open-extractors'
+          ? `Opened ${tildified(directory)}. Each extractor is a Markdown file; the example shows how.`
+          : `Opened ${tildified(directory)}. Each automation is a Markdown file; the example stays off until you turn it on.`);
+        return true;
+      } catch (cause) {
+        setMessage(cause instanceof Error ? cause.message : String(cause));
+        return false;
+      } finally { props.onFinished?.(); }
+    }
+    if (action === 'turn-on-video') {
+      try {
+        props.onConfigChange?.(updateMeetingConfig({ video: { enabled: true } }));
+        // The item's own state line says it is on.
+        setMessage(undefined);
+        return true;
+      } catch (cause) {
+        setMessage(cause instanceof Error ? cause.message : String(cause));
+        return false;
+      } finally { props.onFinished?.(); }
+    }
     const controller = new AbortController(); request.current = controller;
     setBusy(true); setMessage(undefined);
     let finished = false;
@@ -132,6 +194,24 @@ export function useSetupActions(props: SetupActionProps & { onFinished?: () => v
           }
           setMessage(result.detail);
         }
+      } else if (action === 'check-computer-audio') {
+        setMessage('Playing a short sound to check. If macOS asks about "Seashell System Audio", choose Allow.');
+        const result = await (props.actions?.checkComputerAudio ?? (signal => checkComputerAudio({ signal })))(controller.signal);
+        if (controller.signal.aborted) return false;
+        if (result.refused && !props.actions?.checkComputerAudio) {
+          spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'], { stdio: 'ignore', timeout: 5_000 });
+        }
+        finished = result.heard;
+        setMessage(result.detail);
+      } else if (action === 'allow-screen-recording') {
+        setMessage('macOS will ask about "Seashell Screen Capture". Choose Allow.');
+        const result = await (props.actions?.allowScreenRecording ?? (signal => screenCapturePermission({ request: true, signal })))(controller.signal);
+        if (controller.signal.aborted) return false;
+        if (result.authorization !== 'authorized' && !props.actions?.allowScreenRecording) {
+          spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'], { stdio: 'ignore', timeout: 5_000 });
+        }
+        finished = result.authorization === 'authorized';
+        setMessage(finished ? 'Screen Recording allowed. Calls now keep their video.' : result.detail);
       }
     } catch (cause) {
       if (!controller.signal.aborted) setMessage(cause instanceof Error ? cause.message : String(cause));
@@ -214,6 +294,20 @@ const MENU_WIDTH = 26;
 /** "Choose AI" reads "choose AI" in a key bar, never "choose ai". */
 const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
 
+const PROMPT_STATE: Record<PromptSummary['state'], string> = { default: 'As shipped', edited: 'Edited', empty: 'Empty · sends nothing' };
+
+/** When an extractor runs, in a few words. */
+function whenWords(when: ExtractorWhen): string {
+  if (when.kind === 'always') return 'After every meeting';
+  if (when.kind === 'manual') return 'By hand';
+  const words = [...when.title, ...when.attendee, ...when.app];
+  return `When it mentions ${words.slice(0, 3).join(', ')}${words.length > 3 ? '…' : ''}`;
+}
+
+const RUN_SYMBOL: Record<AutomationRun['status'], [string, 'green' | 'red' | 'yellow']> = {
+  ok: ['✓', 'green'], failed: ['✗', 'red'], skipped: ['!', 'yellow'],
+};
+
 /** Everything Seashell can do, whether it works right now, and one key to fix it. */
 export default function SettingsScreen(props: SetupActionProps & {
   config: SeashellConfig;
@@ -230,36 +324,59 @@ export default function SettingsScreen(props: SetupActionProps & {
   const [rowIndex, setRowIndex] = useState(0);
   const [refresh, setRefresh] = useState(0);
   const [loadError, setLoadError] = useState<string>();
+  const opened = useRef(false);
+  /** A yes-or-no question in the key bar's row, before anything is lost. */
+  const [confirm, setConfirm] = useState<{ text: string; run: () => void }>();
   // Recording rows show what was just saved, whether or not the caller passes it back down.
   const [config, setConfig] = useState(props.config);
   useEffect(() => setConfig(props.config), [props.config]);
   const setup = useSetupActions({ ...props, onFinished: () => setRefresh(value => value + 1) });
 
+  // Read from the settings as just saved here, so a change shows even before the caller passes it back.
   useEffect(() => {
     const controller = new AbortController();
-    void readFeatureStatuses({ config: props.config, libraryDir: props.libraryDir, signal: controller.signal,
+    void readFeatureStatuses({ config, libraryDir: props.libraryDir, signal: controller.signal,
       ...(props.dependencies ? { dependencies: props.dependencies } : {}) })
-      .then(next => { if (!controller.signal.aborted) setStatuses(next); })
+      .then(next => {
+        if (controller.signal.aborted) return;
+        setStatuses(next);
+        // Open on what needs the person; when nothing does, on the first row. Set with the list
+        // itself, so a key pressed as it appears is never undone.
+        if (opened.current) return;
+        opened.current = true;
+        const first = next.findIndex(status => !status.optional && status.state !== 'ok');
+        if (first >= 0) setIndex(first + 2);
+      })
       .catch(cause => { if (!controller.signal.aborted) setLoadError(cause instanceof Error ? cause.message : String(cause)); });
     return () => controller.abort();
-  }, [refresh, props.config]);
+  }, [refresh, config]);
+
+  // The lists behind Prompts, Extractors, Automations and Saved voices; read again after every change.
+  const files = useMemo(() => {
+    const safely = <T,>(read: () => T, fallback: T): T => { try { return read(); } catch { return fallback; } };
+    const runs = safely(() => readAutomationRuns(props.libraryDir).slice(-5).reverse(), []);
+    const titles = new Map(runs.length ? safely(() => listTranscriptRecords(props.libraryDir), []).map(entry => [entry.id, entry.title]) : []);
+    return {
+      prompts: safely(() => listPrompts(props.libraryDir), []),
+      extractors: safely(() => loadExtractors(props.libraryDir), { extractors: [], problems: [] }),
+      automations: safely(() => loadAutomations(props.libraryDir), { automations: [], problems: [] }),
+      runs: runs.map(run => ({ ...run, title: titles.get(run.meetingId) ?? run.meetingId })),
+      voices: safely(() => (props.dependencies?.voices ?? listVoiceprints)(), []),
+    };
+  }, [refresh, props.libraryDir]);
 
   const items: MenuItem[] = [{ kind: 'recording' }, { kind: 'guide' },
     ...(statuses ?? []).map(status => ({ kind: 'status' as const, status }))];
-  // Open on what needs the person; when nothing does, on the first row.
-  const opened = useRef(false);
-  useEffect(() => {
-    if (!statuses || opened.current) return;
-    opened.current = true;
-    const first = items.findIndex(item => item.kind === 'status' && !item.status.optional && item.status.state !== 'ok');
-    setIndex(Math.max(0, first));
-  }, [statuses]);
   const selected = items[Math.min(index, items.length - 1)];
   const rows = recordingRows(config);
   const compact = props.columns < 72;
+  // Recording, prompts and saved voices have rows of their own to choose from.
+  const list = selected?.kind === 'recording' ? 'recording' as const
+    : selected?.kind === 'status' && (selected.status.id === 'prompts' || selected.status.id === 'voices') ? selected.status.id : undefined;
+  const listLength = list === 'recording' ? rows.length : list === 'prompts' ? files.prompts.length : list === 'voices' ? files.voices.length : 0;
   // Ink paints a frame before it swaps in the new input handler; read the latest state.
-  const latest = useRef({ selected, itemCount: items.length, rows, inDetail, rowIndex, config });
-  latest.current = { selected, itemCount: items.length, rows, inDetail, rowIndex, config };
+  const latest = useRef({ selected, itemCount: items.length, rows, inDetail, rowIndex, config, list, listLength, files, confirm });
+  latest.current = { selected, itemCount: items.length, rows, inDetail, rowIndex, config, list, listLength, files, confirm };
 
   const changeRow = (step: number) => {
     const { rows, rowIndex, config } = latest.current;
@@ -275,24 +392,62 @@ export default function SettingsScreen(props: SetupActionProps & {
       setup.setMessage(cause instanceof Error ? cause.message : String(cause));
     }
   };
+  const attempt = (work: () => string | undefined) => {
+    try { setup.setMessage(work()); }
+    catch (cause) { setup.setMessage(cause instanceof Error ? cause.message : String(cause)); }
+    setRefresh(value => value + 1);
+  };
+  const toggleVideo = (on: boolean) => attempt(() => {
+    const saved = updateMeetingConfig({ video: { enabled: !on } });
+    setConfig(saved);
+    props.onConfigChange?.(saved);
+    // The item's own state line says what changed.
+    return undefined;
+  });
 
   useInput((input, key) => {
-    const { selected, itemCount, rows, inDetail } = latest.current;
+    const { selected, itemCount, rows, inDetail, list, listLength, rowIndex, files, confirm } = latest.current;
     if (setup.busy) {
       if (key.escape) setup.cancel();
       return;
     }
-    const editingRows = inDetail && selected?.kind === 'recording';
-    if (key.escape || key.leftArrow && inDetail && !editingRows) {
+    if (confirm) {
+      if (input.toLowerCase() === 'y') { setConfirm(undefined); confirm.run(); }
+      else if (input.toLowerCase() === 'n' || key.escape) setConfirm(undefined);
+      return;
+    }
+    const editingRows = inDetail && list !== undefined;
+    if (key.escape || key.leftArrow && inDetail && list !== 'recording') {
       if (inDetail) { setInDetail(false); setup.setMessage(undefined); return; }
       props.onClose();
       return;
     }
     if (input === ',') { props.onClose(); return; }
     if (editingRows) {
-      if (key.upArrow || input === 'k') setRowIndex(value => Math.max(0, value - 1));
-      else if (key.downArrow || input === 'j') setRowIndex(value => Math.min(rows.length - 1, value + 1));
-      else if (key.leftArrow || key.rightArrow || input === ' ') changeRow(key.leftArrow ? -1 : 1);
+      if (key.upArrow || input === 'k') { setRowIndex(value => Math.max(0, value - 1)); setup.setMessage(undefined); }
+      else if (key.downArrow || input === 'j') { setRowIndex(value => Math.min(listLength - 1, value + 1)); setup.setMessage(undefined); }
+      else if (list === 'recording') { if (key.leftArrow || key.rightArrow || input === ' ') changeRow(key.leftArrow ? -1 : 1); }
+      else if (list === 'prompts') {
+        const prompt = files.prompts[rowIndex];
+        if (!prompt) return;
+        if (key.return) attempt(() => {
+          ensurePromptsDirectory(props.libraryDir);
+          (props.actions?.openFile ?? openTextFile)(prompt.path);
+          return `Opened ${prompt.name}.md. Save it and the next meeting uses it.`;
+        });
+        else if (input === 'd' && prompt.state !== 'default') setConfirm({ text: `Put ${prompt.title} back as shipped? Your changes are lost.`,
+          run: () => attempt(() => { resetPrompt(props.libraryDir, prompt.name); return `${prompt.title} is back as shipped.`; }) });
+      } else if (list === 'voices') {
+        const voice = files.voices[rowIndex];
+        if (voice && key.return) setConfirm({ text: `Forget ${voice.name}'s voice? Past transcripts keep the name.`,
+          run: () => attempt(() => {
+            forgetVoiceprint(voice.name);
+            // The list closes when its last person goes.
+            if (listLength <= 1) setInDetail(false);
+            setRowIndex(value => Math.max(0, Math.min(value, listLength - 2)));
+            return `Forgot ${voice.name}'s voice. Seashell no longer suggests that name.`;
+          }) });
+      }
       return;
     }
     if (input === 'r') { setup.setMessage(undefined); setStatuses(undefined); setRefresh(value => value + 1); return; }
@@ -300,10 +455,11 @@ export default function SettingsScreen(props: SetupActionProps & {
       if (key.upArrow || input === 'k') { setIndex(value => Math.max(0, value - 1)); setup.setMessage(undefined); return; }
       if (key.downArrow || input === 'j') { setIndex(value => Math.min(itemCount - 1, value + 1)); setup.setMessage(undefined); return; }
     }
+    if (input === ' ' && selected?.kind === 'status' && selected.status.id === 'video') { toggleVideo(selected.status.state !== 'off'); return; }
     if (!key.return && !(key.rightArrow && !inDetail)) return;
     if (selected?.kind === 'guide') props.onOpenGuide?.();
-    else if (compact && !inDetail || selected?.kind === 'recording') { setInDetail(true); setRowIndex(0); }
-    else if (key.return && selected?.status.action) void setup.run(selected.status.action);
+    else if (compact && !inDetail || list !== undefined && listLength > 0) { setInDetail(true); setRowIndex(0); setup.setMessage(undefined); }
+    else if (key.return && selected?.kind === 'status' && selected.status.action) void setup.run(selected.status.action);
     // Only hearing it proves a microphone or the Mac's sound works, and the guide listens.
     else if (key.return && selected && testable(selected)) props.onOpenGuide?.();
   });
@@ -318,8 +474,8 @@ export default function SettingsScreen(props: SetupActionProps & {
   const labelOf = (item: MenuItem) => item.kind === 'recording' ? 'Recording'
     : item.kind === 'guide' ? 'Guided setup' : MENU_LABEL[item.status.id];
   const menuRow = (item: MenuItem, i: number) => {
-    // While its rows are being changed, Recording keeps its place without a second selection.
-    const chosen = index === i && !(inDetail && item.kind === 'recording');
+    // While its rows are being changed, an item keeps its place without a second selection.
+    const chosen = index === i && !(inDetail && item === selected && list !== undefined);
     const symbol = item.kind === 'status' ? <><Text color={chosen ? undefined : FEATURE_STATE_COLOR[item.status.state]}>
       {FEATURE_STATE_SYMBOL[item.status.state]}</Text> </> : null;
     const label = labelOf(item);
@@ -347,6 +503,42 @@ export default function SettingsScreen(props: SetupActionProps & {
     <Text bold wrap="truncate-end">{title}</Text>
     {summary}
   </Box>;
+  /** One row of a list in the detail: chosen with › and inverse only while its rows are being chosen from. */
+  const listRow = (key: string, i: number, label: string, value: React.ReactNode, labelWidth: number) => {
+    const chosen = inDetail && i === rowIndex;
+    return <Text key={key} inverse={chosen} wrap="truncate-end">{chosen ? '› ' : '  '}{label.slice(0, labelWidth - 1).padEnd(labelWidth)}
+      <Text dimColor={!chosen}>{value}</Text></Text>;
+  };
+  const problemLines = (problems: readonly { path: string; message: string }[]) => problems.map(problem =>
+    <Text key={problem.path} color="red" wrap="truncate-end">✗ {problem.path.split('/').at(-1)}: {problem.message}</Text>);
+  const filesBody = (id: FeatureId) => {
+    if (id === 'prompts') return files.prompts.map((prompt, i) => listRow(prompt.name, i, prompt.title, PROMPT_STATE[prompt.state], 18));
+    if (id === 'voices') return files.voices.map((voice, i) =>
+      listRow(voice.name, i, voice.name, `${voice.meetings} ${voice.meetings === 1 ? 'meeting' : 'meetings'}`, 22));
+    if (id === 'extractors') return <>
+      {files.extractors.extractors.map(extractor => <Text key={extractor.path} wrap="truncate-end">
+        {'  '}{extractor.name.slice(0, 21).padEnd(22)}<Text dimColor>{whenWords(extractor.when)} · {extractor.fields.length} {extractor.fields.length === 1 ? 'field' : 'fields'}</Text>
+      </Text>)}
+      {problemLines(files.extractors.problems)}
+    </>;
+    if (id === 'automations') return <>
+      {files.automations.automations.map(automation => <Text key={automation.path} wrap="truncate-end">
+        {'  '}{automation.name.slice(0, 21).padEnd(22)}<Text dimColor>{automation.enabled ? 'On' : 'Off'} · {[...new Set(automation.actions.map(action => action.kind))].join(', ')}</Text>
+      </Text>)}
+      {problemLines(files.automations.problems)}
+      {files.runs.length > 0 && <Box flexDirection="column" marginTop={1} flexShrink={0}>
+        <Text dimColor>  Last runs</Text>
+        {files.runs.map((run, i) => {
+          const [symbol, color] = RUN_SYMBOL[run.status];
+          const why = run.detail ?? run.actions.find(action => action.status === run.status && action.detail)?.detail;
+          // What went wrong leads, so a narrow window still shows it.
+          return <Text key={`${run.at}-${i}`} wrap="truncate-end"><Text color={color}>{symbol}</Text> {run.automation}
+            {run.status !== 'ok' && why ? <Text color={color}> · {why}</Text> : null}<Text dimColor> · {run.title} · {meetingWhen(run.at)}</Text></Text>;
+        })}
+      </Box>}
+    </>;
+    return null;
+  };
   const detail = !selected ? null : selected.kind === 'recording' ? <>
     {heading('Recording', <Text dimColor wrap="truncate-end">Which calls Seashell records, and when it asks first.</Text>)}
     <Box flexDirection="column" flexShrink={1} overflow="hidden" marginTop={1}>
@@ -375,15 +567,23 @@ export default function SettingsScreen(props: SetupActionProps & {
         <Paragraph width={width} color="yellow" text={`Next: ${selected.status.fix}`} /></Box>}
       {!selected.status.action && selected.status.state !== 'ok' && selected.status.command
         ? <Paragraph width={width} text={`Run: ${selected.status.command}`} /> : null}
+      {['prompts', 'voices', 'extractors', 'automations'].includes(selected.status.id) &&
+        <Box flexDirection="column" marginTop={1} flexShrink={0}>{filesBody(selected.status.id)}</Box>}
     </Box>
   </>;
 
   const action = selected?.kind === 'status' ? selected.status.action : undefined;
+  const videoOn = selected?.kind === 'status' && selected.status.id === 'video' && selected.status.state !== 'off';
   const hints: Hint[] = compact && !inDetail ? [['Enter', 'open'], ['↑↓', 'choose'], ['r', 'recheck'], ['Esc', 'back']]
-    : inDetail && selected?.kind === 'recording' ? [['↑↓', 'choose'], ['←→', 'change'], ['Esc', 'done']]
+    : inDetail && list === 'recording' ? [['↑↓', 'choose'], ['←→', 'change'], ['Esc', 'done']]
+    : inDetail && list === 'prompts' ? [['Enter', 'edit'], ...(files.prompts[rowIndex]?.state !== 'default' ? [['d', 'put back as shipped'] as Hint] : []),
+      ['↑↓', 'choose'], ['Esc', 'done']]
+    : inDetail && list === 'voices' && listLength ? [['Enter', 'forget'], ['↑↓', 'choose'], ['Esc', 'done']]
     : [
       ...(selected?.kind === 'recording' ? [['Enter', 'change'] as Hint] : selected?.kind === 'guide' ? [['Enter', 'start'] as Hint]
+        : list === 'prompts' ? [['Enter', 'choose a prompt'] as Hint] : list === 'voices' && listLength ? [['Enter', 'choose someone'] as Hint]
         : action ? [['Enter', lowerFirst(FEATURE_ACTION_LABEL[action])] as Hint] : selected && testable(selected) ? [['Enter', 'test it now'] as Hint] : []),
+      ...(videoOn ? [['space', 'turn off'] as Hint] : []),
       ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ['r', 'recheck'], ['Esc', 'back'],
     ];
   const titleDetail = statuses ? <Text color={needs.length ? 'yellow' : 'green'}>
@@ -400,6 +600,8 @@ export default function SettingsScreen(props: SetupActionProps & {
         {setup.message && <Box marginTop={1} flexShrink={0}><Paragraph width={width} color="yellow" text={setup.message} /></Box>}
       </Box>}
     </Box>
-    {setup.busy ? <Text color="yellow">Working… Esc cancels</Text> : <KeyBar hints={hints} columns={props.columns - 2} help={false} />}
+    {setup.busy ? <Text color="yellow">Working… Esc cancels</Text>
+      : confirm ? <Text color="yellow" wrap="truncate-end">{confirm.text}  y yes  n no</Text>
+      : <KeyBar hints={hints} columns={props.columns - 2} help={false} />}
   </Box>;
 }

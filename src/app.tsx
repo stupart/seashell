@@ -41,7 +41,7 @@ import { chatWithMeeting, enrichMeeting } from './meeting-enrichment.ts';
 import { Chalk } from 'chalk';
 import { HEADING, meetingViewLines, type MeetingView } from './meeting-tui.ts';
 import { HELP_ROWS, HelpRow, KeyBar, Sheet, type Hint } from './tui-chrome.tsx';
-import { transcriptRows, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
+import { timedTranscriptRows, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
   renderText,
 } from './transcript-renderer.ts';
@@ -82,7 +82,7 @@ import { backgroundMeetingMessage } from './background-meeting-status.ts';
 import { readBackgroundWatchStatus, type BackgroundWatchStatus } from './background-watch-status.ts';
 import { writeMeetingConsent } from './meeting-consent.ts';
 import { writeMeetingCommand } from './meeting-command.ts';
-import { CaptureHealthTracker, type CaptureHealthSnapshot } from './capture-health.ts';
+import { CaptureHealthTracker, readMeetingCoverage, yourSideNotice, type CaptureHealthSnapshot } from './capture-health.ts';
 import { captureRecordingMode, recordingSummary, type RecordingMode } from './RecordingStatus.tsx';
 import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
@@ -114,6 +114,11 @@ import {
 import { acquireMeetingWatchLock, type MeetingWatchLock } from './watch-lock.ts';
 import { applySpeakerLabels, EvidenceSpeakerLabeler } from './speaker-labeling.ts';
 import { buildMeetingContext } from './meeting-context.ts';
+import { afterMeetingReady, askAutomationApprovalWithDialog } from './automations.ts';
+import { runAutomaticExtractors } from './extractors.ts';
+import { meetingVideo, openMeetingVideo } from './video-meeting.ts';
+import { clearVideoRequest, startRecordingWithVideo } from './video-recording.ts';
+import { speakerEngine, speakerModelSize } from './speaker-engine.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const PROJECT_ROOT = join(dirname(__filename), '..');
@@ -324,6 +329,8 @@ export default function App(props: {
   const meetingAutomationController = useRef(new MeetingAutomationController(meetingAutomation));
   const meetingSignalFailure = useRef<string | null>(null);
   const meetingWatchLock = useRef<MeetingWatchLock | null>(null);
+  /** The app a call this window recorded ran in, for automations that filter by app. */
+  const liveAppName = useRef<string | undefined>(undefined);
 
   const refreshLibrary = useCallback(() => {
     setLibraryEntries(listTranscriptRecords(libraryRoot));
@@ -652,6 +659,7 @@ export default function App(props: {
         if (generation !== liveSessionGeneration.current || healthTracker !== liveHealthTracker.current) return;
         if (healthTracker) setLiveHealth(healthTracker.pcm('systemAudio', level));
       },
+      onWarning: (message) => setNotice(message),
       onState: (update) => {
         if (generation !== liveSessionGeneration.current || healthTracker !== liveHealthTracker.current) return;
         if (healthTracker) setLiveHealth(healthTracker.state('systemAudio', update));
@@ -901,9 +909,10 @@ export default function App(props: {
     ? terminal.columns - layout.sidebarWidth - 4
     : terminal.columns - 2;
   const contentColumns = transcriptContentColumns ?? Math.max(1, mainPanelColumns);
-  const displayRows = useMemo(() => currentRecord
-    ? transcriptRows(currentRecord, contentColumns, { timestamps: showTimestamps, speakers: showSpeakers })
+  const timedRows = useMemo(() => currentRecord
+    ? timedTranscriptRows(currentRecord, contentColumns, { timestamps: showTimestamps, speakers: showSpeakers })
     : [], [currentRecord, contentColumns, showTimestamps, showSpeakers]);
+  const displayRows = useMemo(() => timedRows.map((row) => row.text), [timedRows]);
   const visibleRows = Math.max(1, transcriptContentRows ?? layout.visibleTranscriptRows);
   const sidebarStart = Math.max(
     0,
@@ -995,8 +1004,11 @@ export default function App(props: {
         const routing = config.transcription ?? DEFAULT_TRANSCRIPTION_ROUTING;
         const canonicalRoute = selectCanonicalTranscriptionRoute(routing);
         const cloud = routing.cloud;
+        const attendees = liveMeetingRef.current?.calendar?.attendees;
         const record = await saveFinalizedCapture(store, libraryRoot, reason, {
           title: current.title,
+          // A recording started from a calendar event: its invitees cap how many voices there are.
+          ...(attendees?.length ? { attendees } : {}),
           onStatus: (label) => setProcessing({ label }),
           ...(alreadyFinalized ? { finalizedRecord: current } : {}),
           ...(canonicalRoute === 'cloud' && cloud?.uploadConsent ? {
@@ -1049,6 +1061,27 @@ export default function App(props: {
     if (wasListening) setListeningPaused(true);
     setError(null);
     setProcessing({ label: finishLive ? 'Finishing capture…' : 'Preparing meeting enrichment…' });
+    const onStatus = (label: string) => setProcessing({ label });
+    // A meeting this window finished is ready, as one the background recorder finishes is:
+    // extractors that fit it, then automations. Whatever fails is said; the notes stay.
+    let readyId: string | undefined;
+    const followUpReadyMeeting = async (id: string): Promise<string | undefined> => {
+      const result = await afterMeetingReady(libraryRoot, id, {
+        ...(configuredMeetingRoutes.reconciliation ? { route: configuredMeetingRoutes.reconciliation } : {}),
+        ...(liveAppName.current ? { app: liveAppName.current } : {}),
+        ask: askAutomationApprovalWithDialog,
+        onStatus,
+      });
+      const failed = [...result.extractorFailures.map((failure) => failure.extractor),
+        ...result.automations.filter((run) => run.status === 'failed').map((run) => run.automation)];
+      return failed.length ? `${failed.join(', ')} failed. Settings (,) shows why.` : undefined;
+    };
+    const reload = (id: string, fallback?: MeetingArtifact) => {
+      const artifact = loadMeetingArtifact(libraryRoot, id) ?? fallback;
+      if (!artifact) return;
+      if (finishLive) { liveMeetingRef.current = artifact; setLiveMeeting(artifact); }
+      else commitMeetingState(artifact);
+    };
     void (async () => {
       try {
         if (finishLive) {
@@ -1062,6 +1095,8 @@ export default function App(props: {
             const cloud = routing.cloud;
             const finalized = await finalizeCaptureTranscript(store.manifestPath, {
               title: liveRecordRef.current.title,
+              // A recording started from a calendar event: its invitees cap how many voices there are.
+              ...(targetMeeting.calendar?.attendees.length ? { attendees: targetMeeting.calendar.attendees } : {}),
               onStatus: (label) => setProcessing({ label }),
               ...(canonicalRoute === 'cloud' && cloud?.uploadConsent ? {
                 remoteRoute: {
@@ -1096,9 +1131,14 @@ export default function App(props: {
         }
         const record = finishLive ? liveRecordRef.current : targetRecord;
         saveTranscriptRecord(libraryRoot, record);
+        if (finishLive) readyId = record.id;
         if (missingObserver || missingReconciliation) {
+          readyId = undefined;
+          const failed = finishLive ? await followUpReadyMeeting(record.id) : undefined;
+          if (finishLive) reload(record.id);
           refreshLibrary();
-          setNotice('Meeting saved. Connect AI for notes, or return to your transcript.');
+          if (failed) setError(`Meeting saved, but ${failed}`);
+          else setNotice('Meeting saved. Connect AI for notes, or return to your transcript.');
           return;
         }
         const artifact = await enrichMeeting(libraryRoot, record.id, {
@@ -1115,21 +1155,30 @@ export default function App(props: {
           maximumNewSegments: config.meeting?.observerMaxSegments,
           maxObserverRuns: config.meeting?.maxObserverRuns,
           context: buildMeetingContext(config.meeting?.contextFiles, targetMeeting.calendar),
-          onStatus: (label) => setProcessing({ label }),
+          onStatus,
         });
-        if (finishLive) {
-          liveMeetingRef.current = artifact;
-          setLiveMeeting(artifact);
-        } else {
-          commitMeetingState(artifact);
-        }
-        refreshLibrary();
+        // The notes show at once; what runs after them updates the view when it is done.
+        reload(record.id, artifact);
         setMeetingView('notes');
-        setNotice(finishLive
+        let failed: string | undefined;
+        if (finishLive) {
+          readyId = undefined;
+          failed = await followUpReadyMeeting(record.id);
+        } else if (configuredMeetingRoutes.reconciliation && artifact.analysis?.final) {
+          // Notes written again: the extractors that fit run again over them.
+          const extracted = await runAutomaticExtractors(libraryRoot, record.id, { route: configuredMeetingRoutes.reconciliation, onStatus });
+          if (extracted.failed.length) failed = `${extracted.failed.map((failure) => failure.extractor).join(', ')} failed: ${extracted.failed[0]!.message}`;
+        }
+        reload(record.id, artifact);
+        refreshLibrary();
+        if (failed) setError(`Notes are ready, but ${failed}`);
+        else setNotice(finishLive
           ? 'Meeting capture, final transcript, notes, and analysis are ready.'
           : 'Meeting notes and analysis are ready.');
       } catch (meetingError) {
         setError(meetingError instanceof Error ? meetingError.message : String(meetingError));
+        // Saved, even without notes: the meeting is still ready for its automations.
+        if (readyId) await followUpReadyMeeting(readyId).catch(() => undefined);
         const failed = loadMeetingArtifact(libraryRoot, targetRecord.id);
         if (failed) {
           if (finishLive) {
@@ -1399,6 +1448,7 @@ export default function App(props: {
       liveMeetingRef.current = null;
       setLiveMeeting(null);
       setCaptureAppBundle(undefined);
+      liveAppName.current = undefined;
       setMeetingView('transcript');
       setTranscriptScroll(0);
       setNotice('Started a fresh live transcript.');
@@ -1422,6 +1472,7 @@ export default function App(props: {
     );
     if (needsFreshSession) await resetLiveSession();
     setCaptureAppBundle(candidate.bundleId);
+    liveAppName.current = candidate.appName;
     ensureLiveSessionStartedAt();
     const base = liveRecordRef.current;
     const record: TranscriptRecord = {
@@ -1583,6 +1634,47 @@ export default function App(props: {
   const mouseDecoder = useRef(new MouseScrollDecoder());
   const mouseEnabled = !speakerSetupOpen && !aiSetupOpen && !guideOpen && !chatInputState && !renameState && !speakerPickerOpen && !searchMode && !exportMode && !confirmTrashId && !notesSetup;
 
+  const renameSpeaker = (speakerId: string, name: string, done: string) => {
+    if (!currentRecord) return;
+    try {
+      const renamed = renameTranscriptSpeaker(libraryRoot, currentRecord.id, speakerId, name);
+      if (view === 'live') {
+        liveRecordRef.current = renamed;
+        setLiveRecord(renamed);
+      } else {
+        setSelectedRecord(renamed);
+      }
+      const meeting = loadMeetingArtifact(libraryRoot, renamed.id);
+      if (meeting) commitMeetingState(meeting);
+      refreshLibrary();
+      setNotice(done);
+    } catch (renameError) {
+      setError(renameError instanceof Error ? renameError.message : String(renameError));
+    }
+  };
+
+  // A meeting kept with its video plays it, from the line being read.
+  const videoAvailable = useMemo(() => {
+    if (view !== 'record' || !selectedRecord || currentRecordBusy) return false;
+    try { return Boolean(meetingVideo(libraryRoot, selectedRecord.id)); } catch { return false; }
+  }, [view, selectedRecord?.id, currentRecordBusy, libraryRoot]);
+  const watchVideo = () => {
+    if (!selectedRecord) return;
+    const at = meetingView === 'transcript' ? timedRows[visibleTranscriptScroll]?.start : undefined;
+    try {
+      openMeetingVideo(libraryRoot, selectedRecord.id, at === undefined ? {} : { atSeconds: at });
+      setNotice(at === undefined ? 'Opened the video.' : `Opened the video at ${formatTuiClock(at)}.`);
+    } catch (videoError) {
+      setError(videoError instanceof Error ? videoError.message : String(videoError));
+    }
+  };
+
+  // Your side of a finished call was barely heard: said once, in the meeting, never in the list.
+  const yourSide = useMemo(() => {
+    if (!currentEntry || currentEntry.captureState === 'recording' || currentEntry.captureState === 'processing') return undefined;
+    return yourSideNotice(readMeetingCoverage(currentEntry.directory, currentEntry.captureHealth));
+  }, [currentEntry?.directory, currentEntry?.captureState, currentEntry?.captureHealth?.coverage?.yourSideMissing]);
+
   const saveMeetingAi = useCallback((change: (ai: NonNullable<MeetingArtifact['ai']>) => void) => {
     if (!currentMeeting) return;
     const ai = { ...currentMeeting.ai };
@@ -1650,27 +1742,8 @@ export default function App(props: {
         return;
       }
       if (key.return) {
-        if (currentRecord && renameState.input.trim()) {
-          try {
-            const renamed = renameTranscriptSpeaker(
-              libraryRoot,
-              currentRecord.id,
-              renameState.speakerId,
-              renameState.input,
-            );
-            if (view === 'live') {
-              liveRecordRef.current = renamed;
-              setLiveRecord(renamed);
-            } else {
-              setSelectedRecord(renamed);
-            }
-            const meeting = loadMeetingArtifact(libraryRoot, renamed.id);
-            if (meeting) commitMeetingState(meeting);
-            refreshLibrary();
-            setNotice(`${renameState.label} is now ${renameState.input.trim()}. Notes kept.`);
-          } catch (renameError) {
-            setError(renameError instanceof Error ? renameError.message : String(renameError));
-          }
+        if (renameState.input.trim()) {
+          renameSpeaker(renameState.speakerId, renameState.input, `${renameState.label} is now ${renameState.input.trim()}. Notes kept.`);
         }
         setRenameState(null);
         return;
@@ -1688,8 +1761,13 @@ export default function App(props: {
     if (speakerPickerOpen) {
       if (key.escape || input === 'r') { setSpeakerPickerOpen(false); return; }
       const speakers = currentRecord?.speakers ?? [];
+      const suggested = speakers[speakerSelection]?.suggestion ? speakers[speakerSelection] : undefined;
       if (key.upArrow) setSpeakerSelection((index) => moveSelection(index, -1, speakers.length));
       else if (key.downArrow) setSpeakerSelection((index) => moveSelection(index, 1, speakers.length));
+      // A name Seashell suggested from a known voice: keep it, which also teaches the voice, or undo it.
+      else if (input === 'y' && suggested) renameSpeaker(suggested.id, suggested.label, `Kept ${suggested.label}.`);
+      else if (input === 'u' && suggested) renameSpeaker(suggested.id, suggested.suggestion!.previous,
+        `${suggested.label} is ${suggested.suggestion!.previous} again.`);
       else if (key.return) {
         const speaker = speakers[speakerSelection];
         setSpeakerPickerOpen(false);
@@ -1984,13 +2062,17 @@ export default function App(props: {
       openCurrentFolder();
       return;
     }
+    if (input === 'w' && videoAvailable) {
+      watchVideo();
+      return;
+    }
     if (input === 'e' && currentRecord?.transcript.length) {
       setExportMode(true);
       return;
     }
     if (input === 'r' && currentRecord?.speakers.length) {
-      // Start on the first person still without a real name.
-      setSpeakerSelection(Math.max(0, currentRecord.speakers.findIndex((speaker) => /^Remote speaker \d/u.test(speaker.label))));
+      // Start on the first name still to check: a suggestion, or a person without a real name.
+      setSpeakerSelection(Math.max(0, currentRecord.speakers.findIndex((speaker) => speaker.suggestion || /^Remote speaker \d/u.test(speaker.label))));
       setSpeakerPickerOpen(true);
       return;
     }
@@ -2006,8 +2088,20 @@ export default function App(props: {
     if (input === ' ' && watchOwnership === 'external') {
       if (activeBackgroundEntry) { setConfirmStop(true); return; }
       try {
+        // Plain Space is audio only, even if an earlier request for video was never picked up.
+        clearVideoRequest();
         writeMeetingCommand('start');
         setNotice('Starting a recording…');
+      } catch (cause) { setError(`Could not start recording: ${cause instanceof Error ? cause.message : String(cause)}`); }
+      return;
+    }
+    // V records by hand with video: the call's window if one is open, otherwise the screen.
+    if (input === 'V') {
+      if (watchOwnership !== 'external') { setNotice('Recording with video needs the background recorder. Press , to start it.'); return; }
+      if (activeBackgroundEntry) { setNotice('Already recording. Video can only start with a new recording.'); return; }
+      try {
+        startRecordingWithVideo();
+        setNotice('Starting a recording with video…');
       } catch (cause) { setError(`Could not start recording: ${cause instanceof Error ? cause.message : String(cause)}`); }
       return;
     }
@@ -2165,6 +2259,7 @@ export default function App(props: {
     onClose={() => { setGuideOpen(false); if (guideFromSettings) setSettingsOpen(true); }} />;
 
   if (speakerSetupOpen) return <SpeakerSettings columns={terminal.columns} rows={terminal.rows}
+    modelSize={speakerModelSize(speakerEngine())}
     recording={Boolean(activeBackgroundEntry) || (!paused && !listenerDisabled)}
     browser={config.meeting?.speakerBrowser ?? 'off'}
     meetStatus={meetSpeakerStatus}
@@ -2208,7 +2303,9 @@ export default function App(props: {
   const reading = !historyOpen;
   const hasNotes = Boolean(currentMeeting?.analysis);
   const atHome = view === 'live' && paused && !currentMeeting;
-  const byHand: Hint[] = watchOwnership === 'external' ? [['space', activeBackgroundEntry ? 'stop' : 'record']] : [];
+  const byHand: Hint[] = watchOwnership !== 'external' ? [] : activeBackgroundEntry ? [['space', 'stop']]
+    : [['space', 'record'], ['V', 'with video']];
+  const watch: Hint[] = videoAvailable ? [['w', 'watch video']] : [];
   const hints: Hint[] = consentPending ? [['m', 'record'], ['x', 'ignore']]
     : atHome && attention.length ? [['Enter', 'guided setup'], [',', 'settings'], ['f', 'import']]
     : !historyOpen && activeBackgroundEntry && currentRecordBusy ? [['space', 'stop'], ['↑↓', 'scroll'],
@@ -2218,13 +2315,14 @@ export default function App(props: {
     : currentRecordBusy ? [['↑↓', 'scroll'], ...(followLiveTranscript ? [] : [['l', 'latest'] as Hint]), ['h', 'meetings'], ['i', 'audio']]
     : showingLiveTranscript ? [['↑↓', 'scroll'], ...(followLiveTranscript ? [] : [['l', 'latest'] as Hint]), ['h', 'meetings'], ['i', 'audio']]
     : !currentRecord?.transcript.length ? [...byHand, ['h', 'meetings'], ['f', 'import']]
-    : !currentMeeting ? [['↑↓', 'scroll'], ['r', 'name speakers'], ['m', 'make it a meeting'], ['c', 'copy'], ['h', 'meetings']]
+    : !currentMeeting ? [['↑↓', 'scroll'], ...watch, ['r', 'name speakers'], ['m', 'make it a meeting'], ['c', 'copy'], ['h', 'meetings']]
     : meetingView === 'notes' ? [
-      ...(hasNotes ? [['↑↓', 'scroll'], ['h', 'meetings'], ['a', 'ask'], ['c', 'copy'], ['g', 'rewrite notes']] as Hint[] : [['g', 'write notes'], ['h', 'meetings']] as Hint[]),
+      ...(hasNotes ? [['↑↓', 'scroll'], ['h', 'meetings'], ...watch, ['a', 'ask'], ['c', 'copy'], ['g', 'rewrite notes']] as Hint[]
+        : [['g', 'write notes'], ['h', 'meetings'], ...watch] as Hint[]),
       ['n', 'notes options'],
     ]
     : meetingView === 'chat' ? [['a', 'ask'], ['h', 'meetings'], ['↑↓', 'scroll'], ['c', 'copy']]
-    : [['↑↓', 'scroll'], ['h', 'meetings'], ['r', 'name speakers'], ['a', 'ask'], ['e', 'export'], ['c', 'copy']];
+    : [['↑↓', 'scroll'], ['h', 'meetings'], ...watch, ['r', 'name speakers'], ['a', 'ask'], ['e', 'export'], ['c', 'copy']];
 
   // The time appears when it tells two meetings of the same day apart.
   const withTime = (entry: TranscriptLibraryEntry) =>
@@ -2336,14 +2434,20 @@ export default function App(props: {
     </Sheet>;
   })() : null;
   const namedSpeakers = currentRecord?.speakers ?? [];
+  const speakerName = (speaker: (typeof namedSpeakers)[number]) =>
+    `${speaker.id === 'LOCAL' && speaker.label === 'Microphone' ? 'You' : speaker.label}${speaker.suggestion ? ' · suggested' : ''}`;
+  const speakerColumn = Math.min(32, Math.max(18, ...namedSpeakers.map((speaker) => speakerName(speaker).length))) + 2;
   const speakerSheet = speakerPickerOpen && currentRecord ? <Sheet title="Name a speaker">
     {namedSpeakers.map((speaker, index) => {
       const said = currentRecord.transcript.find((segment) => segment.speaker === speaker.id)?.text ?? '';
-      const label = speaker.id === 'LOCAL' && speaker.label === 'Microphone' ? 'You' : speaker.label;
       return <Text key={speaker.id} inverse={index === speakerSelection} wrap="truncate-end">
-        {index === speakerSelection ? '› ' : '  '}{label.padEnd(20)}<Text dimColor={index !== speakerSelection}>“{said}”</Text>
+        {index === speakerSelection ? '› ' : '  '}{truncate(speakerName(speaker), speakerColumn - 1).padEnd(speakerColumn)}
+        <Text dimColor={index !== speakerSelection}>“{said}”</Text>
       </Text>;
     })}
+    {namedSpeakers.some((speaker) => speaker.suggestion) && <Box marginTop={1}>
+      <Text dimColor wrap="wrap">Suggested names come from voices you named before. y keeps one, u undoes it.</Text>
+    </Box>}
   </Sheet> : null;
   const helpSheet = helpMode ? <Sheet title="Keys">
     {HELP_ROWS.map(([group, keys]) => <HelpRow key={group} group={group} keys={keys} />)}
@@ -2363,7 +2467,8 @@ export default function App(props: {
     : confirmRewrite ? 'Rewrite these notes? This replaces them.  y yes  n no'
     : confirmStop ? 'Stop recording? Everything so far is kept.  y yes  n no'
     : notesSetup ? notesSetup.editing !== undefined ? 'Enter save · Esc cancel' : '↑↓ choose · ←→ change · Enter edit note · Esc done'
-    : speakerPickerOpen ? '↑↓ choose · Enter name · Esc back'
+    : speakerPickerOpen ? currentRecord?.speakers[speakerSelection]?.suggestion
+      ? 'y keep · u undo · Enter rename · ↑↓ choose · Esc back' : '↑↓ choose · Enter name · Esc back'
     : helpMode ? '? or Esc close'
     : audioHelpOpen ? 'o Sound · p Privacy · Esc back'
     : undefined;
@@ -2420,7 +2525,8 @@ export default function App(props: {
       currentRecord?.speakers.some((speaker) => speaker.id === 'SYSTEM')
       ? [currentRecord.speakerAnalysis?.detail ?? 'Source labels only · v to set up speaker names'] : []),
   ];
-  const caution = attention.length && !(view === 'live' && statusProps?.mode === 'watching') && !summary?.problems.length
+  const caution = yourSide && view === 'record' && !drawerOnly ? yourSide
+    : attention.length && !(view === 'live' && statusProps?.mode === 'watching') && !summary?.problems.length
     ? attention[0]!.summary.includes('silent') ? `${attention[0]!.id === 'microphone' ? 'Microphone' : 'Computer audio'}: silent last meeting · i audio help`
     : `${attention[0]!.label}: ${attention[0]!.summary} · , to check` : undefined;
   const toast = error ?? (copied ? 'Copied.' : notice) ?? undefined;

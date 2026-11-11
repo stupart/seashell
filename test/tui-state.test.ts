@@ -109,3 +109,24 @@ test('dates and times line up in a column at 56 columns', () => {
   expect(starts(/[ \d]\d:\d\d[ap]/u).size).toBe(1);
   expect(starts(/[A-Z][a-z]{2} [ \d]\d/u).size).toBe(1);
 });
+
+test("every row's time ends in the same terminal column, whatever its title is written in", () => {
+  const entry = (title: string, createdAt: Date) => ({
+    id: title, title, createdAt: createdAt.toISOString(), updatedAt: createdAt.toISOString(), sourceFilename: 'Live capture session',
+    speakerCount: 0, segmentCount: 0, kind: 'meeting' as const, directory: '/tmp/m',
+  });
+  const now = new Date(2026, 10, 10, 17, 50);
+  const list: Array<[string, Date, boolean]> = [
+    ['Acme discovery call', new Date(2026, 10, 10, 14, 50), true],
+    ['🚀 Launch review 🚀', new Date(2026, 10, 10, 9, 5), true],
+    ['設計レビューと来期の計画についての長い会議', new Date(2026, 10, 7, 14, 30), true],
+    ['Roadmap review', new Date(2026, 10, 7, 9, 5), true],
+    ['Board prep', new Date(2026, 10, 5, 13, 0), false],
+  ];
+  const column = Math.max(...list.map(([, at, withTime]) => listWhen(at.toISOString(), now, withTime).length));
+  // As the app draws them at 56 columns: the selected row starts with ›, the rest with two spaces.
+  const rows = list.map(([title, at, withTime], index) => `${index === 0 ? '› ' : '  '}${meetingEntryRow(entry(title, at), 52, now, withTime, column)}`);
+  for (const row of rows) expect(Bun.stringWidth(row)).toBe(54);
+  const timeEnds = new Set(rows.filter((row) => /\d[ap]$/u.test(row)).map((row) => Bun.stringWidth(row)));
+  expect(timeEnds).toEqual(new Set([54]));
+});

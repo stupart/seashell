@@ -182,6 +182,8 @@ export function startDurableLiveCapture(
           }).catch(fail);
         },
         onLevel: (level) => { systemAudioLevel = level; health.pcm('systemAudio', level); status(); },
+        // Said, never fatal: the audio carries on under the other permission.
+        onWarning: (message) => options.onError?.(new Error(message)),
         onState: (update) => {
           systemAudioState = update.state;
           health.state('systemAudio', update);

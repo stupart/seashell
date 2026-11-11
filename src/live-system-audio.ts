@@ -1,10 +1,17 @@
 import { spawn, type ChildProcess } from 'child_process';
 import { randomUUID } from 'crypto';
-import { existsSync, renameSync, unlinkSync, writeFileSync } from 'fs';
+import { existsSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { basename, dirname, join } from 'path';
+import { basename, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { computerAudioConfirmed, forgetAudioCheck, readAudioChecks, type AudioChecks } from './audio-checks.ts';
 import { terminateManagedChild } from './process-lifecycle.ts';
+import {
+  prepareRuntimeHelper,
+  SYSTEM_AUDIO_RUNTIME_HELPER,
+  systemAudioRuntimeHelperPath,
+  type RuntimeHostOptions,
+} from './runtime-host.ts';
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const SYSTEM_AUDIO_HELPER = join(
@@ -13,6 +20,62 @@ export const SYSTEM_AUDIO_HELPER = join(
   'bin',
   'seashell-system-audio',
 );
+
+let preparedHelper: string | undefined;
+
+/**
+ * The helper every launcher runs: the background recorder, the guided setup's
+ * test and `seashell doctor`. It answers for its own System Audio Recording
+ * permission, so the stable copy keeps that permission across updates, and a
+ * test from a terminal checks exactly what the recorder will use.
+ */
+export function defaultSystemAudioHelper(options: { bundled?: string; runtimeHost?: RuntimeHostOptions } = {}): string {
+  const bundled = options.bundled ?? SYSTEM_AUDIO_HELPER;
+  if (process.platform !== 'darwin' || !existsSync(bundled)) return bundled;
+  const shared = options.bundled === undefined && options.runtimeHost === undefined;
+  if (shared && preparedHelper && existsSync(preparedHelper)) return preparedHelper;
+  let path: string;
+  // The packaged copy still answers for itself; it only lacks a stable path.
+  try { path = prepareRuntimeHelper(bundled, SYSTEM_AUDIO_RUNTIME_HELPER, options.runtimeHost); } catch { path = bundled; }
+  if (shared) preparedHelper = path;
+  return path;
+}
+
+/**
+ * Whose macOS permission computer audio records under. "own" is the helper's,
+ * Seashell System Audio. "inherited" is whatever launched it: for the
+ * background recorder, Seashell Background, which already has permission.
+ */
+export type SystemAudioIdentity = 'own' | 'inherited';
+
+/**
+ * The recorder switches to the helper's own identity only once a check at the
+ * Mac heard it work (src/audio-checks.ts), made with the copy installed now.
+ * Switching sooner would make the first call after an update wait on a
+ * permission prompt that nobody may be there to answer, and lose the other
+ * side of that call.
+ */
+export function systemAudioIdentity(helperPath: string, options: { checks?: AudioChecks; runtimeHelper?: string } = {}): SystemAudioIdentity {
+  const runtimeHelper = options.runtimeHelper ?? systemAudioRuntimeHelperPath();
+  // Only the stable copy keeps the permission a check confirmed.
+  if (resolve(helperPath) !== resolve(runtimeHelper)) return 'inherited';
+  let installedAt: number;
+  try { installedAt = statSync(runtimeHelper).mtimeMs; } catch { return 'inherited'; }
+  return computerAudioConfirmed(options.checks ?? readAudioChecks(), installedAt) ? 'own' : 'inherited';
+}
+
+/** Inherited asks the helper not to answer for its own permission. */
+export function systemAudioIdentityArguments(identity: SystemAudioIdentity): string[] {
+  return identity === 'inherited' ? ['--no-disclaim'] : [];
+}
+
+const BACK_TO_INHERITED = 'Computer audio is recording with the background recorder\'s permission';
+export const OWN_IDENTITY_WARNINGS = {
+  refused: `${BACK_TO_INHERITED}: macOS refused Seashell System Audio. Check computer audio in Settings (,) to switch again.`,
+  failed: `${BACK_TO_INHERITED}: Seashell System Audio could not start.`,
+  silence: `${BACK_TO_INHERITED}: Seashell System Audio sent only silence for a minute.`,
+} as const;
+
 export const LIVE_CAPTURE_SAMPLE_RATE = 16_000;
 export const LIVE_CAPTURE_CHUNK_MILLISECONDS = 10_000;
 
@@ -365,6 +428,14 @@ export interface StartSystemAudioOptions {
   readonly restartDelayMaxMs?: number;
   /** A helper that sends no audio this long after it started sending is restarted. */
   readonly stalledTimeoutMs?: number;
+  /** Whose permission to record under (systemAudioIdentity). Chosen by the gate when Seashell runs its own helper; inherited for any other. */
+  readonly identity?: SystemAudioIdentity;
+  /** Under its own identity, the helper sending only silence this long counts as refused. */
+  readonly ownSilenceMs?: number;
+  /** Something to tell the person that does not stop the audio. */
+  readonly onWarning?: (message: string) => void;
+  /** macOS refused the helper's own identity: later recordings should not start with it. */
+  readonly onOwnIdentityRefused?: () => void;
   readonly onChunk: (chunk: SystemAudioChunk) => void;
   readonly onState: (update: SystemAudioStateUpdate) => void;
   readonly onLevel?: (level: PcmSignalLevel) => void;
@@ -414,6 +485,13 @@ export function startSystemAudioCapture(
   }
   // Each attempt gets its own sample clock/chunker. Reusing a previous clock
   // would close a device-switch gap and move later audio earlier in the meeting.
+  const helperPath = options.helperPath ?? defaultSystemAudioHelper();
+  const gated = options.identity === undefined && options.helperPath === undefined;
+  let identity: SystemAudioIdentity = options.identity ?? (gated ? systemAudioIdentity(helperPath) : 'inherited');
+  const ownRefused = options.onOwnIdentityRefused ?? (gated ? () => { try { forgetAudioCheck('computer'); } catch {} } : undefined);
+  const ownSilenceSeconds = (options.ownSilenceMs ?? 60_000) / 1_000;
+  /** Set while an own-identity attempt ends so an inherited one can take over. */
+  let switching = false;
   const maximumRestarts = options.maxRestarts ?? Number.POSITIVE_INFINITY;
   const firstDelay = options.restartDelayMs ?? 500;
   const maximumDelay = Math.max(firstDelay, options.restartDelayMaxMs ?? 15_000);
@@ -424,9 +502,25 @@ export function startSystemAudioCapture(
   let cancelDelay: (() => void) | undefined;
   let lastChunkEnd: number | undefined;
   let waitingForRestartChunk = false;
+  // The audio never waits on the helper's own identity: anything that looks
+  // like macOS refusing it goes straight back to the inherited one, which works.
+  const fallBack = (reason: keyof typeof OWN_IDENTITY_WARNINGS, attempt: { stop(): void } | undefined) => {
+    if (identity !== 'own' || stopped) return;
+    identity = 'inherited';
+    switching = true;
+    if (reason === 'refused') ownRefused?.();
+    options.onState({ state: 'starting', code: 'system_audio_reconnecting', message: 'Switching computer audio to the background recorder…' });
+    options.onWarning?.(OWN_IDENTITY_WARNINGS[reason]);
+    attempt?.stop();
+  };
   const start = () => {
     retryEligible = false;
-    return startSystemAudioAttempt({ ...options, onChunk(chunk) {
+    const attemptIdentity = identity;
+    let attemptActive = false;
+    let audible = false;
+    let silentFrom: number | undefined;
+    const attempt: SystemAudioCaptureHandle = startSystemAudioAttempt({ ...options, helperPath,
+      helperArgs: [...(options.helperArgs ?? []), ...systemAudioIdentityArguments(attemptIdentity)], onChunk(chunk) {
       if (waitingForRestartChunk && lastChunkEnd !== undefined) {
         const durationFrames = Math.round((chunk.startSeconds - lastChunkEnd) * LIVE_CAPTURE_SAMPLE_RATE);
         if (durationFrames > 0) options.onDiscontinuity?.({
@@ -437,8 +531,21 @@ export function startSystemAudioCapture(
       waitingForRestartChunk = false;
       options.onChunk(chunk);
       lastChunkEnd = chunk.endSeconds;
+      // A refused identity can look like a working one that hears only silence.
+      if (attemptIdentity === 'own' && !audible) {
+        if (chunk.audible) audible = true;
+        else if (chunk.endSeconds - (silentFrom ??= chunk.startSeconds) >= ownSilenceSeconds) fallBack('silence', attempt);
+      }
     }, onState(update) {
-      if (update.state === 'active') heard = true;
+      // The attempt this switch ended: its stop is not the recording's.
+      if (switching && !stopped && update.state === 'stopped') return;
+      if (update.state === 'active') { heard = true; attemptActive = true; }
+      if (attemptIdentity === 'own' && update.state === 'unavailable' &&
+          update.code !== 'helper_missing' && update.code !== 'unsupported_os' &&
+          (update.code === 'permission_denied' || !attemptActive || (!audible && update.code === 'system_audio_stalled'))) {
+        fallBack(update.code === 'permission_denied' ? 'refused' : attemptActive ? 'silence' : 'failed', undefined);
+        return;
+      }
       retryEligible = update.state === 'unavailable' && systemAudioCanRecover(update.code, heard);
       if (retryEligible && !stopped && restarts < maximumRestarts) {
         options.onState({ state: 'starting', code: 'system_audio_reconnecting',
@@ -447,12 +554,19 @@ export function startSystemAudioCapture(
             : 'Computer audio stopped · reconnecting…' });
       } else options.onState(update);
     } }, { expectAudio: heard });
+    return attempt;
   };
   let current = start();
   const done = (async () => {
     while (true) {
       const attemptStartedAt = Date.now();
       await current.done;
+      if (switching && !stopped) {
+        switching = false;
+        waitingForRestartChunk = true;
+        current = start();
+        continue;
+      }
       if (stopped || !retryEligible || restarts >= maximumRestarts) return;
       // A device that worked for a while before changing is a fresh change.
       if (Date.now() - attemptStartedAt >= 60_000) restarts = 0;
@@ -492,7 +606,7 @@ export function systemAudioCanRecover(code: string | undefined, heard: boolean):
 }
 
 function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { readonly expectAudio: boolean }): SystemAudioCaptureHandle {
-  const helperPath = options.helperPath ?? SYSTEM_AUDIO_HELPER;
+  const helperPath = options.helperPath ?? defaultSystemAudioHelper();
   if (!existsSync(helperPath)) {
     options.onState({
       state: 'unavailable',

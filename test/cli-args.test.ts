@@ -418,3 +418,10 @@ describe('meeting AI steering and asking', () => {
     expect(parseCliArgs(['ai', 'test', '--json'])).toEqual({ kind: 'ai', action: 'test', json: true });
   });
 });
+
+test('meeting computer-audio checks, or at the Mac runs the one-time check', () => {
+  expect(parseCliArgs(['meeting', 'computer-audio'])).toMatchObject({ kind: 'meeting', action: { kind: 'computer-audio', operation: 'check' } });
+  expect(parseCliArgs(['meeting', 'computer-audio', 'setup', '--json'])).toMatchObject({
+    kind: 'meeting', action: { kind: 'computer-audio', operation: 'setup' }, json: true });
+  expect(() => parseCliArgs(['meeting', 'computer-audio', 'allow'])).toThrow('seashell meeting computer-audio [setup|check]');
+});
