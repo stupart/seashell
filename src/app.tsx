@@ -287,8 +287,9 @@ export default function App(props: {
   const [liveMeeting, setLiveMeeting] = useState<MeetingArtifact | null>(null);
   const [meetingView, setMeetingView] = useState<MeetingView>('transcript');
   const [chatInputState, setChatInputState] = useState<ChatInputState | null>(null);
-  /** [N] Notes setup for the open meeting: its template, its note, and whether AI may see it. */
-  const [notesSetup, setNotesSetup] = useState<{ row: 0 | 1 | 2; options: string[]; editing?: string } | null>(null);
+  /** [G] Notes setup for the open meeting: its template, its note, and whether AI may see it. Enter writes the notes.
+   * `opened` is the meeting's AI choices when the sheet opened, so leaving says something only after a change. */
+  const [notesSetup, setNotesSetup] = useState<{ row: 0 | 1 | 2; options: string[]; editing?: string; opened: string } | null>(null);
   const [calendarSuggestion, setCalendarSuggestion] = useState<MeetingCalendarEvent | null>(null);
   const [automaticCandidate, setAutomaticCandidate] = useState<MeetingCandidate | null>(null);
   const [automationPhase, setAutomationPhase] = useState<MeetingAutomationPhase>('watching');
@@ -1916,9 +1917,20 @@ export default function App(props: {
         if (input && !key.ctrl && !key.meta) setNotesSetup({ ...notesSetup, editing: notesSetup.editing + input });
         return;
       }
-      if (key.escape || input === 'n' || key.return && notesSetup.row !== 1) {
+      if (key.escape) {
         setNotesSetup(null);
-        if (currentMeeting && !currentMeeting.ai?.off) setCaution('Press g to rewrite the notes with these choices.');
+        const changed = JSON.stringify(currentMeeting?.ai ?? {}) !== notesSetup.opened;
+        if (changed && currentMeeting && !currentMeeting.ai?.off) {
+          setNotice(`Saved for this meeting. Press g to ${currentMeeting.analysis ? 'rewrite' : 'write'} the notes with them.`);
+        }
+        return;
+      }
+      // Enter writes the notes with these choices; on the note, it edits the note.
+      if (key.return && notesSetup.row !== 1) {
+        if (!currentMeeting || currentMeeting.ai?.off) return;
+        setNotesSetup(null);
+        if (currentMeeting.analysis?.final) setConfirmRewrite(true);
+        else runCurrentMeetingEnrichment(view === 'live');
         return;
       }
       if (key.upArrow) { setNotesSetup({ ...notesSetup, row: Math.max(0, notesSetup.row - 1) as 0 | 1 | 2 }); return; }
@@ -2002,14 +2014,13 @@ export default function App(props: {
       setCaution('Review and edit this when it finishes.');
       return;
     }
+    // Speaker setup and AI are rows in Settings, so they have no keys of their own here.
     if (input === ',') {
       const fixing = shownSlot.current;
       setSettingsFocus(fixing?.fix?.[0] === ',' ? fixing.focus : undefined);
       setSettingsOpen(true);
       return;
     }
-    if (input === 'v') { setSpeakerSetupOpen(true); return; }
-    if (input === 'p') { setAiSetupIntent(null); setAiSetupOpen(true); return; }
     if (key.tab || input === '\t' || input === 'h') {
       toggleHistory();
       return;
@@ -2064,28 +2075,21 @@ export default function App(props: {
       setNotice(`Ignored ${automaticCandidate.appName} for this detection window.`);
       return;
     }
+    // n only ever moves to the next match.
     if (input === 'n' && searchHit !== null && matchRows.length && meetingView === 'transcript') {
       setSearchHit((hit) => ((hit ?? 0) + 1) % matchRows.length);
       return;
     }
-    if (input === 'n' && currentMeeting) {
+    // g opens the notes setup, where Enter writes the notes; with AI off it opens on the switch.
+    if (input === 'g' && currentMeeting) {
       let names: string[] = [];
       try { names = loadMeetingTemplates(libraryRoot).map((template) => template.name); } catch {}
-      setNotesSetup({ row: 0, options: ['auto', ...names, NO_TEMPLATE] });
-      return;
-    }
-    if (input === 'g' && currentMeeting) {
-      if (currentMeeting.ai?.off) {
-        setCaution('AI is off for this meeting. Press n to turn it on.');
-        return;
-      }
-      if (currentMeeting.analysis?.final) { setConfirmRewrite(true); return; }
-      runCurrentMeetingEnrichment(view === 'live');
+      setNotesSetup({ row: currentMeeting.ai?.off ? 2 : 0, options: ['auto', ...names, NO_TEMPLATE], opened: JSON.stringify(currentMeeting.ai ?? {}) });
       return;
     }
     if (input === 'a' && currentMeeting) {
       if (currentMeeting.ai?.off) {
-        setCaution('AI is off for this meeting. Press n to turn it on.');
+        setCaution('AI is off for this meeting. Press g to turn it on.');
         return;
       }
       if (!configuredMeetingRoutes.chat) {
@@ -2388,8 +2392,8 @@ export default function App(props: {
     : !currentRecord?.transcript.length ? [...byHand, ['h', 'meetings'], ['f', 'import']]
     : !currentMeeting ? [...watch, ['h', 'meetings'], ['r', 'name speakers'], ['m', 'make it a meeting'], ['c', 'copy'], ['↑↓', 'scroll']]
     : meetingView === 'notes' ? hasNotes
-      ? [['a', 'ask'], ['h', 'meetings'], ...watch, ['g', 'rewrite notes'], ['n', 'notes options'], ['c', 'copy'], ['↑↓', 'scroll']]
-      : [['g', 'write notes'], ['h', 'meetings'], ...watch, ['n', 'notes options']]
+      ? [['a', 'ask'], ['h', 'meetings'], ...watch, ['g', 'rewrite notes'], ['c', 'copy'], ['↑↓', 'scroll']]
+      : [['g', 'write notes'], ['h', 'meetings'], ...watch]
     : meetingView === 'chat' ? [['a', 'ask'], ['h', 'meetings'], ['c', 'copy'], ['↑↓', 'scroll']]
     : [...nextMatch, ...watch, ['h', 'meetings'], ['r', 'name speakers'], ['a', 'ask'], ['e', 'export'], ['c', 'copy'], ['↑↓', 'scroll']];
 
@@ -2551,8 +2555,9 @@ export default function App(props: {
     : consentPending && !approvalPending && consentTitle ? { text: `Record "${consentTitle}"?`, short: 'Record this call?',
       hints: [['m', 'record'], ['x', 'ignore']] }
     : undefined;
+  const write: Hint[] = currentMeeting?.ai?.off ? [] : [['Enter', hasNotes ? 'rewrite notes' : 'write notes']];
   const sheetHints: Hint[] | undefined = notesSetup ? notesSetup.editing !== undefined ? [['Enter', 'save'], ['Esc', 'cancel']]
-      : [notesSetup.row === 1 ? ['Enter', 'edit note'] : ['←→', 'change'], ['↑↓', 'choose'], ['Esc', 'back']]
+      : [...(notesSetup.row === 1 ? [['Enter', 'edit note'] as Hint] : [...write, ['←→', 'change'] as Hint]), ['↑↓', 'choose'], ['Esc', 'back']]
     : speakerPickerOpen ? suggested ? [['y', 'keep'], ['n', `not ${suggested.label}`], ['Enter', 'rename'], ['↑↓', 'choose'], ['Esc', 'back']]
       : [['Enter', 'name'], ['↑↓', 'choose'], ['Esc', 'back']]
     : helpMode ? [['Esc', 'back']]

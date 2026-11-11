@@ -427,7 +427,7 @@ function automationsStatus(libraryDir: string): FeatureStatus {
 
 /** Which notes templates meetings use, and whether the AI knows who it is writing for. */
 function templatesStatus(libraryDir: string): FeatureStatus {
-  const detail = 'Final notes follow a template picked from the meeting title (1:1, discovery call, standup…), with every point cited. "About me" tells the AI who you are and how you like notes. In a meeting, n picks its template.';
+  const detail = 'Final notes follow a template picked from the meeting title (1:1, discovery call, standup…), with every point cited. "About me" tells the AI who you are and how you like notes. In a meeting, g picks its template.';
   let count = 0;
   let personalised = false;
   let profile = false;

@@ -141,6 +141,8 @@ try {
 
   // Rewriting notes runs the extractors that fit, then shows what they found.
   await type('1', 'g');
+  await until(() => screen().includes('Enter rewrite notes'), 'g opens the notes setup, where Enter rewrites');
+  await type('\r');
   await until(() => /Rewrite (and replace )?these notes\?/u.test(screen()), 'rewriting asks first, saying the notes are replaced');
   await type('y');
   await until(() => extracted.length === 1, 'the extractors run after the notes');

@@ -14,7 +14,7 @@ segments, and nothing is sent anywhere unless you approve it. When you ask, the
 agent can also fix a misheard line, name a speaker, or edit your prompts,
 templates, extractors and automations; see [Meetings in Claude Code and Codex](#meetings-in-claude-code-and-codex).
 
-For optional summaries and meeting chat, press **P** in Seashell or run
+For optional summaries and meeting chat, press **,** in Seashell and choose **AI notes**, or run
 `seashell ai setup` to choose models and supported effort levels for live analysis,
 final notes and chat. Each role can use Claude Code, Codex, a local model, or OpenRouter.
 See [Humain setup](docs/humain-setup.md) for engine installation and provider details.
@@ -527,21 +527,19 @@ until it is closed.
 | `W` | Watch the meeting's video beside its transcript, from the line at the top. Shown only when there is video |
 | `F` | Import audio or video |
 | `Shift+F` | Import and run speaker diarization |
-| `V` | Speaker setup, offline readiness, or identify a saved recording |
 | `M` | Approve a call Seashell asks about; make a saved transcript a meeting |
 | `1`–`3` | Open meeting Notes, Transcript, or Chat |
-| `G` | Write notes, or finish a meeting this window is capturing. Rewriting asks first |
+| `G` | Notes setup for this meeting (template, a note, AI on or off); `Enter` there writes the notes. Rewriting asks first |
 | `A` | Ask an evidence-cited question about the current meeting |
 | `T` | Toggle timestamp presentation |
 | `S` | Toggle speaker presentation |
-| `R` | Choose a speaker and name them. Notes and chat stay, with the new name. A name suggested from a known voice says "suggested": `Y` keeps it, `U` undoes it |
+| `R` | Choose a speaker and name them. Notes and chat stay, with the new name. A name suggested from a known voice says "suggested": `Y` keeps it, `N` says it is not them |
 | `E` | Export as SRT, WebVTT, text, or JSON |
 | `C` | Copy the tab you are reading |
 | `O` | Open the transcript folder in Finder |
 | `D` | Move a saved transcript to recoverable `_Trash` after confirmation |
 | `Delete` | Start a fresh live transcript |
-| `,` | Settings: what works, and how to fix what does not |
-| `P` | Choose the AI for notes and chat, or test its connection |
+| `,` | Settings: what works, and how to fix what does not, including speaker setup and the AI for notes and chat |
 | `?` | Show contextual keyboard help |
 | `Q` | Quit from any normal view |
 
@@ -744,9 +742,9 @@ Numbers mentioned, with their period.
 What we asked for, and what they offered.
 ```
 
-In the app, press **N** in any meeting for its notes setup: ←→ changes the
-template, Enter writes a note for that meeting, and the last row turns AI off
-for it. A meeting with AI off is sent to no model — no live analysis, notes or
+In the app, press **G** in any meeting for its notes setup: ←→ changes the
+template, Enter on the note row writes a note for that meeting, the last row turns AI off
+for it, and Enter elsewhere writes the notes with those choices. A meeting with AI off is sent to no model — no live analysis, notes or
 chat — and the meetings MCP server lists it as private without its content
 (`seashell meeting ai <id> off` does the same from a script). Choices made
 while a background meeting is still recording carry into its final notes.
@@ -880,7 +878,7 @@ seashell ai test
 Sends one short, fixed message (never meeting text) through each AI route in
 use and reports how long it took, or why it failed in plain words: the engine
 is not installed, the provider is not signed in, the model is not offered, or
-it timed out. In Seashell, press **P** and choose **Test connection**; Esc
+it timed out. In Seashell, press **,**, choose **AI notes**, then **Test connection**; Esc
 stops a test.
 
 ### Meetings in Claude Code and Codex
@@ -1123,7 +1121,7 @@ taken from up to a minute of their clean speech. In later meetings, a remote
 voice that closely matches exactly one known person gets their name as a
 suggestion. Suggested names read like any other name, and the saved transcript
 records them as suggestions. In a meeting, **R** lists the speakers and marks
-each suggestion: **Y** keeps it, **U** undoes it, and Enter gives another name. A speaker with under ten seconds of clean
+each suggestion: **Y** keeps it, **N** says it is not them, and Enter gives another name. A speaker with under ten seconds of clean
 speech is never matched, two people too close to tell apart leave the voice
 unnamed, and where Google Meet's hints or the meeting's own introductions name
 someone else, the suggestion is dropped.
@@ -1418,7 +1416,7 @@ seashell doctor
 
 ## Speaker separation in meetings
 
-Press **V** to connect Google Meet names or set up local voice separation.
+In Seashell, press **,** and choose **Who said what** to connect Google Meet names or set up local voice separation.
 Meet names need macOS Accessibility permission, but no voice model; see
 [setup and limitations](docs/meet-speakers.md).
 Once the local model is verified, voices in

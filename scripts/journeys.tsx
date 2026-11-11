@@ -55,6 +55,8 @@ interface Step {
   note?: string;
   /** Keys as the person presses them, one entry per press. */
   press?: string[];
+  /** More keys, only on a narrow window: there, Enter opens a Settings row before it acts. */
+  narrowPress?: string[];
   /** How the keys read to a person, when they are not printable. */
   keys?: string;
   /** Change the world before the frame: a meeting starts, a recording fails. */
@@ -91,9 +93,11 @@ export const JOURNEYS: Journey[] = [
       { title: 'Settings', press: [ESC, ','], keys: 'Esc , ', until: 'Settings', note: 'Checklist of what works and what does not.' },
       { title: 'Moved down the list', press: [DOWN, DOWN], keys: '↓ ↓' },
       { title: 'Back to the app', press: [ESC], keys: 'Esc' },
-      { title: 'Speakers setup', press: ['v'], until: 'peaker', note: 'Setting up who-said-what.' },
-      { title: 'Back to the app', press: [ESC], keys: 'Esc' },
-      { title: 'AI setup', press: ['p'], until: 'AI', note: 'Choosing what writes the notes.' },
+      { title: 'Speakers setup', press: [',', ...Array(6).fill(DOWN), ENTER], narrowPress: [ENTER], keys: ', ↓ × 6 Enter',
+        until: 'Speaker setup', note: 'Setting up who-said-what, from its row in Settings.' },
+      { title: 'Back to Settings', press: [ESC], keys: 'Esc', until: 'Settings' },
+      { title: 'AI setup', press: Array(8).fill(DOWN).concat(ENTER), narrowPress: [ENTER], keys: '↓ × 8 Enter', until: 'AI for notes',
+        note: 'Choosing what writes the notes.' },
     ],
   },
   {
@@ -145,8 +149,8 @@ export const JOURNEYS: Journey[] = [
       { title: 'Asking a question', press: ['a'], keys: 'A', note: 'Typing a question about the meeting.' },
       { title: 'Question typed', press: [...'What did we promise Acme?'], keys: 'What did we promise Acme?' },
       { title: 'Cancelled', press: [ESC], keys: 'Esc' },
-      { title: 'Notes setup', press: ['1', 'n'], keys: '1 N', until: 'Notes setup', note: 'Template, a note to the AI, and whether AI may see it.' },
-      { title: 'Back', press: [ESC], keys: 'Esc' },
+      { title: 'Notes setup', press: ['1', 'g'], keys: '1 G', until: 'Notes setup', note: 'Template, a note to the AI, and whether AI may see it. Enter rewrites.' },
+      { title: 'Back', press: [ESC], keys: 'Esc', note: 'Nothing changed, so nothing to say.' },
       { title: 'Export', press: ['2', 'e'], keys: '2 E', note: 'Getting the transcript out.' },
     ],
   },
@@ -178,7 +182,8 @@ export const JOURNEYS: Journey[] = [
       { title: 'Suggestion kept', press: ['y'], keys: 'Y', note: 'Keeping it also teaches Seashell the voice.' },
       { title: 'Hide speakers', press: [ESC, 's'], keys: 'Esc S', note: 'Toggle.' },
       { title: 'Show speakers again, hide times', press: ['s', 't'], keys: 'S T' },
-      { title: 'Speaker settings', press: ['t', 'v'], keys: 'T V', until: 'peaker' },
+      { title: 'Speaker settings', press: ['t', ',', ...Array(7).fill(DOWN), ENTER], narrowPress: [ENTER], keys: 'T , ↓ × 7 Enter',
+        until: 'Speaker setup', note: 'From its row in Settings.' },
     ],
   },
   {
@@ -187,7 +192,7 @@ export const JOURNEYS: Journey[] = [
     steps: [
       { title: 'History', history: true, until: 'Weekly' },
       { title: 'Meeting without notes', press: [DOWN, ENTER], keys: '↓ Enter', until: '1 Notes' },
-      { title: 'Asked for notes', press: ['g'], keys: 'G', note: 'No AI chosen yet: what happens?' },
+      { title: 'Asked for notes', press: ['g', ENTER], keys: 'G Enter', until: 'AI for notes', note: 'Notes setup, then Enter to write them. No AI chosen yet: what happens?' },
       { title: 'Next choice', press: [DOWN], keys: '↓' },
       { title: 'Picked one', press: [ENTER], keys: 'Enter' },
       { title: 'Next', press: [ENTER], keys: 'Enter' },
@@ -265,7 +270,7 @@ export const JOURNEYS: Journey[] = [
       observer: { backend: 'claude-code', model: 'haiku' }, reconciliation: { backend: 'claude-code', model: 'sonnet' },
       chat: { backend: 'codex', model: 'gpt-5.5' } } } },
     steps: [
-      { title: 'AI screen', press: ['p'], keys: 'P', until: 'Test connection' },
+      { title: 'AI screen', press: [',', ...Array(9).fill(DOWN), ENTER], narrowPress: [ENTER], keys: ', ↓ × 9 Enter', until: 'Test connection' },
       { title: 'Testing', press: [ENTER], keys: 'Enter', until: 'Testing', note: 'One short fixed prompt each; no meeting text.' },
       { title: 'Results', until: 'answered in', note: 'Which AI answered, how fast, and what to do about the one that did not.' },
     ],
@@ -593,7 +598,7 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
       await step.world?.(context);
       if (step.world) await sleep(900);
       if (step.history && !stripVTControlCharacters(latest).includes('Meetings')) await type('h');
-      for (const key of step.press ?? []) await type(key);
+      for (const key of [...step.press ?? [], ...size === NARROW ? step.narrowPress ?? [] : []]) await type(key);
       if (step.until) {
         const deadline = Date.now() + 2500;
         while (!stripVTControlCharacters(latest).includes(step.until) && Date.now() < deadline) await sleep(40);

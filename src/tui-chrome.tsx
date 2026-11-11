@@ -191,11 +191,11 @@ export function Paragraph(props: { text: string; width: number; color?: Tone; di
 }
 
 export const HELP_ROWS: ReadonlyArray<readonly [string, string]> = [
-  ['Move', 'Enter read · h meetings · / search · ↑↓ move · Esc back · q quit, recording carries on'],
-  ['Meeting', '1 notes · 2 transcript · 3 chat · a ask · g write notes · n notes options · r name speakers · w watch video · c copy · e export · o open folder · d move to Trash'],
+  ['Go', 'Enter read · h meetings · / search · ↑↓ move · Esc back · q quit, recording carries on'],
+  ['Meeting', '1 notes · 2 transcript · 3 chat · a ask · g write notes, with a template · r name speakers · w watch video · c copy · e export · o open folder · d move to Trash'],
   ['Transcript', 't show/hide times · s show/hide speakers · l latest words · n next match'],
   ['When asked', 'm record · x ignore'],
   ['Recording', 'starts and stops with the call · space record or stop by hand · V record with video · i audio help'],
   ['Add', 'f import a file · F import and separate speakers'],
-  ['Setup', ', settings · p AI · v speaker setup'],
+  ['Setup', ', settings: speakers, AI and everything else'],
 ];
