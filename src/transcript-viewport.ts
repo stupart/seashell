@@ -15,6 +15,27 @@ export interface TranscriptRow {
   text: string;
   /** Seconds into the meeting; unknown when the words run together without lines. */
   start?: number;
+  /** Where the transcript has columns: this row with its line's time and speaker beside it, for the top of the view. */
+  pinned?: string;
+  /** Where it stacks: its line's time and speaker, on a row of their own above it at the top of the view. */
+  heading?: string;
+}
+
+/**
+ * The rows in view from this scroll position. A line cut at the top keeps its time and speaker in
+ * view: beside its words where the transcript has columns, on a row above them where it stacks.
+ */
+export function transcriptWindow(rows: readonly TranscriptRow[], scroll: number, count: number): string[] {
+  const top = rows[scroll];
+  if (top?.pinned !== undefined) return [top.pinned, ...rows.slice(scroll + 1, scroll + count).map((row) => row.text)];
+  if (top?.heading !== undefined) return [top.heading, ...rows.slice(scroll, scroll + count - 1).map((row) => row.text)];
+  return rows.slice(scroll, scroll + count).map((row) => row.text);
+}
+
+/** The furthest the view scrolls: the last row in view, with room for a time and speaker pinned above it. */
+export function lastTranscriptScroll(rows: readonly TranscriptRow[], count: number): number {
+  const last = Math.max(0, rows.length - Math.max(1, count));
+  return rows[last]?.heading !== undefined && last + 1 < rows.length ? last + 1 : last;
 }
 
 /** Scroll physical terminal rows so even a single long segment is fully readable. */
@@ -54,13 +75,14 @@ export function timedTranscriptRows(
     const text = stripVTControlCharacters(segment.text);
     const timed = (row: string) => ({ text: row, start: segment.start });
     if (stacked) {
-      return [[clock, color[speakerColor](name)].filter(Boolean).join('  '), ...wrapAnsi(text, width, { hard: true }).split('\n')].map(timed);
+      const heading = [clock, color[speakerColor](name)].filter(Boolean).join('  ');
+      return [timed(heading), ...wrapAnsi(text, width, { hard: true }).split('\n').map((line) => ({ ...timed(line), heading }))];
     }
     const label = options.speakers ? color[speakerColor](name.slice(0, nameWidth).padEnd(nameWidth)) : '';
     const prefix = [clock, label].filter(Boolean).join('  ');
     const indent = (clockWidth ? clockWidth + 2 : 0) + (options.speakers ? nameWidth + 2 : 0);
     return wrapAnsi(text, Math.max(1, width - indent), { hard: true }).split('\n')
-      .map((line, index) => timed(index === 0 ? `${prefix}  ${line}` : ' '.repeat(indent) + line));
+      .map((line, index) => index === 0 ? timed(`${prefix}  ${line}`) : { ...timed(' '.repeat(indent) + line), pinned: `${prefix}  ${line}` });
   });
 }
 

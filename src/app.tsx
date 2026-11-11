@@ -41,7 +41,7 @@ import { chatWithMeeting, enrichMeeting } from './meeting-enrichment.ts';
 import { Chalk } from 'chalk';
 import { HEADING, meetingViewLines, plainMeetingLines, SUBHEADING, type MeetingView } from './meeting-tui.ts';
 import { HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
-import { timedTranscriptRows, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
+import { lastTranscriptScroll, timedTranscriptRows, transcriptWindow, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
   renderText,
 } from './transcript-renderer.ts';
@@ -948,14 +948,12 @@ export default function App(props: {
     return videoLookups.current.get(key);
   }).map((entry) => entry.id)), [libraryEntries]);
   const showingLiveTranscript = meetingView === 'transcript' && (view === 'live' || currentEntry?.captureState === 'recording');
-  const latestTranscriptScroll = Math.max(0, displayRows.length - visibleRows);
+  const latestTranscriptScroll = lastTranscriptScroll(timedRows, visibleRows);
   const visibleTranscriptScroll = showingLiveTranscript && followLiveTranscript
     ? latestTranscriptScroll
     : Math.min(transcriptScroll, latestTranscriptScroll);
-  const visibleTranscriptRows = displayRows.slice(
-    visibleTranscriptScroll,
-    visibleTranscriptScroll + visibleRows,
-  );
+  // A line cut at the top keeps its time and speaker in view.
+  const visibleTranscriptRows = transcriptWindow(timedRows, visibleTranscriptScroll, visibleRows);
   // The first row of every line that says what was searched for, so a match opens with its whole line at the top.
   const matchRows = useMemo(() => {
     const needle = searchQuery.trim().toLocaleLowerCase();
@@ -1437,10 +1435,9 @@ export default function App(props: {
     : displayRows.length;
   const scrollVisibleRows = visibleRows;
   const scrollTranscriptBy = (delta: number) => {
-    const next = moveTranscriptScroll(
-      meetingView === 'transcript' ? visibleTranscriptScroll : transcriptScroll,
-      delta, scrollItemCount, scrollVisibleRows,
-    );
+    const next = currentMeeting && meetingView !== 'transcript'
+      ? moveTranscriptScroll(transcriptScroll, delta, scrollItemCount, scrollVisibleRows)
+      : Math.min(latestTranscriptScroll, Math.max(0, visibleTranscriptScroll + delta));
     setTranscriptScroll(next);
     if (showingLiveTranscript) setFollowLiveTranscript(next >= latestTranscriptScroll);
   };
@@ -1717,9 +1714,8 @@ export default function App(props: {
   }, [view, selectedRecord?.id, currentRecordBusy, libraryRoot]);
   const watchVideo = () => {
     if (!selectedRecord) return;
-    // From the first line whose start is on screen, not the tail of one scrolled half away.
-    const first = timedRows.findIndex((row, index) => index >= visibleTranscriptScroll && (index === 0 || timedRows[index - 1]!.start !== row.start));
-    const at = meetingView === 'transcript' ? timedRows[first >= 0 ? first : visibleTranscriptScroll]?.start : undefined;
+    // From the line at the top: a line cut there keeps its time pinned in view, so that is where it plays from.
+    const at = meetingView === 'transcript' ? timedRows[visibleTranscriptScroll]?.start : undefined;
     try {
       openMeetingVideo(libraryRoot, selectedRecord.id, at === undefined ? {} : { atSeconds: at });
       setNotice(at === undefined ? 'Opened the video.' : `Opened the video at ${formatTuiClock(at)}.`);
