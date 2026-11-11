@@ -31,11 +31,14 @@ function stalePcm(source: CaptureSourceHealth, now: number): boolean {
   return now - (source.lastPcmAtUnixMs ?? source.updatedAtUnixMs) > 8000;
 }
 
-function sourceLabel(source: CaptureSourceHealth | undefined, finished: boolean, now: number): string {
+const oneSided = (source: CaptureSourceHealth) => source.warnings.some(w => w.kind === 'one-sided' && w.resolvedAtUnixMs === undefined);
+
+function sourceLabel(source: CaptureSourceHealth | undefined, finished: boolean, now: number, missing = false): string {
   if (!source) return 'status unconfirmed';
   if (source.state === 'disabled') return 'off';
   if (finished) {
     if (source.warnings.some(w => w.kind === 'unavailable' || w.kind === 'no-audio')) return 'interrupted — review recording';
+    if (missing) return 'your side wasn’t recorded';
     if (source.lastSignalAtUnixMs === undefined) return 'no sound confirmed';
     if (source.warnings.some(w => w.resolvedAtUnixMs === undefined && w.kind === 'reconnecting')) return 'interrupted — review recording';
     if (source.warnings.some(w => w.resolvedAtUnixMs === undefined && w.kind === 'quiet')) return 'sound captured · quiet at end';
@@ -46,14 +49,16 @@ function sourceLabel(source: CaptureSourceHealth | undefined, finished: boolean,
   if (source.state === 'starting') return 'opening…';
   if (stalePcm(source, now)) return 'signal not updating';
   if (source.lastPcmAtUnixMs === undefined) return 'waiting for audio';
+  if (oneSided(source)) return 'not hearing you — muted or wrong mic?';
   if (source.state === 'quiet') return 'quiet — check if speaking';
   return source.lastSignalAtUnixMs === undefined ? 'waiting for sound' : 'sound detected';
 }
 export function recordingNeedsAttention(health?: CaptureHealthSnapshot, finished = false, nowUnixMs = Date.now()): boolean {
   if (!health) return false;
+  if (finished && health.coverage?.yourSideMissing) return true;
   return [health.microphone, health.systemAudio].some(source => source.state !== 'disabled' && (
     finished ? source.lastSignalAtUnixMs === undefined || source.warnings.some(w => w.kind === 'unavailable' || w.kind === 'no-audio' || (w.kind === 'reconnecting' && w.resolvedAtUnixMs === undefined))
-      : ['quiet', 'unavailable', 'reconnecting', 'stopped'].includes(source.state) || (source.state === 'receiving' && stalePcm(source, nowUnixMs))
+      : ['quiet', 'unavailable', 'reconnecting', 'stopped'].includes(source.state) || (source.state === 'receiving' && stalePcm(source, nowUnixMs)) || oneSided(source)
   ));
 }
 
@@ -86,7 +91,7 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
     : `● Recording ${recordingClock(props.elapsedSeconds)}`;
   const headline = props.title ? `${label} · ${props.title}` : label;
   const showSources = ['starting', 'recording', 'no-audio', 'processing', 'ready'].includes(props.mode);
-  const mic = sourceLabel(props.health?.microphone, finished, now);
+  const mic = sourceLabel(props.health?.microphone, finished, now, props.health?.coverage?.yourSideMissing);
   const computer = sourceLabel(props.health?.systemAudio, finished, now).replace('check if speaking', 'check if others are speaking');
   const healthy = (value: string) => ['sound detected', 'sound captured', 'off'].includes(value);
   const saved = props.savedThroughSeconds === undefined ? 'Saved audio: not confirmed'
