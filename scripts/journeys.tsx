@@ -332,6 +332,9 @@ export const JOURNEYS: Journey[] = [
       { title: 'Writing it', press: [ENTER], keys: 'Enter', until: 'Writing the email' },
       { title: 'The email', until: 'Subject', note: 'Copy it, or open it in Mail as a draft. Nothing is sent.' },
       { title: 'Where it came from', press: ['t'], keys: 'T', until: 'hide times', note: 'Times are there when you want them.' },
+      { title: 'Write it again', press: ['g'], keys: 'G', until: 'Anything to add', note: 'What you typed last time comes back, to change.' },
+      { title: 'It failed', press: [ENTER], keys: 'Enter', until: 'try again', world: () => { process.env.JOURNEY_MODEL_DOWN = '1'; },
+        note: 'The AI did not answer this time. Enter tries again.' },
       { title: 'Notes the engine could not read', press: [ESC, 'h', DOWN, DOWN, DOWN, DOWN, ENTER], keys: 'Esc H ↓ ↓ ↓ ↓ Enter', until: 'Board',
         note: 'An older AI engine wrote these notes, so yours are listed as written, with one yellow line and the key that helps.' },
     ],
@@ -716,6 +719,8 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
     // question, a follow-up or a brief gets a made-up answer after a moment.
     runHumainMeeting: (action: string, request: Record<string, any>, options: { signal?: AbortSignal }) => new Promise((resolve, reject) => {
       options.signal?.addEventListener('abort', () => reject(new Error('Journeys never call a model')));
+      // A step can pretend the AI is not answering, to show how a failure reads.
+      if (process.env.JOURNEY_MODEL_DOWN) { setTimeout(() => reject(new Error('Claude Code did not answer. Check you are online, then try again.')), 300); return; }
       const output = cannedAnswer(action, request);
       if (output) setTimeout(() => resolve({ runId: `journey-${action}`, compiledRunId: 'journey', status: 'succeeded', receipt: {}, output }), 700);
     }),

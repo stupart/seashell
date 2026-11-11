@@ -376,12 +376,14 @@ export default function App(props: {
   const lastLookedAt = useRef(Date.now());
   /** [u] A follow-up: its kind, then anything to add, at the key bar; the draft in a sheet. */
   const [draftPrompt, setDraftPrompt] = useState<{ kind?: DraftKind; input: string } | null>(null);
-  const [draft, setDraft] = useState<{ kind: DraftKind; result?: FollowUpDraft; error?: string; sources: boolean; abort: AbortController; scroll: number } | null>(null);
+  /** `ask` is what was typed at "Anything to add?", so writing it again starts from it. */
+  const [draft, setDraft] = useState<{ kind: DraftKind; ask: string; result?: FollowUpDraft; error?: string; sources: boolean; abort: AbortController; scroll: number } | null>(null);
   /** [b] The brief for the next meeting on the calendar, as the recorder last saw it. */
   /** [b] The meetings coming up in the next 36 hours, as the recorder last saw them; the list's chosen row while it is open. */
   const [comingUp, setComingUp] = useState<ComingUpMeeting[]>([]);
   const [comingUpRow, setComingUpRow] = useState<number | null>(null);
-  const [briefSheet, setBriefSheet] = useState<{ title: string; brief?: Brief; error?: string; status?: string; abort?: AbortController; scroll: number } | null>(null);
+  /** `retry`: it failed, and trying again may work; having nothing to brief from is not a failure. */
+  const [briefSheet, setBriefSheet] = useState<{ meeting: ComingUpMeeting; brief?: Brief; error?: string; retry?: boolean; status?: string; abort?: AbortController; scroll: number } | null>(null);
 
   const microphoneCapture = useRef<MicrophoneCaptureHandle | null>(null);
   const systemAudioCapture = useRef<SystemAudioCaptureHandle | null>(null);
@@ -1861,7 +1863,7 @@ export default function App(props: {
     const route = configuredMeetingRoutes.chat;
     if (!currentRecord || !route) return;
     const abort = new AbortController();
-    setDraft({ kind, sources: false, abort, scroll: 0 });
+    setDraft({ kind, ask, sources: false, abort, scroll: 0 });
     void draftFollowUp(libraryRoot, currentRecord.id, kind, route, { ...(ask.trim() ? { ask } : {}), signal: abort.signal })
       .then((result) => setDraft((current) => current?.abort === abort ? { ...current, result } : current))
       .catch((cause) => {
@@ -1871,25 +1873,25 @@ export default function App(props: {
 
   /** A meeting's brief: the saved one, or written now from its past meetings. One with no past meetings has none. */
   const openBrief = (meeting: ComingUpMeeting) => {
-    const title = meeting.upcoming.title;
     const saved = findBrief(libraryRoot, meeting.upcoming);
-    if (saved) { setBriefSheet({ title, brief: saved, scroll: 0 }); return; }
-    if (!canBrief(meeting)) { setCaution(new NoBriefHistoryError(title).message); return; }
+    if (saved) { setBriefSheet({ meeting, brief: saved, scroll: 0 }); return; }
+    if (!canBrief(meeting)) { setCaution(new NoBriefHistoryError(meeting.upcoming.title).message); return; }
     const route = configuredMeetingRoutes.reconciliation;
     if (!route) { setAiSetupIntent(null); setAiSetupOpen(true); return; }
     const abort = new AbortController();
     const count = `${meeting.history} past ${meeting.history === 1 ? 'meeting' : 'meetings'}`;
-    setBriefSheet({ title, status: `Reading ${count}…`, abort, scroll: 0 });
+    setBriefSheet({ meeting, status: `Reading ${count}…`, abort, scroll: 0 });
     void makeBrief(libraryRoot, meeting.upcoming, { route, signal: abort.signal,
       onStatus: (status) => setBriefSheet((current) => current?.abort === abort && !current.brief ? { ...current, status } : current) })
       .then((brief) => {
-        setBriefSheet((current) => current?.abort === abort ? { title, brief, scroll: 0 } : current);
+        setBriefSheet((current) => current?.abort === abort ? { meeting, brief, scroll: 0 } : current);
         // The list says it is ready at once; reading the list again finds it saved.
         setComingUp((current) => current.map((candidate) => briefKey(candidate.upcoming) === brief.key ? { ...candidate, brief: brief.path } : candidate));
       })
       .catch((cause) => {
         if (abort.signal.aborted) return;
-        setBriefSheet((current) => current?.abort === abort ? { title, scroll: 0, error: cause instanceof NoBriefHistoryError ? cause.message : failureText(cause) } : current);
+        setBriefSheet((current) => current?.abort === abort ? { meeting, scroll: 0, error: failureText(cause),
+          ...(cause instanceof NoBriefHistoryError ? {} : { retry: true }) } : current);
       });
   };
 
@@ -2044,6 +2046,14 @@ export default function App(props: {
         else setNotice('Opened in Mail as a draft. Nothing was sent.');
       } else if (draft?.result && input === 't') {
         setDraft((current) => current && { ...current, sources: !current.sources });
+      } else if (draft && (draft.result || draft.error) && input === 'g') {
+        // Write it again: "Anything to add?" comes back with what was typed last time.
+        setDraft(null);
+        setDraftPrompt({ kind: draft.kind, input: draft.ask });
+      } else if (draft?.error && key.return) {
+        writeDraft(draft.kind, draft.ask);
+      } else if (briefSheet?.retry && key.return) {
+        openBrief(briefSheet.meeting);
       } else if (briefSheet?.brief && input === 'o') {
         try { openTextFile(briefSheet.brief.path); } catch (cause) { setError(failureText(cause)); }
       }
@@ -2920,10 +2930,11 @@ export default function App(props: {
     : speakerPickerOpen ? suggested ? [['y', 'keep'], ['n', `not ${suggested.label}`], ['Enter', 'rename'], ['↑↓', 'choose'], ['Esc', 'back']]
       : [['Enter', 'name'], ['↑↓', 'choose'], ['Esc', 'back']]
     : liveAnswer ? liveAnswer.answer || liveAnswer.error ? [...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']] : [['Esc', 'cancel']]
-    : draft ? draft.result ? [['c', 'copy'], ...(draft.result.kind === 'email' ? [['o', 'open in Mail'] as Hint] : []),
+    : draft ? draft.result ? [['c', 'copy'], ...(draft.result.kind === 'email' ? [['o', 'open in Mail'] as Hint] : []), ['g', 'write again'],
       ['t', draft.sources ? 'hide times' : 'show times'], ...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']]
-      : draft.error ? [['Esc', 'back']] : [['Esc', 'cancel']]
+      : draft.error ? [['Enter', 'try again'], ['g', 'write again'], ['Esc', 'back']] : [['Esc', 'cancel']]
     : briefSheet ? briefSheet.brief ? [['o', 'open the file'], ...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']]
+      : briefSheet.retry ? [['Enter', 'try again'], ['Esc', 'back']]
       : briefSheet.error ? [['Esc', 'back']] : [['Esc', 'cancel']]
     : comingUpRow !== null ? [...(comingUp[comingUpRow]?.brief ? [['Enter', 'read brief'] as Hint]
       : comingUp[comingUpRow] && canBrief(comingUp[comingUpRow]!) ? [['Enter', 'make brief'] as Hint] : []), ['↑↓', 'choose'], ['Esc', 'back']]
@@ -3034,7 +3045,7 @@ export default function App(props: {
   // A sheet's name takes the title line, as a screen's does; what is wrong stays in the status slot.
   const sheetName = helpSheet ? 'Keys' : liveAnswer ? liveAnswer.catchUp ? 'What you missed' : 'Your question'
     : draft ? draft.kind === 'email' ? 'Follow-up email' : 'Slack message'
-    : briefSheet ? `Brief · ${briefSheet.title}`
+    : briefSheet ? `Brief · ${briefSheet.meeting.upcoming.title}`
     : comingUpSheet ? 'Coming up'
     : audioSheet ? finding?.source === 'microphone' ? 'Mic help' : 'Audio help'
     : notesSheet ? 'Notes setup' : speakerSheet ? 'Name a speaker' : undefined;
