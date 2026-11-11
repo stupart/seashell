@@ -128,6 +128,8 @@ const PROJECT_ROOT = join(dirname(__filename), '..');
 const WHISPER_SERVER = join(PROJECT_ROOT, 'whisper.cpp/build/bin/whisper-server');
 const MODEL_PATH = join(PROJECT_ROOT, 'models', DEFAULT_WHISPER_MODEL_FILENAME);
 const HIGHLIGHT = new Chalk({ level: 1 }).black.bgYellow;
+/** Another match than the one n is on: in the same yellow, underlined rather than filled. */
+const SOFT_HIGHLIGHT = new Chalk({ level: 1 }).yellow.underline;
 
 type ListenerState = 'listening' | 'recording';
 type View = 'live' | 'record';
@@ -949,11 +951,6 @@ export default function App(props: {
   }).map((entry) => entry.id)), [libraryEntries]);
   const showingLiveTranscript = meetingView === 'transcript' && (view === 'live' || currentEntry?.captureState === 'recording');
   const latestTranscriptScroll = lastTranscriptScroll(timedRows, visibleRows);
-  const visibleTranscriptScroll = showingLiveTranscript && followLiveTranscript
-    ? latestTranscriptScroll
-    : Math.min(transcriptScroll, latestTranscriptScroll);
-  // A line cut at the top keeps its time and speaker in view.
-  const visibleTranscriptRows = transcriptWindow(timedRows, visibleTranscriptScroll, visibleRows);
   // The first row of every line that says what was searched for, so a match opens with its whole line at the top.
   const matchRows = useMemo(() => {
     const needle = searchQuery.trim().toLocaleLowerCase();
@@ -981,10 +978,16 @@ export default function App(props: {
     });
     return [...lines.values()].filter((line) => line.text.replace(/\s+/gu, ' ').toLocaleLowerCase().includes(needle));
   }, [timedRows, searchQuery, searchPane]);
+  // The match n is on: its line starts at the top of the view, even near the end, where the view runs past the last row.
+  const currentMatch = searchHit !== null && matchRows.length ? matchRows[searchHit % matchRows.length]! : undefined;
+  const visibleTranscriptScroll = showingLiveTranscript && followLiveTranscript
+    ? latestTranscriptScroll
+    : Math.min(transcriptScroll, Math.max(latestTranscriptScroll, currentMatch ?? 0));
+  // A line cut at the top keeps its time and speaker in view.
+  const visibleTranscriptRows = transcriptWindow(timedRows, visibleTranscriptScroll, visibleRows);
   // The rows rewrap once the list closes, so the match is found again whenever they do.
   useEffect(() => {
-    if (searchHit === null || !matchRows.length) return;
-    setTranscriptScroll(matchRows[searchHit % matchRows.length]!);
+    if (currentMatch !== undefined) setTranscriptScroll(currentMatch);
   }, [searchHit, matchRows]);
   // Finished notes arrive by themselves; say so, and show them unless someone is reading.
   const notesStatus = useRef<{ id?: string; status?: string }>({});
@@ -1437,7 +1440,7 @@ export default function App(props: {
   const scrollTranscriptBy = (delta: number) => {
     const next = currentMeeting && meetingView !== 'transcript'
       ? moveTranscriptScroll(transcriptScroll, delta, scrollItemCount, scrollVisibleRows)
-      : Math.min(latestTranscriptScroll, Math.max(0, visibleTranscriptScroll + delta));
+      : Math.min(Math.max(latestTranscriptScroll, visibleTranscriptScroll), Math.max(0, visibleTranscriptScroll + delta));
     setTranscriptScroll(next);
     if (showingLiveTranscript) setFollowLiveTranscript(next >= latestTranscriptScroll);
   };
@@ -2382,7 +2385,8 @@ export default function App(props: {
     : view === 'live' && !historyOpen ? [['space', paused ? 'record' : 'stop']] : [];
   const watch: Hint[] = videoAvailable ? [['w', 'watch video']] : [];
   const latest: Hint[] = followLiveTranscript ? [] : [['l', 'latest']];
-  const nextMatch: Hint[] = searchHit !== null && matchRows.length > 1 && meetingView === 'transcript' ? [['n', 'next match']] : [];
+  const nextMatch: Hint[] = searchHit !== null && matchRows.length > 1 && meetingView === 'transcript'
+    ? [['n', `next match · ${(searchHit % matchRows.length) + 1} of ${matchRows.length}`]] : [];
   // One order everywhere: what can be done here, then moving, then Esc. The way back to
   // the meetings comes early, so a narrow window keeps it.
   const hints: Hint[] = atHome && attention.length ? [['Enter', 'guided setup'], ...byHand, ['f', 'import']]
@@ -2496,7 +2500,9 @@ export default function App(props: {
               : backgroundMessage ?? 'No transcript text'}</Text>
           )
         ) : visibleTranscriptRows.map((row, index) => <Box key={index} flexShrink={0} height={1}>
-          <Text wrap="truncate-end">{highlighted(row, searchHighlight) || ' '}</Text>
+          {/* The line n is on is marked in full; the other matches are only underlined. */}
+          <Text wrap="truncate-end">{highlighted(row.text, searchHighlight,
+            currentMatch !== undefined && row.start !== timedRows[currentMatch]?.start) || ' '}</Text>
         </Box>)}
       </Box>
     </Box>
@@ -2685,10 +2691,10 @@ export default function App(props: {
 
 const searchPattern = (needle: string, flags: string) => new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), flags);
 
-/** Every place a row says what was searched for, in the transcript's yellow. */
-function highlighted(row: string, query: string): string {
+/** Every place a row says what was searched for, in the transcript's yellow: filled, or underlined when another match is current. */
+function highlighted(row: string, query: string, soft = false): string {
   const needle = query.trim();
-  return needle ? row.replace(searchPattern(needle, 'giu'), (match) => HIGHLIGHT(match)) : row;
+  return needle ? row.replace(searchPattern(needle, 'giu'), (match) => (soft ? SOFT_HIGHLIGHT : HIGHLIGHT)(match)) : row;
 }
 
 /** A dim line with what was searched for in the transcript's yellow, at full strength. */

@@ -52,7 +52,7 @@ test('each transcript row knows when its line was said, wrapped rows included', 
 
 test('a line cut at the top of the view keeps its time and speaker', () => {
   const options = { timestamps: true, speakers: true };
-  const plain = (rows: string[]) => rows.map((row) => stripVTControlCharacters(row));
+  const plain = (rows: { text: string }[]) => rows.map((row) => stripVTControlCharacters(row.text));
   // Stacked: the time and speaker sit on a row of their own above the words that are left.
   const stacked = timedTranscriptRows(timedRecord, 40, options);
   expect(plain(transcriptWindow(stacked, 1, 3))).toEqual(['00:00  You', 'A made-up opening line that is long', 'enough to wrap onto a second row here.']);

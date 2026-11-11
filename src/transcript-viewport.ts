@@ -25,11 +25,12 @@ export interface TranscriptRow {
  * The rows in view from this scroll position. A line cut at the top keeps its time and speaker in
  * view: beside its words where the transcript has columns, on a row above them where it stacks.
  */
-export function transcriptWindow(rows: readonly TranscriptRow[], scroll: number, count: number): string[] {
+export function transcriptWindow(rows: readonly TranscriptRow[], scroll: number, count: number): TranscriptRow[] {
   const top = rows[scroll];
-  if (top?.pinned !== undefined) return [top.pinned, ...rows.slice(scroll + 1, scroll + count).map((row) => row.text)];
-  if (top?.heading !== undefined) return [top.heading, ...rows.slice(scroll, scroll + count - 1).map((row) => row.text)];
-  return rows.slice(scroll, scroll + count).map((row) => row.text);
+  const timed = (text: string): TranscriptRow => top?.start === undefined ? { text } : { text, start: top.start };
+  if (top?.pinned !== undefined) return [timed(top.pinned), ...rows.slice(scroll + 1, scroll + count)];
+  if (top?.heading !== undefined) return [timed(top.heading), ...rows.slice(scroll, scroll + count - 1)];
+  return rows.slice(scroll, scroll + count);
 }
 
 /** The furthest the view scrolls: the last row in view, with room for a time and speaker pinned above it. */
