@@ -169,8 +169,11 @@ function playerHarness(html: string, view = 400) {
     closest(selector: string) { const tags = selector.split(',').map((tag) => tag.trim().toUpperCase()); for (let el: El | null = this; el; el = el.parent) if (tags.includes(el.tagName)) return el; return null; }
     contains(node: unknown) { for (let el = node as El | null; el; el = el.parent) if (el === this) return true; return false; }
     focus() { doc.activeElement = this; dispatch(this, 'focusin'); }
-    // Lines are 40px tall under the list's 20px top padding.
-    get offsetTop() { return 20 + (this.parent?.children.indexOf(this) ?? 0) * 40; }
+    // Lines are 40px tall under the list's 20px top padding, with 16px more before a new speaker.
+    get offsetTop() {
+      const before = (this.parent?.children ?? []).slice(0, (this.parent?.children.indexOf(this) ?? 0) + 1) as El[];
+      return 20 + (before.length - 1) * 40 + before.filter((item) => item.classes.has('turn')).length * 16;
+    }
     get offsetHeight() { return 40; }
   }
   function dispatch(target: El, type: string, key?: string) {
@@ -325,4 +328,17 @@ test('opening deep in a meeting starts the view on a whole line, with the line b
   const current = page.items[30]!;
   expect(current.offsetTop).toBeGreaterThanOrEqual(top);
   expect(current.offsetTop + current.offsetHeight).toBeLessThanOrEqual(page.list.scrollTop + 410 * 0.8);
+});
+
+test('a view that would start in the gap between speakers starts on the next whole line instead', () => {
+  const turns = Array.from({ length: 60 }, (_, index) => ({ start: index * 10, end: index * 10 + 8, text: `Line ${index}`, speaker: index % 2 ? 'SPEAKER_01' : 'SPEAKER_00' }));
+  const record = createTranscriptRecord({ transcript: turns, speakers: [{ id: 'SPEAKER_00', label: 'Avery' }, { id: 'SPEAKER_01', label: 'Rowan' }] }, { id: 'g2', title: 'Gaps' });
+  // At 340px a quarter of the view lands the top edge in the 16px gap before a new speaker.
+  const page = playerHarness(renderVideoPlayerPage('/m', record, { ...movie(-1), segments: [movie(-1)] }, 301), 340);
+  expect(page.current()).toBe(30);
+  const top = page.list.scrollTop + 20;
+  expect(page.items.some((item) => item.offsetTop === top)).toBe(true);
+  const current = page.items[30]!;
+  expect(current.offsetTop).toBeGreaterThanOrEqual(top);
+  expect(current.offsetTop + current.offsetHeight).toBeLessThanOrEqual(page.list.scrollTop + 340 * 0.8);
 });

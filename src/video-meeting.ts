@@ -252,10 +252,14 @@ function reveal(item, how) {
   } else {
     if (how === 'follow' && top >= at + pad && bottom <= at + view * 0.8) return;
     target = Math.max(0, top - Math.max(pad, Math.min(view * 0.25, view - (bottom - top) - end)));
+    // The view's top edge falls through a line or in the gap after one: move to the nearer whole line,
+    // going up by no more than a quarter of the view.
     const cut = items.find((entry) => entry.offsetTop + entry.offsetHeight > target + pad);
-    if (cut && cut !== item && cut.offsetTop < target + pad) {
-      const after = items[items.indexOf(cut) + 1];
-      target = target - (cut.offsetTop - pad) <= view * 0.25 || !after ? cut.offsetTop - pad : after.offsetTop - pad;
+    if (cut && cut.offsetTop !== target + pad) {
+      const line = cut.offsetTop < target + pad ? cut : items[items.indexOf(cut) - 1];
+      const next = line ? items[items.indexOf(line) + 1] : cut;
+      const up = line ? line.offsetTop - pad : -Infinity, down = next ? next.offsetTop - pad : Infinity;
+      target = target - up <= view * 0.25 && target - up <= down - target ? up : Number.isFinite(down) ? down : up;
     }
   }
   const smooth = how === 'follow' && motion.matches && Math.abs(target - at) < view * 2;
