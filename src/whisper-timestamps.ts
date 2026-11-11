@@ -9,6 +9,7 @@ import {
   trackTempDirectory,
 } from './process-lifecycle.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
+import { finalTranscriptionThreads, transcriptionHardware, transcriptionUsesGpu, type TranscriptionHardware } from './local-asr-profile.ts';
 import { dropPhantomUnits } from './speech-gate.ts';
 import type { TimedTranscriptUnit } from './transcript-types.ts';
 
@@ -195,16 +196,14 @@ export function timedUnitsFromWhisperJson(value: unknown): TimedTranscriptUnit[]
 export interface TimestampTranscriptionOptions {
   onProgress?: (percentage: number) => void;
   onFallback?: (message: string) => void;
+  /** Test seams: the whisper.cpp build and model, and the Mac to size the run for. */
+  whisperCli?: string;
+  modelPath?: string;
+  hardware?: TranscriptionHardware;
 }
 
-class WhisperExecutionError extends Error {
-  constructor(
-    message: string,
-    readonly retryWithoutGpu: boolean,
-  ) {
-    super(message);
-  }
-}
+/** whisper.cpp started and then failed; spawn failures are plain errors. */
+class WhisperExecutionError extends Error {}
 
 /**
  * Canonical detailed transcription path for all file-based workflows.
@@ -213,11 +212,14 @@ export async function transcribeWithTimestamps(
   filePath: string,
   options: TimestampTranscriptionOptions = {},
 ): Promise<TimedTranscriptUnit[]> {
+  const whisperCli = options.whisperCli ?? WHISPER_CLI;
+  const modelPath = options.modelPath ?? MODEL_PATH;
+  const hardware = options.hardware ?? transcriptionHardware();
   if (!existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
-  if (!existsSync(WHISPER_CLI)) {
+  if (!existsSync(whisperCli)) {
     throw new Error('whisper.cpp is not built. Run ./install.sh first.');
   }
-  if (!existsSync(MODEL_PATH)) {
+  if (!existsSync(modelPath)) {
     throw new Error('Whisper model is missing. Run ./install.sh first.');
   }
 
@@ -235,12 +237,12 @@ export async function transcribeWithTimestamps(
 
   try {
     const runWhisper = (disableGpu: boolean) => new Promise<void>((resolve, reject) => {
-      const proc = spawn(WHISPER_CLI, [
+      const proc = spawn(whisperCli, [
         ...(disableGpu ? ['-ng'] : []),
-        '-m', MODEL_PATH,
+        '-m', modelPath,
         '-f', filePath,
         '-l', 'en',
-        '-t', '6',
+        '-t', String(finalTranscriptionThreads(hardware)),
         // Do not combine canonical word timestamps with --vad: our pinned CLI
         // maps segment times but emits token/DTW times on compressed audio
         // (ggml-org/whisper.cpp#4046). Live draft VAD is independent of this path.
@@ -282,7 +284,6 @@ export async function transcribeWithTimestamps(
           const reason = signal ? `signal ${signal}` : `exit ${code}`;
           reject(new WhisperExecutionError(
             `whisper.cpp failed (${reason}): ${stderr.trim() || 'no details'}`,
-            Boolean(signal) || code === 139,
           ));
           return;
         }
@@ -290,15 +291,13 @@ export async function transcribeWithTimestamps(
       });
     });
 
-    const forceCpu = process.env.SEASHELL_DISABLE_GPU === '1';
+    const forceCpu = !transcriptionUsesGpu(hardware);
     try {
       await runWhisper(forceCpu);
     } catch (error) {
-      if (
-        !forceCpu &&
-        error instanceof WhisperExecutionError &&
-        error.retryWithoutGpu
-      ) {
+      // A GPU run can crash, or stop before transcribing with no reason given
+      // ("failed to initialize whisper context"). Either way, retry on the CPU.
+      if (!forceCpu && error instanceof WhisperExecutionError) {
         rmSync(outputJson, { force: true });
         options.onFallback?.('Metal transcription failed; retrying on CPU…');
         await runWhisper(true);

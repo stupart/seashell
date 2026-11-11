@@ -1,6 +1,10 @@
-import { describe, expect, test } from 'bun:test';
-import { timedUnitsFromWhisperJson } from '../src/whisper-timestamps.ts';
-import { readFileSync } from 'node:fs';
+import { afterEach, describe, expect, test } from 'bun:test';
+import { transcribeWithTimestamps, timedUnitsFromWhisperJson } from '../src/whisper-timestamps.ts';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pcmS16leToWav } from '../src/live-system-audio.ts';
+import type { TranscriptionHardware } from '../src/local-asr-profile.ts';
 
 describe('timedUnitsFromWhisperJson', () => {
   test('real VAD mixed-clock output preserves whole sentences instead of collapsing words at the segment start', () => {
@@ -114,5 +118,62 @@ describe('timedUnitsFromWhisperJson', () => {
     })).toEqual([
       { start: 0, end: 1, text: 'Keep every word.' },
     ]);
+  });
+});
+
+describe('transcribeWithTimestamps', () => {
+  const roots: string[] = [];
+  afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+
+  /** A stand-in whisper-cli that logs its arguments and can fail whenever the GPU is used. */
+  function fakeWhisper(failOnGpu: boolean) {
+    const root = mkdtempSync(join(tmpdir(), 'seashell-fake-whisper-'));
+    roots.push(root);
+    const cli = join(root, 'whisper-cli');
+    const calls = join(root, 'calls.log');
+    writeFileSync(cli, `#!/bin/sh
+echo "$*" >> '${calls}'
+case " $* " in *" -ng "*) gpu=0 ;; *) gpu=1 ;; esac
+if [ "$gpu" = 1 ] && [ ${failOnGpu ? 1 : 0} = 1 ]; then echo 'error: failed to initialize whisper context' >&2; exit 3; fi
+while [ $# -gt 0 ]; do [ "$1" = -of ] && out="$2"; shift; done
+printf '%s' '{"transcription":[{"text":" Made-up words.","offsets":{"from":0,"to":900}}]}' > "$out.json"
+`);
+    chmodSync(cli, 0o755);
+    const model = join(root, 'model.bin');
+    writeFileSync(model, '');
+    // A loud tone, so no speech check can mistake the words for silence.
+    const pcm = Buffer.alloc(16_000 * 2);
+    for (let index = 0; index < 16_000; index++) pcm.writeInt16LE(Math.round(Math.sin(index / 8) * 16_000), index * 2);
+    const audio = join(root, 'audio.wav');
+    writeFileSync(audio, pcmS16leToWav(pcm));
+    return { cli, model, audio, calls: () => readFileSync(calls, 'utf8').trim().split('\n') };
+  }
+  const mac: TranscriptionHardware = { appleSilicon: true, performanceCores: 6, memoryBytes: 16 * 2 ** 30 };
+  const intel: TranscriptionHardware = { appleSilicon: false, performanceCores: 4, memoryBytes: 8 * 2 ** 30 };
+
+  test('a Metal run that exits with an error is retried once on the CPU', async () => {
+    const whisper = fakeWhisper(true);
+    const fallbacks: string[] = [];
+    const units = await transcribeWithTimestamps(whisper.audio, {
+      whisperCli: whisper.cli, modelPath: whisper.model, hardware: mac, onFallback: (message) => fallbacks.push(message),
+    });
+    expect(units.map((unit) => unit.text)).toEqual(['Made-up words.']);
+    expect(fallbacks).toEqual(['Metal transcription failed; retrying on CPU…']);
+    const [gpu, cpu] = whisper.calls();
+    expect(gpu).not.toContain('-ng');
+    expect(gpu).toContain('-t 6');
+    expect(cpu).toStartWith('-ng ');
+  });
+
+  test('an Intel Mac transcribes on the CPU with one thread per physical core', async () => {
+    const whisper = fakeWhisper(true);
+    const fallbacks: string[] = [];
+    await transcribeWithTimestamps(whisper.audio, {
+      whisperCli: whisper.cli, modelPath: whisper.model, hardware: intel, onFallback: (message) => fallbacks.push(message),
+    });
+    expect(fallbacks).toEqual([]);
+    expect(whisper.calls()).toHaveLength(1);
+    expect(whisper.calls()[0]).toStartWith('-ng ');
+    expect(whisper.calls()[0]).toContain('-t 4');
   });
 });
