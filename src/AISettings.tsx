@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
 import AdvancedAISettings from './AIProviderPicker.tsx';
-import { KeyBar, Paragraph, ScreenTitle } from './tui-chrome.tsx';
-import { AI_PROVIDERS, currentMeetingRoutes, preferredAIProvider, recommendedMeetingSetup } from './ai-provider.ts';
+import { KeyBar, Paragraph, Prompt, ScreenTitle } from './tui-chrome.tsx';
+import { AI_PROVIDERS, currentMeetingRoutes, preferredAIProvider, providerName, recommendedMeetingSetup } from './ai-provider.ts';
 import type { SeashellMeetingConfig } from './config.ts';
 import {
   discoverHumainModels,
@@ -17,20 +17,23 @@ type Providers = Awaited<ReturnType<typeof discoverHumainProviders>>['integratio
 type HomeEntry = 'use' | 'test' | 'another' | 'advanced' | 'recommended';
 
 const ROLE_WORDS: Record<MeetingAiRole, string> = { observer: 'live analysis', reconciliation: 'final notes', chat: 'chat' };
-const nameOf = (id: HumainBackend) => AI_PROVIDERS.find((provider) => provider.id === id)?.name ?? id;
 
-/** Each route the test tried: ✓ with how long it took, or ✗ with what to do. */
+/** Each AI the test tried: ✓ with how long it took, or ✗ with what to do. The models are in Advanced. */
 function ConnectionTest(props: { test: MeetingAiTest; width: number }) {
   if (!props.test.routes.length) {
     return <Paragraph width={props.width} color={props.test.engine.ready ? 'yellow' : 'red'}
       text={props.test.engine.ready ? 'No AI is chosen yet, so there is nothing to test.' : props.test.engine.detail ?? 'The AI engine is not installed.'} />;
   }
   return <>{props.test.routes.map((route) => {
-    const name = `${nameOf(route.backend)} · ${route.model}`;
+    const name = providerName(route.backend);
     const roles = route.roles.map((role) => ROLE_WORDS[role]).join(', ');
+    const timing = route.ok && route.latencyMs !== undefined ? `answered in ${(route.latencyMs / 1000).toFixed(1)} s` : '';
+    // What each AI does goes under it when the line has no room, rather than being cut.
+    const oneLine = Bun.stringWidth(`✓ ${name}  ${timing} · ${roles}`) <= props.width;
     return <Box key={`${route.backend}-${route.model}-${roles}`} flexDirection="column" flexShrink={0}>
       <Text wrap="truncate-end"><Text color={route.ok ? 'green' : 'red'}>{route.ok ? '✓' : '✗'}</Text> {name}
-        <Text dimColor>{'  '}{route.ok && route.latencyMs !== undefined ? `answered in ${(route.latencyMs / 1000).toFixed(1)} s · ` : ''}{roles}</Text></Text>
+        <Text dimColor>{'  '}{timing}{timing && oneLine ? ' · ' : ''}{oneLine || !timing ? roles : ''}</Text></Text>
+      {!oneLine && timing && <Text dimColor wrap="truncate-end">{'  '}{roles}</Text>}
       {!route.ok && <Box paddingLeft={2}><Paragraph width={props.width - 2} color="red" text={route.reason ?? route.failure?.message ?? 'It did not answer.'} /></Box>}
     </Box>;
   })}</>;
@@ -93,12 +96,14 @@ export default function AISettings(props: {
   };
   const routes = proposal?.routes ?? currentRoutes;
   const backends = [...new Set(Object.values(routes).flatMap((route) => route ? [route.backend] : []))];
-  const providerName = backends.map((id) => AI_PROVIDERS.find((provider) => provider.id === id)!.name).join(' + ');
+  const names = backends.map(providerName);
+  const providerNames = names.join(' + ');
   const canUse = Boolean(proposal || configured);
   const { stdout } = useStdout();
   // Testing sends one tiny fixed prompt through each route that is saved, so it waits for a proposal to be saved first.
+  // Once AI is chosen there is nothing to confirm: Esc goes back.
   const home: Array<[HomeEntry, string]> = [
-    ['use', proposal ? `Yes, use ${providerName}` : configured ? 'Done' : 'Find connected AI'],
+    ...(proposal ? [['use', `Yes, use ${providerNames}`] as [HomeEntry, string]] : configured ? [] : [['use', 'Find connected AI'] as [HomeEntry, string]]),
     ...(configured && !proposal ? [['test', 'Test connection'] as [HomeEntry, string]] : []),
     ['another', 'Choose another AI…'], ['advanced', 'Advanced · models and effort…'],
     ...(configured ? [['recommended', 'Use recommended models…'] as [HomeEntry, string]] : []),
@@ -131,13 +136,12 @@ export default function AISettings(props: {
       setIndex((value) => (value + (key.upArrow ? -1 : 1) + entries.length) % entries.length);
       setError(undefined); setTest(undefined); return;
     }
-    if (input.toLowerCase() === 'r') { setRefresh((value) => value + 1); return; }
     if (!key.return || busy) return;
     if (screen === 'providers') {
       const selected = AI_PROVIDERS[index]!;
       const status = providers?.find((item) => item.id === selected.id);
       if (status?.ready) chooseProvider(selected.id);
-      else setError(status?.nextStep ?? status?.detail ?? 'Connect this provider, then press R to refresh.');
+      else setError(status?.nextStep ?? status?.detail ?? 'Connect this provider, then choose it here again.');
       return;
     }
     const entry = home[index]?.[0];
@@ -145,10 +149,10 @@ export default function AISettings(props: {
       try {
         if (proposal) props.onSave(proposal);
         else if (configured) props.onClose();
-        else { setScreen('providers'); setIndex(0); }
+        else { setScreen('providers'); setIndex(0); setRefresh((value) => value + 1); }
       } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     } else if (entry === 'test') runTest();
-    else if (entry === 'another') { setScreen('providers'); setIndex(0); }
+    else if (entry === 'another') { setScreen('providers'); setIndex(0); setRefresh((value) => value + 1); }
     else if (entry === 'advanced') { request.current?.abort(); setBusy(false); setScreen('advanced'); }
     else {
       const backend = backends.length === 1 ? backends[0] : preferredAIProvider(providers ?? []);
@@ -161,16 +165,15 @@ export default function AISettings(props: {
     onClose={() => { setScreen('home'); setIndex(Math.max(0, home.findIndex(([entry]) => entry === 'advanced'))); }}
     onSave={(patch) => props.onSave({ ...patch, modelSelection: 'custom' })} />;
   return <Box flexDirection="column" paddingX={1} height={stdout?.rows ?? 24} overflow="hidden">
-    <ScreenTitle name="AI for notes and chat" />
-    {props.recording && <Text color="yellow">Recording continues · Esc to return</Text>}
+    <ScreenTitle name="AI for notes and chat" status={props.recording ? { text: 'Recording continues', color: 'yellow' } : undefined} />
     <Text>{screen === 'providers' ? 'Connect once. Seashell chooses the models.' : busy ? 'Finding your connected AI…'
-      : canUse ? `${proposal ? 'Write notes with' : 'Using'} ${providerName}${proposal ? '?' : ''}` : 'No connected AI found. Recording still works.'}</Text>
+      : canUse ? `${proposal ? 'Write notes with' : 'Using'} ${providerNames}${proposal ? '?' : ''}` : 'No connected AI found. Recording still works.'}</Text>
     <Box flexDirection="column" marginTop={1}>
       {entries.map((label, i) => <Text key={label} inverse={index === i} wrap="truncate-end">{index === i ? '› ' : '  '}{label}</Text>)}
     </Box>
     <Box flexDirection="column" marginTop={1}>
       {screen === 'home' && canUse && <Text dimColor>{backends.some((id) => id !== 'local-openai')
-        ? `Your meeting text will be sent through your ${providerName} account. Usage follows your plan.`
+        ? `Your meeting text will be sent through your ${names.join(' and ')} ${names.length === 1 ? 'account' : 'accounts'}. Usage follows your plan.`
         : 'Meeting text stays with your configured local model server.'}</Text>}
       {screen === 'providers' && <Text dimColor>{AI_PROVIDERS[index]?.privacy}</Text>}
       {screen === 'home' && (testing || test) && <Box flexDirection="column" marginTop={1}>
@@ -182,8 +185,8 @@ export default function AISettings(props: {
       {!busy && !canUse && screen === 'home' && <Text dimColor>No Seashell account needed. Connect a provider or return to your transcript.</Text>}
     </Box>
     <Box flexGrow={1} />
-    <Box flexShrink={0}>{testing ? <Text color="yellow">Testing… Esc cancels</Text>
+    <Box flexShrink={0}>{testing ? <Prompt text="◐ Testing…" color="magenta" hints={[['Esc', 'cancel']]} columns={(stdout?.columns ?? 80) - 2} />
       : <KeyBar help={false} columns={(stdout?.columns ?? 80) - 2}
-        hints={[['↑↓', 'choose'], ['Enter', screen === 'home' && home[index]?.[0] === 'test' ? test ? 'test again' : 'test' : 'continue'], ['r', 'refresh'], ['Esc', 'back']]} />}</Box>
+        hints={[['Enter', screen === 'home' && home[index]?.[0] === 'test' ? test ? 'test again' : 'test' : 'continue'], ['↑↓', 'choose'], ['Esc', 'back']]} />}</Box>
   </Box>;
 }

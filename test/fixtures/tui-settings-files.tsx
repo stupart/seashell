@@ -73,26 +73,26 @@ const DOWN = '\x1b[B', LEFT = '\x1b[D', ENTER = '\r';
 try {
   await until(() => frame().includes('Saved voices'), 'Settings lists saved voices');
   // Saved voices: choose one, and forget them only after a yes.
-  await type(...Array(9).fill(DOWN), ENTER);
+  await type(...Array(8).fill(DOWN), ENTER);
   await until(() => frame().includes('Enter forget'), 'Enter chooses among the people');
   await type(ENTER);
   await until(() => frame().includes("Forget Dana's voice?"), 'forgetting asks first');
   assert.equal(listVoiceprints().length, 2, 'nothing is forgotten before the yes');
   await type('n');
-  await until(() => !frame().includes('y yes'), 'n keeps the voice');
+  await until(() => !frame().includes('y forget'), 'n keeps the voice');
   assert.equal(listVoiceprints().length, 2);
   await type(ENTER, 'y');
   await until(() => listVoiceprints().length === 1, 'y forgets the voice');
   assert.deepEqual(listVoiceprints().map((voice) => voice.name), ['Priya']);
 
-  // Prompts: Enter opens one in the editor; d puts it back as shipped after a yes.
+  // Prompts: Enter opens one in the editor; d undoes your edits after a yes.
   await type(LEFT, DOWN, DOWN, DOWN, ENTER, DOWN);
-  await until(() => frame().includes('d put back as shipped'), 'an edited prompt can be put back');
+  await until(() => frame().includes('d undo edits'), 'an edited prompt can be put back');
   await type(ENTER);
   await until(() => opened.length === 1, 'Enter opens the prompt');
   assert.ok(opened[0]!.endsWith('notes.md'));
   await type('d');
-  await until(() => frame().includes('Put Final notes back as shipped?'), 'putting back asks first');
+  await until(() => frame().includes('Undo your edits to Final notes?  y undo  n keep'), 'putting back asks first');
   await type('y');
   await until(() => listPrompts(library).find((prompt) => prompt.name === 'notes')?.state === 'default', 'the prompt is as shipped again');
 
@@ -102,15 +102,16 @@ try {
   await until(() => folders.length === 1, 'Enter opens the extractors folder');
   assert.ok(existsSync(join(folders[0]!, 'customer-pains.md')), 'the folder starts with an example');
 
-  // Video: Enter asks macOS for Screen Recording; space turns video off.
+  // Video: Enter switches it. Off, then on again, which asks macOS for Screen Recording.
   await type(LEFT, DOWN, DOWN, DOWN);
   if (narrow) await type(ENTER);
   await until(() => frame().includes('needs Screen Recording'), 'video is on but not allowed');
   await type(ENTER);
-  await until(() => screenRequests === 1 && frame().includes('Screen Recording allowed'), 'Enter allows Screen Recording');
-  await type(' ');
-  await until(() => JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.video?.enabled === false, 'space turns video off');
+  await until(() => JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.video?.enabled === false, 'Enter turns video off');
   await until(() => frame().includes('Off · calls record audio only'), 'the item says it is off');
+  await type(ENTER);
+  await until(() => screenRequests === 1 && frame().includes('Screen Recording allowed'), 'Enter turns it on and allows Screen Recording');
+  assert.equal(JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.video?.enabled, true);
 
   // Computer audio: the one-time check that lets meetings use Seashell System Audio.
   await type(LEFT, ...Array(11).fill('\x1b[A'));
@@ -118,7 +119,7 @@ try {
   await until(() => frame().includes('Enter check computer audio'), 'computer audio offers the check');
   // Wide, the detail wraps beside the menu's border; read the words only.
   const words = () => frame().split('\n').map((line) => line.split('│').at(-1)!.trim()).join(' ').replace(/\s+/gu, ' ');
-  assert.ok(words().includes("background recorder's permission until you allow computer audio for Seashell System Audio"), words());
+  assert.ok(words().includes('Next: Press Enter so Seashell hears computer audio directly.'), words());
   await type(ENTER);
   await until(() => computerChecks === 1 && words().includes('Meetings use it from the next call'), 'Enter runs the check and says what it found');
   for (const line of frame().split('\n')) assert.ok(Bun.stringWidth(line) <= columns, `fits ${columns} columns: ${line}`);

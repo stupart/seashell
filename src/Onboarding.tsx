@@ -13,7 +13,7 @@ import {
 } from './feature-status.ts';
 import { COMPUTER_PASS, computerLevels, microphoneLevels, type LevelProblem, type LevelSource } from './audio-levels.ts';
 import { MENU_LABEL, useSetupActions, type SetupActionProps } from './SettingsScreen.tsx';
-import { KeyBar, Paragraph, ScreenTitle, type Hint } from './tui-chrome.tsx';
+import { KeyBar, Paragraph, Prompt, ScreenTitle, Toast, type Hint } from './tui-chrome.tsx';
 
 // MARK: - Levels
 
@@ -165,7 +165,7 @@ export default function Onboarding(props: SetupActionProps & {
     void readFeatureStatuses({ config: props.config, libraryDir: props.libraryDir, signal: controller.signal,
       ...(props.dependencies ? { dependencies: props.dependencies } : {}) })
       .then(next => { if (!controller.signal.aborted) setStatuses(next); })
-      .catch(cause => { if (!controller.signal.aborted) setup.setMessage(cause instanceof Error ? cause.message : String(cause)); });
+      .catch(cause => { if (!controller.signal.aborted) setup.failure(cause); });
     return () => controller.abort();
   }, [refresh, props.config]);
   // The plan is made once, so a step that gets done does not vanish from under the person.
@@ -211,6 +211,8 @@ export default function Onboarding(props: SetupActionProps & {
   useInput((input, key) => {
     const { step, recorder, microphone, micAllowed, extras, extraIndex, mic, computer } = latest.current;
     if (setup.busy) { if (key.escape) setup.cancel(); return; }
+    // A confirmation stays in the key bar until the next key.
+    if (setup.message?.tone === 'done') setup.setMessage(undefined);
     if (key.escape) { props.onClose(); return; }
     if (input === 's' && step !== 'done') { next(); return; }
     if (step === 'recorder') {
@@ -218,16 +220,16 @@ export default function Onboarding(props: SetupActionProps & {
       if (recorder?.state === 'ok') next();
       else if (recorder?.state === 'off') {
         try { props.onConfigChange?.(updateMeetingConfig({ automation: { mode: 'automatic', enabled: true } })); }
-        catch (cause) { setup.setMessage(cause instanceof Error ? cause.message : String(cause)); }
+        catch (cause) { setup.failure(cause); }
       } else if (recorder?.action) void runQuietly(recorder.action);
     } else if (step === 'microphone') {
       if (input === 'o') open('sound-input');
-      else if (input === 'p') open('microphone-privacy');
+      else if (input === 'u') open('microphone-privacy');
       else if (key.return && mic.heard) next();
       else if (key.return && !micAllowed && microphone?.action) void runQuietly(microphone.action);
     } else if (step === 'computer') {
       if (input === 'o') open('sound-output');
-      else if (input === 'p') open('audio-recording-privacy');
+      else if (input === 'u') open('audio-recording-privacy');
       else if (key.return && computer.heard) next();
     } else if (step === 'extras') {
       if (key.upArrow || input === 'k') setExtraIndex(value => Math.max(0, value - 1));
@@ -254,8 +256,8 @@ export default function Onboarding(props: SetupActionProps & {
     if (meter.problem) return <>
       <Paragraph width={width} color="red" text={meter.problem.message} />
       {meter.problem.kind === 'permission' && <Paragraph width={width} text={yours
-        ? 'Turn on Seashell Microphone in Privacy & Security → Microphone. p opens it.'
-        : 'Allow Seashell System Audio in Privacy & Security → Screen & System Audio Recording. p opens it.'} />}
+        ? 'Turn on Seashell Microphone in Privacy & Security → Microphone.'
+        : 'Allow Seashell System Audio in Privacy & Security → Screen & System Audio Recording.'} />}
     </>;
     return <>
       <LevelBar level={meter.level} width={barWidth} heard={false} />
@@ -265,11 +267,11 @@ export default function Onboarding(props: SetupActionProps & {
           ? 'Nothing heard. Your microphone is sending silence, not sound. That happens when it is muted or the wrong input is chosen.'
           : 'Nothing that sounds like speech yet.'} />
         <Text>1. Check your Mac, headset or call app is not muted.</Text>
-        <Text>2. Check the input in Sound settings. <Text bold>o</Text> opens Sound.</Text>
+        <Text>2. Check the input in Sound settings.</Text>
       </> : <>
         <Paragraph width={width} color="yellow" text="Nothing heard from your Mac yet." />
         <Text>1. Check the volume is up and not muted.</Text>
-        <Text>2. Check the output in Sound settings. <Text bold>o</Text> opens Sound.</Text>
+        <Text>2. Check the output in Sound settings.</Text>
       </>}
     </>;
   };
@@ -333,25 +335,27 @@ export default function Onboarding(props: SetupActionProps & {
         : 'Anything skipped is in Settings. Press , in the app, or run this guide again from there.'} />
     </>;
 
-  // Started from Settings, Esc goes back there; on a first run it leaves setup for later.
-  const leave = props.fromSettings ? 'back' : 'later';
-  const meterHints = (meter: Meter, done: boolean): Hint[] => done ? [['Enter', 'next'], ['Esc', leave]]
-    : [['o', 'Sound settings'], ...(meter.problem?.kind === 'permission' ? [['p', 'Privacy'] as Hint] : []), ['s', 'skip'], ['Esc', leave]];
-  const hints: Hint[] = !progress ? [['Esc', leave]]
-    : step === 'recorder' ? [['Enter', recorder?.state === 'ok' ? 'next' : recorder?.state === 'off' ? 'turn on' : 'start it'], ['s', 'skip'], ['Esc', leave]]
-    : step === 'microphone' ? !micAllowed ? [['Enter', 'allow'], ['s', 'skip'], ['Esc', leave]] : meterHints(mic, Boolean(mic.heard || heard.microphone))
+  // Started from Settings, Esc goes back there; on a first run it goes back to the app and leaves setup for later.
+  const meterHints = (meter: Meter, done: boolean): Hint[] => done ? [['Enter', 'next'], ['Esc', 'back']]
+    : [['o', 'Sound settings'], ...(meter.problem?.kind === 'permission' ? [['u', 'Privacy'] as Hint] : []), ['s', 'skip'], ['Esc', 'back']];
+  const hints: Hint[] = !progress ? [['Esc', 'back']]
+    : step === 'recorder' ? [['Enter', recorder?.state === 'ok' ? 'next' : recorder?.state === 'off' ? 'turn on' : 'start it'], ['s', 'skip'], ['Esc', 'back']]
+    : step === 'microphone' ? !micAllowed ? [['Enter', 'allow'], ['s', 'skip'], ['Esc', 'back']] : meterHints(mic, Boolean(mic.heard || heard.microphone))
     : step === 'computer' ? meterHints(computer, Boolean(computer.heard || heard.computer))
-    : step === 'extras' ? [['Enter', extraIndex < extras.length ? 'set up' : 'finish'], ['↑↓', 'choose'], ['s', 'skip'], ['Esc', leave]]
+    : step === 'extras' ? [['Enter', extraIndex < extras.length ? 'set up' : 'finish'], ['s', 'skip'], ['↑↓', 'choose'], ['Esc', 'back']]
     : [['Enter', 'done']];
   const counted = progress?.steps.filter(candidate => candidate !== 'done') ?? [];
-  const place = step && step !== 'done' ? `  Step ${counted.indexOf(step) + 1} of ${counted.length}` : '';
+  const place = step && step !== 'done' ? `Step ${counted.indexOf(step) + 1} of ${counted.length}` : '';
 
   return <Box flexDirection="column" paddingX={1} {...(props.rows ? { height: props.rows } : {})} overflow="hidden">
-    <ScreenTitle name="Guided setup" detail={place ? <Text dimColor>{place}</Text> : undefined} />
+    <ScreenTitle name="Guided setup" status={place ? { text: place } : undefined} />
     <Box flexDirection="column" flexGrow={1} overflow="hidden">
       {body}
-      {setup.message && <Box marginTop={1} flexShrink={0}><Paragraph width={width} color="yellow" text={setup.message} /></Box>}
+      {setup.message && setup.message.tone !== 'done' && <Box marginTop={1} flexShrink={0}>
+        <Paragraph width={width} color={setup.message.tone === 'failed' ? 'red' : 'yellow'} text={setup.message.text} /></Box>}
     </Box>
-    {setup.busy ? <Text color="yellow">Working… Esc cancels</Text> : <KeyBar hints={hints} columns={width} help={false} />}
+    {setup.busy ? <Prompt text="◐ Working…" color="magenta" hints={[['Esc', 'cancel']]} columns={width} />
+      : setup.message?.tone === 'done' ? <Toast text={setup.message.text} columns={width} />
+      : <KeyBar hints={hints} columns={width} help={false} />}
   </Box>;
 }

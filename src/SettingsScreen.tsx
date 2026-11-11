@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { spawnSync } from 'child_process';
 import { existsSync } from 'fs';
-import { homedir } from 'os';
 import { Box, Text, useInput } from 'ink';
 import { defaultConfigPath, updateMeetingConfig, type SeashellConfig } from './config.ts';
 import {
@@ -30,7 +29,7 @@ import { checkComputerAudio, type ComputerAudioCheck } from './audio-levels.ts';
 import { listTranscriptRecords } from './transcript-library.ts';
 import { meetingWhen } from './tui-state.ts';
 import { DEFAULT_MEETING_AUTOMATION, meetingApps, type AppRecordingPolicy } from './meeting-automation.ts';
-import { KeyBar, Paragraph, ScreenTitle, type Hint } from './tui-chrome.tsx';
+import { KeyBar, Paragraph, Prompt, ScreenTitle, Toast, type Hint, type TitleStatus } from './tui-chrome.tsx';
 
 /** Short names, shared with the guided setup so each thing has one name. */
 export const MENU_LABEL: Record<FeatureId, string> = {
@@ -65,9 +64,6 @@ export interface SettingsActions {
   /** A prompt, in the person's text editor. */
   openFile?: (path: string) => void;
 }
-
-/** A path as people write it, with ~ for their home folder. */
-const tildified = (path: string) => path.startsWith(`${homedir()}/`) ? `~${path.slice(homedir().length)}` : path;
 
 /** Opens a folder in Finder. */
 export function openFolder(directory: string): void {
@@ -105,15 +101,25 @@ function enableRecorder(onConfigChange?: (config: SeashellConfig) => void): void
   if (result.warning) throw new Error(result.warning);
 }
 
+/** What a setup step says: what to do while it runs, what it did, or why it failed. */
+export interface SetupMessage {
+  readonly text: string;
+  /** progress: shown while the step runs · done: a confirmation, green in the key bar · failed: red. */
+  readonly tone: 'progress' | 'done' | 'failed';
+}
+
 /**
  * The one key that fixes each thing, shared by Settings and the guided setup so
  * both do exactly the same. run() says whether the step finished.
  */
 export function useSetupActions(props: SetupActionProps & { onFinished?: () => void }) {
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<string>();
+  const [message, setMessage] = useState<SetupMessage>();
   const request = useRef<AbortController | undefined>(undefined);
   useEffect(() => () => request.current?.abort(), []);
+  const say = (tone: SetupMessage['tone']) => (text: string) => setMessage({ text, tone });
+  const progress = say('progress'), done = say('done'), failed = say('failed');
+  const failure = (cause: unknown) => failed(cause instanceof Error ? cause.message : String(cause));
 
   const run = async (action: FeatureAction): Promise<boolean> => {
     if (action === 'open-speakers') { props.onOpenSpeakers(); return true; }
@@ -125,10 +131,10 @@ export function useSetupActions(props: SetupActionProps & { onFinished?: () => v
           spawnSync('/usr/bin/open', [folder], { stdio: 'ignore', timeout: 5_000 });
           spawnSync('/usr/bin/open', ['-t', join(folder, PROFILE_FILE)], { stdio: 'ignore', timeout: 5_000 });
         }))(directory);
-        setMessage(`Opened ${directory}. Edit "About me", then any template; each ## heading is a section.`);
+        done('Opened the Templates folder and About me.');
         return true;
       } catch (cause) {
-        setMessage(cause instanceof Error ? cause.message : String(cause));
+        failure(cause);
         return false;
       } finally { props.onFinished?.(); }
     }
@@ -136,23 +142,20 @@ export function useSetupActions(props: SetupActionProps & { onFinished?: () => v
       try {
         const directory = action === 'open-extractors' ? ensureExtractorsDirectory(props.libraryDir) : ensureAutomationsDirectory(props.libraryDir);
         (props.actions?.openFolder ?? openFolder)(directory);
-        setMessage(action === 'open-extractors'
-          ? `Opened ${tildified(directory)}. Each extractor is a Markdown file; the example shows how.`
-          : `Opened ${tildified(directory)}. Each automation is a Markdown file; the example stays off until you turn it on.`);
+        done(`Opened the ${action === 'open-extractors' ? 'Extractors' : 'Automations'} folder in Finder.`);
         return true;
       } catch (cause) {
-        setMessage(cause instanceof Error ? cause.message : String(cause));
+        failure(cause);
         return false;
       } finally { props.onFinished?.(); }
     }
     if (action === 'turn-on-video') {
       try {
         props.onConfigChange?.(updateMeetingConfig({ video: { enabled: true } }));
-        // The item's own state line says it is on.
-        setMessage(undefined);
+        done('Video on. Calls keep what was on screen.');
         return true;
       } catch (cause) {
-        setMessage(cause instanceof Error ? cause.message : String(cause));
+        failure(cause);
         return false;
       } finally { props.onFinished?.(); }
     }
@@ -161,67 +164,67 @@ export function useSetupActions(props: SetupActionProps & { onFinished?: () => v
     let finished = false;
     try {
       if (action === 'enable-recorder') {
-        setMessage('Starting the background recorder…');
+        progress('Starting the recorder…');
         (props.actions?.enableRecorder ?? (() => enableRecorder(props.onConfigChange)))();
-        setMessage('Background recorder started. It also starts when you log in.');
+        done('Recorder started. It also starts when you log in.');
         finished = true;
       } else if (action === 'connect-meet') {
         props.onConnectMeet();
-        setMessage('Opening Accessibility setup… allow the Seashell entries macOS shows.');
+        progress('Opening Accessibility setup… allow the Seashell entries macOS shows.');
         const result = await (props.actions?.connectMeet ?? (signal => requestMeetAccessibilityPermission(signal)))(controller.signal);
-        if (!controller.signal.aborted) setMessage(result.detail);
+        if (!controller.signal.aborted) done(result.detail);
         finished = true;
       } else if (action === 'allow-microphone') {
-        setMessage('macOS will ask about "Seashell Microphone". Choose Allow.');
+        progress('macOS will ask about "Seashell Microphone". Choose Allow.');
         const result = await (props.actions?.allowMicrophone ?? (signal => microphonePermission({ request: true, signal })))(controller.signal);
         if (controller.signal.aborted) return false;
         if (result.authorization === 'denied' && !props.actions?.allowMicrophone) {
           spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'], { stdio: 'ignore', timeout: 5_000 });
         }
         finished = result.authorization === 'authorized';
-        setMessage(finished ? 'Microphone allowed. Your side of meetings is now recorded.' : result.detail);
+        if (finished) done('Microphone allowed. Your side of meetings is recorded.'); else failed(result.detail);
       } else if (action === 'allow-calendar') {
-        setMessage('macOS will ask about "Seashell Calendar". Choose Allow (Full Access).');
+        progress('macOS will ask about "Seashell Calendar". Choose Allow (Full Access).');
         const result = await (props.actions?.allowCalendar ?? (signal => calendarPermission({ request: true, signal })))(controller.signal);
         if (controller.signal.aborted) return false;
         if (result.authorization === 'authorized') {
           props.onEnableCalendar();
-          setMessage('Calendar titles are on. Meetings with a calendar event get its name and attendees.');
+          done('Calendar titles on. Meetings take their event\'s name.');
           finished = true;
         } else {
           if ((result.authorization === 'denied' || result.authorization === 'writeOnly') && !props.actions?.allowCalendar) {
             spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars'], { stdio: 'ignore', timeout: 5_000 });
           }
-          setMessage(result.detail);
+          failed(result.detail);
         }
       } else if (action === 'check-computer-audio') {
-        setMessage('Playing a short sound to check. If macOS asks about "Seashell System Audio", choose Allow.');
+        progress('Playing a short sound to check. If macOS asks about "Seashell System Audio", choose Allow.');
         const result = await (props.actions?.checkComputerAudio ?? (signal => checkComputerAudio({ signal })))(controller.signal);
         if (controller.signal.aborted) return false;
         if (result.refused && !props.actions?.checkComputerAudio) {
           spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'], { stdio: 'ignore', timeout: 5_000 });
         }
         finished = result.heard;
-        setMessage(result.detail);
+        if (finished) done(result.detail); else failed(result.detail);
       } else if (action === 'allow-screen-recording') {
-        setMessage('macOS will ask about "Seashell Screen Capture". Choose Allow.');
+        progress('macOS will ask about "Seashell Screen Capture". Choose Allow.');
         const result = await (props.actions?.allowScreenRecording ?? (signal => screenCapturePermission({ request: true, signal })))(controller.signal);
         if (controller.signal.aborted) return false;
         if (result.authorization !== 'authorized' && !props.actions?.allowScreenRecording) {
           spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'], { stdio: 'ignore', timeout: 5_000 });
         }
         finished = result.authorization === 'authorized';
-        setMessage(finished ? 'Screen Recording allowed. Calls now keep their video.' : result.detail);
+        if (finished) done('Video on. Calls keep what was on screen.'); else failed(result.detail);
       }
     } catch (cause) {
-      if (!controller.signal.aborted) setMessage(cause instanceof Error ? cause.message : String(cause));
+      if (!controller.signal.aborted) failure(cause);
     } finally {
       if (!controller.signal.aborted) { setBusy(false); props.onFinished?.(); }
     }
     return finished && !controller.signal.aborted;
   };
   const cancel = () => { request.current?.abort(); setBusy(false); };
-  return { run, busy, message, setMessage, cancel };
+  return { run, busy, message, setMessage, done, failure, cancel };
 }
 
 // MARK: - Recording
@@ -230,7 +233,7 @@ type AppSetting = AppRecordingPolicy | 'default';
 const POLICIES: readonly AppRecordingPolicy[] = ['automatic', 'ask', 'off'];
 const APP_SETTINGS: readonly AppSetting[] = ['default', 'automatic', 'ask', 'off'];
 const POLICY_WORDS: Record<AppSetting, string> = {
-  automatic: 'Records by itself', ask: 'Asks first', off: 'Off', default: 'Default',
+  automatic: 'Records by itself', ask: 'Asks first', off: 'Off', default: 'Same as Calls',
 };
 
 interface RecordingRow {
@@ -248,7 +251,7 @@ export function recordingRows(config: SeashellConfig): RecordingRow[] {
   const browsers = automation?.browserWithoutCalendar ?? DEFAULT_MEETING_AUTOMATION.browserWithoutCalendar;
   return [
     { id: 'mode', label: 'Calls', value: mode, choices: POLICIES,
-      help: 'What Seashell does when it notices a call. Apps on Default follow this.' },
+      help: 'What Seashell does when it notices a call. Apps left blank follow this.' },
     { id: 'browser', label: 'Browser, no calendar', value: browsers, choices: POLICIES,
       help: 'A call in a browser with no calendar event. Asking first avoids recording videos.' },
     ...meetingApps().map(app => {
@@ -290,11 +293,24 @@ type MenuItem =
   | { readonly kind: 'guide' }
   | { readonly kind: 'status'; readonly status: FeatureStatus };
 
+/** The list in sections, each under a dim heading; the guided setup comes last. */
+const SECTIONS: ReadonlyArray<readonly [string, ReadonlyArray<FeatureId | 'recording'>]> = [
+  ['Recording', ['recording', 'recorder', 'detection', 'microphone', 'computer-audio', 'transcription']],
+  ['Speakers', ['meet-names', 'speaker-separation', 'voices']],
+  ['AI notes', ['ai-notes', 'notes-templates', 'prompts', 'extractors', 'automations']],
+  ['Extras', ['calendar', 'video']],
+];
+
 const MENU_WIDTH = 26;
 /** "Choose AI" reads "choose AI" in a key bar, never "choose ai". */
 const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
 
 const PROMPT_STATE: Record<PromptSummary['state'], string> = { default: 'As shipped', edited: 'Edited', empty: 'Empty · sends nothing' };
+
+/** What an automation does, in words: never "webhook" or "write". */
+const ACTION_WORDS: Record<string, string> = {
+  write: 'saves a file', webhook: 'posts to a web address', shell: 'runs a command', extract: 'runs an extractor',
+};
 
 /** When an extractor runs, in a few words. */
 function whenWords(when: ExtractorWhen): string {
@@ -304,9 +320,30 @@ function whenWords(when: ExtractorWhen): string {
   return `When it mentions ${words.slice(0, 3).join(', ')}${words.length > 3 ? '…' : ''}`;
 }
 
+/** A file that does not load, named by its file: `risks.md has no fields. Open it to add some.` */
+function problemText(problem: { path: string; message: string }): string {
+  const file = problem.path.split('/').at(-1);
+  const named = /^"[^"]*"(:?)\s*(.*)$/su.exec(problem.message);
+  return named ? `${file}${named[1] ? ':' : ''} ${named[2]}` : `${file}: ${problem.message}`;
+}
+
 const RUN_SYMBOL: Record<AutomationRun['status'], [string, 'green' | 'red' | 'yellow']> = {
   ok: ['✓', 'green'], failed: ['✗', 'red'], skipped: ['!', 'yellow'],
 };
+
+/**
+ * The title's status: whether recording works, counted from the same rows the list marks,
+ * then the extras that need a look. Narrow, it says the same in fewer words.
+ */
+export function settingsStatus(statuses: readonly FeatureStatus[], room: number): TitleStatus {
+  const fixes = statuses.filter(status => !status.optional && status.state !== 'ok').length;
+  const extras = statuses.filter(status => status.optional && (status.state === 'broken' || status.state === 'attention')).length;
+  const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
+  const full = [fixes ? `Recording needs ${plural(fixes, 'fix', 'fixes')}` : 'Recording works',
+    ...(extras ? [`${plural(extras, 'extra needs', 'extras need')} a look`] : [])].join(' · ');
+  const short = [fixes ? `${fixes} to fix` : 'Recording works', ...(extras ? [`${plural(extras, 'extra', 'extras')} to check`] : [])].join(' · ');
+  return { text: Bun.stringWidth(full) <= room ? full : short, color: fixes || extras ? 'yellow' : 'green' };
+}
 
 /** Everything Seashell can do, whether it works right now, and one key to fix it. */
 export default function SettingsScreen(props: SetupActionProps & {
@@ -326,7 +363,7 @@ export default function SettingsScreen(props: SetupActionProps & {
   const [loadError, setLoadError] = useState<string>();
   const opened = useRef(false);
   /** A yes-or-no question in the key bar's row, before anything is lost. */
-  const [confirm, setConfirm] = useState<{ text: string; run: () => void }>();
+  const [confirm, setConfirm] = useState<{ text: string; short?: string; yes: string; run: () => void }>();
   // Recording rows show what was just saved, whether or not the caller passes it back down.
   const [config, setConfig] = useState(props.config);
   useEffect(() => setConfig(props.config), [props.config]);
@@ -344,8 +381,8 @@ export default function SettingsScreen(props: SetupActionProps & {
         // itself, so a key pressed as it appears is never undone.
         if (opened.current) return;
         opened.current = true;
-        const first = next.findIndex(status => !status.optional && status.state !== 'ok');
-        if (first >= 0) setIndex(first + 2);
+        const first = menuItems(next).findIndex(item => item.kind === 'status' && !item.status.optional && item.status.state !== 'ok');
+        if (first >= 0) setIndex(first);
       })
       .catch(cause => { if (!controller.signal.aborted) setLoadError(cause instanceof Error ? cause.message : String(cause)); });
     return () => controller.abort();
@@ -365,8 +402,7 @@ export default function SettingsScreen(props: SetupActionProps & {
     };
   }, [refresh, props.libraryDir]);
 
-  const items: MenuItem[] = [{ kind: 'recording' }, { kind: 'guide' },
-    ...(statuses ?? []).map(status => ({ kind: 'status' as const, status }))];
+  const items = menuItems(statuses);
   const selected = items[Math.min(index, items.length - 1)];
   const rows = recordingRows(config);
   const compact = props.columns < 72;
@@ -389,21 +425,25 @@ export default function SettingsScreen(props: SetupActionProps & {
       props.onConfigChange?.(saved);
       setup.setMessage(undefined);
     } catch (cause) {
-      setup.setMessage(cause instanceof Error ? cause.message : String(cause));
+      setup.failure(cause);
     }
   };
-  const attempt = (work: () => string | undefined) => {
-    try { setup.setMessage(work()); }
-    catch (cause) { setup.setMessage(cause instanceof Error ? cause.message : String(cause)); }
+  /** Does something now, says what it did in the key bar, and checks everything again. */
+  const attempt = (work: () => string) => {
+    try { setup.done(work()); }
+    catch (cause) { setup.failure(cause); }
     setRefresh(value => value + 1);
   };
-  const toggleVideo = (on: boolean) => attempt(() => {
-    const saved = updateMeetingConfig({ video: { enabled: !on } });
-    setConfig(saved);
-    props.onConfigChange?.(saved);
-    // The item's own state line says what changed.
-    return undefined;
-  });
+  // Video is one switch: Enter turns it on, and asks macOS for Screen Recording if it must; Enter again turns it off.
+  const switchVideo = (on: boolean) => {
+    try {
+      const saved = updateMeetingConfig({ video: { enabled: !on } });
+      setConfig(saved);
+      props.onConfigChange?.(saved);
+    } catch (cause) { setup.failure(cause); return; }
+    if (on) { setup.done('Video off. Calls record audio only.'); setRefresh(value => value + 1); }
+    else void setup.run('allow-screen-recording');
+  };
 
   useInput((input, key) => {
     const { selected, itemCount, rows, inDetail, list, listLength, rowIndex, files, confirm } = latest.current;
@@ -416,6 +456,8 @@ export default function SettingsScreen(props: SetupActionProps & {
       else if (input.toLowerCase() === 'n' || key.escape) setConfirm(undefined);
       return;
     }
+    // A confirmation stays in the key bar until the next key.
+    if (setup.message?.tone === 'done') setup.setMessage(undefined);
     const editingRows = inDetail && list !== undefined;
     if (key.escape || key.leftArrow && inDetail && list !== 'recording') {
       if (inDetail) { setInDetail(false); setup.setMessage(undefined); return; }
@@ -426,26 +468,28 @@ export default function SettingsScreen(props: SetupActionProps & {
     if (editingRows) {
       if (key.upArrow || input === 'k') { setRowIndex(value => Math.max(0, value - 1)); setup.setMessage(undefined); }
       else if (key.downArrow || input === 'j') { setRowIndex(value => Math.min(listLength - 1, value + 1)); setup.setMessage(undefined); }
-      else if (list === 'recording') { if (key.leftArrow || key.rightArrow || input === ' ') changeRow(key.leftArrow ? -1 : 1); }
+      // ←→ change a row; space only ever records, in the app.
+      else if (list === 'recording') { if (key.leftArrow || key.rightArrow) changeRow(key.leftArrow ? -1 : 1); }
       else if (list === 'prompts') {
         const prompt = files.prompts[rowIndex];
         if (!prompt) return;
         if (key.return) attempt(() => {
           ensurePromptsDirectory(props.libraryDir);
           (props.actions?.openFile ?? openTextFile)(prompt.path);
-          return `Opened ${prompt.name}.md. Save it and the next meeting uses it.`;
+          return `Opened ${prompt.title}. Save it and the next meeting uses it.`;
         });
-        else if (input === 'd' && prompt.state !== 'default') setConfirm({ text: `Put ${prompt.title} back as shipped? Your changes are lost.`,
-          run: () => attempt(() => { resetPrompt(props.libraryDir, prompt.name); return `${prompt.title} is back as shipped.`; }) });
+        else if (input === 'd' && prompt.state !== 'default') setConfirm({ text: `Undo your edits to ${prompt.title}?`, yes: 'undo',
+          run: () => attempt(() => { resetPrompt(props.libraryDir, prompt.name); return `Undid your edits to ${prompt.title}.`; }) });
       } else if (list === 'voices') {
         const voice = files.voices[rowIndex];
         if (voice && key.return) setConfirm({ text: `Forget ${voice.name}'s voice? Past transcripts keep the name.`,
+          short: `Forget ${voice.name}'s voice?`, yes: 'forget',
           run: () => attempt(() => {
             forgetVoiceprint(voice.name);
             // The list closes when its last person goes.
             if (listLength <= 1) setInDetail(false);
             setRowIndex(value => Math.max(0, Math.min(value, listLength - 2)));
-            return `Forgot ${voice.name}'s voice. Seashell no longer suggests that name.`;
+            return `Forgot ${voice.name}'s voice. Seashell won't suggest that name again.`;
           }) });
       }
       return;
@@ -455,23 +499,22 @@ export default function SettingsScreen(props: SetupActionProps & {
       if (key.upArrow || input === 'k') { setIndex(value => Math.max(0, value - 1)); setup.setMessage(undefined); return; }
       if (key.downArrow || input === 'j') { setIndex(value => Math.min(itemCount - 1, value + 1)); setup.setMessage(undefined); return; }
     }
-    if (input === ' ' && selected?.kind === 'status' && selected.status.id === 'video') { toggleVideo(selected.status.state !== 'off'); return; }
     if (!key.return && !(key.rightArrow && !inDetail)) return;
     if (selected?.kind === 'guide') props.onOpenGuide?.();
     else if (compact && !inDetail || list !== undefined && listLength > 0) { setInDetail(true); setRowIndex(0); setup.setMessage(undefined); }
+    else if (key.return && selected?.kind === 'status' && selected.status.id === 'video') switchVideo(selected.status.state !== 'off');
     else if (key.return && selected?.kind === 'status' && selected.status.action) void setup.run(selected.status.action);
     // Only hearing it proves a microphone or the Mac's sound works, and the guide listens.
     else if (key.return && selected && testable(selected)) props.onOpenGuide?.();
   });
 
-  const needs = (statuses ?? []).filter(status => !status.optional && status.state !== 'ok');
   function testable(item: MenuItem): boolean {
     return item.kind === 'status' && !item.status.action && (item.status.id === 'microphone' || item.status.id === 'computer-audio')
       && Boolean(props.onOpenGuide);
   }
   const summaryOf = (item: MenuItem) => item.kind === 'recording' ? recordingSummary(config)
     : item.kind === 'guide' ? 'Test mic and computer audio' : item.status.summary;
-  const labelOf = (item: MenuItem) => item.kind === 'recording' ? 'Recording'
+  const labelOf = (item: MenuItem) => item.kind === 'recording' ? 'Which calls'
     : item.kind === 'guide' ? 'Guided setup' : MENU_LABEL[item.status.id];
   const menuRow = (item: MenuItem, i: number) => {
     // While its rows are being changed, an item keeps its place without a second selection.
@@ -479,22 +522,38 @@ export default function SettingsScreen(props: SetupActionProps & {
     const symbol = item.kind === 'status' ? <><Text color={chosen ? undefined : FEATURE_STATE_COLOR[item.status.state]}>
       {FEATURE_STATE_SYMBOL[item.status.state]}</Text> </> : null;
     const label = labelOf(item);
-    if (!compact) return <Text key={item.kind === 'status' ? item.status.id : item.kind} inverse={chosen} bold={index === i && !chosen} wrap="truncate-end">
+    const key = item.kind === 'status' ? item.status.id : item.kind;
+    if (!compact) return <Text key={key} inverse={chosen} bold={index === i && !chosen} wrap="truncate-end">
       {chosen ? '› ' : '  '}{symbol}{label}</Text>;
     // Narrow, each row also says how it stands, the way the meetings list shows dates.
     const room = Math.max(1, props.columns - 2 - 23);
     const summary = summaryOf(item);
-    return <Text key={item.kind === 'status' ? item.status.id : item.kind} inverse={chosen} wrap="truncate-end">
+    return <Text key={key} inverse={chosen} wrap="truncate-end">
       {chosen ? '› ' : '  '}{symbol}{label.padEnd(item.kind === 'status' ? 19 : 21)}
       <Text dimColor={!chosen}>{(summary.length > room ? `${summary.slice(0, room - 1)}…` : summary).padEnd(room)}</Text>
     </Text>;
   };
-  const firstOptional = items.findIndex(item => item.kind === 'status' && item.status.optional);
+  // Section headings, each after a blank line, then the guide on its own at the end.
+  const lines: Array<{ key: string; node: React.ReactNode; item?: number }> = [];
+  items.forEach((item, i) => {
+    const section = SECTIONS.find(([, ids]) => ids[0] === (item.kind === 'status' ? item.status.id : item.kind));
+    if (section || item.kind === 'guide') {
+      if (lines.length) lines.push({ key: `gap-${i}`, node: <Text key={`gap-${i}`}> </Text> });
+      if (section) lines.push({ key: section[0], node: <Text key={section[0]} dimColor>  {section[0]}</Text> });
+    }
+    lines.push({ key: `item-${i}`, node: menuRow(item, i), item: i });
+  });
+  // A short window scrolls with the selection, so every row stays reachable.
+  const height = props.rows ? Math.max(4, props.rows - 3) : lines.length + 1;
+  const selectedLine = Math.max(0, lines.findIndex(line => line.item === index));
+  const top = lines.length <= height ? 0 : Math.max(0, Math.min(selectedLine - height + 2, lines.length - height));
+  const shown = lines.slice(top, top + height);
+  // A heading never sits alone at the bottom edge, cut off from its rows.
+  while (shown.length && shown.at(-1)!.item === undefined && top + shown.length < lines.length) shown.pop();
   const menu = <Box flexDirection="column" flexShrink={0} {...(compact ? {} : { width: MENU_WIDTH, paddingRight: 1,
     borderStyle: 'single' as const, borderTop: false, borderBottom: false, borderLeft: false, borderDimColor: true })}>
-    {items.flatMap((item, i) => i === firstOptional
-      ? [<Text key="optional-heading" dimColor>  Optional</Text>, menuRow(item, i)] : [menuRow(item, i)])}
-    {!statuses && <Text dimColor>  {loadError ?? 'Checking what works…'}</Text>}
+    {statuses ? shown.map(line => line.node)
+      : <Text dimColor>  {loadError ?? 'Checking what works…'}</Text>}
   </Box>;
 
   // The detail never shrinks its heading: the body below it gives way, and is cut, first.
@@ -510,7 +569,7 @@ export default function SettingsScreen(props: SetupActionProps & {
       <Text dimColor={!chosen}>{value}</Text></Text>;
   };
   const problemLines = (problems: readonly { path: string; message: string }[]) => problems.map(problem =>
-    <Text key={problem.path} color="red" wrap="truncate-end">✗ {problem.path.split('/').at(-1)}: {problem.message}</Text>);
+    <Text key={problem.path} color="red" wrap="truncate-end">✗ {problemText(problem)}</Text>);
   const filesBody = (id: FeatureId) => {
     if (id === 'prompts') return files.prompts.map((prompt, i) => listRow(prompt.name, i, prompt.title, PROMPT_STATE[prompt.state], 18));
     if (id === 'voices') return files.voices.map((voice, i) =>
@@ -523,7 +582,7 @@ export default function SettingsScreen(props: SetupActionProps & {
     </>;
     if (id === 'automations') return <>
       {files.automations.automations.map(automation => <Text key={automation.path} wrap="truncate-end">
-        {'  '}{automation.name.slice(0, 21).padEnd(22)}<Text dimColor>{automation.enabled ? 'On' : 'Off'} · {[...new Set(automation.actions.map(action => action.kind))].join(', ')}</Text>
+        {'  '}{automation.name.slice(0, 21).padEnd(22)}<Text dimColor>{automation.enabled ? 'On' : 'Off'} · {[...new Set(automation.actions.map(action => ACTION_WORDS[action.kind] ?? action.kind))].join(', ')}</Text>
       </Text>)}
       {problemLines(files.automations.problems)}
       {files.runs.length > 0 && <Box flexDirection="column" marginTop={1} flexShrink={0}>
@@ -531,24 +590,27 @@ export default function SettingsScreen(props: SetupActionProps & {
         {files.runs.map((run, i) => {
           const [symbol, color] = RUN_SYMBOL[run.status];
           const why = run.detail ?? run.actions.find(action => action.status === run.status && action.detail)?.detail;
-          // What went wrong leads, so a narrow window still shows it.
-          return <Text key={`${run.at}-${i}`} wrap="truncate-end"><Text color={color}>{symbol}</Text> {run.automation}
-            {run.status !== 'ok' && why ? <Text color={color}> · {why}</Text> : null}<Text dimColor> · {run.title} · {meetingWhen(run.at)}</Text></Text>;
+          // What went wrong gets a line of its own, so it is never cut to make room for the meeting.
+          return <Box key={`${run.at}-${i}`} flexDirection="column" flexShrink={0}>
+            <Text wrap="truncate-end"><Text color={color}>{symbol}</Text> {run.automation}<Text dimColor> · {run.title} · {meetingWhen(run.at)}</Text></Text>
+            {run.status !== 'ok' && why ? <Box paddingLeft={2}><Paragraph width={width - 2} color={color} text={why} /></Box> : null}
+          </Box>;
         })}
       </Box>}
     </>;
     return null;
   };
   const detail = !selected ? null : selected.kind === 'recording' ? <>
-    {heading('Recording', <Text dimColor wrap="truncate-end">Which calls Seashell records, and when it asks first.</Text>)}
+    {heading('Which calls', <Text dimColor wrap="truncate-end">Which calls Seashell records, and when it asks first.</Text>)}
     <Box flexDirection="column" flexShrink={1} overflow="hidden" marginTop={1}>
       {rows.map((row, i) => {
         const chosen = inDetail && i === rowIndex;
-        const value = chosen ? `‹ ${POLICY_WORDS[row.value]} ›` : POLICY_WORDS[row.value];
+        // An app that follows Calls is left blank, so the ones set apart stand out.
+        const value = chosen ? `‹ ${POLICY_WORDS[row.value]} ›` : row.value === 'default' ? '' : POLICY_WORDS[row.value];
         return <React.Fragment key={row.id}>
           {i === 2 && <Text dimColor>  Apps</Text>}
           <Text inverse={chosen} wrap="truncate-end">{chosen ? '› ' : '  '}{row.label.padEnd(compact ? 22 : 24)}
-            <Text dimColor={!chosen && row.value === 'default'}>{value}</Text></Text>
+            <Text>{value}</Text></Text>
         </React.Fragment>;
       })}
     </Box>
@@ -556,14 +618,14 @@ export default function SettingsScreen(props: SetupActionProps & {
   </> : selected.kind === 'guide' ? <>
     {heading('Guided setup')}
     <Box marginTop={1} flexShrink={1} overflow="hidden">
-      <Paragraph width={width} text="Walks through the background recorder, then listens to your microphone and your Mac's sound so you know both are heard. Then the optional extras. Steps that are already done are skipped." />
+      <Paragraph width={width} text="Walks through the recorder, then listens to your microphone and your Mac's sound so you know both are heard. Then the extras. Steps that are already done are skipped." />
     </Box>
   </> : <>
-    {heading(`${selected.status.label}${selected.status.optional ? ' · optional' : ''}`,
+    {heading(MENU_LABEL[selected.status.id],
       <Text color={FEATURE_STATE_COLOR[selected.status.state]} wrap="truncate-end">{FEATURE_STATE_SYMBOL[selected.status.state]} {selected.status.summary}</Text>)}
     <Box flexDirection="column" flexShrink={1} overflow="hidden">
       <Box marginTop={1} flexShrink={0}><Paragraph width={width} text={selected.status.detail} /></Box>
-      {selected.status.state !== 'ok' && selected.status.fix && <Box marginTop={1} flexShrink={0}>
+      {selected.status.fix && <Box marginTop={1} flexShrink={0}>
         <Paragraph width={width} color="yellow" text={`Next: ${selected.status.fix}`} /></Box>}
       {!selected.status.action && selected.status.state !== 'ok' && selected.status.command
         ? <Paragraph width={width} text={`Run: ${selected.status.command}`} /> : null}
@@ -573,35 +635,51 @@ export default function SettingsScreen(props: SetupActionProps & {
   </>;
 
   const action = selected?.kind === 'status' ? selected.status.action : undefined;
-  const videoOn = selected?.kind === 'status' && selected.status.id === 'video' && selected.status.state !== 'off';
+  const video = selected?.kind === 'status' && selected.status.id === 'video' ? selected.status : undefined;
+  // One order everywhere: what Enter does, then moving, then r, then Esc.
   const hints: Hint[] = compact && !inDetail ? [['Enter', 'open'], ['↑↓', 'choose'], ['r', 'recheck'], ['Esc', 'back']]
-    : inDetail && list === 'recording' ? [['↑↓', 'choose'], ['←→', 'change'], ['Esc', 'done']]
-    : inDetail && list === 'prompts' ? [['Enter', 'edit'], ...(files.prompts[rowIndex]?.state !== 'default' ? [['d', 'put back as shipped'] as Hint] : []),
-      ['↑↓', 'choose'], ['Esc', 'done']]
-    : inDetail && list === 'voices' && listLength ? [['Enter', 'forget'], ['↑↓', 'choose'], ['Esc', 'done']]
+    : inDetail && list === 'recording' ? [['←→', 'change'], ['↑↓', 'choose'], ['Esc', 'back']]
+    : inDetail && list === 'prompts' ? [['Enter', 'edit'], ...(files.prompts[rowIndex]?.state !== 'default' ? [['d', 'undo edits'] as Hint] : []),
+      ['↑↓', 'choose'], ['Esc', 'back']]
+    : inDetail && list === 'voices' && listLength ? [['Enter', 'forget'], ['↑↓', 'choose'], ['Esc', 'back']]
     : [
       ...(selected?.kind === 'recording' ? [['Enter', 'change'] as Hint] : selected?.kind === 'guide' ? [['Enter', 'start'] as Hint]
+        : video ? [['Enter', video.state === 'off' ? 'turn on' : 'turn off'] as Hint]
         : list === 'prompts' ? [['Enter', 'choose a prompt'] as Hint] : list === 'voices' && listLength ? [['Enter', 'choose someone'] as Hint]
         : action ? [['Enter', lowerFirst(FEATURE_ACTION_LABEL[action])] as Hint] : selected && testable(selected) ? [['Enter', 'test it now'] as Hint] : []),
-      ...(videoOn ? [['space', 'turn off'] as Hint] : []),
       ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ['r', 'recheck'], ['Esc', 'back'],
     ];
-  const titleDetail = statuses ? <Text color={needs.length ? 'yellow' : 'green'}>
-    {`  ${needs.length ? `${needs.length} ${needs.length === 1 ? 'thing needs' : 'things need'} you`
-      : compact ? 'Everything works' : 'Everything needed to record meetings works'}`}
-  </Text> : undefined;
+  const titleRoom = props.columns - 2 - 14;
+  const failed = setup.message?.tone === 'failed' ? setup.message.text : undefined;
 
   return <Box flexDirection="column" paddingX={1} {...(props.rows ? { height: props.rows } : {})} overflow="hidden">
-    <ScreenTitle name="Settings" detail={titleDetail} />
+    <ScreenTitle name="Settings" status={statuses ? settingsStatus(statuses, titleRoom) : undefined} />
     <Box flexDirection="row" flexGrow={1} overflow="hidden">
       {(!compact || !inDetail) && menu}
       {(!compact || inDetail) && <Box flexDirection="column" flexGrow={1} minWidth={0} overflow="hidden" {...(compact ? {} : { paddingLeft: 1 })}>
         {detail}
-        {setup.message && <Box marginTop={1} flexShrink={0}><Paragraph width={width} color="yellow" text={setup.message} /></Box>}
+        {/* What to do while a step runs is attention; why it failed is a failure. Both stay until the next move. */}
+        {setup.busy && setup.message?.tone === 'progress' && <Box marginTop={1} flexShrink={0}><Paragraph width={width} color="yellow" text={setup.message.text} /></Box>}
+        {failed && <Box marginTop={1} flexShrink={0}><Paragraph width={width} color="red" text={failed} /></Box>}
       </Box>}
     </Box>
-    {setup.busy ? <Text color="yellow">Working… Esc cancels</Text>
-      : confirm ? <Text color="yellow" wrap="truncate-end">{confirm.text}  y yes  n no</Text>
+    {setup.busy ? <Prompt text="◐ Working…" color="magenta" hints={[['Esc', 'cancel']]} columns={props.columns - 2} />
+      : confirm ? <Prompt text={confirm.text} {...(confirm.short ? { short: confirm.short } : {})} color="yellow"
+        hints={[['y', confirm.yes], ['n', 'keep']]} columns={props.columns - 2} />
+      : setup.message?.tone === 'done' ? <Toast text={setup.message.text} columns={props.columns - 2} />
       : <KeyBar hints={hints} columns={props.columns - 2} help={false} />}
   </Box>;
+}
+
+/** The items in the order the list shows them: by section, then the guided setup. */
+function menuItems(statuses: readonly FeatureStatus[] | undefined): MenuItem[] {
+  if (!statuses) return [];
+  return [
+    ...SECTIONS.flatMap(([, ids]) => ids.flatMap((id): MenuItem[] => {
+      if (id === 'recording') return [{ kind: 'recording' }];
+      const status = statuses.find(candidate => candidate.id === id);
+      return status ? [{ kind: 'status', status }] : [];
+    })),
+    { kind: 'guide' },
+  ];
 }
