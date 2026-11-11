@@ -1,6 +1,8 @@
 import { expect, test } from 'bun:test';
 import { createMeetingArtifact } from '../src/meeting-artifact.ts';
-import { meetingViewLines } from '../src/meeting-tui.ts';
+import { META, meetingViewLines, plainMeetingLines, SUBHEADING } from '../src/meeting-tui.ts';
+import { wrappedMeetingRows } from '../src/transcript-viewport.ts';
+import { stripVTControlCharacters } from 'util';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 
 test('meeting views stay concise and show only relevant artifact layers', () => {
@@ -42,7 +44,7 @@ test('meeting answers and claims expose the exact cited passage, without unrelat
   artifact.provisionalClaims = [{ id: 'd1', type: 'decision', text: 'Release Monday.',
     evidenceSegmentIds: ['s1', 's2'], confidence: 0.9 }];
   // Notes point at the moment rather than repeating the quote.
-  expect(meetingViewLines(artifact, 'notes', record)).toContain('- Release Monday.  00:05');
+  expect(meetingViewLines(artifact, 'notes', record)).toContain(`- Release Monday.${META}${META}00:05`);
   artifact.chat[0]!.evidenceSegmentIds = ['missing'];
   expect(meetingViewLines(artifact, 'chat', record).join('\n')).toContain('cited passages are unavailable');
   artifact.chat[0]!.evidenceSegmentIds = ['s1'];
@@ -73,5 +75,85 @@ test('notes keep every decision and action, and drop only what a template sectio
   // Nor is using the same words about a different moment.
   expect(lines).toContain('- Dana reviews the security summary by Friday.');
   expect(lines).not.toContain('- Send the security summary.');
-  expect(lines.indexOf('# Decisions')).toBeLessThan(lines.indexOf('# Next steps'));
+  // The template's next steps join the actions: one heading, before what was decided.
+  expect(lines).not.toContain('# Next steps');
+  expect(lines.slice(lines.indexOf('# Actions'), lines.indexOf('# Decisions'))).toEqual(['# Actions',
+    '- You send the security summary by Friday.', '- Book the kickoff room.', '- Dana reviews the security summary by Friday.', '']);
+});
+
+test('actions lead in the order they were said, follow-ups among them, then decisions, open questions and risks', () => {
+  const record = createTranscriptRecord({ transcript: [10, 20, 30, 40, 50].map((start) => ({ start, end: start + 5, text: `Line at ${start}.` })),
+    speakers: [] }, { id: 'ordered' });
+  const artifact = createMeetingArtifact(record);
+  const claim = (id: string, type: string, text: string, segment: number) =>
+    ({ id, type, text, evidenceSegmentIds: [`s00000${segment}`], confidence: 0.9 }) as never;
+  artifact.analysis = {
+    final: true, summary: 'Ordered.', runId: 'r', createdAt: new Date().toISOString(),
+    claims: [claim('r', 'risk', 'Legal may block it.', 2), claim('q', 'open_question', 'Which region?', 3),
+      claim('d', 'decision', 'Pilot in November.', 4), claim('a', 'action_item', 'Draft the plan.', 9), claim('f', 'follow_up', 'Hand onboarding over.', 5)],
+    notes: [{ heading: 'Where they stand', items: [{ text: 'Pricing works.', evidenceSegmentIds: ['s000001'] }] },
+      { heading: 'Next steps', items: [{ text: 'Book the kickoff.', evidenceSegmentIds: ['s000001'] }] }],
+  };
+  const headings = meetingViewLines(artifact, 'notes', record).filter((line) => line.startsWith('# '));
+  expect(headings).toEqual(['# Actions', '# Decisions', '# Open questions', '# Risks', '# Where they stand']);
+  const lines = meetingViewLines(artifact, 'notes', record);
+  // A line Seashell cannot place in the transcript keeps its place at the end.
+  expect(plainMeetingLines(lines.slice(lines.indexOf('# Actions') + 1, lines.indexOf('# Decisions') - 1)))
+    .toEqual(['- Book the kickoff.  00:10', '- Hand onboarding over.  00:50', '- Draft the plan.']);
+});
+
+test("a template's wording of an action keeps the action's owner and due date", () => {
+  const record = createTranscriptRecord({ transcript: [{ start: 35, end: 40, text: 'I will send the security summary by Friday.' }], speakers: [] }, { id: 'owned' });
+  const artifact = createMeetingArtifact(record);
+  artifact.analysis = {
+    final: true, summary: 'Settled.', runId: 'r', createdAt: new Date().toISOString(),
+    claims: [{ id: 'a', type: 'action_item', text: 'Send the security summary.', person: 'You', due: 'Fri', evidenceSegmentIds: ['s000001'], confidence: 0.9 }],
+    notes: [{ heading: 'Next steps', items: [{ text: 'Send the security summary.', evidenceSegmentIds: ['s000001'] }] }],
+  };
+  const lines = meetingViewLines(artifact, 'notes', record);
+  expect(lines).toContain(`- Send the security summary.${META}You · Fri${META}00:35`);
+  expect(lines).toContain('# Actions');
+  expect(lines).not.toContain('# Next steps');
+  // On screen the owner and time sit against the right edge, only the time dim; copied, they follow the line.
+  const wide = wrappedMeetingRows(lines, 70);
+  expect(wide.map((row) => stripVTControlCharacters(row))).toContain(`- Send the security summary.${' '.repeat(70 - 28 - 16)}You · Fri  00:35`);
+  expect(wide.find((row) => row.includes('security'))).toContain(`You · Fri  ${'\x1b[2m'}00:35`);
+  expect(plainMeetingLines(lines)).toContain('- Send the security summary.  You · Fri  00:35');
+  // Narrow, the same layout: the text, then the owner, then the time.
+  const narrow = wrappedMeetingRows(lines, 54).map((row) => stripVTControlCharacters(row));
+  expect(narrow).toContain(`- Send the security summary.${' '.repeat(54 - 28 - 16)}You · Fri  00:35`);
+});
+
+test('a long bullet wraps under itself, keeps its owner and time on its first row, and strands no word', () => {
+  const lines = [`- Hand onboarding to the support team after two weeks.${META}You${META}01:10`,
+    `- Kickoff the week of the tenth.${META}${META}01:17`, `- Not placed.${META}You · Fri${META}`];
+  const rows = wrappedMeetingRows(lines, 54).map((row) => stripVTControlCharacters(row));
+  expect(rows).toEqual([
+    `- Hand onboarding to the support team${' '.repeat(54 - 37 - 10)}You  01:10`,
+    '  after two weeks.',
+    `- Kickoff the week of the tenth.${' '.repeat(54 - 32 - 5)}01:17`,
+    // Without a time, the owner still ends where the others do.
+    `- Not placed.${' '.repeat(54 - 13 - 16)}You · Fri`,
+  ]);
+  // Too narrow for a column beside the text: owner and time go on the row under it, indented.
+  const narrow = wrappedMeetingRows(lines.slice(0, 1), 34).map((row) => stripVTControlCharacters(row));
+  expect(narrow).toEqual(['- Hand onboarding to the support', '  team after two weeks.', '  You  01:10']);
+  expect(narrow.some((row) => /^\s*\S+$/u.test(row) && !row.includes(':'))).toBe(false);
+});
+
+test('insights name each extractor once, label their fields, and leave out what the notes already say', () => {
+  const record = createTranscriptRecord({ transcript: [
+    { start: 7, end: 9, text: 'The per-seat price works.' },
+    { start: 14, end: 16, text: 'Legal needs it in writing.' },
+  ], speakers: [] }, { id: 'insightful' });
+  const artifact = createMeetingArtifact(record);
+  artifact.analysis = { final: true, summary: 'Priced.', runId: 'r', createdAt: new Date().toISOString(), claims: [],
+    notes: [{ heading: 'Where they stand', items: [{ text: 'Per-seat pricing works for them.', evidenceSegmentIds: ['s000001'] }] }] };
+  artifact.insights = [{ extractor: 'Customer pains', createdAt: new Date().toISOString(), runId: 'i', fields: [
+    { name: 'Pains', items: [{ text: 'Legal needs it in writing.', evidenceSegmentIds: ['s000002'] }] },
+    { name: 'Budget', items: [{ text: 'The per-seat pricing works for them.', evidenceSegmentIds: ['s000001'] }] },
+  ] }];
+  const lines = meetingViewLines(artifact, 'notes', record);
+  // The only field left needs no label of its own.
+  expect(lines.slice(lines.indexOf('# Insights'))).toEqual(['# Insights', `${SUBHEADING}Customer pains`, `- Legal needs it in writing.${META}${META}00:14`]);
 });

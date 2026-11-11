@@ -11,6 +11,7 @@ import {
   parseAutomation,
   readAutomationRuns,
   runAutomations,
+  runFailure,
   runShellAction,
   updateAutomation,
   type AutomationApprovalRequest,
@@ -179,4 +180,14 @@ test('automations can be created as files', () => {
   const { root, env } = library();
   const created = createAutomation(root, { name: 'Post it', filters: { title: ['demo'] }, actions: [{ kind: 'webhook', url: 'https://hooks.example.com/y' }] }, env);
   expect(readFileSync(created.path, 'utf8')).toBe('---\nname: Post it\nwhen: meeting ready\ntitle: [demo]\n---\n- webhook: https://hooks.example.com/y\n');
+});
+
+test('a failed run says why in plain words, and whether trying again could help', () => {
+  const run = (automation: string, detail: string, kind: 'webhook' | 'shell' = 'webhook') => ({ at: '', automation, hash: 'h', meetingId: 'm',
+    trigger: 'meeting-ready' as const, status: 'failed' as const,
+    actions: [{ kind, target: kind === 'webhook' ? 'https://crm.example.com/hooks' : 'exit 1', status: 'failed' as const, detail }] });
+  expect(runFailure(run('Post to the CRM', 'the server failed (502)'))).toEqual({ text: "The CRM didn't answer.", retry: true });
+  expect(runFailure(run('Archive', 'The operation timed out.'))).toEqual({ text: "The server at crm.example.com didn't answer.", retry: true });
+  expect(runFailure(run('Post to the CRM', 'the server refused it (403)'))).toEqual({ text: 'The CRM refused it (403).', retry: false });
+  expect(runFailure(run('Script', 'exit 1', 'shell'))).toEqual({ text: 'exit 1', retry: false });
 });

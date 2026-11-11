@@ -59,6 +59,7 @@ export type MeetingCommand = {
     | { kind: 'calendar'; operation?: 'setup' | 'check' }
     | { kind: 'speakers'; browser: 'setup' | 'auto' | 'chrome' | 'safari' | 'off' | 'check' }
     | { kind: 'microphone'; operation: 'setup' | 'check' }
+    | { kind: 'computer-audio'; operation: 'setup' | 'check' }
     | { kind: 'merge'; ids: string[]; auto: boolean; dryRun: boolean; maxGapMinutes?: number }
     | { kind: 'template'; id: string; template?: string }
     | { kind: 'note'; id: string; note?: string }
@@ -418,7 +419,7 @@ function meetingBackend(value: string): HumainBackend {
 function parseMeeting(args: string[]): MeetingCommand {
   const actionName = args[1];
   if (!actionName) {
-    throw new Error('Meeting command requires setup, create, enrich, show, chat, calendar, watch, consent, autostart, speakers, microphone, or merge');
+    throw new Error('Meeting command requires setup, create, enrich, show, chat, calendar, watch, consent, autostart, speakers, microphone, computer-audio, or merge');
   }
   const positional: string[] = [];
   let libraryDir: string | undefined;
@@ -554,6 +555,14 @@ function parseMeeting(args: string[]): MeetingCommand {
         throw new Error('Usage: seashell meeting microphone [setup|check]');
       }
       action = { kind: 'microphone', operation: operation as 'setup' | 'check' };
+      break;
+    }
+    case 'computer-audio': {
+      const operation = positional[0] ?? 'check';
+      if (positional.length > 1 || !['setup', 'check'].includes(operation)) {
+        throw new Error('Usage: seashell meeting computer-audio [setup|check]');
+      }
+      action = { kind: 'computer-audio', operation: operation as 'setup' | 'check' };
       break;
     }
     case 'speakers': {
@@ -1097,6 +1106,8 @@ Meeting actions:
   meeting speakers [auto|chrome|safari|off|check] [--json]  Configure/check without permission prompts
   meeting microphone setup [--json]         Ask macOS once for background microphone access
   meeting microphone [check] [--json]       Check background microphone access without a prompt
+  meeting computer-audio setup [--json]     At your Mac: play a sound and allow computer audio for Seashell System Audio
+  meeting computer-audio [check] [--json]   Which permission meetings record computer audio with, without a prompt
   meeting video setup [--json]              Ask macOS once for Screen Recording, for meeting video
   meeting video [--status] [--json]         Check Screen Recording access and video settings without a prompt
   meeting merge <id> <id>... [--json]       Join pieces of one meeting into one entry (pieces go to _Trash)

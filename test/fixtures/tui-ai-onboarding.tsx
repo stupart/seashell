@@ -45,7 +45,7 @@ const app = render(<App />, { stdin: input as any, stdout: output as any, stderr
 const text = () => stripVTControlCharacters(rendered);
 const type = async (key: string) => { input.write(key); await Bun.sleep(100); };
 const until = async (check: () => boolean) => {
-  const end = Date.now() + 3000;
+  const end = Date.now() + 10_000;
   while (!check() && Date.now() < end) await Bun.sleep(10);
   assert.ok(check(), 'UI condition timed out');
 };

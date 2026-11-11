@@ -43,13 +43,13 @@ function createSources(artifact: MeetingArtifact, record?: TranscriptRecord): (i
   };
 }
 
-/** When a line of the notes was said, so it can be found in the transcript. */
-function createClock(artifact: MeetingArtifact, record?: TranscriptRecord): (ids?: string[]) => string | undefined {
+/** When a line of the notes was said, in seconds, so it can be found in the transcript. */
+function createStart(artifact: MeetingArtifact, record?: TranscriptRecord): (ids?: readonly string[]) => number | undefined {
   if (!record || record.id !== artifact.transcriptId) return () => undefined;
   const starts = new Map(record.transcript.map((segment, index) => [transcriptSegmentId(record, index), segment.start]));
   return (ids) => {
     const times = (ids ?? []).flatMap((id) => starts.get(id) ?? []);
-    return times.length ? formatTuiClock(Math.min(...times)) : undefined;
+    return times.length ? Math.min(...times) : undefined;
   };
 }
 
@@ -59,18 +59,43 @@ function wordsOf(text: string): Set<string> {
 
 /** Lines starting with this are headings; wrappedMeetingRows keeps them, the app makes them bold. */
 export const HEADING = '# ';
+/** A heading under a heading: an extractor's name under Insights. */
+export const SUBHEADING = '## ';
+/**
+ * Splits a bullet from what sits against the right edge: who owns it and by when, then when it was said.
+ * A bullet with either reads `- text META owner META clock`, with an empty part where one is unknown.
+ */
+export const META = '\t';
 
-/** What the meeting settled and left open leads; the template follows; then everything else. */
-const LEADING_GROUPS: Array<[string, MeetingClaimType[]]> = [
-  ['Decisions', ['decision']],
-  ['Actions', ['action_item']],
-  ['Risks', ['risk']],
-  ['Open questions', ['open_question']],
-  ['Follow-ups', ['follow_up']],
+/** A line of the notes taken apart: its text, who owns it and by when, and when it was said. */
+export function bulletParts(line: string): { body: string; owner?: string; clock?: string } {
+  const [body = '', owner, clock] = line.split(META);
+  return { body, ...(owner ? { owner } : {}), ...(clock ? { clock } : {}) };
+}
+
+/** The notes as plain text, for the clipboard. */
+export function plainMeetingLines(lines: readonly string[]): string[] {
+  return lines.map((line) => {
+    if (line.startsWith(SUBHEADING)) return line.slice(SUBHEADING.length);
+    if (line.startsWith(HEADING)) return line.slice(HEADING.length);
+    const { body, owner, clock } = bulletParts(line);
+    return [body, owner, clock].filter(Boolean).join('  ');
+  });
+}
+
+/**
+ * What the meeting left to do leads, then what it settled, left open and put at risk. A template's
+ * section with one of these names joins its group, so an action is never split across two headings.
+ */
+const LEADING_GROUPS: Array<[string, MeetingClaimType[], RegExp]> = [
+  ['Actions', ['action_item', 'follow_up'], /^(actions?|action items?|next|next steps?|follow[- ]?ups?|to[- ]?dos?)$/iu],
+  ['Decisions', ['decision'], /^decisions?$/iu],
+  ['Open questions', ['open_question'], /^open questions?$/iu],
+  ['Risks', ['risk'], /^risks?$/iu],
 ];
 
-const CLAIM_GROUPS: Array<[string, MeetingClaimType[]]> = [
-  ...LEADING_GROUPS,
+/** After the template: everything else the notes found. */
+const TRAILING_GROUPS: Array<[string, MeetingClaimType[]]> = [
   ['Dates', ['date']],
   ['Notes', ['note', 'highlight']],
   ['Facts and feedback', ['fact', 'feedback']],
@@ -98,15 +123,21 @@ export function meetingViewLines(
     return [
       'AI is off for this meeting.',
       'Seashell sends it to no model: no live analysis, notes or chat, and agents using the meetings server are refused it.',
-      'The transcript is here as usual. Press n to turn AI back on.',
+      'The transcript is here as usual. Press g to turn AI back on.',
     ];
   }
 
-  const clock = createClock(artifact, record);
-  const bullet = (text: string, ids?: string[]) => {
-    const at = clock(ids);
-    return at ? `- ${text}  ${at}` : `- ${text}`;
+  const start = createStart(artifact, record);
+  type Item = { text: string; ids: readonly string[]; owner?: string | undefined };
+  // The time is the citation: it finds the line in the transcript.
+  const bullet = (item: Item) => {
+    const said = start(item.ids);
+    const clock = said === undefined ? '' : formatTuiClock(said);
+    return item.owner || clock ? `- ${item.text}${META}${item.owner ?? ''}${META}${clock}` : `- ${item.text}`;
   };
+  // In the order they were said; anything Seashell cannot place keeps its place at the end.
+  const inOrder = (items: Item[]) => items.map((item, index) => ({ item, index, at: start(item.ids) ?? Number.POSITIVE_INFINITY }))
+    .sort((a, b) => a.at - b.at || a.index - b.index).map(({ item }) => item);
   const claims = artifact.analysis?.claims ?? artifact.provisionalClaims;
   const summary = artifact.analysis?.summary || (
     artifact.status === 'failed'
@@ -114,49 +145,73 @@ export function meetingViewLines(
       : artifact.status === 'reconciling' ? 'Writing the notes…'
       : claims.length ? 'Notes so far. Press g for final notes.' : 'No notes yet. Press g to write them.'
   );
-  // Decisions and actions lead, so they are never a scroll away. A template is
-  // the layout the owner chose, so its sections follow. A claim goes only when a
+  // Actions and decisions lead, so they are never a scroll away. A template is
+  // the layout the owner chose, so its other sections follow. A claim goes only when a
   // section says the same thing about the same moment: either alone can be a
   // different point, and losing one is worse than reading it twice.
   const sections = artifact.analysis?.notes ?? [];
-  const said = sections.flatMap((section) => section.items.map((item) =>
-    ({ words: wordsOf(item.text), passages: new Set(item.evidenceSegmentIds) })));
-  const repeated = (claim: MeetingClaim) => {
-    const words = wordsOf(claim.text);
-    return said.some((other) => claim.evidenceSegmentIds.some((id) => other.passages.has(id)) &&
-      [...words].filter((word) => other.words.has(word)).length >= Math.max(2, words.size * 0.7));
-  };
+  type Said = { words: Set<string>; passages: Set<string> };
+  const saying = (text: string, ids: readonly string[]): Said => ({ words: wordsOf(text), passages: new Set(ids) });
+  const echoes = (line: Said, other: Said) => [...line.passages].some((id) => other.passages.has(id)) &&
+    [...line.words].filter((word) => other.words.has(word)).length >= Math.max(2, line.words.size * 0.7);
+  const said = sections.flatMap((section) => section.items.map((item) => saying(item.text, item.evidenceSegmentIds)));
+  const repeated = (claim: MeetingClaim) => said.some((other) => echoes(saying(claim.text, claim.evidenceSegmentIds), other));
   // An action or follow-up says who and by when, as it was said.
-  const claimText = (claim: MeetingClaim) => {
-    const owner = claim.type === 'action_item' || claim.type === 'follow_up' ? claimOwnerAndDue(claim) : undefined;
-    return owner ? `${claim.text} (${owner})` : claim.text;
+  const ownerOf = (claim: MeetingClaim) =>
+    claim.type === 'action_item' || claim.type === 'follow_up' ? claimOwnerAndDue(claim) : undefined;
+  // A template's wording of an action keeps the owner and due date the action itself recorded.
+  const ownerFor = (item: { text: string; evidenceSegmentIds: string[] }) => {
+    const line = saying(item.text, item.evidenceSegmentIds);
+    const action = claims.find((claim) => ownerOf(claim) && echoes(saying(claim.text, claim.evidenceSegmentIds), line));
+    return action && ownerOf(action);
   };
-  const group = ([title, types]: [string, MeetingClaimType[]]) => {
+  const shown = [...said];
+  const fromClaims = (types: MeetingClaimType[]): Item[] => {
     const items = claims.filter((claim) => types.includes(claim.type) && !repeated(claim));
-    return items.length ? ['', `${HEADING}${title}`, ...items.map((claim) => bullet(claimText(claim), claim.evidenceSegmentIds))] : [];
+    shown.push(...items.map((claim) => saying(claim.text, claim.evidenceSegmentIds)));
+    return items.map((claim) => ({ text: claim.text, ids: claim.evidenceSegmentIds, owner: ownerOf(claim) }));
   };
+  const fromSection = (section: (typeof sections)[number]): Item[] =>
+    section.items.map((item) => ({ text: item.text, ids: item.evidenceSegmentIds, owner: ownerFor(item) }));
+  const groupOf = (heading: string) => LEADING_GROUPS.find(([, , names]) => names.test(heading.trim()));
   const stale = record && artifact.transcriptEvidence &&
     compareMeetingEvidence(artifact.transcriptEvidence, meetingEvidence(record)) !== 'same';
-  // Each extractor's fields, under one Insights heading; an empty field is left out.
+  const leading = LEADING_GROUPS.flatMap(([title, types]) => {
+    const joined = sections.filter((section) => groupOf(section.heading)?.[0] === title);
+    const items = inOrder([...joined.flatMap(fromSection), ...fromClaims(types)]);
+    // A section the template asks for says so when the meeting never got to it.
+    if (!items.length) return joined.length ? ['', `${HEADING}${title}`, '- Not discussed.'] : [];
+    return ['', `${HEADING}${title}`, ...items.map(bullet)];
+  });
+  const template = sections.filter((section) => !groupOf(section.heading)).flatMap((section) => [
+    '',
+    `${HEADING}${section.heading}`,
+    ...(section.items.length ? fromSection(section).map(bullet) : ['- Not discussed.']),
+  ]);
+  const trailing = TRAILING_GROUPS.flatMap(([title, types]) => {
+    const items = fromClaims(types);
+    return items.length ? ['', `${HEADING}${title}`, ...items.map(bullet)] : [];
+  });
+  // Each extractor once, by name, then its fields as labelled lines. What the notes
+  // already say is left out, and so is an empty field. A field's name is left off when
+  // it is the only one left, or when the extractor's name already says it ("Customer pains" over "Pains").
   const insights = (artifact.insights ?? []).flatMap((insight) => {
-    const found = insight.fields.filter((field) => field.items.length);
-    if (!found.length) return [`${insight.extractor}: nothing found.`];
-    return found.flatMap((field) => [
-      insight.fields.length === 1 ? insight.extractor : `${insight.extractor} · ${field.name}`,
-      ...field.items.map((item) => bullet(item.text, item.evidenceSegmentIds)),
-    ]);
+    if (!insight.fields.some((field) => field.items.length)) return [`${insight.extractor}: nothing found.`];
+    const fields = insight.fields.map((field) => ({ field, items: field.items
+      .filter((item) => !shown.some((other) => echoes(saying(item.text, item.evidenceSegmentIds), other))) }))
+      .filter(({ items }) => items.length);
+    const named = wordsOf(insight.extractor);
+    const lines = fields.flatMap(({ field, items }) => {
+      const label = fields.length > 1 && ![...wordsOf(field.name)].every((word) => named.has(word));
+      return items.map((item) => bullet({ text: label ? `${field.name}: ${item.text}` : item.text, ids: item.evidenceSegmentIds }));
+    });
+    return lines.length ? [`${SUBHEADING}${insight.extractor}`, ...lines] : [];
   });
   return [
     summary,
-    ...CLAIM_GROUPS.slice(0, LEADING_GROUPS.length).flatMap(group),
-    ...sections.flatMap((section) => [
-      '',
-      `${HEADING}${section.heading}`,
-      ...(section.items.length
-        ? section.items.map((item) => bullet(item.text, item.evidenceSegmentIds))
-        : ['- Not discussed.']),
-    ]),
-    ...CLAIM_GROUPS.slice(LEADING_GROUPS.length).flatMap(group),
+    ...leading,
+    ...template,
+    ...trailing,
     ...(insights.length ? ['', `${HEADING}Insights`, ...insights] : []),
     ...(stale ? ['', 'The transcript changed since these notes. Press g to rewrite them.']
       : artifact.notesOutdated ? ['', `${artifact.notesOutdated.reason} after these notes were written, so they may be out of date. Press g to rewrite them.`]

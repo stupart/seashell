@@ -99,11 +99,6 @@ export default function AIProviderPicker(props: {
       const delta = key.upArrow ? -1 : key.downArrow ? 1 : key.pageUp ? -7 : 7;
       setIndex((value) => (value + delta % count + count) % count); return;
     }
-    if (input.toLowerCase() === 'r') {
-      if (screen === 'models') loadModels(backend, suggesting);
-      else setRefresh((value) => value + 1);
-      return;
-    }
     if (!key.return) return;
     try {
       if (screen === 'roles') {
@@ -133,7 +128,7 @@ export default function AIProviderPicker(props: {
       const route = routes[id];
       const inactive = id === 'observer' && mode === 'post-session' || id === 'reconciliation' && mode === 'streaming';
       return `${name}${inactive ? ' (off)' : ''}: ${route ? `${AI_PROVIDERS.find((p) => p.id === route.backend)?.name} / ${route.model} · ${route.effort ?? 'default effort'}` : 'Choose model'}`;
-    }), 'Suggest models for all roles…', `Mode: ${MODE_NAMES[mode]}`, 'Save choices',
+    }), 'Use recommended models…', `Mode: ${MODE_NAMES[mode]}`, 'Save choices',
   ];
   else if (screen === 'providers') entries = AI_PROVIDERS.map((p) => `${p.name} · ${providers ? providers.find((s) => s.id === p.id)?.ready ? 'Ready' : 'Setup needed' : 'Checking…'}`);
   else if (screen === 'models') entries = [...models.map((m) => `${m.name}${m.id !== m.name ? ` · ${m.id}` : ''}`), 'Enter a custom model ID…'];
@@ -141,8 +136,8 @@ export default function AIProviderPicker(props: {
   const offset = Math.max(0, Math.min(index - 3, entries.length - 7));
   const selectedProvider = screen === 'providers' ? AI_PROVIDERS[index]! : provider;
   return <Box flexDirection="column" paddingX={1} height={stdout?.rows ?? 24} overflow="hidden">
-    <ScreenTitle name={`AI for notes and chat · ${screen === 'roles' ? 'models by role' : suggesting ? 'Suggested setup' : roleName}`} />
-    {props.recording && <Text color="yellow">Recording continues · Esc to return</Text>}
+    <ScreenTitle name={`AI for notes and chat · ${screen === 'roles' ? 'models by role' : suggesting ? 'Suggested setup' : roleName}`}
+      status={props.recording ? { text: 'Recording continues', color: 'yellow' } : undefined} />
     {screen === 'roles' && <Text dimColor>Each role can use its own provider, model and effort.</Text>}
     {screen === 'models' && <Text dimColor>{loadingModels ? 'Reading available models…' : `${provider.name} · ${models.length} discovered models`}</Text>}
     {screen === 'effort' && <Text>{chosen?.name} · reasoning effort</Text>}
@@ -166,6 +161,6 @@ export default function AIProviderPicker(props: {
     </Box>
     <Box flexGrow={1} />
     <Box flexShrink={0}><KeyBar help={false} columns={(stdout?.columns ?? 80) - 2} hints={screen === 'custom' ? [['Enter', 'use model'], ['Esc', 'back']]
-      : [['↑↓', 'choose'], ['Enter', 'select'], ['r', 'refresh'], ['Esc', 'back']]} /></Box>
+      : [['Enter', 'select'], ['↑↓', 'choose'], ['Esc', 'back']]} /></Box>
   </Box>;
 }

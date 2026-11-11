@@ -39,9 +39,9 @@ import {
 } from './meeting-artifact.ts';
 import { chatWithMeeting, enrichMeeting } from './meeting-enrichment.ts';
 import { Chalk } from 'chalk';
-import { HEADING, meetingViewLines, type MeetingView } from './meeting-tui.ts';
-import { HELP_ROWS, HelpRow, KeyBar, Sheet, type Hint } from './tui-chrome.tsx';
-import { transcriptRows, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
+import { HEADING, meetingViewLines, plainMeetingLines, SUBHEADING, type MeetingView } from './meeting-tui.ts';
+import { HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
+import { lastTranscriptScroll, timedTranscriptRows, transcriptWindow, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
   renderText,
 } from './transcript-renderer.ts';
@@ -72,18 +72,19 @@ import {
   type TranscriptionRoute,
 } from './transcription-routing.ts';
 import AIProviderPicker from './AISettings.tsx';
+import { providerName } from './ai-provider.ts';
 import SpeakerSettings from './SpeakerSettings.tsx';
-import SettingsScreen, { type SettingsActions } from './SettingsScreen.tsx';
+import SettingsScreen, { MENU_LABEL, type SettingsActions } from './SettingsScreen.tsx';
 import Onboarding, { DEFAULT_LEVEL_SOURCES, switchedOff, type GuideProgress, type LevelSources, type SystemSettingsPane } from './Onboarding.tsx';
-import { readFeatureStatuses, type FeatureStatus } from './feature-status.ts';
+import { FEATURE_STATE_COLOR, FEATURE_STATE_SYMBOL, readFeatureStatuses, type FeatureId, type FeatureStatus } from './feature-status.ts';
 import { stripVTControlCharacters } from 'util';
 import { startMeetSpeakerReader, meetBrowserMatchesApp, probeMeetSpeakers, type MeetSpeakerReader, type MeetProbe } from './meet-speakers.ts';
 import { backgroundMeetingMessage } from './background-meeting-status.ts';
 import { readBackgroundWatchStatus, type BackgroundWatchStatus } from './background-watch-status.ts';
 import { writeMeetingConsent } from './meeting-consent.ts';
 import { writeMeetingCommand } from './meeting-command.ts';
-import { CaptureHealthTracker, type CaptureHealthSnapshot } from './capture-health.ts';
-import { captureRecordingMode, recordingSummary, type RecordingMode } from './RecordingStatus.tsx';
+import { CaptureHealthTracker, readMeetingCoverage, yourSideNotice, type CaptureHealthSnapshot } from './capture-health.ts';
+import { captureRecordingMode, recordingSummary, sourceFinding, type RecordingMode } from './RecordingStatus.tsx';
 import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { runHumainTranscription } from './humain-client.ts';
@@ -93,11 +94,13 @@ import {
 import {
   meetingEntryRow,
   listWhen,
-  sameDay,
   meetingWhen,
+  snippetAround,
+  VIDEO_MARK,
   moveSelection,
   moveTranscriptScroll,
   formatTuiClock,
+  speakerDisplayName,
   tuiLayout,
 } from './tui-state.ts';
 import {
@@ -114,12 +117,19 @@ import {
 import { acquireMeetingWatchLock, type MeetingWatchLock } from './watch-lock.ts';
 import { applySpeakerLabels, EvidenceSpeakerLabeler } from './speaker-labeling.ts';
 import { buildMeetingContext } from './meeting-context.ts';
+import { afterMeetingReady, askAutomationApprovalWithDialog } from './automations.ts';
+import { runAutomaticExtractors } from './extractors.ts';
+import { meetingVideo, openMeetingVideo, videoMapIn } from './video-meeting.ts';
+import { clearVideoRequest, startRecordingWithVideo } from './video-recording.ts';
+import { speakerEngine, speakerModelSize } from './speaker-engine.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const PROJECT_ROOT = join(dirname(__filename), '..');
 const WHISPER_SERVER = join(PROJECT_ROOT, 'whisper.cpp/build/bin/whisper-server');
 const MODEL_PATH = join(PROJECT_ROOT, 'models', DEFAULT_WHISPER_MODEL_FILENAME);
 const HIGHLIGHT = new Chalk({ level: 1 }).black.bgYellow;
+/** Another match than the one n is on: in the same yellow, underlined rather than filled. */
+const SOFT_HIGHLIGHT = new Chalk({ level: 1 }).yellow.underline;
 
 type ListenerState = 'listening' | 'recording';
 type View = 'live' | 'record';
@@ -177,6 +187,9 @@ function createLiveRecord(): TranscriptRecord {
   });
 }
 
+/** What each export is, in the words the key bar uses. */
+const EXPORT_WORDS: Record<TranscriptFormat, string> = { srt: 'subtitles', vtt: 'subtitles', text: 'the text', json: 'the data' };
+
 function truncate(value: string, width: number): string {
   if (width <= 1) return value.slice(0, Math.max(0, width));
   return value.length <= width ? value : `${value.slice(0, width - 1)}…`;
@@ -216,14 +229,24 @@ export default function App(props: {
   const [captureAppBundle, setCaptureAppBundle] = useState<string>();
   const [aiSetupOpen, setAiSetupOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** The row Settings opens on, when a fix in the title's status slot sent the person there. */
+  const [settingsFocus, setSettingsFocus] = useState<FeatureId>();
+  /** What the title's status slot showed last, for the key that fixes it. */
+  const shownSlot = useRef<TitleStatus & { focus?: FeatureId }>(undefined);
   const [guideOpen, setGuideOpen] = useState(Boolean(props.guide));
   const [guideProgress, setGuideProgress] = useState<GuideProgress>();
+  /** A test of one source from its Settings row, rather than the whole guide. */
+  const [guideTest, setGuideTest] = useState<'microphone' | 'computer'>();
   // The guide offers itself once, on a first run that still needs it.
   const guideOffered = useRef(Boolean(props.guide));
   // Speakers and AI return to whatever opened them; the guide returns to Settings when started there.
   const [returnTo, setReturnTo] = useState<'settings' | 'guide'>();
+  /** What just worked in speaker or AI setup, for Settings or the guide to say when it opens again. */
+  const [subNotice, setSubNotice] = useState<string>();
   const [guideFromSettings, setGuideFromSettings] = useState(false);
   const [attention, setAttention] = useState<FeatureStatus[]>([]);
+  /** Everything Settings checks, read once more whenever Settings or the guide closes. Speaker setup reads it too. */
+  const [featureStatuses, setFeatureStatuses] = useState<FeatureStatus[]>();
   const [setupNeeded, setSetupNeeded] = useState(false);
   const [aiSetupIntent, setAiSetupIntent] = useState<'notes' | 'chat' | null>(null);
   const libraryRoot = useMemo(
@@ -248,7 +271,11 @@ export default function App(props: {
   const [transcribingCount, setTranscribingCount] = useState(0);
   const [paused, setPaused] = useState(initiallyPaused);
   const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNoticeState] = useState<{ text: string; color: 'green' | 'yellow' } | null>(null);
+  /** What just worked, in green in the key bar until the next key. */
+  const setNotice = useCallback((text: string | null) => setNoticeState(text ? { text, color: 'green' } : null), []);
+  /** Something to look at that is not a failure, in yellow. */
+  const setCaution = useCallback((text: string) => setNoticeState({ text, color: 'yellow' }), []);
   const [backgroundWatch, setBackgroundWatch] = useState<BackgroundWatchStatus>();
   const [backgroundApproval, setBackgroundApproval] = useState<string>();
   const [audioHelpOpen, setAudioHelpOpen] = useState(false);
@@ -267,8 +294,9 @@ export default function App(props: {
   const [liveMeeting, setLiveMeeting] = useState<MeetingArtifact | null>(null);
   const [meetingView, setMeetingView] = useState<MeetingView>('transcript');
   const [chatInputState, setChatInputState] = useState<ChatInputState | null>(null);
-  /** [N] Notes setup for the open meeting: its template, its note, and whether AI may see it. */
-  const [notesSetup, setNotesSetup] = useState<{ row: 0 | 1 | 2; options: string[]; editing?: string } | null>(null);
+  /** [G] Notes setup for the open meeting: its template, its note, and whether AI may see it. Enter writes the notes.
+   * `opened` is the meeting's AI choices when the sheet opened, so leaving says something only after a change. */
+  const [notesSetup, setNotesSetup] = useState<{ row: 0 | 1 | 2; options: string[]; editing?: string; opened: string } | null>(null);
   const [calendarSuggestion, setCalendarSuggestion] = useState<MeetingCalendarEvent | null>(null);
   const [automaticCandidate, setAutomaticCandidate] = useState<MeetingCandidate | null>(null);
   const [automationPhase, setAutomationPhase] = useState<MeetingAutomationPhase>('watching');
@@ -299,7 +327,8 @@ export default function App(props: {
   const [speakerPickerOpen, setSpeakerPickerOpen] = useState(false);
   const [confirmRewrite, setConfirmRewrite] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
-  const [jumpTo, setJumpTo] = useState<string | null>(null);
+  /** Opened from a search: which match is at the top of the transcript; n moves to the next. */
+  const [searchHit, setSearchHit] = useState<number | null>(null);
   const [exportMode, setExportMode] = useState(false);
   const [helpMode, setHelpMode] = useState(false);
   const [confirmTrashId, setConfirmTrashId] = useState<string | null>(null);
@@ -324,6 +353,8 @@ export default function App(props: {
   const meetingAutomationController = useRef(new MeetingAutomationController(meetingAutomation));
   const meetingSignalFailure = useRef<string | null>(null);
   const meetingWatchLock = useRef<MeetingWatchLock | null>(null);
+  /** The app a call this window recorded ran in, for automations that filter by app. */
+  const liveAppName = useRef<string | undefined>(undefined);
 
   const refreshLibrary = useCallback(() => {
     setLibraryEntries(listTranscriptRecords(libraryRoot));
@@ -339,7 +370,7 @@ export default function App(props: {
     refreshLibrary();
     const recoverable = listRecoverableCaptureSessions(libraryRoot);
     if (recoverable.length > 0) {
-      setNotice(`${recoverable.length} recoverable live capture${recoverable.length === 1 ? '' : 's'} found · run seashell capture list`);
+      setCaution(`${recoverable.length} recoverable live capture${recoverable.length === 1 ? '' : 's'} found · run seashell capture list`);
     }
   }, [refreshLibrary]);
 
@@ -436,7 +467,7 @@ export default function App(props: {
     if (saveByDefault || liveMeetingRef.current) {
       try {
         const saved = saveTranscriptRecord(libraryRoot, next);
-        if (saved.meetingWarning) setNotice(saved.meetingWarning);
+        if (saved.meetingWarning) setCaution(saved.meetingWarning);
         if (liveMeetingRef.current) {
           const meeting = loadMeetingArtifact(libraryRoot, next.id) ?? null;
           liveMeetingRef.current = meeting;
@@ -652,11 +683,12 @@ export default function App(props: {
         if (generation !== liveSessionGeneration.current || healthTracker !== liveHealthTracker.current) return;
         if (healthTracker) setLiveHealth(healthTracker.pcm('systemAudio', level));
       },
+      onWarning: (message) => setCaution(message),
       onState: (update) => {
         if (generation !== liveSessionGeneration.current || healthTracker !== liveHealthTracker.current) return;
         if (healthTracker) setLiveHealth(healthTracker.state('systemAudio', update));
         if (update.state === 'unavailable' && update.message) {
-          setNotice(`System audio unavailable; continuing with microphone only. ${update.message}`);
+          setCaution(`System audio unavailable; continuing with microphone only. ${update.message}`);
         }
       },
     });
@@ -901,35 +933,64 @@ export default function App(props: {
     ? terminal.columns - layout.sidebarWidth - 4
     : terminal.columns - 2;
   const contentColumns = transcriptContentColumns ?? Math.max(1, mainPanelColumns);
-  const displayRows = useMemo(() => currentRecord
-    ? transcriptRows(currentRecord, contentColumns, { timestamps: showTimestamps, speakers: showSpeakers })
+  const timedRows = useMemo(() => currentRecord
+    ? timedTranscriptRows(currentRecord, contentColumns, { timestamps: showTimestamps, speakers: showSpeakers })
     : [], [currentRecord, contentColumns, showTimestamps, showSpeakers]);
+  const displayRows = useMemo(() => timedRows.map((row) => row.text), [timedRows]);
   const visibleRows = Math.max(1, transcriptContentRows ?? layout.visibleTranscriptRows);
-  const sidebarStart = Math.max(
-    0,
-    selectionIndex - layout.visibleLibraryItems + 1,
-  );
+  // A search shows the line that matched under each meeting, so the list holds half as many.
+  const listCapacity = Math.max(1, Math.floor(layout.visibleLibraryItems / (searchQuery.trim() ? 2 : 1)));
+  const sidebarStart = Math.max(0, selectionIndex - listCapacity + 1);
+  // Meetings kept with their video show ▶ in the list; each is looked up once per change.
+  const videoLookups = useRef(new Map<string, boolean>());
+  const videoEntries = useMemo(() => new Set(libraryEntries.filter((entry) => {
+    if (entry.captureState === 'recording' || entry.captureState === 'processing') return false;
+    const key = `${entry.directory}:${entry.updatedAt}`;
+    if (!videoLookups.current.has(key)) {
+      try { videoLookups.current.set(key, Boolean(videoMapIn(entry.directory))); } catch { videoLookups.current.set(key, false); }
+    }
+    return videoLookups.current.get(key);
+  }).map((entry) => entry.id)), [libraryEntries]);
   const showingLiveTranscript = meetingView === 'transcript' && (view === 'live' || currentEntry?.captureState === 'recording');
-  const latestTranscriptScroll = Math.max(0, displayRows.length - visibleRows);
+  const latestTranscriptScroll = lastTranscriptScroll(timedRows, visibleRows);
+  // The first row of every line that says what was searched for, so a match opens with its whole line at the top.
+  const matchRows = useMemo(() => {
+    const needle = searchQuery.trim().toLocaleLowerCase();
+    if (!needle || meetingView !== 'transcript') return [];
+    const lines = new Map<number | undefined, { first: number; text: string }>();
+    timedRows.forEach((row, index) => {
+      const line = lines.get(row.start);
+      if (line) line.text += ` ${stripVTControlCharacters(row.text).trim()}`;
+      else lines.set(row.start, { first: index, text: stripVTControlCharacters(row.text) });
+    });
+    // A phrase can wrap across rows, so the line is read whole.
+    return [...lines.values()].filter((line) => line.text.replace(/\s+/gu, ' ').toLocaleLowerCase().includes(needle)).map((line) => line.first);
+  }, [timedRows, searchQuery, meetingView]);
+  // Choosing among search results, the reader shows the chosen meeting's lines that say it, whole.
+  const searchPane = historyOpen && !drawerOnly && Boolean(searchQuery.trim()) && view === 'record'
+    && visibleEntries.some((entry) => entry.id === selectedRecord?.id);
+  const searchLines = useMemo(() => {
+    const needle = searchQuery.trim().toLocaleLowerCase();
+    if (!searchPane || !needle) return [];
+    const lines = new Map<number | undefined, { rows: string[]; text: string }>();
+    timedRows.forEach((row) => {
+      const line = lines.get(row.start);
+      if (line) { line.rows.push(row.text); line.text += ` ${stripVTControlCharacters(row.text).trim()}`; }
+      else lines.set(row.start, { rows: [row.text], text: stripVTControlCharacters(row.text) });
+    });
+    return [...lines.values()].filter((line) => line.text.replace(/\s+/gu, ' ').toLocaleLowerCase().includes(needle));
+  }, [timedRows, searchQuery, searchPane]);
+  // The match n is on: its line starts at the top of the view, even near the end, where the view runs past the last row.
+  const currentMatch = searchHit !== null && matchRows.length ? matchRows[searchHit % matchRows.length]! : undefined;
   const visibleTranscriptScroll = showingLiveTranscript && followLiveTranscript
     ? latestTranscriptScroll
-    : Math.min(transcriptScroll, latestTranscriptScroll);
-  const visibleTranscriptRows = displayRows.slice(
-    visibleTranscriptScroll,
-    visibleTranscriptScroll + visibleRows,
-  );
-  // Opened from a search: land on the words that were searched for.
-  // The rows rewrap once the list closes, so this holds until the person moves.
+    : Math.min(transcriptScroll, Math.max(latestTranscriptScroll, currentMatch ?? 0));
+  // A line cut at the top keeps its time and speaker in view.
+  const visibleTranscriptRows = transcriptWindow(timedRows, visibleTranscriptScroll, visibleRows);
+  // The rows rewrap once the list closes, so the match is found again whenever they do.
   useEffect(() => {
-    if (!jumpTo || !displayRows.length) return;
-    const needle = jumpTo.toLocaleLowerCase();
-    const rows = displayRows.map((text) => stripVTControlCharacters(text).toLocaleLowerCase());
-    const within = rows.findIndex((text) => text.includes(needle));
-    // A phrase can wrap across two rows.
-    const row = within >= 0 ? within
-      : rows.findIndex((text, index) => `${text.trimEnd()} ${(rows[index + 1] ?? '').trim()}`.includes(needle));
-    if (row >= 0) setTranscriptScroll(Math.max(0, row - 1));
-  }, [jumpTo, displayRows]);
+    if (currentMatch !== undefined) setTranscriptScroll(currentMatch);
+  }, [searchHit, matchRows]);
   // Finished notes arrive by themselves; say so, and show them unless someone is reading.
   const notesStatus = useRef<{ id?: string; status?: string }>({});
   useEffect(() => {
@@ -995,8 +1056,11 @@ export default function App(props: {
         const routing = config.transcription ?? DEFAULT_TRANSCRIPTION_ROUTING;
         const canonicalRoute = selectCanonicalTranscriptionRoute(routing);
         const cloud = routing.cloud;
+        const attendees = liveMeetingRef.current?.calendar?.attendees;
         const record = await saveFinalizedCapture(store, libraryRoot, reason, {
           title: current.title,
+          // A recording started from a calendar event: its invitees cap how many voices there are.
+          ...(attendees?.length ? { attendees } : {}),
           onStatus: (label) => setProcessing({ label }),
           ...(alreadyFinalized ? { finalizedRecord: current } : {}),
           ...(canonicalRoute === 'cloud' && cloud?.uploadConsent ? {
@@ -1032,7 +1096,7 @@ export default function App(props: {
     const targetMeeting = finishLive ? liveMeetingRef.current : currentMeeting;
     if (!targetRecord || !targetMeeting || processing) return;
     if (observerActiveRef.current) {
-      setNotice('The live meeting observer is finishing its current window. Try again in a moment.');
+      setCaution('The live meeting observer is finishing its current window. Try again in a moment.');
       return;
     }
     const mode = config.meeting?.mode ?? targetMeeting.mode;
@@ -1048,7 +1112,28 @@ export default function App(props: {
       .filter((handle): handle is MicrophoneCaptureHandle | SystemAudioCaptureHandle => Boolean(handle));
     if (wasListening) setListeningPaused(true);
     setError(null);
-    setProcessing({ label: finishLive ? 'Finishing capture…' : 'Preparing meeting enrichment…' });
+    setProcessing({ label: finishLive ? 'Finishing capture…' : 'Writing the notes…' });
+    const onStatus = (label: string) => setProcessing({ label });
+    // A meeting this window finished is ready, as one the background recorder finishes is:
+    // extractors that fit it, then automations. Whatever fails is said; the notes stay.
+    let readyId: string | undefined;
+    const followUpReadyMeeting = async (id: string): Promise<string | undefined> => {
+      const result = await afterMeetingReady(libraryRoot, id, {
+        ...(configuredMeetingRoutes.reconciliation ? { route: configuredMeetingRoutes.reconciliation } : {}),
+        ...(liveAppName.current ? { app: liveAppName.current } : {}),
+        ask: askAutomationApprovalWithDialog,
+        onStatus,
+      });
+      const failed = [...result.extractorFailures.map((failure) => failure.extractor),
+        ...result.automations.filter((run) => run.status === 'failed').map((run) => run.automation)];
+      return failed.length ? `${failed.join(', ')} failed. Settings (,) shows why.` : undefined;
+    };
+    const reload = (id: string, fallback?: MeetingArtifact) => {
+      const artifact = loadMeetingArtifact(libraryRoot, id) ?? fallback;
+      if (!artifact) return;
+      if (finishLive) { liveMeetingRef.current = artifact; setLiveMeeting(artifact); }
+      else commitMeetingState(artifact);
+    };
     void (async () => {
       try {
         if (finishLive) {
@@ -1062,6 +1147,8 @@ export default function App(props: {
             const cloud = routing.cloud;
             const finalized = await finalizeCaptureTranscript(store.manifestPath, {
               title: liveRecordRef.current.title,
+              // A recording started from a calendar event: its invitees cap how many voices there are.
+              ...(targetMeeting.calendar?.attendees.length ? { attendees: targetMeeting.calendar.attendees } : {}),
               onStatus: (label) => setProcessing({ label }),
               ...(canonicalRoute === 'cloud' && cloud?.uploadConsent ? {
                 remoteRoute: {
@@ -1096,9 +1183,14 @@ export default function App(props: {
         }
         const record = finishLive ? liveRecordRef.current : targetRecord;
         saveTranscriptRecord(libraryRoot, record);
+        if (finishLive) readyId = record.id;
         if (missingObserver || missingReconciliation) {
+          readyId = undefined;
+          const failed = finishLive ? await followUpReadyMeeting(record.id) : undefined;
+          if (finishLive) reload(record.id);
           refreshLibrary();
-          setNotice('Meeting saved. Connect AI for notes, or return to your transcript.');
+          if (failed) setError(`Meeting saved, but ${failed}`);
+          else setNotice('Meeting saved. Connect AI for notes, or return to your transcript.');
           return;
         }
         const artifact = await enrichMeeting(libraryRoot, record.id, {
@@ -1115,21 +1207,30 @@ export default function App(props: {
           maximumNewSegments: config.meeting?.observerMaxSegments,
           maxObserverRuns: config.meeting?.maxObserverRuns,
           context: buildMeetingContext(config.meeting?.contextFiles, targetMeeting.calendar),
-          onStatus: (label) => setProcessing({ label }),
+          onStatus,
         });
-        if (finishLive) {
-          liveMeetingRef.current = artifact;
-          setLiveMeeting(artifact);
-        } else {
-          commitMeetingState(artifact);
-        }
-        refreshLibrary();
+        // The notes show at once; what runs after them updates the view when it is done.
+        reload(record.id, artifact);
         setMeetingView('notes');
-        setNotice(finishLive
+        let failed: string | undefined;
+        if (finishLive) {
+          readyId = undefined;
+          failed = await followUpReadyMeeting(record.id);
+        } else if (configuredMeetingRoutes.reconciliation && artifact.analysis?.final) {
+          // Notes written again: the extractors that fit run again over them.
+          const extracted = await runAutomaticExtractors(libraryRoot, record.id, { route: configuredMeetingRoutes.reconciliation, onStatus });
+          if (extracted.failed.length) failed = `${extracted.failed.map((failure) => failure.extractor).join(', ')} failed: ${extracted.failed[0]!.message}`;
+        }
+        reload(record.id, artifact);
+        refreshLibrary();
+        if (failed) setError(`Notes are ready, but ${failed}`);
+        else setNotice(finishLive
           ? 'Meeting capture, final transcript, notes, and analysis are ready.'
           : 'Meeting notes and analysis are ready.');
       } catch (meetingError) {
         setError(meetingError instanceof Error ? meetingError.message : String(meetingError));
+        // Saved, even without notes: the meeting is still ready for its automations.
+        if (readyId) await followUpReadyMeeting(readyId).catch(() => undefined);
         const failed = loadMeetingArtifact(libraryRoot, targetRecord.id);
         if (failed) {
           if (finishLive) {
@@ -1247,11 +1348,11 @@ export default function App(props: {
     if (!calendarSuggestion || liveMeeting || view !== 'live') return;
     const policy = config.meeting?.calendar?.policy ?? 'ask';
     if (pausedRef.current) {
-      setNotice(`Upcoming: ${calendarSuggestion.title} · waiting for meeting audio.`);
+      setCaution(`Upcoming: ${calendarSuggestion.title} · waiting for meeting audio.`);
     } else if (policy === 'all' || policy === 'selected-calendars') {
       markCurrentAsMeeting(calendarSuggestion);
     } else if (policy === 'ask') {
-      setNotice(`Meeting starting: ${calendarSuggestion.title}. Press M to attach it.`);
+      setCaution(`Meeting starting: ${calendarSuggestion.title}. Press M to attach it.`);
     }
   }, [
     calendarSuggestion,
@@ -1300,7 +1401,7 @@ export default function App(props: {
         liveMeetingRef.current = failed;
         setLiveMeeting(failed);
       }
-      setNotice(`Meeting observer paused: ${
+      setCaution(`Meeting observer paused: ${
         observerError instanceof Error ? observerError.message : String(observerError)
       }`);
     }).finally(() => {
@@ -1316,11 +1417,20 @@ export default function App(props: {
     view,
   ]);
 
+  // Your side of a finished call was barely heard: said once, as the first line of
+  // the meeting's notes, never in the list.
+  const yourSide = useMemo(() => {
+    if (!currentEntry || currentEntry.captureState === 'recording' || currentEntry.captureState === 'processing') return undefined;
+    return yourSideNotice(readMeetingCoverage(currentEntry.directory, currentEntry.captureHealth));
+  }, [currentEntry?.directory, currentEntry?.captureState, currentEntry?.captureHealth?.coverage?.yourSideMissing]);
+  const cautionRows = useMemo(() => yourSide && view === 'record' && meetingView === 'notes'
+    ? wrappedMeetingRows([yourSide], contentColumns) : [], [yourSide, view, meetingView, contentColumns]);
   const auxiliaryMeetingLines = useMemo(() => (
     currentMeeting && meetingView !== 'transcript'
-      ? wrappedMeetingRows(meetingViewLines(currentMeeting, meetingView, currentRecord ?? undefined), contentColumns)
+      ? [...cautionRows, ...(cautionRows.length ? [''] : []),
+        ...wrappedMeetingRows(meetingViewLines(currentMeeting, meetingView, currentRecord ?? undefined), contentColumns)]
       : []
-  ), [currentMeeting, meetingView, currentRecord, contentColumns]);
+  ), [currentMeeting, meetingView, currentRecord, contentColumns, cautionRows]);
   const visibleAuxiliaryMeetingLines = auxiliaryMeetingLines.slice(
     transcriptScroll,
     transcriptScroll + visibleRows,
@@ -1330,10 +1440,9 @@ export default function App(props: {
     : displayRows.length;
   const scrollVisibleRows = visibleRows;
   const scrollTranscriptBy = (delta: number) => {
-    const next = moveTranscriptScroll(
-      meetingView === 'transcript' ? visibleTranscriptScroll : transcriptScroll,
-      delta, scrollItemCount, scrollVisibleRows,
-    );
+    const next = currentMeeting && meetingView !== 'transcript'
+      ? moveTranscriptScroll(transcriptScroll, delta, scrollItemCount, scrollVisibleRows)
+      : Math.min(Math.max(latestTranscriptScroll, visibleTranscriptScroll), Math.max(0, visibleTranscriptScroll + delta));
     setTranscriptScroll(next);
     if (showingLiveTranscript) setFollowLiveTranscript(next >= latestTranscriptScroll);
   };
@@ -1341,7 +1450,7 @@ export default function App(props: {
   const copyCurrentView = useCallback(() => {
     if (!currentRecord) return;
     const text = currentMeeting && meetingView !== 'transcript'
-      ? meetingViewLines(currentMeeting, meetingView, currentRecord).join('\n').replaceAll(HEADING, '')
+      ? plainMeetingLines(meetingViewLines(currentMeeting, meetingView, currentRecord)).join('\n')
       : renderText(currentRecord, { timestamps: showTimestamps, speakers: showSpeakers });
     if (!text) return;
     const result = spawnSync('pbcopy', [], { input: text, encoding: 'utf8' });
@@ -1357,7 +1466,7 @@ export default function App(props: {
     if (!currentRecord) return;
     try {
       writeTranscriptExport(libraryRoot, currentRecord.id, format);
-      setNotice(`Exported ${format.toUpperCase()}.`);
+      setNotice(`Saved ${EXPORT_WORDS[format]} in the meeting's folder. o opens it.`);
     } catch (exportError) {
       setError(exportError instanceof Error ? exportError.message : String(exportError));
     }
@@ -1399,6 +1508,7 @@ export default function App(props: {
       liveMeetingRef.current = null;
       setLiveMeeting(null);
       setCaptureAppBundle(undefined);
+      liveAppName.current = undefined;
       setMeetingView('transcript');
       setTranscriptScroll(0);
       setNotice('Started a fresh live transcript.');
@@ -1422,6 +1532,7 @@ export default function App(props: {
     );
     if (needsFreshSession) await resetLiveSession();
     setCaptureAppBundle(candidate.bundleId);
+    liveAppName.current = candidate.appName;
     ensureLiveSessionStartedAt();
     const base = liveRecordRef.current;
     const record: TranscriptRecord = {
@@ -1474,7 +1585,7 @@ export default function App(props: {
         setAutomaticFinishRequested(true);
         setNotice(`Meeting signals unavailable · finishing ${action.candidate.title}.`);
       } else if (meetingSignalFailure.current !== message) {
-        setNotice(`${message} Manual recording is still available.`);
+        setCaution(`${message} Manual recording is still available.`);
       }
       meetingSignalFailure.current = message;
     };
@@ -1495,7 +1606,6 @@ export default function App(props: {
         meetingSignalFailure.current = null;
         if (action.kind === 'suggest') {
           setAutomaticCandidate(action.candidate);
-          setNotice(`Possible ${action.candidate.appName} meeting · press M to record or X to ignore.`);
         } else if (action.kind === 'start') {
           automaticTransition.current = true;
           void beginAutomaticMeeting(action.candidate).catch((automationError: unknown) => {
@@ -1546,7 +1656,7 @@ export default function App(props: {
     if (exitInProgress.current) return;
     if (processing) {
       setExitRequested(true);
-      setNotice('Finishing the current operation before quitting…');
+      setCaution('Finishing the current operation before quitting…');
       return;
     }
     exitInProgress.current = true;
@@ -1583,6 +1693,43 @@ export default function App(props: {
   const mouseDecoder = useRef(new MouseScrollDecoder());
   const mouseEnabled = !speakerSetupOpen && !aiSetupOpen && !guideOpen && !chatInputState && !renameState && !speakerPickerOpen && !searchMode && !exportMode && !confirmTrashId && !notesSetup;
 
+  const renameSpeaker = (speakerId: string, name: string, done: string) => {
+    if (!currentRecord) return;
+    try {
+      const renamed = renameTranscriptSpeaker(libraryRoot, currentRecord.id, speakerId, name);
+      if (view === 'live') {
+        liveRecordRef.current = renamed;
+        setLiveRecord(renamed);
+      } else {
+        setSelectedRecord(renamed);
+      }
+      const meeting = loadMeetingArtifact(libraryRoot, renamed.id);
+      if (meeting) commitMeetingState(meeting);
+      refreshLibrary();
+      setNotice(done);
+    } catch (renameError) {
+      setError(renameError instanceof Error ? renameError.message : String(renameError));
+    }
+  };
+
+  // A meeting kept with its video plays it, from the line being read.
+  const videoAvailable = useMemo(() => {
+    if (view !== 'record' || !selectedRecord || currentRecordBusy) return false;
+    try { return Boolean(meetingVideo(libraryRoot, selectedRecord.id)); } catch { return false; }
+  }, [view, selectedRecord?.id, currentRecordBusy, libraryRoot]);
+  const watchVideo = () => {
+    if (!selectedRecord) return;
+    // From the line at the top: a line cut there keeps its time pinned in view, so that is where it plays from.
+    const at = meetingView === 'transcript' ? timedRows[visibleTranscriptScroll]?.start : undefined;
+    try {
+      openMeetingVideo(libraryRoot, selectedRecord.id, at === undefined ? {} : { atSeconds: at });
+      setNotice(at === undefined ? 'Opened the video.' : `Opened the video at ${formatTuiClock(at)}.`);
+    } catch (videoError) {
+      setError(videoError instanceof Error ? videoError.message : String(videoError));
+    }
+  };
+
+
   const saveMeetingAi = useCallback((change: (ai: NonNullable<MeetingArtifact['ai']>) => void) => {
     if (!currentMeeting) return;
     const ai = { ...currentMeeting.ai };
@@ -1605,7 +1752,6 @@ export default function App(props: {
   }, [mouseEnabled, stdin, stdout]);
 
   useInput((input, key) => {
-    setJumpTo(null);
     const mouse = mouseDecoder.current.read(input);
     if (mouse.consumed) {
       if (mouseEnabled && mouse.events.length) {
@@ -1650,27 +1796,8 @@ export default function App(props: {
         return;
       }
       if (key.return) {
-        if (currentRecord && renameState.input.trim()) {
-          try {
-            const renamed = renameTranscriptSpeaker(
-              libraryRoot,
-              currentRecord.id,
-              renameState.speakerId,
-              renameState.input,
-            );
-            if (view === 'live') {
-              liveRecordRef.current = renamed;
-              setLiveRecord(renamed);
-            } else {
-              setSelectedRecord(renamed);
-            }
-            const meeting = loadMeetingArtifact(libraryRoot, renamed.id);
-            if (meeting) commitMeetingState(meeting);
-            refreshLibrary();
-            setNotice(`${renameState.label} is now ${renameState.input.trim()}. Notes kept.`);
-          } catch (renameError) {
-            setError(renameError instanceof Error ? renameError.message : String(renameError));
-          }
+        if (renameState.input.trim()) {
+          renameSpeaker(renameState.speakerId, renameState.input, `${renameState.label} is now ${renameState.input.trim()}.`);
         }
         setRenameState(null);
         return;
@@ -1688,13 +1815,17 @@ export default function App(props: {
     if (speakerPickerOpen) {
       if (key.escape || input === 'r') { setSpeakerPickerOpen(false); return; }
       const speakers = currentRecord?.speakers ?? [];
+      const suggested = speakers[speakerSelection]?.suggestion ? speakers[speakerSelection] : undefined;
       if (key.upArrow) setSpeakerSelection((index) => moveSelection(index, -1, speakers.length));
       else if (key.downArrow) setSpeakerSelection((index) => moveSelection(index, 1, speakers.length));
+      // A name Seashell suggested from a known voice: keep it, which also teaches the voice, or say it is not them.
+      else if (input === 'y' && suggested) renameSpeaker(suggested.id, suggested.label, `Kept ${suggested.label}.`);
+      else if (input === 'n' && suggested) renameSpeaker(suggested.id, suggested.suggestion!.previous,
+        `${suggested.label} is ${speakerDisplayName(suggested.id, suggested.suggestion!.previous)} again.`);
       else if (key.return) {
         const speaker = speakers[speakerSelection];
         setSpeakerPickerOpen(false);
-        if (speaker) setRenameState({ speakerId: speaker.id, input: '',
-          label: speaker.id === 'LOCAL' && speaker.label === 'Microphone' ? 'You' : speaker.label });
+        if (speaker) setRenameState({ speakerId: speaker.id, input: '', label: speakerDisplayName(speaker.id, speaker.label) });
       }
       return;
     }
@@ -1703,6 +1834,7 @@ export default function App(props: {
       if (key.escape) {
         setSearchMode(false);
         setSearchQuery('');
+        setSearchHit(null);
         return;
       }
       if (key.return) {
@@ -1764,7 +1896,7 @@ export default function App(props: {
           setView('live');
           setSelectionIndex(0);
           refreshLibrary();
-          setNotice('Transcript moved to the library Trash folder.');
+          setNotice(`Moved "${selectedRecord?.title ?? 'the meeting'}" to the Trash folder.`);
         } catch (trashError) {
           setError(trashError instanceof Error ? trashError.message : String(trashError));
         }
@@ -1788,9 +1920,20 @@ export default function App(props: {
         if (input && !key.ctrl && !key.meta) setNotesSetup({ ...notesSetup, editing: notesSetup.editing + input });
         return;
       }
-      if (key.escape || input === 'n' || key.return && notesSetup.row !== 1) {
+      if (key.escape) {
         setNotesSetup(null);
-        if (currentMeeting && !currentMeeting.ai?.off) setNotice('Press g to rewrite the notes with these choices.');
+        const changed = JSON.stringify(currentMeeting?.ai ?? {}) !== notesSetup.opened;
+        if (changed && currentMeeting && !currentMeeting.ai?.off) {
+          setNotice(`Saved for this meeting. Press g to ${currentMeeting.analysis ? 'rewrite' : 'write'} the notes with them.`);
+        }
+        return;
+      }
+      // Enter writes the notes with these choices; on the note, it edits the note.
+      if (key.return && notesSetup.row !== 1) {
+        if (!currentMeeting || currentMeeting.ai?.off) return;
+        setNotesSetup(null);
+        if (currentMeeting.analysis?.final) setConfirmRewrite(true);
+        else runCurrentMeetingEnrichment(view === 'live');
         return;
       }
       if (key.upArrow) { setNotesSetup({ ...notesSetup, row: Math.max(0, notesSetup.row - 1) as 0 | 1 | 2 }); return; }
@@ -1816,6 +1959,7 @@ export default function App(props: {
 
     if (audioHelpOpen) {
       if (input === 'i' || key.escape) { setAudioHelpOpen(false); return; }
+      // The same keys as the guided setup: o for Sound settings, p for Privacy.
       if (input === 'o' || input === 'p') {
         const target = input === 'o' ? 'x-apple.systempreferences:com.apple.preference.sound?input'
           : 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone';
@@ -1846,7 +1990,7 @@ export default function App(props: {
     }
     // Esc goes back one level and never leaves the app; only Q does.
     if (key.escape) {
-      if (searchQuery) setSearchQuery('');
+      if (searchQuery) { setSearchQuery(''); setSearchHit(null); }
       else if (!historyOpen) toggleHistory();
       else if (layout.compact && view === 'record') setHistoryOpen(false);
       return;
@@ -1857,25 +2001,50 @@ export default function App(props: {
     }
     if (processing) return;
     if (input === 'i') { setAudioHelpOpen(true); return; }
-    if (watchOwnership === 'external' && (input === 'm' || input === 'x') && backgroundWatch?.phase === 'awaiting-consent') {
+    // A noticed call is a question like any other: y records it, n ignores it.
+    const answer = input.toLowerCase();
+    if (watchOwnership === 'external' && (answer === 'y' || answer === 'n') && backgroundWatch?.phase === 'awaiting-consent'
+        && backgroundApproval !== backgroundWatch.consentId) {
       const current = readBackgroundWatchStatus(libraryRoot);
       if (current?.phase !== 'awaiting-consent' || !current.consentId || current.consentId !== backgroundWatch.consentId) {
-        refreshLibrary(); setNotice('The meeting request changed. Check its current status before recording.'); return;
+        refreshLibrary(); setCaution('The meeting request changed. Check its current status before recording.'); return;
       }
       try {
-        writeMeetingConsent(input === 'm' ? 'approve' : 'decline', undefined, Date.now(), current.consentId);
+        writeMeetingConsent(answer === 'y' ? 'approve' : 'decline', undefined, Date.now(), current.consentId);
         setBackgroundApproval(current.consentId);
-        setNotice(input === 'm' ? 'Start requested. Waiting for the recorder to confirm.' : 'Ignore requested.');
+        setNotice(answer === 'y' ? 'Start requested. Waiting for the recorder to confirm.' : 'Ignore requested.');
       } catch (cause) { setError(`Could not send the meeting decision: ${cause instanceof Error ? cause.message : String(cause)}`); }
       return;
     }
-    if (currentRecordBusy && ['r', 'd', 'g', 'a', 'e', 'm'].includes(input)) {
-      setNotice('Review and edit this when it finishes.');
+    if (automaticCandidate && (answer === 'y' || answer === 'n')) {
+      if (answer === 'y') {
+        const approved = meetingAutomationController.current.approve();
+        setAutomationPhase(meetingAutomationController.current.state.phase);
+        setAutomaticCandidate(null);
+        if (approved) {
+          void beginAutomaticMeeting(approved).catch((automationError: unknown) => {
+            setError(automationError instanceof Error ? automationError.message : String(automationError));
+          });
+        }
+      } else {
+        meetingAutomationController.current.decline();
+        setAutomationPhase(meetingAutomationController.current.state.phase);
+        setAutomaticCandidate(null);
+        setNotice(`Ignored ${automaticCandidate.appName} for this detection window.`);
+      }
       return;
     }
-    if (input === ',') { setSettingsOpen(true); return; }
-    if (input === 'v') { setSpeakerSetupOpen(true); return; }
-    if (input === 'p') { setAiSetupIntent(null); setAiSetupOpen(true); return; }
+    if (currentRecordBusy && ['r', 'd', 'g', 'a', 'e', 'm'].includes(input)) {
+      setCaution('Review and edit this when it finishes.');
+      return;
+    }
+    // Speaker setup and AI are rows in Settings, so they have no keys of their own here.
+    if (input === ',') {
+      const fixing = shownSlot.current;
+      setSettingsFocus(fixing?.fix?.[0] === ',' ? fixing.focus : undefined);
+      setSettingsOpen(true);
+      return;
+    }
     if (key.tab || input === '\t' || input === 'h') {
       toggleHistory();
       return;
@@ -1909,45 +2078,24 @@ export default function App(props: {
       return;
     }
     if (input === 'm') {
-      if (automaticCandidate) {
-        const approved = meetingAutomationController.current.approve();
-        setAutomationPhase(meetingAutomationController.current.state.phase);
-        setAutomaticCandidate(null);
-        if (approved) {
-          void beginAutomaticMeeting(approved).catch((automationError: unknown) => {
-            setError(automationError instanceof Error ? automationError.message : String(automationError));
-          });
-        }
-      } else if (currentRecord?.transcript.length) {
-        markCurrentAsMeeting(view === 'live' ? calendarSuggestion ?? undefined : undefined);
-      }
+      if (currentRecord?.transcript.length) markCurrentAsMeeting(view === 'live' ? calendarSuggestion ?? undefined : undefined);
       return;
     }
-    if (input === 'x' && automaticCandidate) {
-      meetingAutomationController.current.decline();
-      setAutomationPhase(meetingAutomationController.current.state.phase);
-      setAutomaticCandidate(null);
-      setNotice(`Ignored ${automaticCandidate.appName} for this detection window.`);
+    // n only ever moves to the next match.
+    if (input === 'n' && searchHit !== null && matchRows.length && meetingView === 'transcript') {
+      setSearchHit((hit) => ((hit ?? 0) + 1) % matchRows.length);
       return;
     }
-    if (input === 'n' && currentMeeting) {
+    // g opens the notes setup, where Enter writes the notes; with AI off it opens on the switch.
+    if (input === 'g' && currentMeeting) {
       let names: string[] = [];
       try { names = loadMeetingTemplates(libraryRoot).map((template) => template.name); } catch {}
-      setNotesSetup({ row: 0, options: ['auto', ...names, NO_TEMPLATE] });
-      return;
-    }
-    if (input === 'g' && currentMeeting) {
-      if (currentMeeting.ai?.off) {
-        setNotice('AI is off for this meeting. Press n to turn it on.');
-        return;
-      }
-      if (currentMeeting.analysis?.final) { setConfirmRewrite(true); return; }
-      runCurrentMeetingEnrichment(view === 'live');
+      setNotesSetup({ row: currentMeeting.ai?.off ? 2 : 0, options: ['auto', ...names, NO_TEMPLATE], opened: JSON.stringify(currentMeeting.ai ?? {}) });
       return;
     }
     if (input === 'a' && currentMeeting) {
       if (currentMeeting.ai?.off) {
-        setNotice('AI is off for this meeting. Press n to turn it on.');
+        setCaution('AI is off for this meeting. Press g to turn it on.');
         return;
       }
       if (!configuredMeetingRoutes.chat) {
@@ -1984,13 +2132,17 @@ export default function App(props: {
       openCurrentFolder();
       return;
     }
+    if (input === 'w' && videoAvailable) {
+      watchVideo();
+      return;
+    }
     if (input === 'e' && currentRecord?.transcript.length) {
       setExportMode(true);
       return;
     }
     if (input === 'r' && currentRecord?.speakers.length) {
-      // Start on the first person still without a real name.
-      setSpeakerSelection(Math.max(0, currentRecord.speakers.findIndex((speaker) => /^Remote speaker \d/u.test(speaker.label))));
+      // Start on the first name still to check: a suggestion, or a person without a real name.
+      setSpeakerSelection(Math.max(0, currentRecord.speakers.findIndex((speaker) => speaker.suggestion || /^Remote speaker \d/u.test(speaker.label))));
       setSpeakerPickerOpen(true);
       return;
     }
@@ -2006,8 +2158,20 @@ export default function App(props: {
     if (input === ' ' && watchOwnership === 'external') {
       if (activeBackgroundEntry) { setConfirmStop(true); return; }
       try {
+        // Plain Space is audio only, even if an earlier request for video was never picked up.
+        clearVideoRequest();
         writeMeetingCommand('start');
         setNotice('Starting a recording…');
+      } catch (cause) { setError(`Could not start recording: ${cause instanceof Error ? cause.message : String(cause)}`); }
+      return;
+    }
+    // V records by hand with video: the call's window if one is open, otherwise the screen.
+    if (input === 'V') {
+      if (watchOwnership !== 'external') { setCaution('Recording with video needs the background recorder. Press , to start it.'); return; }
+      if (activeBackgroundEntry) { setCaution('Already recording. Video can only start with a new recording.'); return; }
+      try {
+        startRecordingWithVideo();
+        setNotice('Starting a recording with video…');
       } catch (cause) { setError(`Could not start recording: ${cause instanceof Error ? cause.message : String(cause)}`); }
       return;
     }
@@ -2050,7 +2214,7 @@ export default function App(props: {
       if (historyOpen) {
         const next = moveSelection(
           selectionIndex,
-          -layout.visibleLibraryItems,
+          -listCapacity,
           navigationItems.length,
         );
         setSelectionIndex(next);
@@ -2064,7 +2228,7 @@ export default function App(props: {
       if (historyOpen) {
         const next = moveSelection(
           selectionIndex,
-          layout.visibleLibraryItems,
+          listCapacity,
           navigationItems.length,
         );
         setSelectionIndex(next);
@@ -2079,7 +2243,7 @@ export default function App(props: {
       setHistoryOpen(false);
       if (searchQuery.trim()) {
         setMeetingView('transcript');
-        setJumpTo(searchQuery.trim());
+        setSearchHit(0);
       }
     }
   }, { isActive: !aiSetupOpen && !speakerSetupOpen && !settingsOpen && !guideOpen });
@@ -2093,6 +2257,7 @@ export default function App(props: {
     void readFeatureStatuses({ config, libraryDir: libraryRoot, signal: controller.signal })
       .then(statuses => {
         if (controller.signal.aborted) return;
+        setFeatureStatuses(statuses);
         setAttention(statuses.filter(status => !status.optional && (status.state === 'broken' ||
           (status.state === 'attention' && (status.id === 'microphone' && !heard?.microphone || status.id === 'computer-audio' && !heard?.computer)))));
         setSetupNeeded(statuses.some(status => (status.id === 'recorder' || status.id === 'microphone') && status.state !== 'ok' && Boolean(status.action)));
@@ -2113,8 +2278,9 @@ export default function App(props: {
       : DEFAULT_LEVEL_SOURCES.computer,
   }, [props.levels, listenerDisabled, systemAudioDisabled]);
 
-  const openGuide = (fromSettings: boolean) => {
+  const openGuide = (fromSettings: boolean, test?: 'microphone' | 'computer') => {
     setGuideProgress(undefined);
+    setGuideTest(test);
     setGuideFromSettings(fromSettings);
     setSettingsOpen(false);
     setGuideOpen(true);
@@ -2136,6 +2302,8 @@ export default function App(props: {
   const openAI = (from: 'settings' | 'guide') => {
     setSettingsOpen(false); setGuideOpen(false); setReturnTo(from); setAiSetupIntent(null); setAiSetupOpen(true);
   };
+  // Choosing an AI from Settings or the guide says so there, once, when it opens again.
+  useEffect(() => { if (subNotice && (settingsOpen || guideOpen)) setSubNotice(undefined); }, [subNotice, settingsOpen, guideOpen]);
   const closeSubSettings = () => {
     if (returnTo === 'settings') setSettingsOpen(true);
     if (returnTo === 'guide') setGuideOpen(true);
@@ -2147,12 +2315,15 @@ export default function App(props: {
     onConnectMeet: connectMeetReader,
     onEnableCalendar: enableCalendarTitles,
     onConfigChange: setConfig,
+    ...(subNotice ? { notice: subNotice } : {}),
   };
 
   if (settingsOpen) return <SettingsScreen {...setupActionProps} config={config} columns={terminal.columns} rows={terminal.rows}
+    {...(settingsFocus ? { focus: settingsFocus } : {})}
     onOpenSpeakers={() => openSpeakers('settings')}
     onOpenAI={() => openAI('settings')}
     onOpenGuide={() => openGuide(true)}
+    onTest={(source) => openGuide(true, source)}
     onClose={() => setSettingsOpen(false)} />;
 
   if (guideOpen) return <Onboarding {...setupActionProps} config={config} columns={terminal.columns} rows={terminal.rows}
@@ -2162,9 +2333,13 @@ export default function App(props: {
     onOpenSpeakers={() => openSpeakers('guide')}
     onOpenAI={() => openAI('guide')}
     fromSettings={guideFromSettings}
+    {...(guideTest ? { test: guideTest } : {})}
     onClose={() => { setGuideOpen(false); if (guideFromSettings) setSettingsOpen(true); }} />;
 
+  const separation = featureStatuses?.find((status) => status.id === 'speaker-separation');
   if (speakerSetupOpen) return <SpeakerSettings columns={terminal.columns} rows={terminal.rows}
+    modelSize={speakerModelSize(speakerEngine())}
+    {...(separation ? { ready: separation.state === 'ok' } : {})}
     recording={Boolean(activeBackgroundEntry) || (!paused && !listenerDisabled)}
     browser={config.meeting?.speakerBrowser ?? 'off'}
     meetStatus={meetSpeakerStatus}
@@ -2184,7 +2359,7 @@ export default function App(props: {
         .then((record) => {
           setSelectedRecord(record); setSelectedMeeting(null); setMeetingView('transcript');
           setTranscriptScroll(0); setSpeakerSelection(0); setHistoryOpen(false); refreshLibrary();
-          setNotice('Speaker review copy saved. Original transcript and notes unchanged. R names speakers.');
+          setNotice('Saved a copy to review. The original and its notes are unchanged.');
         }).catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
         .finally(() => setProcessing(null));
     }} />;
@@ -2197,83 +2372,108 @@ export default function App(props: {
       setConfig((current) => ({ ...current, meeting: { ...saved.meeting,
         calendar: current.meeting?.calendar, automation: current.meeting?.automation,
       } }));
+      const names = [...new Set(Object.values(patch.routes ?? {}).flatMap((route) => route ? [providerName(route.backend)] : []))];
+      const done = `Notes and chat use ${names.join(' and ')}.`;
+      // Said wherever the person lands: Settings, the guide, or the meeting.
+      if (returnTo) setSubNotice(done); else setNotice(done);
       setAiSetupOpen(false);
       closeSubSettings();
       setError(null);
-      const names = [...new Set(Object.values(patch.routes ?? {}).flatMap((route) => route ? [route.backend] : []))];
-      setNotice(`AI ready · ${names.join(' + ')}`);
     }} />;
 
   const consentPending = (watchOwnership === 'external' && backgroundWatch?.phase === 'awaiting-consent') || Boolean(automaticCandidate);
+  const approvalPending = backgroundWatch?.consentId !== undefined && backgroundApproval === backgroundWatch.consentId;
+  const consentTitle = automaticCandidate?.title ?? backgroundWatch?.candidate?.title;
   const reading = !historyOpen;
   const hasNotes = Boolean(currentMeeting?.analysis);
   const atHome = view === 'live' && paused && !currentMeeting;
-  const byHand: Hint[] = watchOwnership === 'external' ? [['space', activeBackgroundEntry ? 'stop' : 'record']] : [];
-  const hints: Hint[] = consentPending ? [['m', 'record'], ['x', 'ignore']]
-    : atHome && attention.length ? [['Enter', 'guided setup'], [',', 'settings'], ['f', 'import']]
-    : !historyOpen && activeBackgroundEntry && currentRecordBusy ? [['space', 'stop'], ['↑↓', 'scroll'],
-      ...(followLiveTranscript ? [] : [['l', 'latest'] as Hint]), ['h', 'meetings'], ['i', 'audio']]
-    : !navigationItems.some((item) => item.kind === 'record') && historyOpen ? [['f', 'import'], ['/', 'search']]
-    : historyOpen ? [['↑↓', 'choose'], ['Enter', 'read'], ...byHand, ['/', 'search'], ['f', 'import']]
-    : currentRecordBusy ? [['↑↓', 'scroll'], ...(followLiveTranscript ? [] : [['l', 'latest'] as Hint]), ['h', 'meetings'], ['i', 'audio']]
-    : showingLiveTranscript ? [['↑↓', 'scroll'], ...(followLiveTranscript ? [] : [['l', 'latest'] as Hint]), ['h', 'meetings'], ['i', 'audio']]
+  // Space records by hand, and stops whatever is recording.
+  const byHand: Hint[] = watchOwnership === 'external' ? activeBackgroundEntry ? [['space', 'stop']] : [['space', 'record'], ['V', 'with video']]
+    : view === 'live' && !historyOpen ? [['space', paused ? 'record' : 'stop']] : [];
+  const watch: Hint[] = videoAvailable ? [['w', 'watch video']] : [];
+  const latest: Hint[] = followLiveTranscript ? [] : [['l', 'latest']];
+  const nextMatch: Hint[] = searchHit !== null && matchRows.length > 1 && meetingView === 'transcript'
+    ? [['n', `next match · ${(searchHit % matchRows.length) + 1} of ${matchRows.length}`]] : [];
+  // One order everywhere: what can be done here, then moving, then Esc. The way back to
+  // the meetings comes early, so a narrow window keeps it.
+  const hints: Hint[] = atHome && attention.length ? [['Enter', 'guided setup'], ...byHand, ['f', 'import']]
+    : historyOpen && searchQuery.trim() ? visibleEntries.length ? [['Enter', 'read'], ['/', 'search again'], ['Esc', 'clear search'], ['↑↓', 'choose']]
+      : [['/', 'search again'], ['Esc', 'clear search']]
+    : historyOpen && !navigationItems.some((item) => item.kind === 'record') ? [...byHand, ['f', 'import'], ['/', 'search']]
+    : historyOpen ? [['Enter', 'read'], ...byHand, ['/', 'search'], ['f', 'import'], ['↑↓', 'choose']]
+    : currentRecordBusy || showingLiveTranscript ? [
+      ...(activeBackgroundEntry && currentRecordBusy || view === 'live' ? byHand.filter(([key]) => key === 'space') : []),
+      ...latest, ['h', 'meetings'], ['i', 'audio help'], ['↑↓', 'scroll']]
     : !currentRecord?.transcript.length ? [...byHand, ['h', 'meetings'], ['f', 'import']]
-    : !currentMeeting ? [['↑↓', 'scroll'], ['r', 'name speakers'], ['m', 'make it a meeting'], ['c', 'copy'], ['h', 'meetings']]
+    : !currentMeeting ? [...watch, ['h', 'meetings'], ['r', 'name speakers'], ['m', 'make it a meeting'], ['c', 'copy'], ['↑↓', 'scroll']]
     : meetingView === 'notes' ? [
-      ...(hasNotes ? [['↑↓', 'scroll'], ['h', 'meetings'], ['a', 'ask'], ['c', 'copy'], ['g', 'rewrite notes']] as Hint[] : [['g', 'write notes'], ['h', 'meetings']] as Hint[]),
-      ['n', 'notes options'],
-    ]
-    : meetingView === 'chat' ? [['a', 'ask'], ['h', 'meetings'], ['↑↓', 'scroll'], ['c', 'copy']]
-    : [['↑↓', 'scroll'], ['h', 'meetings'], ['r', 'name speakers'], ['a', 'ask'], ['e', 'export'], ['c', 'copy']];
+      // A call where your side was missing says what to do next, first.
+      ...(yourSide ? [['i', 'check your mic'] as Hint] : []),
+      ...(hasNotes ? [['a', 'ask'], ['h', 'meetings'], ...watch, ['g', 'rewrite notes'], ['c', 'copy'], ['↑↓', 'scroll']] as Hint[]
+        : [['g', 'write notes'], ['h', 'meetings'], ...watch] as Hint[])]
+    : meetingView === 'chat' ? [['a', 'ask'], ['h', 'meetings'], ['c', 'copy'], ['↑↓', 'scroll']]
+    : [...nextMatch, ...watch, ['h', 'meetings'], ['r', 'name speakers'], ['a', 'ask'], ['e', 'export'], ['c', 'copy'], ['↑↓', 'scroll']];
 
-  // The time appears when it tells two meetings of the same day apart.
-  const withTime = (entry: TranscriptLibraryEntry) =>
-    visibleEntries.some((other) => other.id !== entry.id && sameDay(other.createdAt, entry.createdAt));
-  // Dates line up as a column when titles still keep their room; a narrow sidebar gives the room to titles.
+  // Today's meetings show their time, older ones their day, in one column against the right edge.
   const listRowWidth = (layout.compact ? terminal.columns - 2 : layout.sidebarWidth - 2) - 2;
-  const widestDate = Math.max(0, ...navigationItems.slice(sidebarStart, sidebarStart + layout.visibleLibraryItems)
-    .map((item) => item.kind === 'record' ? listWhen(item.entry.createdAt, new Date(statusNow), withTime(item.entry)).length : 0));
-  const dateColumn = listRowWidth - widestDate >= 24 ? widestDate : 0;
+  const dateColumn = Math.max(0, ...navigationItems.slice(sidebarStart, sidebarStart + listCapacity)
+    .map((item) => item.kind === 'record' ? listWhen(item.entry.createdAt, new Date(statusNow)).length : 0));
   const list = (
     <Box width={layout.compact ? undefined : layout.sidebarWidth} flexGrow={layout.compact ? 1 : 0} flexShrink={0}
       flexDirection="column" overflow="hidden" paddingRight={layout.compact ? 0 : 1}
       {...(layout.compact ? {} : { borderStyle: 'single' as const, borderTop: false, borderBottom: false, borderLeft: false, borderDimColor: true })}
       aria-role="listbox" aria-label="Meetings">
-      <Text bold color="cyan" wrap="truncate-end">
-        {searchQuery ? `/ ${searchQuery} · ${visibleEntries.length} found` : searchMode ? '/ Type to search' : 'Meetings'}
-      </Text>
-      {navigationItems.slice(sidebarStart, sidebarStart + layout.visibleLibraryItems).map((item, windowIndex) => {
+      <Text bold color="cyan" wrap="truncate-end">{searchQuery.trim() ? searchHeading(visibleEntries.length, searchQuery.trim()) : 'Meetings'}</Text>
+      {navigationItems.slice(sidebarStart, sidebarStart + listCapacity).map((item, windowIndex) => {
         const index = sidebarStart + windowIndex;
         const selected = selectionIndex === index;
-        const rowWidth = (layout.compact ? terminal.columns - 2 : layout.sidebarWidth - 2) - 2;
-        const label = item.kind === 'record' ? meetingEntryRow(item.entry, rowWidth, new Date(statusNow),
-          withTime(item.entry), dateColumn) : item.label;
-        return <Text key={item.kind === 'record' ? item.entry.id : item.kind} inverse={selected} wrap="truncate-end"
-          aria-role="option" aria-state={{ selected }}>{selected ? '› ' : '  '}{truncate(label, rowWidth)}</Text>;
+        const label = item.kind === 'record' ? meetingEntryRow(item.entry, listRowWidth, new Date(statusNow), dateColumn,
+          videoEntries.has(item.entry.id)) : item.label;
+        const [title, date] = truncate(label, listRowWidth).split(VIDEO_MARK);
+        const match = searchQuery.trim() && item.kind === 'record' ? item.entry.match : undefined;
+        return <React.Fragment key={item.kind === 'record' ? item.entry.id : item.kind}>
+          <Text inverse={selected} wrap="truncate-end" aria-role="option" aria-state={{ selected }}>{selected ? '› ' : '  '}{title}
+            {date !== undefined && <><Text dimColor={!selected}>{VIDEO_MARK}</Text>{date}</>}</Text>
+          {match && <Text wrap="truncate-end">{'  '}<Text dimColor>{formatTuiClock(match.start)}  </Text>
+            <Highlighted text={snippetAround(match.text, searchQuery.trim(), listRowWidth - 7)} query={searchQuery} /></Text>}
+        </React.Fragment>;
       })}
-      {searchQuery && visibleEntries.length === 0 && <Text dimColor>Nothing found. Esc clears the search.</Text>}
       {!searchQuery && libraryEntries.length === 0 && <Text dimColor>Your meetings will appear here.</Text>}
     </Box>
   );
 
   const readerTotal = currentMeeting && meetingView !== 'transcript' ? auxiliaryMeetingLines.length : displayRows.length;
   const readerScroll = currentMeeting && meetingView !== 'transcript' ? transcriptScroll : visibleTranscriptScroll;
-  const searchHighlight = searchQuery.trim() && meetingView === 'transcript'
-    ? new RegExp(searchQuery.trim().replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'giu') : undefined;
+  // How much is out of view, as Settings says it: what is below, or once at the end, what is above.
+  // A time and speaker pinned at the top take a row of the view.
+  const readerShown = readerScroll + visibleRows - (currentMeeting && meetingView !== 'transcript' || timedRows[readerScroll]?.heading === undefined ? 0 : 1);
+  const readerMore = readerTotal - readerShown > 0 ? `↓ ${readerTotal - readerShown} more` : readerScroll > 0 ? `↑ ${readerScroll} more` : undefined;
+  const searchHighlight = meetingView === 'transcript' ? searchQuery : '';
+  // The title says whether Seashell can record; the body says what is missing, or what happens next.
   const homeMessage = attention.length ? <>
-    <Text bold>Seashell can't record meetings yet.</Text>
-    <Text> </Text>
-    {attention.map((status) => <Text key={status.id}>{status.label}: {status.summary}</Text>)}
-    <Text> </Text>
-    <Text>Press <Text bold>Enter</Text> for a guided setup, one step at a time.</Text>
+    {attention.map((status) => <Text key={status.id} wrap="truncate-end">
+      <Text color={FEATURE_STATE_COLOR[status.state]}>{FEATURE_STATE_SYMBOL[status.state]}</Text> {MENU_LABEL[status.id].padEnd(16)}<Text dimColor>{status.summary}</Text>
+    </Text>)}
   </> : <>
-    <Text bold>Seashell is ready.</Text>
-    <Text> </Text>
     <Text>Join a call and recording starts by itself. Words appear here as people speak.</Text>
     <Text dimColor>Notes are written when the call ends.</Text>
   </>;
 
-  const reader = (
+  const reader = searchPane ? (
+    <Box flexDirection="column" flexGrow={1} minWidth={0} paddingLeft={1} overflow="hidden" aria-label="Matching lines">
+      <Box flexShrink={0} marginBottom={1}>
+        <Text dimColor wrap="truncate-end">{searchLines.length
+          ? `${searchLines.length} ${searchLines.length === 1 ? 'line mentions' : 'lines mention'} "${searchQuery.trim()}"`
+          : `Its title mentions "${searchQuery.trim()}"; no line does.`}</Text>
+      </Box>
+      {/* Measured as the reader is, so the lines wrap to the room beside the list. */}
+      <Box ref={transcriptPaneRef} flexGrow={1} flexDirection="column" overflow="hidden">
+        {searchLines.flatMap((line) => line.rows).slice(0, visibleRows).map((row, index) => <Box key={index} flexShrink={0} height={1}>
+          <Text wrap="truncate-end">{highlighted(row, searchQuery) || ' '}</Text>
+        </Box>)}
+      </Box>
+    </Box>
+  ) : (
     <Box flexDirection="column" flexGrow={1} minWidth={0} paddingLeft={layout.compact ? 0 : 1} overflow="hidden">
       {currentMeeting && !drawerOnly && (
         <Box flexShrink={0} marginBottom={1} justifyContent="space-between">
@@ -2289,14 +2489,15 @@ export default function App(props: {
               </React.Fragment>
             ))}
           </Text>
-          {readerTotal > visibleRows && <Text dimColor>{Math.min(readerTotal, readerScroll + visibleRows)}/{readerTotal} lines</Text>}
+          {readerMore && <Text dimColor>{readerMore}</Text>}
         </Box>
       )}
       <Box ref={transcriptPaneRef} flexGrow={1} minHeight={2} flexDirection="column" overflow="hidden" aria-label="Transcript reader">
         {currentMeeting && meetingView !== 'transcript' ? visibleAuxiliaryMeetingLines.map((line, index) => (
           <Box key={`${meetingView}-${index}`} flexShrink={0} height={1}>
-            {line.startsWith(HEADING)
-              ? <Text bold color="cyan" wrap="truncate-end">{line.slice(HEADING.length)}</Text>
+            {transcriptScroll + index < cautionRows.length ? <Text color="yellow" wrap="truncate-end">{line}</Text>
+              : line.startsWith(HEADING) ? <Text bold color="cyan" wrap="truncate-end">{line.slice(HEADING.length)}</Text>
+              : line.startsWith(SUBHEADING) ? <Text bold wrap="truncate-end">{line.slice(SUBHEADING.length)}</Text>
               : <Text wrap="truncate-end">{line || ' '}</Text>}
           </Box>
         )) : visibleTranscriptRows.length === 0 ? (
@@ -2306,7 +2507,9 @@ export default function App(props: {
               : backgroundMessage ?? 'No transcript text'}</Text>
           )
         ) : visibleTranscriptRows.map((row, index) => <Box key={index} flexShrink={0} height={1}>
-          <Text wrap="truncate-end">{(searchHighlight ? row.replace(searchHighlight, (match) => HIGHLIGHT(match)) : row) || ' '}</Text>
+          {/* The line n is on is marked in full; the other matches are only underlined. */}
+          <Text wrap="truncate-end">{highlighted(row.text, searchHighlight,
+            currentMatch !== undefined && row.start !== timedRows[currentMatch]?.start) || ' '}</Text>
         </Box>)}
       </Box>
     </Box>
@@ -2329,43 +2532,53 @@ export default function App(props: {
       ['Note', notesSetup.editing !== undefined ? `${notesSetup.editing}█` : currentMeeting.ai?.note ?? '— Enter to add, e.g. "Capture pricing"'],
       ['AI', currentMeeting.ai?.off ? '‹ Off › no notes or chat; agents are refused it' : '‹ On ›'],
     ];
-    return <Sheet title="Notes setup for this meeting">
+    return <Sheet>
       {rows.map(([label, value], index) => (
         <Text key={label} inverse={index === notesSetup.row} wrap="truncate-end">{index === notesSetup.row ? '› ' : '  '}{label.padEnd(10)}{value}</Text>
       ))}
     </Sheet>;
   })() : null;
   const namedSpeakers = currentRecord?.speakers ?? [];
-  const speakerSheet = speakerPickerOpen && currentRecord ? <Sheet title="Name a speaker">
+  const speakerName = (speaker: (typeof namedSpeakers)[number]) =>
+    `${speakerDisplayName(speaker.id, speaker.label)}${speaker.suggestion ? ' · suggested' : ''}`;
+  const speakerColumn = Math.min(32, Math.max(18, ...namedSpeakers.map((speaker) => speakerName(speaker).length))) + 2;
+  const speakerSheet = speakerPickerOpen && currentRecord ? <Sheet>
     {namedSpeakers.map((speaker, index) => {
       const said = currentRecord.transcript.find((segment) => segment.speaker === speaker.id)?.text ?? '';
-      const label = speaker.id === 'LOCAL' && speaker.label === 'Microphone' ? 'You' : speaker.label;
       return <Text key={speaker.id} inverse={index === speakerSelection} wrap="truncate-end">
-        {index === speakerSelection ? '› ' : '  '}{label.padEnd(20)}<Text dimColor={index !== speakerSelection}>“{said}”</Text>
+        {index === speakerSelection ? '› ' : '  '}{truncate(speakerName(speaker), speakerColumn - 1).padEnd(speakerColumn)}
+        <Text dimColor={index !== speakerSelection}>“{said}”</Text>
       </Text>;
     })}
+    {namedSpeakers.some((speaker) => speaker.suggestion) && <Box marginTop={1}>
+      <Text dimColor wrap="wrap">Suggested names come from voices you named before.</Text>
+    </Box>}
   </Sheet> : null;
-  const helpSheet = helpMode ? <Sheet title="Keys">
+  const helpSheet = helpMode ? <Sheet>
     {HELP_ROWS.map(([group, keys]) => <HelpRow key={group} group={group} keys={keys} />)}
   </Sheet> : null;
-  const audioSheet = audioHelpOpen ? <Sheet title="Audio help">
-    <Text>1. Quiet can just mean you are muted or nobody is speaking.</Text>
-    <Text>2. Check the right microphone is chosen and its level moves. <Text bold>o</Text> opens Sound.</Text>
-    <Text>3. Check Seashell Microphone is allowed. <Text bold>p</Text> opens Privacy.</Text>
-  </Sheet> : null;
-  const sheet = helpSheet ?? audioSheet ?? notesSheet ?? speakerSheet;
 
-  const prompt = chatInputState ? `Ask: ${chatInputState.input}█  Enter send · Esc cancel`
-    : renameState ? `Name for ${renameState.label}: ${renameState.input}█  Enter save · Esc cancel`
-    : searchMode ? `Search: ${searchQuery}█  Enter choose · Esc clear`
-    : exportMode ? 'Export  s SRT  v WebVTT  t text  j JSON  Esc cancel'
-    : confirmTrashId ? 'Move to the Trash folder?  y yes  n no'
-    : confirmRewrite ? 'Rewrite these notes? This replaces them.  y yes  n no'
-    : confirmStop ? 'Stop recording? Everything so far is kept.  y yes  n no'
-    : notesSetup ? notesSetup.editing !== undefined ? 'Enter save · Esc cancel' : '↑↓ choose · ←→ change · Enter edit note · Esc done'
-    : speakerPickerOpen ? '↑↓ choose · Enter name · Esc back'
-    : helpMode ? '? or Esc close'
-    : audioHelpOpen ? 'o Sound · p Privacy · Esc back'
+  // Questions and typed answers take the key bar's row. Their keys are never cut.
+  const suggested = speakerPickerOpen ? currentRecord?.speakers[speakerSelection]?.suggestion ? currentRecord.speakers[speakerSelection] : undefined : undefined;
+  const prompt: Omit<React.ComponentProps<typeof Prompt>, 'columns'> | undefined = chatInputState
+    ? { text: 'Ask:', input: chatInputState.input, hints: [['Enter', 'send'], ['Esc', 'cancel']] }
+    : renameState ? { text: `Name for ${renameState.label}:`, short: 'Name:', input: renameState.input, hints: [['Enter', 'save'], ['Esc', 'cancel']] }
+    : searchMode ? { text: 'Search:', input: searchQuery, hints: [['Enter', 'choose'], ['Esc', 'cancel']] }
+    : exportMode ? { text: 'Export', hints: [['s', 'subtitles'], ['t', 'text'], ['j', 'data'], ['Esc', 'cancel']] }
+    : confirmTrashId ? { text: `Move "${selectedRecord?.title ?? 'this meeting'}" to the Trash?`, short: 'Move it to the Trash?',
+      hints: [['y', 'move'], ['n', 'keep']] }
+    : confirmRewrite ? { text: 'Rewrite these notes? This replaces them.', short: 'Rewrite and replace these notes?', hints: [['y', 'rewrite'], ['n', 'keep']] }
+    : confirmStop ? { text: 'Stop recording? Everything so far is kept.', short: 'Stop recording?', hints: [['y', 'stop'], ['n', 'keep recording']] }
+    : consentPending && !approvalPending && consentTitle ? { text: `Record "${consentTitle}"?`, short: 'Record this call?',
+      hints: [['y', 'record'], ['n', 'ignore']] }
+    : undefined;
+  const write: Hint[] = currentMeeting?.ai?.off ? [] : [['Enter', hasNotes ? 'rewrite notes' : 'write notes']];
+  const sheetHints: Hint[] | undefined = notesSetup ? notesSetup.editing !== undefined ? [['Enter', 'save'], ['Esc', 'cancel']]
+      : [...(notesSetup.row === 1 ? [['Enter', 'edit note'] as Hint] : [...write, ['←→', 'change'] as Hint]), ['↑↓', 'choose'], ['Esc', 'back']]
+    : speakerPickerOpen ? suggested ? [['y', 'keep'], ['n', `not ${suggested.label}`], ['Enter', 'rename'], ['↑↓', 'choose'], ['Esc', 'back']]
+      : [['Enter', 'name'], ['↑↓', 'choose'], ['Esc', 'back']]
+    : helpMode ? [['Esc', 'back']]
+    : audioHelpOpen ? [['o', 'Sound settings'], ['p', 'Privacy'], ['Esc', 'back']]
     : undefined;
 
   const statusProps = showBackgroundStatus ? {
@@ -2389,7 +2602,7 @@ export default function App(props: {
       : backgroundEntry?.captureState === 'processing' ? 'Final transcript in progress' : undefined,
     warning: (view === 'live' || backgroundRecording) && backgroundWatch?.warning ? backgroundWatch.warning
       : backgroundRecording && !backgroundWatch ? 'The recorder has not confirmed its status. Check seashell meeting watch status.' : undefined,
-    approvalPending: backgroundWatch?.consentId !== undefined && backgroundApproval === backgroundWatch.consentId,
+    approvalPending,
     nowUnixMs: statusNow,
   } : view === 'live' ? {
     mode: (paused ? automaticCandidate ? 'awaiting-consent' : automaticMeetingEnabled ? 'watching' : 'paused' : captureRecordingMode(liveHealth)) as RecordingMode,
@@ -2401,59 +2614,118 @@ export default function App(props: {
     nowUnixMs: statusNow,
   } : undefined;
   const summary = statusProps ? recordingSummary(statusProps) : undefined;
-  const quietlyDone = statusProps?.mode === 'ready' && !summary?.problems.length && summary?.color === undefined;
+  const quietlyDone = statusProps?.mode === 'ready' && !summary?.alert && summary?.label === 'Saved · transcript ready';
   const recordingElsewhere = activeBackgroundEntry && backgroundEntry?.id !== activeBackgroundEntry.id ? activeBackgroundEntry : undefined;
-  const consentOverRecord = view === 'record' && backgroundWatch?.phase === 'awaiting-consent';
-  const heading = attention.length && view === 'live' && statusProps?.mode === 'watching'
-    ? { text: 'Not recording · finish setup to record meetings', color: 'yellow' as const }
-    : consentOverRecord ? { text: `Not recording · record this? · ${backgroundWatch?.candidate?.title}`, color: 'yellow' as const }
-    : recordingElsewhere ? { text: `● Another meeting is recording · ${recordingElsewhere.title} · l to open`, color: 'red' as const }
-    : summary && !quietlyDone ? { text: summary.headline, color: summary.color }
-    : currentRecord && view === 'record' ? { text: [currentRecord.title, meetingWhen(currentRecord.createdAt),
-      ...(currentEntry?.duration ? [`${Math.max(1, Math.round(currentEntry.duration / 60))} min`] : [])].join(' · ') }
-    : { text: '' };
-  const problems = [
-    ...((consentOverRecord || recordingElsewhere) && summary && !quietlyDone ? [summary.headline] : []),
-    ...(summary?.problems ?? []),
-    ...(currentMeeting?.status === 'failed' ? ['The notes failed · g to try again'] : []),
-    ...(currentMeeting && meetingView === 'transcript' && reading && showSpeakers &&
-      currentRecord?.speakers.some((speaker) => speaker.id === 'SYSTEM')
-      ? [currentRecord.speakerAnalysis?.detail ?? 'Source labels only · v to set up speaker names'] : []),
-  ];
-  const caution = attention.length && !(view === 'live' && statusProps?.mode === 'watching') && !summary?.problems.length
-    ? attention[0]!.summary.includes('silent') ? `${attention[0]!.id === 'microphone' ? 'Microphone' : 'Computer audio'}: silent last meeting · i audio help`
-    : `${attention[0]!.label}: ${attention[0]!.summary} · , to check` : undefined;
-  const toast = error ?? (copied ? 'Copied.' : notice) ?? undefined;
+  // Home, before Seashell can record: the title says so, the body says what is missing.
+  const settingUp = attention.length > 0 && view === 'live' && statusProps?.mode === 'watching';
+  const recordHeading = currentRecord && view === 'record' ? { text: [currentRecord.title, meetingWhen(currentRecord.createdAt),
+    ...(currentEntry?.duration ? [`${Math.max(1, Math.round(currentEntry.duration / 60))} min`] : [])].join(' · ') } : undefined;
+  // The title names what is on screen; a call waiting to be recorded is asked about in the key bar,
+  // and another call recording is said in the status slot.
+  const heading: { text: string; color?: 'yellow'; keep?: number } = settingUp ? { text: "Can't record yet", color: 'yellow' }
+    // Narrow, the meeting's title gives way before what is happening to it. What is happening keeps the
+    // title's colour whatever happens: only the alert beside it says something is wrong.
+    : summary && !quietlyDone ? { text: summary.headline, keep: Bun.stringWidth(summary.label) }
+    // A long meeting title is cut before a warning beside it.
+    : recordHeading ? { ...recordHeading, keep: 24 } : { text: '' };
   // Says the recorder is on, so a quiet screen never reads as a stopped one.
-  const standing = watchOwnership === 'external' && backgroundWatch?.phase === 'watching' && !recordingElsewhere && !attention.length
-    && !(summary && !quietlyDone && statusProps?.mode !== 'watching') ? layout.compact ? 'Watching' : 'Watching for calls'
-    : currentMeeting?.status === 'reconciling' || currentMeeting?.status === 'observing' ? 'writing notes…' : undefined;
+  const standing = watchOwnership === 'external' && backgroundWatch?.phase === 'watching' && statusProps?.mode !== 'watching'
+    && !(summary && !quietlyDone) ? { text: 'Watching for calls' }
+    : currentMeeting?.status === 'reconciling' || currentMeeting?.status === 'observing' ? { text: 'Writing notes…' } : undefined;
+  // Warnings take the title's status slot, most urgent first; nothing adds a row under the title.
+  // The slot says only what is wrong; the key that fixes it leads the key bar, and a fix in
+  // Settings opens Settings on the row that fixes it.
+  const slot: (TitleStatus & { focus?: FeatureId }) | undefined = recordingElsewhere
+    ? { text: '● Another call is recording', short: '● Another call', fix: ['l', 'go to the call'] }
+    : summary?.alert && !quietlyDone ? summary.alert
+    : currentMeeting?.status === 'failed' ? { text: 'Notes failed', color: 'red', fix: ['g', 'retry notes'] }
+    : attention[0] && !settingUp ? attentionStatus(attention[0])
+    : currentMeeting && meetingView === 'transcript' && reading && showSpeakers && currentRecord?.speakers.some((speaker) => speaker.id === 'SYSTEM')
+      ? { text: 'Voices not separated', color: 'yellow', fix: [',', 'speaker setup'], focus: 'speaker-separation' }
+    : standing;
+  shownSlot.current = slot;
+  const toast = error ? { text: error, color: 'red' as const } : copied ? { text: 'Copied.', color: 'green' as const } : notice ?? undefined;
+
+  // Audio help leads with what Seashell found: during a call, what the source sent and since when;
+  // after one, that your side was missing; at home, what the last meeting heard.
+  const startedAt = showBackgroundStatus ? backgroundEntry ? Date.parse(backgroundEntry.createdAt) : undefined
+    : liveSessionStartedAt.current ?? undefined;
+  const silentSetup = attention.find((status) => (status.id === 'microphone' || status.id === 'computer-audio') && status.summary.includes('silent'));
+  const live = summary?.alert && statusProps?.mode !== 'ready' && statusProps?.mode !== 'processing'
+    ? sourceFinding(statusProps?.health, startedAt, statusNow) : undefined;
+  const finding: { text: string; source: 'microphone' | 'computer'; color: 'red' | 'yellow' } | undefined = live
+    ? { ...live, color: summary!.alert!.color }
+    : yourSide && view === 'record' ? { text: yourSide, source: 'microphone', color: 'yellow' }
+    : silentSetup ? { text: silentSetup.detail, source: silentSetup.id === 'microphone' ? 'microphone' : 'computer', color: 'yellow' }
+    : undefined;
+  const sheetWidth = terminal.columns - 2;
+  // Each step's wrapped lines hang under its words, not its number.
+  const step = (number: number, text: string) => <Box key={number} flexShrink={0}>
+    <Box width={3} flexShrink={0}><Text>{number}.</Text></Box>
+    <Paragraph text={text} width={sheetWidth - 3} />
+  </Box>;
+  const audioSheet = audioHelpOpen ? <Sheet>
+    {finding && <Box flexShrink={0} marginBottom={1}><Paragraph text={finding.text} width={sheetWidth} color={finding.color} /></Box>}
+    {step(1, 'Check the right microphone is chosen and its level moves.')}
+    {step(2, 'Check Seashell Microphone is allowed in Privacy & Security.')}
+  </Sheet> : null;
+  const sheet = helpSheet ?? audioSheet ?? notesSheet ?? speakerSheet;
+  // A sheet's name takes the title line, as a screen's does; what is wrong stays in the status slot.
+  const sheetName = helpSheet ? 'Keys' : audioSheet ? finding?.source === 'microphone' ? 'Mic help' : 'Audio help'
+    : notesSheet ? 'Notes setup' : speakerSheet ? 'Name a speaker' : undefined;
 
   return (
     <Box flexDirection="column" paddingX={1} height={terminal.rows} overflow="hidden">
-      <Box flexShrink={0} justifyContent="space-between">
-        <Text wrap="truncate-end">
-          🐚{layout.compact ? '' : <Text> <Text bold color="cyan">Seashell</Text></Text>}
-          {heading.text ? '  ' : ''}
-          <Text bold={Boolean(heading.color)} {...(heading.color ? { color: heading.color } : {})}>{heading.text}</Text>
-          {summary?.detail && !layout.compact && !quietlyDone ? <Text dimColor>  {summary.detail}</Text> : null}
-        </Text>
-        {standing && <Box flexShrink={0} marginLeft={2}><Text dimColor>{standing}</Text></Box>}
-      </Box>
-      {problems.map((problem) => <Box key={problem} flexShrink={0}><Text color="red" inverse wrap="truncate-end">{` ${problem} `}</Text></Box>)}
-      {caution && <Box flexShrink={0}><Text color="yellow" wrap="truncate-end">{caution}</Text></Box>}
-      <Box flexShrink={0}><Text dimColor wrap="truncate-end">{'─'.repeat(Math.max(1, terminal.columns - 2))}</Text></Box>
+      {sheetName ? <ScreenTitle name={sheetName} status={slot} />
+        : <ScreenTitle name={heading.text} bold={Boolean(heading.color)} {...(heading.color ? { color: heading.color } : {})}
+          {...(heading.keep ? { keep: heading.keep } : {})}
+          {...(summary?.detail && !quietlyDone ? { detail: summary.detail } : {})} status={slot} />}
       {sheet ?? <Box flexDirection="row" flexGrow={1} overflow="hidden">
         {historyOpen && list}
         {!drawerOnly && reader}
       </Box>}
       <Box flexShrink={0}>
-        {prompt ? <Text color={confirmTrashId ? 'red' : 'yellow'}
-          wrap={chatInputState || renameState || searchMode ? 'truncate-start' : 'truncate-end'}>{prompt}</Text>
-          : processing ? <Text color="magenta" wrap="truncate-end">◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}</Text>
-          : toast ? <Text color={error ? 'red' : 'green'}>{toast}</Text>
-          : <KeyBar hints={hints} columns={terminal.columns - 2} />}
+        {prompt ? <Prompt {...prompt} color="yellow" columns={terminal.columns - 2} />
+          : processing ? <Text dimColor wrap="truncate-end">◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}</Text>
+          : toast ? <Toast text={toast.text} color={toast.color} columns={terminal.columns - 2} />
+          : sheetHints ? <KeyBar hints={sheetHints} columns={terminal.columns - 2} help={false} />
+          : <KeyBar hints={withFix(hints, slot)} columns={terminal.columns - 2} />}
       </Box>
     </Box>
   );
+}
+
+const searchPattern = (needle: string, flags: string) => new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), flags);
+
+/** Every place a row says what was searched for, in the transcript's yellow: filled, or underlined when another match is current. */
+function highlighted(row: string, query: string, soft = false): string {
+  const needle = query.trim();
+  return needle ? row.replace(searchPattern(needle, 'giu'), (match) => (soft ? SOFT_HIGHLIGHT : HIGHLIGHT)(match)) : row;
+}
+
+/** A dim line with what was searched for in the transcript's yellow, at full strength. */
+function Highlighted(props: { text: string; query: string }) {
+  const needle = props.query.trim();
+  // Split around a captured match, the text and the matches alternate.
+  const parts = needle ? props.text.split(new RegExp(`(${searchPattern(needle, 'u').source})`, 'giu')) : [props.text];
+  return <>{parts.map((part, index) => index % 2
+    ? <Text key={index} color="black" backgroundColor="yellow">{part}</Text>
+    : <Text key={index} dimColor>{part}</Text>)}</>;
+}
+
+/** The list's heading during a search: how many meetings say it, and what was searched for. */
+function searchHeading(count: number, query: string): string {
+  return `${count === 0 ? 'No meeting mentions' : count === 1 ? '1 meeting mentions' : `${count} meetings mention`} "${query}"`;
+}
+
+/** A setup problem in the title's status slot: what is wrong in a word or two. The key that helps
+ * leads the key bar: audio help for a silent source, otherwise Settings, opened on the row that fixes it. */
+function attentionStatus(status: FeatureStatus): TitleStatus & { focus: FeatureId } {
+  const silent = status.summary.includes('silent');
+  const [what, fix] = status.id === 'recorder' ? [status.state === 'attention' ? 'Recorder not responding' : 'Recorder off', 'fix recorder']
+    : status.id === 'microphone' ? silent ? ['Mic silent', 'mic help'] : ['Mic not allowed', 'allow mic']
+    : status.id === 'computer-audio' ? silent ? ['Computer audio silent', 'audio help'] : ['Computer audio unconfirmed', 'check audio']
+    : status.id === 'detection' ? ['Meet not connected', 'connect Meet']
+    : [`${MENU_LABEL[status.id]} needs you`, 'settings'];
+  return { text: what, color: 'yellow', fix: [silent ? 'i' : ',', fix], focus: status.id };
 }

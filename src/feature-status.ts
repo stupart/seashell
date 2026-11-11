@@ -1,7 +1,8 @@
 import { existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { currentMeetingRoutes } from './ai-provider.ts';
+import { currentMeetingRoutes, providerName } from './ai-provider.ts';
+import { computerAudioConfirmed, readAudioChecks, type AudioChecks } from './audio-checks.ts';
 import { readBackgroundMeetingStatus } from './background-meeting-status.ts';
 import { readBackgroundWatchStatus } from './background-watch-status.ts';
 import { captureCoverage, type CaptureCoverage } from './capture-health.ts';
@@ -16,16 +17,25 @@ import { microphonePermission, type MicrophonePermissionStatus } from './microph
 import { calendarPermission } from './calendar-permission.ts';
 import type { HelperPermissionStatus } from './helper-permission.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
-import { microphoneRuntimeHelperPath } from './runtime-host.ts';
+import { microphoneRuntimeHelperPath, systemAudioRuntimeHelperPath } from './runtime-host.ts';
 import { listTranscriptRecords } from './transcript-library.ts';
+import { listPrompts } from './prompts.ts';
+import { extractorsDirectory, loadExtractors } from './extractors.ts';
+import { automationsDirectory, loadAutomations, readAutomationRuns, runFailure } from './automations.ts';
+import { listVoiceprints } from './voiceprints.ts';
+import { screenCapturePermission } from './video-capture.ts';
+import { DEFAULT_MEETING_VIDEO } from './video-recording.ts';
+import { meetingWhen } from './tui-state.ts';
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** ok: works · attention: works partly or needs one step · off: not set up (optional) · broken: should work and does not. */
 export type FeatureState = 'ok' | 'attention' | 'off' | 'broken';
-export type FeatureAction = 'enable-recorder' | 'connect-meet' | 'allow-microphone' | 'allow-calendar' | 'open-speakers' | 'open-ai' | 'open-templates';
+export type FeatureAction = 'enable-recorder' | 'connect-meet' | 'allow-microphone' | 'allow-calendar' | 'open-speakers' | 'open-ai' | 'open-templates'
+  | 'open-extractors' | 'open-automations' | 'turn-on-video' | 'allow-screen-recording' | 'check-computer-audio';
 export type FeatureId = 'recorder' | 'detection' | 'microphone' | 'computer-audio' | 'transcription'
-  | 'meet-names' | 'speaker-separation' | 'ai-notes' | 'notes-templates' | 'calendar';
+  | 'meet-names' | 'speaker-separation' | 'voices' | 'ai-notes' | 'notes-templates' | 'prompts' | 'extractors' | 'automations'
+  | 'calendar' | 'video';
 
 export interface FeatureStatus {
   readonly id: FeatureId;
@@ -52,6 +62,11 @@ export const FEATURE_ACTION_LABEL: Record<FeatureAction, string> = {
   'open-speakers': 'Open speaker setup',
   'open-ai': 'Choose AI',
   'open-templates': 'Open your templates and About me',
+  'open-extractors': 'Open Insights folder',
+  'open-automations': 'Open Automations folder',
+  'turn-on-video': 'Turn video on',
+  'allow-screen-recording': 'Allow Screen Recording',
+  'check-computer-audio': 'Check computer audio',
 };
 
 /** What the most recent recorded meeting actually captured, per source. */
@@ -80,6 +95,14 @@ export interface FeatureStatusDependencies {
   readonly systemAudioHelperReady?: () => boolean;
   /** When the native microphone recorder was installed; earlier meetings could not hear you. */
   readonly microphoneRecorderSince?: () => number | undefined;
+  /** When the computer-audio helper macOS judges was installed; a check or meeting before it used another identity. */
+  readonly systemAudioRecorderSince?: () => number | undefined;
+  /** What the guided setup heard itself (src/audio-checks.ts). */
+  readonly audioChecks?: () => AudioChecks;
+  /** Seashell Screen Capture's permission, asked only while video is on. */
+  readonly screenRecording?: (signal?: AbortSignal) => Promise<HelperPermissionStatus>;
+  /** The people with a saved voice. */
+  readonly voices?: () => ReadonlyArray<{ name: string; meetings: number }>;
 }
 
 export function lastMeetingEvidence(libraryDir: string): MeetingEvidence | undefined {
@@ -109,8 +132,9 @@ function aiEngineInstalled(): boolean {
   try { resolveHumainExecutable(); return true; } catch { return false; }
 }
 
-const when = (evidence: MeetingEvidence) =>
-  new Date(evidence.createdAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+// Local time, written the way the meetings list writes it, so "6:44 pm" here is 6:44 pm there.
+const when = (evidence: MeetingEvidence) => meetingWhen(evidence.createdAt);
+const checkedOn = (at: string) => meetingWhen(at);
 
 /**
  * One honest checklist for every capability: permission and process state are
@@ -129,7 +153,8 @@ export async function readFeatureStatuses(options: {
   const automationOn = automation?.enabled !== false && automation?.mode !== 'off';
   const browser = meeting?.speakerBrowser ?? 'off';
   const calendarOn = meeting?.calendar?.enabled === true && meeting.calendar.policy !== 'off';
-  const [meet, microphone, calendarAccess] = await Promise.all([
+  const videoOn = meeting?.video?.enabled ?? DEFAULT_MEETING_VIDEO.enabled;
+  const [meet, microphone, calendarAccess, screenRecording] = await Promise.all([
     browser === 'off' ? Promise.resolve(undefined)
       : (deps.meetConnection ?? checkMeetConnection)(browser, options.signal)
         .catch((): MeetProbe => ({ state: 'unavailable', detail: 'Meeting detection could not be checked.' })),
@@ -139,6 +164,9 @@ export async function readFeatureStatuses(options: {
     !calendarOn ? Promise.resolve(undefined)
       : (deps.calendar ?? (signal => calendarPermission({ ...(signal ? { signal } : {}) })))(options.signal)
         .catch((): HelperPermissionStatus => ({ authorization: 'unknown', detail: 'Could not check calendar access.' })),
+    !videoOn ? Promise.resolve(undefined)
+      : (deps.screenRecording ?? (signal => screenCapturePermission({ ...(signal ? { signal } : {}) })))(options.signal)
+        .catch((): HelperPermissionStatus => ({ authorization: 'unknown', detail: 'Could not check Screen Recording.' })),
   ]);
   const evidence = (deps.lastMeeting ?? lastMeetingEvidence)(options.libraryDir);
   const statuses: FeatureStatus[] = [];
@@ -183,9 +211,14 @@ export async function readFeatureStatuses(options: {
     try { return statSync(microphoneRuntimeHelperPath()).mtimeMs; } catch { return undefined; }
   }))();
   const predatesRecorder = Boolean(evidence && recorderSince !== undefined && Date.parse(evidence.createdAt) < recorderSince);
-  const micSilent = evidence && evidence.microphoneChunks > 0 && evidence.audibleMicrophoneChunks === 0 && !predatesRecorder;
+  // The guided setup hearing you since that meeting outweighs it, until the helper is replaced.
+  const checks = (deps.audioChecks ?? readAudioChecks)();
+  const heardInSetup = (at: string | undefined, since: number | undefined) => at !== undefined &&
+    (since === undefined || Date.parse(at) >= since) && (!evidence || Date.parse(at) > Date.parse(evidence.createdAt));
+  const micCheck = heardInSetup(checks.microphone, recorderSince) ? checks.microphone : undefined;
+  const micSilent = evidence && evidence.microphoneChunks > 0 && evidence.audibleMicrophoneChunks === 0 && !predatesRecorder && !micCheck;
   // A couple of audible moments in an hour is not your side of the call.
-  const almostSilent = evidence?.coverage?.yourSideMissing && !predatesRecorder
+  const almostSilent = evidence?.coverage?.yourSideMissing && !predatesRecorder && !micCheck
     ? { evidence, minutes: Math.max(1, Math.round(evidence.coverage.otherSideAudibleSeconds / 60)) } : undefined;
   statuses.push({
     id: 'microphone', label: 'Your microphone', optional: false,
@@ -198,10 +231,11 @@ export async function readFeatureStatuses(options: {
         ? { state: 'attention', summary: 'Allowed · your side almost silent',
           detail: `Your side was almost silent in "${almostSilent.evidence.title}" (${when(almostSilent.evidence)}). The others talked for about ${almostSilent.minutes} minutes, but your microphone picked up almost nothing.`,
           fix: 'Check that you are not muted, and that the right microphone is selected in System Settings → Sound → Input.' } as const
-        : { state: 'ok', summary: evidence?.audibleMicrophoneChunks ? 'Heard in last meeting'
+        : { state: 'ok', summary: micCheck ? 'Heard during setup' : evidence?.audibleMicrophoneChunks ? 'Heard in last meeting'
             : predatesRecorder ? 'Allowed · your next meeting confirms it' : 'Allowed',
           detail: 'Records your side of the conversation as its own track, so your words are labelled as you.' +
-            (predatesRecorder && !evidence?.audibleMicrophoneChunks
+            (micCheck ? ` The guided setup heard you at ${checkedOn(micCheck)}.`
+              : predatesRecorder && !evidence?.audibleMicrophoneChunks
               ? ' Meetings recorded before this update could not hear you; that is fixed now.' : '') } as const
       : microphone.authorization === 'notDetermined'
         ? { state: 'broken', summary: 'Not allowed yet',
@@ -214,19 +248,36 @@ export async function readFeatureStatuses(options: {
             detail: microphone.detail, fix: 'Update Seashell.', command: 'brew upgrade stupart/tap/seashell' } as const),
   });
 
-  // Computer audio: no prompt-free permission check exists, so rely on evidence.
+  // Computer audio: no prompt-free permission check exists, so rely on what was heard,
+  // by the last meeting or by the guided setup, through the helper the recorder runs now.
   const helperReady = (deps.systemAudioHelperReady ?? (() => existsSync(join(PROJECT_ROOT, 'native', 'bin', 'seashell-system-audio'))))();
+  const computerSince = (deps.systemAudioRecorderSince ?? (() => {
+    try { return statSync(systemAudioRuntimeHelperPath()).mtimeMs; } catch { return undefined; }
+  }))();
+  // Until a check at the Mac confirms Seashell System Audio, the recorder keeps
+  // the background recorder's permission (src/live-system-audio.ts), so meetings
+  // recorded with it still count.
+  const ownConfirmed = Boolean(computerAudioConfirmed(checks, computerSince));
+  const computerCheck = ownConfirmed && heardInSetup(checks.computer, computerSince) ? checks.computer : undefined;
+  const computerDetail = 'Records everyone else from your Mac\'s audio output.';
+  const check = { action: 'check-computer-audio', command: 'seashell meeting computer-audio setup' } as const;
+  // Recording works either way; a test sound at the Mac moves it onto Seashell's own permission,
+  // which the key bar offers. Under a ✓ there is nothing more to say.
+  const allow = 'Enter plays a test sound to check it.';
   statuses.push({
     id: 'computer-audio', label: 'Other people (computer audio)', optional: false,
     ...(!helperReady ? { state: 'broken', summary: 'Recorder missing', detail: 'The computer-audio recorder is not installed.',
       fix: 'Update Seashell.', command: 'brew upgrade stupart/tap/seashell' } as const
     : evidence?.audibleComputerChunks ? { state: 'ok', summary: 'Heard in last meeting',
-      detail: `Records everyone else from your Mac's audio output. Last meeting: "${evidence.title}" (${when(evidence)}).` } as const
+      detail: `${computerDetail} Last meeting: "${evidence.title}" (${when(evidence)}).`,
+      // Until a check at the Mac, it records with the background recorder's permission.
+      ...(ownConfirmed ? {} : check) } as const
+    : computerCheck ? { state: 'ok', summary: 'Heard during setup',
+      detail: `${computerDetail} The check heard your Mac through Seashell System Audio at ${checkedOn(computerCheck)}.` } as const
     : evidence ? { state: 'attention', summary: 'Silent in last meeting',
-      detail: `Nothing was heard from your computer in "${evidence.title}" (${when(evidence)}). macOS may need Screen & System Audio Recording access for Seashell Background.`,
-      fix: 'Allow Seashell Background in Privacy & Security → Screen & System Audio Recording.' } as const
+      detail: `Nothing was heard from your computer in "${evidence.title}" (${when(evidence)}).`, fix: allow, ...check } as const
     : { state: 'attention', summary: 'Not confirmed yet',
-      detail: 'Records everyone else from your Mac\'s audio output. It is confirmed after your first recorded meeting.' } as const),
+      detail: `${computerDetail} Your first recorded meeting confirms it, or check it now.`, fix: allow, ...check } as const),
   });
 
   const transcriptionReady = (deps.transcriptionReady ?? (() =>
@@ -260,31 +311,33 @@ export async function readFeatureStatuses(options: {
       fix: 'Set up the voice model once.', command: 'seashell setup --speakers --login' } as const),
   });
 
+  statuses.push(voicesStatus((deps.voices ?? listVoiceprints)()));
+
   const engine = (deps.aiEngineInstalled ?? aiEngineInstalled)();
   const routes = currentMeetingRoutes(meeting);
   const mode = meeting?.mode ?? 'post-session';
   const aiConfigured = Boolean(routes.chat && (mode === 'streaming' || routes.reconciliation) &&
     (mode === 'post-session' || routes.observer));
   const backends = [...new Set(Object.values(routes).flatMap(route => route ? [route.backend] : []))];
+  // Until an AI is chosen, that is what is missing: choosing one is the next step whether or not the engine is in yet.
+  const aiDetail = 'Writes notes, decisions and action items after each meeting and answers questions about it.';
   statuses.push({
     id: 'ai-notes', label: 'AI notes, summary & chat', optional: true,
-    ...(!engine ? { state: 'off', summary: 'Not installed', action: 'open-ai',
-      detail: 'Writes notes, decisions and action items after each meeting and answers questions about it.',
+    ...(!aiConfigured ? { state: 'off', summary: 'Not chosen', action: 'open-ai', detail: aiDetail,
+      fix: 'Choose which AI writes your notes.', command: engine ? 'seashell ai setup' : 'seashell ai install <package.tgz>' } as const
+    : !engine ? { state: 'off', summary: 'Not installed', action: 'open-ai', detail: `${aiDetail} The AI engine is not installed.`,
       fix: 'Install the AI engine.', command: 'seashell ai install <package.tgz>' } as const
-    : aiConfigured ? { state: 'ok', summary: `Using ${backends.join(' + ')}`, action: 'open-ai',
-      detail: 'Writes notes, decisions and action items after each meeting and answers questions about it.' } as const
-    : { state: 'off', summary: 'No model chosen', action: 'open-ai',
-      detail: 'Writes notes, decisions and action items after each meeting and answers questions about it. The engine is installed; choose which AI to use.',
-      fix: 'Choose which AI writes your notes.', command: 'seashell ai setup' } as const),
+    : { state: 'ok', summary: `Using ${backends.map(providerName).join(' + ')}`, action: 'open-ai', detail: aiDetail } as const),
   });
 
   statuses.push(templatesStatus(options.libraryDir));
+  statuses.push(promptsStatus(options.libraryDir), extractorsStatus(options.libraryDir), automationsStatus(options.libraryDir));
 
   const titlesDetail = 'Names each meeting after its calendar event (matched by its Meet link) and lists the attendees, which later helps name speakers.';
   statuses.push({
     id: 'calendar', label: 'Meeting titles from Calendar', optional: true,
-    ...(!calendarOn ? { state: 'off', summary: 'Off · meetings are called "Google Meet"',
-      detail: `${titlesDetail} macOS asks for Calendar access once.`,
+    ...(!calendarOn ? { state: 'off', summary: 'Off',
+      detail: `${titlesDetail} Until then, Meet calls are called "Google Meet". macOS asks for Calendar access once.`,
       fix: 'Turn on calendar titles; macOS asks for Calendar access once.', action: 'allow-calendar',
       command: 'seashell meeting calendar setup' } as const
     : calendarAccess?.authorization !== 'authorized' ? { state: 'attention', summary: 'On · needs Calendar access',
@@ -295,12 +348,86 @@ export async function readFeatureStatuses(options: {
       fix: 'Add your work account in System Settings → Internet Accounts, with Calendars on.' } as const
     : { state: 'ok', summary: 'On', detail: titlesDetail } as const),
   });
+
+  statuses.push(videoStatus(videoOn, screenRecording));
   return statuses;
+}
+
+const VIDEO_DETAIL = 'Records the call\'s window beside its audio, about 60 MB an hour. In a meeting, w plays it from the line you are reading.';
+
+/** Video with calls: on or off, and whether macOS lets Seashell Screen Capture record. */
+function videoStatus(on: boolean, permission: HelperPermissionStatus | undefined): FeatureStatus {
+  const base = { id: 'video', label: 'Meeting video', optional: true } as const;
+  // Off is a choice the person made, so there is nothing to nag about; Enter turns it back on.
+  if (!on) return { ...base, state: 'off', summary: 'Off · calls record audio only', detail: VIDEO_DETAIL,
+    action: 'turn-on-video', command: 'seashell meeting video on' };
+  if (permission?.authorization === 'authorized') return { ...base, state: 'ok', summary: 'On · Screen Recording allowed', detail: VIDEO_DETAIL };
+  if (permission?.authorization === 'unavailable') return { ...base, state: 'attention', summary: 'On · video recorder missing',
+    detail: `${VIDEO_DETAIL} The screen recorder is not installed, so calls record audio only.`, fix: 'Update Seashell.', command: 'brew upgrade stupart/tap/seashell' };
+  return { ...base, state: 'attention', summary: 'On · needs Screen Recording',
+    detail: `${VIDEO_DETAIL} Until macOS allows it, calls record audio only.`,
+    fix: 'Allow Seashell Screen Capture in Privacy & Security → Screen & System Audio Recording.',
+    action: 'allow-screen-recording', command: 'seashell meeting video setup' };
+}
+
+/** People Seashell recognises by voice. */
+function voicesStatus(voices: ReadonlyArray<{ name: string; meetings: number }>): FeatureStatus {
+  const base = { id: 'voices', label: 'Saved voices', optional: true,
+    detail: 'When you name a speaker, Seashell keeps their voice on this Mac and suggests the name in later meetings. Forget anyone here.' } as const;
+  return voices.length
+    ? { ...base, state: 'ok', summary: `${voices.length} ${voices.length === 1 ? 'person' : 'people'}` }
+    : { ...base, state: 'off', summary: 'None yet', fix: 'Name a speaker in a meeting to add one.' };
+}
+
+/** What each AI role is told, as files the owner edits. */
+function promptsStatus(libraryDir: string): FeatureStatus {
+  const detail = 'What the AI is told for live analysis, final notes and chat. Each is a Markdown file you can edit.';
+  let summary = 'As shipped';
+  try {
+    const prompts = listPrompts(libraryDir);
+    const edited = prompts.filter(prompt => prompt.state === 'edited').length;
+    const empty = prompts.filter(prompt => prompt.state === 'empty').length;
+    if (edited || empty) summary = [edited ? `${edited} edited` : '', empty ? `${empty} empty` : ''].filter(Boolean).join(' · ');
+  } catch {}
+  return { id: 'prompts', label: 'AI prompts', optional: true, state: 'ok', summary, detail, command: 'seashell prompts' };
+}
+
+/** Markdown files that pull the same things out of every meeting. */
+function extractorsStatus(libraryDir: string): FeatureStatus {
+  const base = { id: 'extractors', label: 'Insights', optional: true, action: 'open-extractors', command: 'seashell extractors',
+    detail: 'The same few things pulled out of every meeting, each one cited, under Insights in the notes. Each comes from a Markdown file in the Extractors folder.' } as const;
+  const { extractors, problems } = loadExtractors(libraryDir);
+  if (problems.length) return { ...base, state: 'broken', summary: `${problems.length} ${problems.length === 1 ? 'file does' : 'files do'} not load`,
+    fix: 'Fix the file marked ✗ below. Until then it never runs.' };
+  if (!extractors.length) return { ...base, state: 'off', summary: existsSync(extractorsDirectory(libraryDir)) ? 'None' : 'None yet',
+    fix: 'Open the folder; it starts with an example.' };
+  const automatic = extractors.filter(extractor => extractor.when.kind !== 'manual').length;
+  return { ...base, state: 'ok', summary: `${extractors.length} · ${automatic ? `${automatic} run by themselves` : 'run by hand'}` };
+}
+
+/** Markdown files that act when a meeting is ready, and how their last runs went. */
+function automationsStatus(libraryDir: string): FeatureStatus {
+  const base = { id: 'automations', label: 'Automations', optional: true, action: 'open-automations', command: 'seashell automations',
+    detail: 'Do something by themselves when a meeting is ready: save the notes to a folder, run a command, or post to a web address.' } as const;
+  const { automations, problems } = loadAutomations(libraryDir);
+  if (problems.length) return { ...base, state: 'broken', summary: `${problems.length} ${problems.length === 1 ? 'file does' : 'files do'} not load`,
+    fix: 'Fix the file marked ✗ below. Until then it never runs.' };
+  const on = automations.filter(automation => automation.enabled);
+  if (!on.length) return { ...base, state: 'off', summary: automations.length ? `${automations.length} · all off`
+    : existsSync(automationsDirectory(libraryDir)) ? 'None' : 'None yet', fix: 'Open the folder; it starts with an example that is off.' };
+  const last = readAutomationRuns(libraryDir).at(-1);
+  // A server that did not answer needs nothing fixed: the failed run below offers to try again.
+  return last?.status === 'failed'
+    ? { ...base, state: 'broken', summary: `${on.length} on · last run failed`,
+      ...(runFailure(last)?.retry ? {} : { fix: 'Check the failed run below, then fix its file.' }) }
+    : last?.status === 'skipped' && last.actions.some(action => action.detail?.startsWith('Waiting for your approval'))
+      ? { ...base, state: 'attention', summary: `${on.length} on · waiting for you`, fix: 'Allow it the next time Seashell asks, or run it by hand.' }
+      : { ...base, state: 'ok', summary: `${on.length} on` };
 }
 
 /** Which notes templates meetings use, and whether the AI knows who it is writing for. */
 function templatesStatus(libraryDir: string): FeatureStatus {
-  const detail = 'Final notes follow a template picked from the meeting title (1:1, discovery call, standup…), with every point cited. "About me" tells the AI who you are and how you like notes. Per meeting: [N] in the meeting.';
+  const detail = 'Final notes follow a template picked from the meeting title (1:1, discovery call, standup…), with every point cited. "About me" tells the AI who you are and how you like notes. In a meeting, g picks its template.';
   let count = 0;
   let personalised = false;
   let profile = false;
@@ -311,7 +438,7 @@ function templatesStatus(libraryDir: string): FeatureStatus {
   } catch {}
   const base = { id: 'notes-templates', label: 'Notes templates & About me', optional: true, action: 'open-templates', command: 'seashell templates' } as const;
   if (!personalised) {
-    return { ...base, state: 'off', summary: `${count} built-in templates · not personalised`, detail,
+    return { ...base, state: 'off', summary: `${count} built in`, detail,
       fix: 'Open your templates folder and write a few lines in "About me".' };
   }
   return profile

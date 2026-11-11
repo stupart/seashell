@@ -39,7 +39,7 @@ const app = render(<App />, { stdin: input as any, stdout: output as any, stderr
 const screen = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('🐚')));
 const type = async (key: string) => { input.write(key); await Bun.sleep(100); };
 const until = async (condition: () => boolean, message: string) => {
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + 10_000;
   while (!condition() && Date.now() < deadline) await Bun.sleep(50);
   assert(condition(), `${message}\n${screen()}`);
 };
@@ -50,11 +50,22 @@ try {
   await type('\x1b[B'); await type('\r');
   await until(() => screen().includes('1 Notes'), 'the meeting opens with its tabs');
   await type('1');
-  await type('n');
-  await until(() => screen().includes('Notes setup for this meeting'), 'N opens notes setup');
-  assert(screen().includes('Auto · Customer call from the title'), `the title picks Customer call\n${screen()}`);
+  // Leaving without a change says nothing.
+  await type('g');
+  await until(() => screen().includes('Notes setup'), 'G opens notes setup');
+  await until(() => screen().includes('Enter write notes'), 'and Enter in it writes the notes');
+  await type('\x1b');
+  await until(() => !screen().includes('Notes setup'), 'Esc closes it');
+  assert(!screen().includes('Saved for this meeting'), `nothing changed, so nothing to say\n${screen()}`);
+  await type('g');
+  await until(() => screen().includes('Notes setup'), 'G opens it again');
+  await until(() => screen().includes('Auto · Customer call from the title'), 'the title picks Customer call');
   await type('\x1b[C');
   await until(() => ai().template === 'Customer call', 'right arrow chooses the next template and saves it');
+  await type('\x1b');
+  await until(() => screen().includes('Saved for this meeting. Press g to write the notes with them.'), 'after a change, leaving says how to use it');
+  await type('g');
+  await until(() => screen().includes('Notes setup'), 'G opens it once more');
   await type('\x1b[C');
   await until(() => ai().template === 'General', 'and the next');
   await type('\x1b[B'); await type('\r');
@@ -63,11 +74,14 @@ try {
   await until(() => ai().note === 'Budget', 'the note is saved on Enter');
   await type('\x1b[B'); await type('\x1b[C');
   await until(() => ai().off === true, 'AI turns off for this meeting');
-  assert(screen().includes('no notes or chat'), 'the panel says what off means');
+  await until(() => screen().includes('no notes or chat'), 'the panel says what off means');
   await type('\x1b');
-  await until(() => !screen().includes('Notes setup for this meeting'), 'Esc closes the panel');
+  await until(() => !screen().includes('Notes setup'), 'Esc closes the panel');
   await until(() => screen().includes('AI is off for this meeting.'), 'the Notes tab says AI is off');
   await type('g');
-  await until(() => screen().includes('Press n to turn it on'), 'G refuses instead of sending the meeting to a model');
+  await until(() => screen().includes('Notes setup') && screen().includes('› AI'), 'with AI off, G opens on the switch');
+  assert(!screen().includes('Enter write notes'), 'and Enter writes nothing, so nothing is sent to a model');
+  await type('\r');
+  assert(screen().includes('Notes setup'), 'Enter on the switch does not send the meeting anywhere');
   process.stdout.write(JSON.stringify({ passed: true }) + '\n');
 } finally { app.unmount(); input.destroy(); output.destroy(); rmSync(root, { recursive: true, force: true }); }

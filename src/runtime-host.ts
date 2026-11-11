@@ -23,7 +23,10 @@ export interface RuntimeHostStatus {
 }
 
 function runtimeDirectory(options: RuntimeHostOptions): string {
-  return resolve(options.hostDirectory ?? join(homedir(), 'Library', 'Application Support', 'Sea Shell', 'Runtime'));
+  // SEASHELL_RUNTIME_DIR keeps tests and previews off the installed copies: replacing
+  // one gives macOS a new app, and the microphone permission no longer applies to it.
+  return resolve(options.hostDirectory ?? (process.env.SEASHELL_RUNTIME_DIR?.trim() ||
+    join(homedir(), 'Library', 'Application Support', 'Sea Shell', 'Runtime')));
 }
 
 export function meetingRuntimeHostPath(options: RuntimeHostOptions = {}): string {
@@ -42,6 +45,8 @@ export const MICROPHONE_RUNTIME_HELPER: StableRuntimeHelper = { name: 'Seashell 
 export const CALENDAR_RUNTIME_HELPER: StableRuntimeHelper = { name: 'Seashell Calendar', identifier: 'com.humain.seashell.calendar' };
 /** macOS lists this name under Privacy & Security → Screen & System Audio Recording. */
 export const SCREEN_CAPTURE_RUNTIME_HELPER: StableRuntimeHelper = { name: 'Seashell Screen Capture', identifier: 'com.humain.seashell.screen-capture' };
+/** macOS lists this name under Privacy & Security → Screen & System Audio Recording → System Audio Recording Only. */
+export const SYSTEM_AUDIO_RUNTIME_HELPER: StableRuntimeHelper = { name: 'Seashell System Audio', identifier: 'com.humain.seashell.system-audio' };
 
 export function runtimeHelperPath(helper: StableRuntimeHelper, options: RuntimeHostOptions = {}): string {
   return join(runtimeDirectory(options), helper.name);
@@ -50,6 +55,10 @@ export function runtimeHelperPath(helper: StableRuntimeHelper, options: RuntimeH
 /** macOS lists this name under Privacy & Security → Microphone. */
 export function microphoneRuntimeHelperPath(options: RuntimeHostOptions = {}): string {
   return runtimeHelperPath(MICROPHONE_RUNTIME_HELPER, options);
+}
+
+export function systemAudioRuntimeHelperPath(options: RuntimeHostOptions = {}): string {
+  return runtimeHelperPath(SYSTEM_AUDIO_RUNTIME_HELPER, options);
 }
 
 function existing(path: string) {

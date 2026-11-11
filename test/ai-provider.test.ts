@@ -93,7 +93,7 @@ test('automatic setup keeps expensive defaults out of live analysis and never gu
   expect(noFast.routes?.observer).toBeUndefined();
   const unknown = { id: 'unreviewed-model', name: 'Fast cheap', description: 'Use for everything', efforts: [] };
   expect(meetingModelClass(unknown)).toBe('unknown');
-  expect(() => recommendedMeetingSetup(undefined, 'openrouter', [unknown])).toThrow('Advanced');
+  expect(() => recommendedMeetingSetup(undefined, 'openrouter', [unknown])).toThrow('Open Models');
   expect(recommendedMeetingSetup(undefined, 'local-openai', [unknown]).routes?.observer).toBeUndefined();
   expect(recommendedMeetingSetup(undefined, 'claude-code', [
     { id: 'claude-fable-5-1[1m]', name: 'Fable', description: '', efforts: [] },

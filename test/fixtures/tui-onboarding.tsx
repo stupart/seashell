@@ -35,6 +35,7 @@ const dependencies: FeatureStatusDependencies = {
   speakerSeparationReady: () => false, aiEngineInstalled: () => false,
   transcriptionReady: () => true, systemAudioHelperReady: () => true,
   microphoneRecorderSince: () => Date.now() - 86_400_000,
+  systemAudioRecorderSince: () => Date.now() - 86_400_000,
 };
 const real = { ...await import('../../src/feature-status.ts') };
 mock.module('../../src/feature-status.ts', () => ({ ...real,
@@ -87,7 +88,7 @@ try {
   assert.equal(calls.microphone, 1);
 
   // Digital zeros, exactly what a muted or wrong input sends while macOS says "allowed".
-  await until(() => plain().includes('sending silence, not sound'), 'silence is explained', 8000);
+  await until(() => plain().includes('Your mic may be muted or set to the wrong input'), 'silence is explained', 8000);
   assert.ok(plain().includes('Check the input in Sound settings'));
   await type('o');
   assert.deepEqual(calls.panes, ['sound-input'], 'o opens Sound input');
@@ -100,6 +101,10 @@ try {
   await until(() => plain().includes('Play any sound') && plain().includes('Step 3 of 4'), 'computer audio');
   room.computer = { peak: 12000, rmsDbfs: -20 };
   await until(() => plain().includes('Heard your Mac'), 'computer audio passes');
+  // Kept beside the settings file, so a restart still knows both were heard.
+  const checks = join(root, 'audio-checks.json');
+  await until(() => existsSync(checks) && Boolean(JSON.parse(readFileSync(checks, 'utf8')).computer), 'the passed checks are remembered');
+  assert.ok(JSON.parse(readFileSync(checks, 'utf8')).microphone);
 
   await type('\r');
   await until(() => plain().includes('Optional extras'), 'optional extras');
@@ -110,7 +115,7 @@ try {
   await type('\r');
   await until(() => plain().includes("You're set"), 'the end says what works');
   await type('\r');
-  await until(() => since("You're set").includes('Seashell is ready'), 'back in the app, nothing left to fix');
+  await until(() => since("You're set").includes('Join a call and recording starts by itself'), 'back in the app, nothing left to fix');
   app.unmount();
 
   // Later runs offer the guide instead of opening it; Enter takes it.
@@ -119,19 +124,22 @@ try {
   rendered = '';
   const again = render(<App levels={levels} setupActions={actions} openSettings={() => {}} />,
     { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
-  await until(() => plain().includes('one step at a time'), 'the home screen offers the guide');
+  // The title says it cannot record yet; the key bar offers the guide, once.
+  await until(() => plain().includes("Can't record yet") && plain().includes('Enter guided setup'), 'the home screen offers the guide');
   assert.ok(!plain().includes('Guided setup'), 'not opened by itself after the first run');
   await type('\r');
   await until(() => plain().includes('Guided setup') && plain().includes('Background recorder'), 'Enter starts the guide');
+  // After a restart, computer audio heard during setup is not asked for again.
+  await until(() => plain().includes('Step 1 of 3'), 'a remembered computer-audio check skips its step');
   await type('\x1b');
-  await until(() => since('Guided setup').includes('one step at a time'), 'Esc leaves it for later');
+  await until(() => since('Guided setup').includes('Enter guided setup'), 'Esc leaves it for later');
   again.unmount();
 
   // A window started with listening off never opens a real device, even for the guide.
   rendered = '';
   const off = render(<App setupActions={actions} openSettings={() => {}} />,
     { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
-  await until(() => plain().includes('one step at a time'), 'offered again');
+  await until(() => plain().includes('Enter guided setup'), 'offered again');
   await type('\r');
   await until(() => plain().includes('Background recorder'), 'guide');
   await type('s');

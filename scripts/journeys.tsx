@@ -17,6 +17,7 @@ import { render } from 'ink';
 import { PassThrough, Writable } from 'stream';
 import { stripVTControlCharacters } from 'util';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { createHash } from 'crypto';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
@@ -54,6 +55,8 @@ interface Step {
   note?: string;
   /** Keys as the person presses them, one entry per press. */
   press?: string[];
+  /** More keys, only on a narrow window: there, Enter opens a Settings row before it acts. */
+  narrowPress?: string[];
   /** How the keys read to a person, when they are not printable. */
   keys?: string;
   /** Change the world before the frame: a meeting starts, a recording fails. */
@@ -74,6 +77,8 @@ interface Journey {
   standalone?: boolean;
   /** Seashell has never been set up: there is no settings file yet. */
   firstRun?: boolean;
+  /** Settings to start from, instead of the machine's. */
+  config?: object;
   narrow?: boolean;
   steps: Step[];
 }
@@ -88,9 +93,12 @@ export const JOURNEYS: Journey[] = [
       { title: 'Settings', press: [ESC, ','], keys: 'Esc , ', until: 'Settings', note: 'Checklist of what works and what does not.' },
       { title: 'Moved down the list', press: [DOWN, DOWN], keys: '↓ ↓' },
       { title: 'Back to the app', press: [ESC], keys: 'Esc' },
-      { title: 'Speakers setup', press: ['v'], until: 'peaker', note: 'Setting up who-said-what.' },
-      { title: 'Back to the app', press: [ESC], keys: 'Esc' },
-      { title: 'AI setup', press: ['p'], until: 'AI', note: 'Choosing what writes the notes.' },
+      { title: 'Speakers setup', press: [',', ...Array(6).fill(DOWN), ENTER], narrowPress: [ENTER], keys: ', ↓ × 6 Enter',
+        until: 'Speaker setup', note: 'Setting up who-said-what, from its row in Settings.' },
+      { title: 'Back to Settings', press: [ESC], keys: 'Esc', until: 'Settings' },
+      { title: 'AI setup', press: Array(8).fill(DOWN).concat(ENTER), narrowPress: [ENTER], keys: '↓ × 8 Enter', until: 'AI for notes',
+        note: 'Choosing what writes the notes.' },
+      { title: 'AI chosen', press: [ENTER], keys: 'Enter', until: 'Notes and chat use', note: 'Back in Settings, which says what changed.' },
     ],
   },
   {
@@ -102,7 +110,7 @@ export const JOURNEYS: Journey[] = [
       { title: 'Microphone permission', press: [ENTER], keys: 'Enter', until: 'Seashell Microphone', note: 'macOS asks once.' },
       { title: 'Allowed, now listening', press: [ENTER], keys: 'Enter', until: 'Listening', note: 'A live level from the microphone recorder.' },
       { title: 'Silence', note: 'The microphone sends pure zeros, as a muted or wrong input does. Does it say what to check?',
-        world: ({ sleep }) => sleep(6_000), until: 'sending silence' },
+        world: ({ sleep }) => sleep(6_000), until: 'may be muted' },
       { title: 'Spoke', note: 'Speech-level sound passes the step and lets go of the microphone.',
         world: ({ room }) => { room.microphone = 'speech'; }, until: 'Heard you' },
       { title: 'Computer audio', press: [ENTER], keys: 'Enter', until: 'Listening' },
@@ -110,7 +118,7 @@ export const JOURNEYS: Journey[] = [
       { title: 'Optional extras', press: [ENTER], keys: 'Enter', until: 'Optional extras' },
       { title: 'Finish chosen', press: [DOWN, DOWN, DOWN, DOWN], keys: '↓ ↓ ↓ ↓' },
       { title: 'Done', press: [ENTER], keys: 'Enter', until: "You're set" },
-      { title: 'Back in the app', press: [ENTER], keys: 'Enter', until: 'ready', note: 'What the guide heard counts: nothing left to fix.' },
+      { title: 'Back in the app', press: [ENTER], keys: 'Enter', until: 'Ready', note: 'What the guide heard counts: nothing left to fix.' },
     ],
   },
   {
@@ -120,7 +128,7 @@ export const JOURNEYS: Journey[] = [
       { title: 'Waiting for a meeting', note: 'Nothing happening yet.' },
       { title: 'A call is noticed', note: 'A browser call without a calendar event: Seashell asks first.',
         world: ({ library, background }) => background.writeBackgroundWatchStatus(library, { phase: 'awaiting-consent',
-          candidate: { id: 'call', title: 'Design review', appName: 'Chrome' }, consentId: 'demo-1' }), until: 'record this' },
+          candidate: { id: 'call', title: 'Design review', appName: 'Chrome' }, consentId: 'demo-1' }), until: 'Record "Design review"' },
       { title: 'Recording', note: 'Words appear as people speak.',
         world: ({ library, background }) => liveMeeting(library, background), until: 'Recording' },
       { title: 'Reading back during the call', press: [UP, UP, UP], keys: '↑ ↑ ↑' },
@@ -136,13 +144,14 @@ export const JOURNEYS: Journey[] = [
       { title: 'History', history: true, until: 'Acme', note: 'Finding the meeting.' },
       { title: 'Meeting opened', press: [ENTER], keys: 'Enter', until: '1 Notes', note: 'Which tab do I land on?' },
       { title: 'Notes', press: ['1'], keys: '1' },
+      { title: 'Insights', press: ['\x1b[6~'], keys: 'Page Down', until: 'Insights', note: 'What the extractors found, under the notes.' },
       { title: 'Transcript', press: ['2'], keys: '2' },
       { title: 'Chat', press: ['3'], keys: '3' },
       { title: 'Asking a question', press: ['a'], keys: 'A', note: 'Typing a question about the meeting.' },
       { title: 'Question typed', press: [...'What did we promise Acme?'], keys: 'What did we promise Acme?' },
       { title: 'Cancelled', press: [ESC], keys: 'Esc' },
-      { title: 'Notes setup', press: ['1', 'n'], keys: '1 N', until: 'Notes setup', note: 'Template, a note to the AI, and whether AI may see it.' },
-      { title: 'Back', press: [ESC], keys: 'Esc' },
+      { title: 'Notes setup', press: ['1', 'g'], keys: '1 G', until: 'Notes setup', note: 'Template, a note to the AI, and whether AI may see it. Enter rewrites.' },
+      { title: 'Back', press: [ESC], keys: 'Esc', note: 'Nothing changed, so nothing to say.' },
       { title: 'Export', press: ['2', 'e'], keys: '2 E', note: 'Getting the transcript out.' },
     ],
   },
@@ -151,27 +160,31 @@ export const JOURNEYS: Journey[] = [
     machine: 'ready', library: 'demo', narrow: true,
     steps: [
       { title: 'History', history: true, until: 'Acme' },
-      { title: 'Search', press: ['/'], keys: '/', note: 'Search box opens.' },
-      { title: 'Typing', press: [...'pricing'], keys: 'pricing' },
+      { title: 'Search', press: ['/'], keys: '/', note: 'The search field is the key bar.' },
+      { title: 'Typing', press: [...'pricing'], keys: 'pricing', note: 'Each meeting shows the line that matched, and when.' },
       { title: 'Results', press: [ENTER], keys: 'Enter' },
-      { title: 'Opened a result', press: [ENTER], keys: 'Enter', until: '1 Notes' },
+      { title: 'Opened a result', press: [ENTER], keys: 'Enter', until: '1 Notes', note: 'The matching line is at the top, highlighted.' },
+      { title: 'Next match', press: ['n'], keys: 'N' },
       { title: 'Delete asked', press: ['d'], keys: 'D', note: 'Moving a meeting to the Trash.' },
       { title: 'Delete cancelled', press: ['n'], keys: 'N' },
     ],
   },
   {
-    id: 'speakers', title: 'Put names on speakers', who: 'Someone who sees "Remote speaker 1" and wants a real name.',
+    id: 'speakers', title: 'Put names on speakers', who: 'Someone who sees "Speaker 1" and wants a real name.',
     machine: 'ready', library: 'demo', narrow: true,
     steps: [
       { title: 'History', history: true, until: 'Acme' },
-      { title: 'Meeting transcript', press: [ENTER, '2'], keys: 'Enter 2', until: 'Remote' },
-      { title: 'Picking a speaker', press: ['r'], keys: 'R', until: 'Name a speaker', note: 'Who can be named?' },
-      { title: 'Chose one', press: [DOWN, ENTER], keys: '↓ Enter' },
+      { title: 'Meeting transcript', press: [ENTER, '2'], keys: 'Enter 2', until: 'Speaker 1' },
+      { title: 'Picking a speaker', press: ['r'], keys: 'R', until: 'Name a speaker', note: 'Who can be named? Priya was suggested from a voice named before.' },
+      { title: 'Chose one', press: [ENTER], keys: 'Enter' },
       { title: 'Name typed', press: [...'Dana'], keys: 'Dana' },
       { title: 'Saved', press: [ENTER], keys: 'Enter' },
-      { title: 'Hide speakers', press: ['s'], keys: 'S', note: 'Toggle.' },
+      { title: 'A suggested name', press: ['r'], keys: 'R', until: 'y keep', note: 'The list opens on the suggestion still to check.' },
+      { title: 'Suggestion kept', press: ['y'], keys: 'Y', note: 'Keeping it also teaches Seashell the voice.' },
+      { title: 'Hide speakers', press: [ESC, 's'], keys: 'Esc S', note: 'Toggle.' },
       { title: 'Show speakers again, hide times', press: ['s', 't'], keys: 'S T' },
-      { title: 'Speaker settings', press: ['t', 'v'], keys: 'T V', until: 'peaker' },
+      { title: 'Speaker settings', press: ['t', ',', ...Array(7).fill(DOWN), ENTER], narrowPress: [ENTER], keys: 'T , ↓ × 7 Enter',
+        until: 'Speaker setup', note: 'From its row in Settings.' },
     ],
   },
   {
@@ -180,7 +193,7 @@ export const JOURNEYS: Journey[] = [
     steps: [
       { title: 'History', history: true, until: 'Weekly' },
       { title: 'Meeting without notes', press: [DOWN, ENTER], keys: '↓ Enter', until: '1 Notes' },
-      { title: 'Asked for notes', press: ['g'], keys: 'G', note: 'No AI chosen yet: what happens?' },
+      { title: 'Asked for notes', press: ['g', ENTER], keys: 'G Enter', until: 'AI for notes', note: 'Notes setup, then Enter to write them. No AI chosen yet: what happens?' },
       { title: 'Next choice', press: [DOWN], keys: '↓' },
       { title: 'Picked one', press: [ENTER], keys: 'Enter' },
       { title: 'Next', press: [ENTER], keys: 'Enter' },
@@ -192,7 +205,7 @@ export const JOURNEYS: Journey[] = [
     steps: [
       { title: 'Warning at the top', until: 'silent', note: 'Does it say what is wrong and what to do?' },
       { title: 'Microphone fails during a call',
-        world: ({ library, background }) => liveMeeting(library, background, { microphoneDown: true }), until: 'NOT CAPTURING' },
+        world: ({ library, background }) => liveMeeting(library, background, { microphoneDown: true }), until: 'Mic not heard' },
       { title: 'Audio help', press: ['i'], keys: 'I', until: 'Sound' },
       { title: 'Back', press: [ESC], keys: 'Esc' },
       { title: 'Settings', press: [','], keys: ',', until: 'Settings' },
@@ -206,6 +219,7 @@ export const JOURNEYS: Journey[] = [
       { title: 'Idle', note: 'How do I just start recording?' },
       { title: 'Tried Space', press: [' '], keys: 'Space' },
       { title: 'Tried Enter', press: [ENTER], keys: 'Enter' },
+      { title: 'With video', press: ['V'], keys: 'Shift-V', until: 'with video', note: 'Space stays audio only; V films the call, or the screen.' },
     ],
   },
   {
@@ -220,10 +234,64 @@ export const JOURNEYS: Journey[] = [
       { title: 'Done changing', press: [ESC], keys: 'Esc' },
       { title: 'Down the list', press: [DOWN, DOWN, DOWN, DOWN], keys: '↓ ↓ ↓ ↓' },
       { title: 'Further down', press: [DOWN, DOWN, DOWN, DOWN, DOWN], keys: '↓ ↓ ↓ ↓ ↓' },
-      { title: 'Guided setup again', press: [UP, UP, UP, UP, UP, UP, UP, UP, ENTER], keys: '↑ × 8 Enter', until: 'Guided setup',
+      { title: 'The end of the list', press: Array(10).fill(DOWN), keys: '↓ × 10', note: 'Narrow, the list scrolls to its last row.' },
+      { title: 'Guided setup again', press: [ENTER], keys: 'Enter', until: 'Step 1',
         note: 'Re-run any time to hear the microphone again.' },
       { title: 'Back to Settings', press: [ESC], keys: 'Esc', until: 'Recording' },
       { title: 'Help', press: [ESC, '?'], keys: 'Esc ?', until: 'Keys' },
+    ],
+  },
+  {
+    id: 'settings-files', title: 'Prompts, extractors, automations, voices and video', who: 'Someone shaping what the AI writes and what happens after a call.',
+    machine: 'ready', library: 'demo', narrow: true,
+    steps: [
+      { title: 'Saved voices', press: [',', ...Array(20).fill(UP), ...Array(8).fill(DOWN)], keys: ', ↑ × 20 ↓ × 8', until: 'Saved voices',
+        note: 'Who Seashell knows by voice.' },
+      { title: 'Choosing someone', press: [ENTER], keys: 'Enter', until: 'forget' },
+      { title: 'Forget asked', press: [ENTER], keys: 'Enter', until: 'y forget', note: 'Asked first, in the key bar.' },
+      { title: 'Forgotten', press: ['y'], keys: 'Y', until: 'Forgot' },
+      { title: 'Prompts', press: [LEFT, DOWN, DOWN, DOWN], keys: '← ↓ ↓ ↓', note: 'What each AI role is told: as shipped, edited or empty.' },
+      { title: 'Choosing a prompt', press: [ENTER, DOWN], keys: 'Enter ↓', until: 'put back' },
+      { title: 'Undo asked', press: ['d'], keys: 'D', until: 'y undo' },
+      { title: 'Edits undone', press: ['y'], keys: 'Y', until: 'Undid' },
+      { title: 'Extractors', press: [LEFT, DOWN, ENTER], keys: '← ↓ Enter', until: 'Customer pains', note: 'A file that does not load is red. Wide, Enter opens the folder.' },
+      { title: 'Automations', press: [LEFT, DOWN, ENTER], keys: '← ↓ Enter', until: 'Last runs', note: 'And how their last runs went.' },
+      { title: 'Video', press: [LEFT, DOWN, DOWN], keys: '← ↓ ↓', note: 'On, but macOS has not allowed Screen Recording yet.' },
+      { title: 'Video off', press: [ENTER], keys: 'Enter', note: 'Enter switches video. Wide, it turns off; narrow, it opens the item first.' },
+      { title: 'Video on, Screen Recording allowed', press: [ENTER], keys: 'Enter', note: 'Turning it on asks macOS for Screen Recording.' },
+      { title: 'Computer audio', press: [LEFT, ...Array(11).fill(UP)], keys: '← ↑ × 11',
+        note: 'Meetings keep the background recorder\'s permission until a check at the Mac allows Seashell System Audio.' },
+      { title: 'Computer audio checked', press: [ENTER], keys: 'Enter', note: 'Wide, Enter plays a short sound and listens; narrow, it opens the item first.' },
+    ],
+  },
+  {
+    id: 'ai-test', title: 'Test the AI connection', who: 'Someone whose notes stopped arriving and wants to know why.',
+    machine: 'ready', library: 'demo', narrow: true,
+    config: { meeting: { speakerBrowser: 'auto', mode: 'hybrid', routes: {
+      observer: { backend: 'claude-code', model: 'haiku' }, reconciliation: { backend: 'claude-code', model: 'sonnet' },
+      chat: { backend: 'codex', model: 'gpt-5.5' } } } },
+    steps: [
+      { title: 'AI screen', press: [',', ...Array(9).fill(DOWN), ENTER], narrowPress: [ENTER], keys: ', ↓ × 9 Enter', until: 'Test connection' },
+      { title: 'Testing', press: [ENTER], keys: 'Enter', until: 'Testing', note: 'One short fixed prompt each; no meeting text.' },
+      { title: 'Results', until: 'answered in', note: 'Which AI answered, how fast, and what to do about the one that did not.' },
+    ],
+  },
+  {
+    id: 'video', title: 'Watch a meeting back', who: 'Someone who wants to see the slide that was on screen when something was said.',
+    machine: 'ready', library: 'demo', narrow: true,
+    steps: [
+      { title: 'History', history: true, until: 'Roadmap' },
+      { title: 'A meeting with video', press: [DOWN, DOWN, DOWN, ENTER], keys: '↓ ↓ ↓ Enter', until: 'watch video', note: 'w appears only when there is video.' },
+      { title: 'Reading the transcript', press: ['2', ...Array(8).fill(DOWN)], keys: '2 ↓ × 8' },
+      { title: 'Video opened', press: ['w'], keys: 'W', until: 'Opened the video', note: 'It plays from the line at the top.' },
+    ],
+  },
+  {
+    id: 'your-side', title: 'Your side was not heard', who: 'Someone reading a call where their microphone picked up almost nothing.',
+    machine: 'ready', library: 'demo', narrow: true,
+    steps: [
+      { title: 'History', history: true, until: 'Hiring' },
+      { title: 'The meeting says so', press: [DOWN, DOWN, ENTER], keys: '↓ ↓ Enter', until: "Your side wasn't recorded", note: 'A yellow line, in the meeting only.' },
     ],
   },
 ];
@@ -258,9 +326,28 @@ async function seed(library: string): Promise<void> {
   const { saveTranscriptRecord } = await import('../src/transcript-library.ts');
   const { createMeetingArtifact, saveMeetingArtifact } = await import('../src/meeting-artifact.ts');
   const add = (id: string, title: string, when: number | Date, notes: boolean) => {
-    const record = createTranscriptRecord({ transcript: demoTranscript(), speakers: SPEAKERS },
+    // Priya was named in an earlier call, so Seashell suggests her name for this voice.
+    const speakers = id === 'demo-acme' ? SPEAKERS.map((speaker) => speaker.id === 'REMOTE_01'
+      ? { ...speaker, label: 'Priya', suggestion: { source: 'voice' as const, previous: speaker.label, similarity: 0.83 } } : speaker) : SPEAKERS;
+    const record = createTranscriptRecord({ transcript: demoTranscript(), speakers },
       { id, title, now: typeof when === 'number' ? new Date(Date.now() - when * 3_600_000) : when });
-    saveTranscriptRecord(library, record);
+    const { directory } = saveTranscriptRecord(library, record);
+    if (id === 'demo-roadmap') {
+      // A pretend movie: the player page is written, never opened.
+      const movie = join(directory, 'capture', 'video', 'segment-1.mov');
+      mkdirSync(dirname(movie), { recursive: true });
+      writeFileSync(movie, '');
+      writeFileSync(join(directory, 'video.json'), JSON.stringify({ file: movie, startOffsetSeconds: 0, segments: [{ file: movie, startOffsetSeconds: 0 }] }));
+    }
+    if (id === 'demo-hiring') {
+      // They talked for 40 minutes; the microphone heard 20 seconds.
+      const now = Date.now();
+      const source = { state: 'stopped', updatedAtUnixMs: now, warnings: [] };
+      mkdirSync(join(directory, 'capture'), { recursive: true });
+      writeFileSync(join(directory, 'capture', 'capture-health.json'), JSON.stringify({ schemaVersion: 1, updatedAtUnixMs: now,
+        microphone: source, systemAudio: source,
+        coverage: { yourSideAudibleSeconds: 20, otherSideAudibleSeconds: 2400, yourSideAudibleShare: 0.008, yourSideMissing: true } }));
+    }
     const artifact = createMeetingArtifact(record);
     if (notes) {
       artifact.status = 'ready';
@@ -269,18 +356,30 @@ async function seed(library: string): Promise<void> {
         summary: 'Acme is ready to pilot with twelve people in November if the security review clears. Data stays on their own machines.',
         claims: [
           { id: 'c1', type: 'decision', text: 'Start the pilot with twelve people in November.', evidenceSegmentIds: ['s000006'], confidence: 0.9 },
-          { id: 'c2', type: 'action_item', text: 'Send the security summary by Friday.', person: 'You', evidenceSegmentIds: ['s000005'], confidence: 0.9 },
+          { id: 'c2', type: 'action_item', text: 'Send the security summary.', person: 'You', due: 'Fri', evidenceSegmentIds: ['s000005'], confidence: 0.9 },
           { id: 'c3', type: 'action_item', text: 'Plan a kickoff the week of the tenth.', evidenceSegmentIds: ['s000011'], confidence: 0.8 },
-          { id: 'c4', type: 'note', text: 'Legal may require data to stay in Canada.', evidenceSegmentIds: ['s000002'], confidence: 0.7 },
+          { id: 'c4', type: 'risk', text: 'The pilot waits on their security review.', evidenceSegmentIds: ['s000004', 's000006'], confidence: 0.8 },
+          { id: 'c5', type: 'open_question', text: 'Does their legal team need the data kept in Canada?', evidenceSegmentIds: ['s000002'], confidence: 0.8 },
+          { id: 'c6', type: 'follow_up', text: 'Hand onboarding to the support team after two weeks.', person: 'You', evidenceSegmentIds: ['s000010'], confidence: 0.8 },
+          { id: 'c7', type: 'note', text: 'Admin controls are on by default for the pilot.', evidenceSegmentIds: ['s000008'], confidence: 0.7 },
         ] as never,
         notes: [
           { heading: 'Where they stand', items: [{ text: 'Per-seat pricing works for them.', evidenceSegmentIds: ['s000001'] }] },
           { heading: 'Next steps', items: [
-            { text: 'You send the security summary by Friday.', evidenceSegmentIds: ['s000005'] },
+            { text: 'Send the security summary.', evidenceSegmentIds: ['s000005'] },
             { text: 'Kickoff the week of the tenth.', evidenceSegmentIds: ['s000011'] },
           ] },
         ] as never,
       };
+      // Two of these repeat the notes and are left out; the rest are new.
+      if (id === 'demo-acme') artifact.insights = [{ extractor: 'Customer pains', createdAt: record.createdAt, runId: 'demo-insight', fields: [
+        { name: 'Pains', items: [
+          { text: 'Their legal team may need the data kept in Canada.', evidenceSegmentIds: ['s000002'] },
+          { text: 'Their security review needs it in writing.', evidenceSegmentIds: ['s000004'] },
+        ] },
+        { name: 'Budget', items: [{ text: 'Per-seat pricing works for them.', evidenceSegmentIds: ['s000001'] }] },
+        { name: 'Asks', items: [{ text: 'Admin controls from day one.', evidenceSegmentIds: ['s000007'] }] },
+      ] }];
       artifact.chat = [
         { id: 'q1', role: 'user', text: 'When does the pilot start?', createdAt: record.createdAt } as never,
         { id: 'a1', role: 'assistant', text: 'November, with twelve people, if the security review clears.', createdAt: record.createdAt, evidenceSegmentIds: ['s000006'] } as never,
@@ -299,6 +398,37 @@ async function seed(library: string): Promise<void> {
   add('demo-hiring', 'Hiring loop debrief', daysAgo(3, 14, 30), true);
   add('demo-roadmap', 'Roadmap review', daysAgo(3, 9, 5), true);
   add('demo-board', 'Board prep', 120, true);
+}
+
+/** The folders beside the library: an edited prompt, two extractors (one broken), an automation and its runs, two voices. */
+async function seedFiles(root: string, library: string): Promise<void> {
+  const { ensurePromptsDirectory, writePrompt } = await import('../src/prompts.ts');
+  ensurePromptsDirectory(library);
+  writePrompt(library, 'notes', 'Lead with what the customer asked for.\nKeep each bullet under fifteen words.\n');
+  const extractors = join(root, 'Extractors');
+  mkdirSync(extractors, { recursive: true });
+  writeFileSync(join(extractors, 'customer-pains.md'), '---\nname: Customer pains\nwhen: always\nfields:\n  Pains: What is hard for them\n  Budget: Any price they mentioned\n---\n');
+  writeFileSync(join(extractors, 'risks.md'), '---\nname: Risks\nwhen:\n  title: [review, board]\n---\n');
+  const automations = join(root, 'Automations');
+  mkdirSync(automations, { recursive: true });
+  writeFileSync(join(automations, 'save-notes.md'), '---\nname: Save notes\nwhen: meeting ready\n---\n- write: ~/Documents/Meeting notes\n');
+  writeFileSync(join(automations, 'crm.md'), '---\nname: Post to the CRM\nwhen: meeting ready\ntitle: [discovery]\n---\n- webhook: https://crm.example.com/hooks/meetings\n');
+  const at = (hours: number) => new Date(Date.now() - hours * 3_600_000).toISOString();
+  writeFileSync(join(library, 'automation-runs.jsonl'), [
+    { at: at(27), automation: 'Save notes', hash: 'a', meetingId: 'demo-weekly', trigger: 'meeting-ready', status: 'ok',
+      actions: [{ kind: 'write', target: '~/Documents/Meeting notes', status: 'ok' }] },
+    { at: at(3), automation: 'Save notes', hash: 'a', meetingId: 'demo-acme', trigger: 'meeting-ready', status: 'ok',
+      actions: [{ kind: 'write', target: '~/Documents/Meeting notes', status: 'ok' }] },
+    { at: at(3), automation: 'Post to the CRM', hash: 'b', meetingId: 'demo-acme', trigger: 'meeting-ready', status: 'failed',
+      actions: [{ kind: 'webhook', target: 'https://crm.example.com/hooks/meetings', status: 'failed', detail: 'the server failed (502)' }] },
+  ].map((run) => JSON.stringify(run)).join('\n') + '\n');
+  for (const [name, meetings] of [['Dana Whitfield', 4], ['Priya', 1]] as const) {
+    const key = createHash('sha256').update(name.toLocaleLowerCase('en-US')).digest('hex').slice(0, 24);
+    const people = join(root, 'Voices', 'people');
+    mkdirSync(people, { recursive: true });
+    writeFileSync(join(people, `${key}.json`), JSON.stringify({ version: 1, name, samples: Array.from({ length: meetings }, (_, index) => ({
+      transcriptId: `demo-${index}`, speakerId: 'REMOTE_00', embedding: [0.1, 0.2, 0.3], seconds: 40, savedAt: at(24 * (index + 1)) })) }));
+  }
 }
 
 async function liveMeeting(library: string, background: Background, options: { microphoneDown?: boolean } = {}) {
@@ -327,7 +457,7 @@ async function endMeeting(library: string, background: Background) {
 }
 
 /** The pretend Mac: what is set up, which the setup actions change. */
-interface Mac { recorder: boolean; microphone: boolean; meet: boolean; calendar: boolean; fresh: boolean; micSilent: boolean }
+interface Mac { recorder: boolean; microphone: boolean; meet: boolean; calendar: boolean; screen: boolean; fresh: boolean; micSilent: boolean }
 
 function dependencies(mac: Mac): FeatureStatusDependencies {
   return {
@@ -338,11 +468,14 @@ function dependencies(mac: Mac): FeatureStatusDependencies {
       : { state: 'off', detail: 'Not connected', accessibilityTrusted: false }) as never,
     microphone: async () => (mac.microphone ? { authorization: 'authorized', detail: 'Allowed.' } : { authorization: 'notDetermined', detail: 'Not asked.' }) as never,
     calendar: async () => ({ authorization: mac.calendar ? 'authorized' : 'notDetermined', detail: 'Calendar.', calendars: 2 }) as never,
-    lastMeeting: () => (mac.fresh ? undefined : { title: 'Acme discovery call', createdAt: new Date().toISOString(), microphoneChunks: 3,
+    lastMeeting: () => (mac.fresh ? undefined : { title: 'Acme discovery call', createdAt: new Date(Date.now() - 3 * 3_600_000).toISOString(), microphoneChunks: 3,
       audibleMicrophoneChunks: mac.micSilent ? 0 : 3, computerChunks: 3, audibleComputerChunks: 3, meetingKey: 'meet:chrome:/abc-defg-hij' }) as never,
     speakerSeparationReady: () => !mac.fresh, aiEngineInstalled: () => !mac.fresh,
     transcriptionReady: () => true, systemAudioHelperReady: () => true,
     microphoneRecorderSince: () => Date.now() - 86_400_000,
+    systemAudioRecorderSince: () => Date.now() - 86_400_000,
+    screenRecording: async () => (mac.screen ? { authorization: 'authorized', detail: 'Allowed.' }
+      : { authorization: 'notDetermined', detail: 'macOS has not asked yet.' }) as never,
   };
 }
 
@@ -353,7 +486,15 @@ function setupActions(mac: Mac): SettingsActions {
     allowMicrophone: async () => { mac.microphone = true; return { authorization: 'authorized', detail: 'Allowed.' }; },
     connectMeet: async () => { mac.meet = true; return { detail: 'Google Meet connected.' }; },
     allowCalendar: async () => { mac.calendar = true; return { authorization: 'authorized', detail: 'Allowed.' }; },
-    openTemplates: () => {},
+    allowScreenRecording: async () => { mac.screen = true; return { authorization: 'authorized', detail: 'Allowed.' }; },
+    // A pass is remembered beside the pretend settings, as the real check does.
+    checkComputerAudio: async () => {
+      (await import('../src/audio-checks.ts')).rememberAudioCheck('computer');
+      return { heard: true, refused: false, detail: 'Heard your Mac. Meetings use it from the next call.' };
+    },
+    openTemplates: () => {}, openFolder: () => {}, openFile: () => {},
+    // Trying an automation again never posts anywhere.
+    retryAutomation: async () => [],
   };
 }
 
@@ -386,15 +527,20 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
   process.env.SEASHELL_CONFIG = join(root, 'config.json');
   process.env.SEASHELL_LIBRARY_DIR = library;
   process.env.SEASHELL_TEMPLATES_DIR = join(root, 'Templates');
+  process.env.SEASHELL_PROMPTS_DIR = join(root, 'Prompts');
+  process.env.SEASHELL_EXTRACTORS_DIR = join(root, 'Extractors');
+  process.env.SEASHELL_AUTOMATIONS_DIR = join(root, 'Automations');
+  process.env.SEASHELL_VOICES_DIR = join(root, 'Voices');
   process.env.SEASHELL_DISABLE_SYSTEM_AUDIO = '1';
   process.env.SEASHELL_MEETING_COMMAND_PATH = join(root, 'meeting-command.json');
+  process.env.SEASHELL_RUNTIME_DIR = join(root, 'Runtime');
   if (journey.standalone) process.env.SEASHELL_DISABLE_LISTENER = '1';
   else delete process.env.SEASHELL_DISABLE_LISTENER;
-  const config = journey.standalone ? { meeting: { automation: { enabled: false } } }
-    : journey.machine === 'fresh' ? {} : { meeting: { speakerBrowser: 'auto', backend: 'claude-code', model: 'sonnet' } };
+  const config = journey.config ?? (journey.standalone ? { meeting: { automation: { enabled: false } } }
+    : journey.machine === 'fresh' ? {} : { meeting: { speakerBrowser: 'auto', backend: 'claude-code', model: 'sonnet' } });
   if (!journey.firstRun) writeFileSync(process.env.SEASHELL_CONFIG, JSON.stringify(config));
   const fresh = journey.machine === 'fresh';
-  const mac: Mac = { recorder: !fresh, microphone: !fresh, meet: !fresh, calendar: false, fresh, micSilent: journey.machine === 'mic-silent' };
+  const mac: Mac = { recorder: !fresh, microphone: !fresh, meet: !fresh, calendar: false, screen: false, fresh, micSilent: journey.machine === 'mic-silent' };
   const room: Room = { microphone: 'zeros', computer: 'zeros' };
   Object.defineProperty(process.stdout, 'columns', { value: size.columns });
   Object.defineProperty(process.stdout, 'rows', { value: size.rows });
@@ -412,10 +558,30 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
       { id: 'local-openai', ready: false, detail: 'No server', nextStep: 'Connect a local server' },
     ] }; },
     async discoverHumainModels() { return ['opus', 'sonnet', 'haiku'].map((id) => ({ id, name: id, description: '', efforts: ['low', 'medium', 'high'] })); },
-    async runHumainMeeting() { throw new Error('Journeys never call a model'); },
+    // Journeys never call a model: the notes stay "being written" until the window closes.
+    runHumainMeeting: (_action: string, _request: unknown, options: { signal?: AbortSignal }) => new Promise((_, reject) =>
+      options.signal?.addEventListener('abort', () => reject(new Error('Journeys never call a model')))),
+    // A pretend test: Claude Code answers, Codex is signed out. No prompt is sent anywhere.
+    async testMeetingAi(routes: Record<string, { backend: string; model: string }>) {
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      const distinct = new Map<string, { backend: string; model: string; roles: string[] }>();
+      for (const [role, route] of Object.entries(routes)) {
+        if (!route) continue;
+        const key = `${route.backend}/${route.model}`;
+        distinct.set(key, { ...route, roles: [...(distinct.get(key)?.roles ?? []), role] });
+      }
+      const results = [...distinct.values()].map((route, index) => route.backend === 'codex'
+        ? { ...route, ok: false, failure: { kind: 'not-signed-in', message: '' }, reason: 'Codex is not signed in. Run codex login in a terminal, then test again.' }
+        : { ...route, ok: true, latencyMs: 1400 + index * 900 });
+      return { ok: results.every((result) => result.ok), engine: { ready: true }, routes: results };
+    },
   }));
+  // The player page is written into the pretend library; the browser is never opened.
+  const video = { ...await import('../src/video-meeting.ts') };
+  mock.module('../src/video-meeting.ts', () => ({ ...video,
+    openMeetingVideo: (libraryDir: string, id: string, options: object = {}) => video.openMeetingVideo(libraryDir, id, { ...options, open: () => {} }) }));
 
-  if (journey.library === 'demo') await seed(library);
+  if (journey.library === 'demo') { await seed(library); await seedFiles(root, library); }
   const background = { ...await import('../src/background-watch-status.ts'), ...await import('../src/background-meeting-status.ts') } as Background;
   if (!journey.standalone) background.writeBackgroundWatchStatus(library, { phase: 'watching' });
   const { loadMeetingArtifact } = await import('../src/meeting-artifact.ts');
@@ -436,7 +602,7 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
       await step.world?.(context);
       if (step.world) await sleep(900);
       if (step.history && !stripVTControlCharacters(latest).includes('Meetings')) await type('h');
-      for (const key of step.press ?? []) await type(key);
+      for (const key of [...step.press ?? [], ...size === NARROW ? step.narrowPress ?? [] : []]) await type(key);
       if (step.until) {
         const deadline = Date.now() + 2500;
         while (!stripVTControlCharacters(latest).includes(step.until) && Date.now() < deadline) await sleep(40);

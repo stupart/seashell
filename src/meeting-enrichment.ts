@@ -320,7 +320,7 @@ export async function enrichMeeting(
       const { instructions } = ownerInstructions(libraryDir, artifact, options, 'reconciliation');
       artifact = { ...artifact, status: 'reconciling', mode };
       saveMeetingArtifact(libraryDir, artifact);
-      options.onStatus?.('Reconciling complete meeting…');
+      options.onStatus?.('Writing the notes…');
       const approvedContext = options.context ?? {
         calendar: artifact.calendar ?? null,
         attendees: artifact.attendees,

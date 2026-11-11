@@ -125,7 +125,7 @@ export function parseExtractor(text: string, path: string): Extractor {
   } else throw new Error(`"${name}": when must be always, manual, or title, attendee or app words`);
   const declared = front.fields;
   if (!declared || typeof declared !== 'object' || Array.isArray(declared)) {
-    throw new Error(`"${name}" has no fields. Add a fields: list, one "name: what to find" line each`);
+    throw new Error(`"${name}" has no fields. Open it to add some.`);
   }
   const fields = Object.entries(declared).map(([field, raw]) => {
     const description = (Array.isArray(raw) ? raw.join(', ') : raw).trim();

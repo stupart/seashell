@@ -8,7 +8,7 @@ import { runAutomaticExtractors, runExtractor } from './extractors.ts';
 import type { HumainMeetingRoute, runHumainMeeting } from './humain-client.ts';
 import { insightFileName, loadMeetingArtifact, saveMeetingArtifact, transcriptSegmentId, type MeetingArtifact } from './meeting-artifact.ts';
 import { meaningful, parseFrontmatter, phraseMatches } from './meeting-templates.ts';
-import { HEADING, meetingViewLines } from './meeting-tui.ts';
+import { HEADING, meetingViewLines, plainMeetingLines, SUBHEADING } from './meeting-tui.ts';
 import { findTranscriptRecord } from './transcript-library.ts';
 import { renderText, speakerLabel } from './transcript-renderer.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
@@ -308,7 +308,8 @@ export function automationPayload(directory: string, artifact: MeetingArtifact |
 export function meetingMarkdown(artifact: MeetingArtifact | undefined, record: TranscriptRecord): string {
   const day = record.createdAt.slice(0, 10);
   const notes = artifact?.analysis
-    ? meetingViewLines(artifact, 'notes', record).map((line) => line.startsWith(HEADING) ? `## ${line.slice(HEADING.length)}` : line)
+    ? meetingViewLines(artifact, 'notes', record).map((line) => line.startsWith(SUBHEADING) ? `### ${line.slice(SUBHEADING.length)}`
+      : line.startsWith(HEADING) ? `## ${line.slice(HEADING.length)}` : plainMeetingLines([line])[0]!)
       .filter((line) => !/Press g\b/u.test(line))
     : ['No AI notes for this meeting.'];
   return [`# ${artifact?.title ?? record.title}`, '', `_${day}_`, '', ...notes, '', '## Transcript', '',
@@ -366,6 +367,27 @@ export interface AutomationRun {
   status: 'ok' | 'failed' | 'skipped';
   actions: AutomationActionResult[];
   detail?: string;
+}
+
+/** Who a web address belongs to, in the automation's own words: "Post to the CRM" posts to "The CRM". */
+function webhookName(automation: string, url: string): string {
+  const named = /^(?:post|send|push)(?:\s+\w+)?\s+to\s+(.+)$/iu.exec(automation.trim())?.[1];
+  if (named) return named.charAt(0).toUpperCase() + named.slice(1);
+  try { return `The server at ${new URL(url).hostname}`; } catch { return 'The server'; }
+}
+
+/**
+ * Why a run failed, in plain words, and whether trying again could help: a server that did not
+ * answer may next time, while one that refused it, or a broken command, needs its file fixed.
+ */
+export function runFailure(run: AutomationRun): { text: string; retry: boolean } | undefined {
+  if (run.status !== 'failed') return undefined;
+  const failed = run.actions.find((action) => action.status === 'failed');
+  const detail = run.detail ?? failed?.detail ?? 'It failed.';
+  if (failed?.kind !== 'webhook') return { text: detail, retry: false };
+  const who = webhookName(run.automation, failed.target);
+  const refused = /refused it \((\d+)\)/u.exec(detail);
+  return refused ? { text: `${who} refused it (${refused[1]}).`, retry: false } : { text: `${who} didn't answer.`, retry: true };
 }
 
 export function automationRunsPath(libraryDir: string): string {
@@ -483,7 +505,9 @@ export async function runAutomations(libraryDir: string, transcriptId: string, o
             method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': 'Seashell' }, body: payload,
             signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
           });
-          result(response.ok ? 'ok' : 'failed', `HTTP ${response.status}`);
+          // In words, with the code for whoever runs the server: never just "HTTP 502".
+          result(response.ok ? 'ok' : 'failed', response.ok ? `sent (${response.status})`
+            : response.status >= 500 ? `the server failed (${response.status})` : `the server refused it (${response.status})`);
         }
       } catch (error) {
         result('failed', (error instanceof Error ? error.message : String(error)).slice(0, 300));
