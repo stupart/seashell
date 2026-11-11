@@ -144,6 +144,9 @@ try {
   await until(() => extracted.length === 1, 'the extractors run after the notes');
   assert.deepEqual(extracted[0], { id: 'filmed-call', route: { backend: 'claude-code', model: 'sonnet' } });
   await until(() => screen().includes('Insights') && screen().includes('Made-up pain point.'), 'the notes show the new insights');
+  await until(() => screen().includes('Meeting notes and analysis are ready.'), 'and the work is done');
+  // Ink swaps in the input handler a moment after the frame; a key sooner meets the busy one.
+  await Bun.sleep(250);
 
   // V records with video; plain Space is audio only and drops a request for video.
   await type('V');

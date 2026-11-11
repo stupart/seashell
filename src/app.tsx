@@ -1156,6 +1156,9 @@ export default function App(props: {
           context: buildMeetingContext(config.meeting?.contextFiles, targetMeeting.calendar),
           onStatus,
         });
+        // The notes show at once; what runs after them updates the view when it is done.
+        reload(record.id, artifact);
+        setMeetingView('notes');
         let failed: string | undefined;
         if (finishLive) {
           readyId = undefined;
@@ -1167,7 +1170,6 @@ export default function App(props: {
         }
         reload(record.id, artifact);
         refreshLibrary();
-        setMeetingView('notes');
         if (failed) setError(`Notes are ready, but ${failed}`);
         else setNotice(finishLive
           ? 'Meeting capture, final transcript, notes, and analysis are ready.'
