@@ -325,7 +325,7 @@ export const JOURNEYS: Journey[] = [
     steps: [
       { title: 'History', history: true, until: 'Acme' },
       { title: 'Notes from your notes', press: [ENTER], keys: 'Enter', until: '1 Notes', note: '✎ marks a point that came from your own notes.' },
-      { title: 'What ✎ means', press: ['?'], keys: '?', until: 'you wrote it' },
+      { title: 'What ✎ means', press: ['?'], keys: '?', until: 'your own notes' },
       { title: 'A note after the call', press: [ESC, '+', ...'Send Priya the admin guide'], keys: 'Esc + Send Priya the admin guide' },
       { title: 'Noted', press: [ENTER], keys: 'Enter', until: 'Noted', note: 'The notes use it when they are written again.' },
       { title: 'A follow-up', press: ['u'], keys: 'U', until: 'Slack', note: 'Email or Slack.' },

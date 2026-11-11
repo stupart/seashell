@@ -190,3 +190,16 @@ test('an insight that says more than a line of the notes is not left out as a re
   const lines = meetingViewLines(artifact, 'notes', record);
   expect(lines.slice(lines.indexOf('# Insights'))).toEqual(['# Insights', `${SUBHEADING}Customer pains`, `- Acme budget is tight.${META}${META}00:07`]);
 });
+
+test('the AI\'s loose points are "Also said" and who is who is "Who\'s who": "Notes" names only the tab', () => {
+  const record = createTranscriptRecord({ transcript: [], speakers: [] }, { id: 'headings', title: 'Planning' });
+  const artifact = createMeetingArtifact(record);
+  artifact.analysis = { final: true, summary: 'S', runId: 'r', createdAt: new Date().toISOString(), claims: [
+    { id: 'n1', type: 'note', text: 'Admin controls are on by default.', evidenceSegmentIds: ['s1'], confidence: 0.7 },
+    { id: 'p1', type: 'speaker_identity', text: 'Speaker 2 is Priya from Acme.', evidenceSegmentIds: ['s2'], confidence: 0.7 },
+  ] };
+  const lines = meetingViewLines(artifact, 'notes');
+  expect(lines).toContain('# Also said');
+  expect(lines).toContain("# Who's who");
+  expect(lines).not.toContain('# Notes');
+});

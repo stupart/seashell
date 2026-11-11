@@ -116,13 +116,16 @@ const LEADING_GROUPS: Array<[string, MeetingClaimType[], RegExp]> = [
   ['Risks', ['risk'], /^risks?$/iu],
 ];
 
-/** After the template: everything else the notes found. */
+/**
+ * After the template: everything else the notes found. "Notes" already names the tab, the AI's
+ * notes and yours, so the AI's loose points are what else was said.
+ */
 const TRAILING_GROUPS: Array<[string, MeetingClaimType[]]> = [
   ['Dates', ['date']],
-  ['Notes', ['note', 'highlight']],
+  ['Also said', ['note', 'highlight']],
   ['Facts and feedback', ['fact', 'feedback']],
   ['Resources', ['resource']],
-  ['Speaker identities', ['speaker_identity']],
+  ["Who's who", ['speaker_identity']],
 ];
 
 export function meetingViewLines(

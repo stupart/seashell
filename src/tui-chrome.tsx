@@ -210,4 +210,4 @@ export const HELP_ROWS: ReadonlyArray<readonly [string, string]> = [
 ];
 
 /** What ✎ means, said once in help rather than beside every point. */
-export const FROM_YOUR_NOTES_HELP = '✎ in the notes: it came from your own notes.';
+export const FROM_YOUR_NOTES_HELP = '✎ marks a point from your own notes.';
