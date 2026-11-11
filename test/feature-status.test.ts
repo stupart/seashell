@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { ensureTemplatesDirectory, PROFILE_FILE } from '../src/meeting-templates.ts';
@@ -19,6 +19,8 @@ const healthy: FeatureStatusDependencies = {
   speakerSeparationReady: () => false, aiEngineInstalled: () => true,
   transcriptionReady: () => true, systemAudioHelperReady: () => true,
   microphoneRecorderSince: () => Date.parse('2026-01-01T00:00:00Z'),
+  systemAudioRecorderSince: () => Date.parse('2026-01-01T00:00:00Z'),
+  audioChecks: () => ({}),
 };
 const read = (dependencies: FeatureStatusDependencies, meetingConfig: Record<string, unknown> = { speakerBrowser: 'auto' }) =>
   readFeatureStatuses({ config: { meeting: meetingConfig } as never, libraryDir: '/fixture', dependencies: { ...healthy, ...dependencies } });
@@ -70,6 +72,58 @@ test('microphone status uses permission first, then what the last meeting heard'
   const after = await byId({ lastMeeting: () => meeting() });
   expect(after.microphone).toMatchObject({ state: 'attention', summary: 'Allowed · last meeting silent' });
   expect(after.microphone!.fix).toContain('Sound → Input');
+});
+
+test('a check the guided setup passed still counts after a restart, until something newer says otherwise', async () => {
+  const silent = meeting({ audibleComputerChunks: 0 });
+  // The meeting was silent; the setup heard both sources afterwards.
+  const later = { microphone: '2026-01-16T09:00:00.000Z', computer: '2026-01-16T09:01:00.000Z' };
+  const heard = await byId({ lastMeeting: () => silent, audioChecks: () => later });
+  expect(heard['computer-audio']).toMatchObject({ state: 'ok', summary: 'Heard during setup' });
+  expect(heard.microphone).toMatchObject({ state: 'ok', summary: 'Heard during setup' });
+  expect(heard['computer-audio']!.detail).toContain('The guided setup heard your Mac');
+  // A meeting after the check is the newer evidence.
+  const earlier = { microphone: '2026-01-14T09:00:00.000Z', computer: '2026-01-14T09:01:00.000Z' };
+  const after = await byId({ lastMeeting: () => silent, audioChecks: () => earlier });
+  expect(after['computer-audio']).toMatchObject({ state: 'attention', summary: 'Silent in last meeting' });
+  expect(after['computer-audio']!.fix).toContain('Seashell System Audio');
+  expect(after.microphone).toMatchObject({ state: 'attention', summary: 'Allowed · last meeting silent' });
+  // With no meeting yet, a passed check is all the proof there is.
+  const fresh = await byId({ lastMeeting: () => undefined, audioChecks: () => ({ computer: later.computer }) });
+  expect(fresh['computer-audio']).toMatchObject({ state: 'ok', summary: 'Heard during setup' });
+  expect((await byId({ lastMeeting: () => undefined }))['computer-audio']).toMatchObject({ state: 'attention', summary: 'Not confirmed yet' });
+  // A helper installed after the check is another identity to macOS: test again.
+  const replaced = await byId({ lastMeeting: () => undefined, audioChecks: () => ({ computer: later.computer }),
+    systemAudioRecorderSince: () => Date.parse('2026-02-01T00:00:00Z') });
+  expect(replaced['computer-audio']).toMatchObject({ state: 'attention', summary: 'Not confirmed yet' });
+});
+
+test('computer audio heard by an earlier helper is not proof for the one that records now', async () => {
+  const since = () => Date.parse('2026-02-01T00:00:00Z');
+  const old = await byId({ lastMeeting: () => meeting(), systemAudioRecorderSince: since });
+  expect(old['computer-audio']).toMatchObject({ state: 'attention', summary: 'Not confirmed since the update' });
+  expect(old['computer-audio']!.detail).toContain('Seashell System Audio');
+  expect(old['computer-audio']!.fix).toContain('guided setup');
+  const tested = await byId({ lastMeeting: () => meeting(), systemAudioRecorderSince: since,
+    audioChecks: () => ({ computer: '2026-02-02T09:00:00.000Z' }) });
+  expect(tested['computer-audio']).toMatchObject({ state: 'ok', summary: 'Heard during setup' });
+  expect((await byId({}))['computer-audio']).toMatchObject({ state: 'ok', summary: 'Heard in last meeting' });
+});
+
+test('passed checks are kept beside the settings file and read back', async () => {
+  const { readAudioChecks, rememberAudioCheck, audioChecksPath } = await import('../src/audio-checks.ts');
+  const root = mkdtempSync(join(tmpdir(), 'seashell-audio-checks-'));
+  const env = { SEASHELL_CONFIG: join(root, 'settings', 'config.json') };
+  try {
+    expect(readAudioChecks(env)).toEqual({});
+    rememberAudioCheck('computer', new Date('2026-03-01T10:00:00Z'), env);
+    rememberAudioCheck('microphone', new Date('2026-03-01T10:01:00Z'), env);
+    expect(audioChecksPath(env)).toBe(join(root, 'settings', 'audio-checks.json'));
+    expect(readAudioChecks(env)).toEqual({ computer: '2026-03-01T10:00:00.000Z', microphone: '2026-03-01T10:01:00.000Z' });
+    expect(statSync(audioChecksPath(env)).mode & 0o777).toBe(0o600);
+    writeFileSync(audioChecksPath(env), '{"schemaVersion":1,"computer":"not a time"}');
+    expect(readAudioChecks(env)).toEqual({});
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('a stopped recorder and missing optional setup each name their one next step', async () => {

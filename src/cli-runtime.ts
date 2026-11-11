@@ -61,8 +61,8 @@ import { transcribeMedia } from './transcription-service.ts';
 import { PACKAGE_VERSION, renderCapabilityManifest, seashellCapabilityManifest } from './capabilities.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
 import {
+  defaultSystemAudioHelper,
   parseNativeSystemAudioEvent,
-  SYSTEM_AUDIO_HELPER,
 } from './live-system-audio.ts';
 import {
   CaptureSessionStore,
@@ -350,7 +350,8 @@ export function doctorChecks(options: {
   meetingAccessibilityHelper?: string;
   systemAudioProbeTimeoutMs?: number;
 } = {}): DoctorCheck[] {
-  const systemAudioHelper = options.systemAudioHelper ?? SYSTEM_AUDIO_HELPER;
+  // The copy the recorder runs, so the probe tests the permission meetings use.
+  const systemAudioHelper = options.systemAudioHelper ?? defaultSystemAudioHelper();
   const meetingSignalsHelper = options.meetingSignalsHelper ?? MEETING_SIGNALS_HELPER;
   const meetingAccessibilityHelper = options.meetingAccessibilityHelper ?? MEETING_ACCESSIBILITY_HELPER;
   const commandCheck = (

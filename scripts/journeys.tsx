@@ -343,6 +343,7 @@ function dependencies(mac: Mac): FeatureStatusDependencies {
     speakerSeparationReady: () => !mac.fresh, aiEngineInstalled: () => !mac.fresh,
     transcriptionReady: () => true, systemAudioHelperReady: () => true,
     microphoneRecorderSince: () => Date.now() - 86_400_000,
+    systemAudioRecorderSince: () => Date.now() - 86_400_000,
   };
 }
 

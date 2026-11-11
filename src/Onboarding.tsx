@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { existsSync } from 'fs';
 import { Box, Text, useInput } from 'ink';
+import { rememberAudioCheck, type AudioCheckSource } from './audio-checks.ts';
 import { updateMeetingConfig, type SeashellConfig } from './config.ts';
 import {
   FEATURE_STATE_COLOR,
@@ -13,6 +14,7 @@ import {
 } from './feature-status.ts';
 import { defaultMicrophoneRecorder, MICROPHONE_PERMISSION_EXIT_CODE } from './live-microphone.ts';
 import {
+  defaultSystemAudioHelper,
   LIVE_CAPTURE_SAMPLE_RATE,
   parseNativeSystemAudioEvent,
   pcmS16leSignalLevel,
@@ -75,13 +77,14 @@ export const microphoneLevels: LevelSource = ({ onLevel, onProblem }) => {
   return () => { stopped = true; stop(); };
 };
 
-/** The computer-audio recorder, run from this window. */
+/** The same computer-audio recorder background meetings use. It answers for its
+ * own permission, so a pass from this window means meetings hear the others too. */
 export const computerLevels: LevelSource = ({ onLevel, onProblem }) => {
   if (!existsSync(SYSTEM_AUDIO_HELPER)) {
     onProblem({ kind: 'missing', message: 'The computer-audio recorder is not installed. Update Seashell.' });
     return () => {};
   }
-  const child = spawn(SYSTEM_AUDIO_HELPER, ['--sample-rate', String(LIVE_CAPTURE_SAMPLE_RATE), '--chunk-ms', '100'],
+  const child = spawn(defaultSystemAudioHelper(), ['--sample-rate', String(LIVE_CAPTURE_SAMPLE_RATE), '--chunk-ms', '100'],
     { stdio: ['ignore', 'pipe', 'pipe'] });
   let stopped = false;
   let failure: LevelProblem | undefined;
@@ -229,6 +232,8 @@ export default function Onboarding(props: SetupActionProps & {
   onClose: () => void;
   levels?: LevelSources;
   openSettings?: (pane: SystemSettingsPane) => void;
+  /** Keeps a passed check across restarts; by default beside the settings file. */
+  rememberHeard?: (source: AudioCheckSource) => void;
   fromSettings?: boolean;
   dependencies?: FeatureStatusDependencies;
 }) {
@@ -265,6 +270,12 @@ export default function Onboarding(props: SetupActionProps & {
     if (mic.heard) props.onProgress(current => current && { ...current, heard: { ...current.heard, microphone: true } });
     if (computer.heard) props.onProgress(current => current && { ...current, heard: { ...current.heard, computer: true } });
   }, [mic.heard, computer.heard]);
+  // Remembered once each, so Settings still says it works after a restart. Losing that note never fails the step.
+  const remember = (source: AudioCheckSource) => {
+    try { (props.rememberHeard ?? rememberAudioCheck)(source); } catch { /* The step passed all the same. */ }
+  };
+  useEffect(() => { if (mic.heard) remember('microphone'); }, [mic.heard]);
+  useEffect(() => { if (computer.heard) remember('computer'); }, [computer.heard]);
 
   // The step's own ✓ says it worked; only a failure needs words underneath.
   const runQuietly = async (action: NonNullable<FeatureStatus['action']>) => {
@@ -328,7 +339,7 @@ export default function Onboarding(props: SetupActionProps & {
       <Paragraph width={width} color="red" text={meter.problem.message} />
       {meter.problem.kind === 'permission' && <Paragraph width={width} text={yours
         ? 'Turn on Seashell Microphone in Privacy & Security → Microphone. p opens it.'
-        : 'Allow your terminal in Privacy & Security → Screen & System Audio Recording. p opens it.'} />}
+        : 'Allow Seashell System Audio in Privacy & Security → Screen & System Audio Recording. p opens it.'} />}
     </>;
     return <>
       <LevelBar level={meter.level} width={barWidth} heard={false} />

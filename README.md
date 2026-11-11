@@ -286,7 +286,11 @@ Background meetings record your microphone through a small native helper,
 **Seashell Microphone**, which holds its own macOS Microphone permission (the
 background runtime itself cannot be granted one). Run
 `seashell meeting microphone setup` once and choose **Allow**; check it any time
-with `seashell meeting microphone`. If you leave a call and rejoin within three
+with `seashell meeting microphone`. Other people in a call are recorded from your
+Mac's sound by **Seashell System Audio**, which holds its own Screen & System
+Audio Recording permission. The guided setup tests that same helper, so a pass
+there means meetings hear the others too, and Settings remembers it after a
+restart. macOS asks once; choose **Allow**. If you leave a call and rejoin within three
 minutes, the recording continues in the same History entry. To name meetings
 after their calendar event, press **,** → Meeting titles from Calendar (or run
 `seashell meeting calendar setup`); **Seashell Calendar** asks macOS once. Use

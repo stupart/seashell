@@ -182,3 +182,25 @@ test('the screen recorder keeps its own stable copy, named for Privacy & Securit
   prepareRuntimeHelper(helper, SCREEN_CAPTURE_RUNTIME_HELPER, h.options);
   expect(readFileSync(path, 'utf8')).not.toContain('rebuilt');
 });
+
+test('every launcher of computer audio runs one stable copy that answers for its own permission', async () => {
+  const { defaultSystemAudioHelper } = await import('../src/live-system-audio.ts');
+  const { SYSTEM_AUDIO_RUNTIME_HELPER } = await import('../src/runtime-host.ts');
+  const root = mkdtempSync(join(tmpdir(), 'seashell-system-audio-host-'));
+  try {
+    const runtimeHost = { hostDirectory: join(root, 'Runtime'), platform: 'darwin' as const };
+    const plist = readFileSync(join(import.meta.dir, '..', 'native', 'macos-system-audio-Info.plist'), 'utf8');
+    expect(plist).toContain(`<string>${SYSTEM_AUDIO_RUNTIME_HELPER.identifier}</string>`);
+    expect(plist).toContain('NSAudioCaptureUsageDescription');
+    const bundled = helperBinary(root, 'seashell-system-audio', plist, 'sdk-27');
+    const path = defaultSystemAudioHelper({ bundled, runtimeHost });
+    expect(path).toBe(join(root, 'Runtime', 'Seashell System Audio'));
+    expect(embeddedHelperProtocol(path, SYSTEM_AUDIO_RUNTIME_HELPER.identifier)).toBe(1);
+    // Rebuilt with the same protocol: the copy macOS already allowed stays.
+    expect(defaultSystemAudioHelper({ bundled: helperBinary(root, 'rebuilt', plist, 'sdk-26.5'), runtimeHost })).toBe(path);
+    expect(readFileSync(path, 'latin1')).toContain('sdk-27');
+    // Nothing packaged: report the missing helper rather than inventing one.
+    const missing = join(root, 'missing');
+    expect(defaultSystemAudioHelper({ bundled: missing, runtimeHost })).toBe(missing);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

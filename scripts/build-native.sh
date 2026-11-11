@@ -11,13 +11,19 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 SYSTEM_AUDIO_BINARY=native/bin/seashell-system-audio
 if [ ! -x "$SYSTEM_AUDIO_BINARY" ] || \
    [ native/macos-system-audio.swift -nt "$SYSTEM_AUDIO_BINARY" ] || \
+   [ native/macos-system-audio-Info.plist -nt "$SYSTEM_AUDIO_BINARY" ] || \
    [ native/seashell-atomic.c -nt "$SYSTEM_AUDIO_BINARY" ] || \
    [ native/seashell-atomic.h -nt "$SYSTEM_AUDIO_BINARY" ]; then
+    # Same pattern as the microphone helper: its own System Audio Recording
+    # permission, the same whether the background recorder or a terminal starts it.
     xcrun clang -std=c11 -O2 -c native/seashell-atomic.c -o "$BUILD_DIR/atomic.o"
-    xcrun swiftc native/macos-system-audio.swift "$BUILD_DIR/atomic.o" -O \
+    xcrun swiftc native/macos-system-audio.swift "$BUILD_DIR/atomic.o" -O -module-name SeashellSystemAudio \
         -import-objc-header native/seashell-atomic.h \
         -framework AVFoundation -framework AudioToolbox -framework CoreAudio \
+        -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+        -Xlinker native/macos-system-audio-Info.plist \
         -o "$BUILD_DIR/seashell-system-audio"
+    codesign --force --sign - --identifier com.humain.seashell.system-audio "$BUILD_DIR/seashell-system-audio" 2>/dev/null
     mv -f "$BUILD_DIR/seashell-system-audio" "$SYSTEM_AUDIO_BINARY"
 fi
 MEETING_SIGNALS_BINARY=native/bin/seashell-meeting-signals
