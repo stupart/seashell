@@ -179,6 +179,37 @@ test('a private meeting keeps your notes and shows them, and sends nothing', asy
   expect(meetingViewLines(loadMeetingArtifact(root, record.id)!, 'notes', record).slice(-2)).toEqual(['# Your notes', '- Only for me']);
 });
 
+test('a question during the call is refused when meeting.json cannot be read, or turns private while the engine is checked', async () => {
+  const { root, record } = library();
+  const path = join(dirname(findTranscriptRecord(root, record.id).path), 'meeting.json');
+  const humain = fake(() => ({ answer: 'November.', evidenceSegmentIds: ['s000001'] }));
+  // Half-written, or damaged: it might have said AI is off.
+  const saved = readFileSync(path, 'utf8');
+  writeFileSync(path, '{"schemaVersion":1,"ai":{"off":tr');
+  await expect(askDuringCall(root, record.id, 'What did I miss?', route, { runner: humain.runner, engine: rev4 })).rejects.toThrow(MeetingAiOffError);
+  await expect(chatWithMeeting(root, record.id, 'When?', route, undefined, humain.runner, rev4)).rejects.toThrow(MeetingAiOffError);
+  // The owner turns AI off while the engine is checked, which can take 20 seconds.
+  writeFileSync(path, saved);
+  const turnedOff = async () => {
+    writeFileSync(path, `${JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), ai: { off: true } }, null, 2)}\n`);
+    return rev4();
+  };
+  await expect(askDuringCall(root, record.id, 'What did I miss?', route, { runner: humain.runner, engine: turnedOff })).rejects.toThrow(MeetingAiOffError);
+  expect(humain.requests).toEqual([]);
+});
+
+test('a question during the call writes nothing, even when the transcript has grown since meeting.json', async () => {
+  const { root, record } = library();
+  const path = join(dirname(findTranscriptRecord(root, record.id).path), 'meeting.json');
+  const before = readFileSync(path, 'utf8');
+  saveTranscriptRecord(root, { ...record, transcript: [...record.transcript, { start: 8, end: 12, speaker: 'REMOTE_00', text: 'And the budget is fine.' }] });
+  writeFileSync(path, before);
+  const humain = fake(() => ({ answer: 'The budget is fine.', evidenceSegmentIds: ['s000003'] }));
+  const answer = await askDuringCall(root, record.id, 'Budget?', route, { runner: humain.runner, engine: rev4 });
+  expect(answer.moments.map((moment) => moment.id)).toEqual(['s000003']);
+  expect(readFileSync(path, 'utf8')).toBe(before);
+});
+
 test('during the call, the Notes view lists your notes and says when the notes come', () => {
   const { root, record } = library();
   const store = recording(root);

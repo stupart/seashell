@@ -102,8 +102,12 @@ export function loadMeeting(libraryDir: string, id: unknown) {
   return { ...found, directory: dirname(found.path), artifact: readMeetingArtifact(dirname(found.path), found.record) };
 }
 
-/** A listed meeting's transcript and notes, from the folder the listing found. */
-function readListed(entry: TranscriptLibraryEntry): { record: TranscriptRecord; artifact: MeetingArtifact | undefined } {
+/**
+ * A listed meeting's transcript and notes, from the folder the listing found.
+ * Nothing is written, whatever changed: for every reader of the library,
+ * briefs included.
+ */
+export function readListed(entry: Pick<TranscriptLibraryEntry, 'directory'>): { record: TranscriptRecord; artifact: MeetingArtifact | undefined } {
   const record = loadTranscriptPath(join(entry.directory, 'transcript.json'));
   return { record, artifact: readMeetingArtifact(entry.directory, record) };
 }

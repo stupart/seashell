@@ -9,7 +9,7 @@ import {
   type HumainMeetingRoute,
   type MeetingEngineCheck,
 } from './humain-client.ts';
-import { loadMeetingArtifact, MeetingAiOffError, type MeetingArtifact } from './meeting-artifact.ts';
+import { MeetingAiOffError, meetingIsPrivateAt, readMeetingArtifact, type MeetingArtifact } from './meeting-artifact.ts';
 import { claimsForHumain, engineCheck, meetingSegments, ownerInstructions, retryableRun, runSafeId, stableKey } from './meeting-enrichment.ts';
 import { findTranscriptRecord } from './transcript-library.ts';
 
@@ -79,7 +79,12 @@ function recipients(libraryDir: string, artifact: MeetingArtifact): { names: str
   return { names: people.map((person) => person.name), to: people.flatMap((person) => person.email ? [person.email] : []) };
 }
 
-/** Write a follow-up from one meeting. Nothing is saved and nothing is sent. */
+/**
+ * Write a follow-up from one meeting. Nothing is saved and nothing is sent: the
+ * meeting is read without writing, as agents read it. A private meeting, or one
+ * whose meeting.json can't be read, is refused, and privacy is read again just
+ * before the request leaves.
+ */
 export async function draftFollowUp(
   libraryDir: string,
   transcriptId: string,
@@ -88,9 +93,10 @@ export async function draftFollowUp(
   options: DraftOptions = {},
 ): Promise<FollowUpDraft> {
   const { record, path } = findTranscriptRecord(libraryDir, transcriptId);
-  const artifact = loadMeetingArtifact(libraryDir, record.id);
+  const directory = dirname(path);
+  if (meetingIsPrivateAt(directory)) throw new MeetingAiOffError();
+  const artifact = readMeetingArtifact(directory, record);
   if (!artifact) throw new Error('Make it a meeting first: m in Seashell, or seashell meeting create <id>.');
-  if (artifact.ai?.off) throw new MeetingAiOffError();
   const segments = meetingSegments(record);
   if (!segments.length) throw new Error('This meeting has no transcript text to write from.');
   const ask = options.ask?.replace(/\s+/gu, ' ').trim();
@@ -100,6 +106,8 @@ export async function draftFollowUp(
   const audience = options.audience?.trim() || (people.names.length ? people.names.join(', ') : undefined);
   const { instructions } = ownerInstructions(libraryDir, artifact, {}, 'chat');
   const finalClaims = claimsForHumain(artifact.analysis?.claims ?? artifact.provisionalClaims, new Set(segments.map((segment) => segment.id)));
+  // Checking the engine can take 20 seconds: a meeting made private meanwhile is not sent.
+  if (meetingIsPrivateAt(directory)) throw new MeetingAiOffError();
   const context = { calendar: artifact.calendar ?? null, attendees: artifact.attendees };
   const draft = { kind, ...(audience ? { audience } : {}), ...(ask ? { ask } : {}) };
   const idempotencyKey = stableKey([record.id, 'draft', draft, segments, finalClaims, route, context, ...(instructions ? [instructions] : [])]);

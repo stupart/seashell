@@ -10,11 +10,11 @@ import {
   type HumainMeetingRoute,
   type MeetingEngineCheck,
 } from './humain-client.ts';
-import { loadMeetingArtifact, type MeetingArtifact, type MeetingAttendee, type MeetingCalendarEvent } from './meeting-artifact.ts';
+import { meetingIsPrivateAt, type MeetingArtifact, type MeetingAttendee, type MeetingCalendarEvent } from './meeting-artifact.ts';
 import { claimsForHumain, engineCheck, meetingSegments, retryableRun, runSafeId, stableKey } from './meeting-enrichment.ts';
-import { isPrivate } from './meeting-memory.ts';
+import { isPrivate, readListed } from './meeting-memory.ts';
 import { loadProfile } from './meeting-templates.ts';
-import { findTranscriptRecord, listTranscriptRecords } from './transcript-library.ts';
+import { listTranscriptRecords } from './transcript-library.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 import { formatTuiClock } from './tui-state.ts';
 import { loadVocabulary } from './vocabulary.ts';
@@ -98,12 +98,17 @@ export interface RelevantMeeting {
   shared: string[];
   artifact: MeetingArtifact;
   record: TranscriptRecord;
+  /** Its folder, to look at its privacy again before anything is sent. */
+  directory: string;
 }
 
 /**
  * The past meetings a brief reads: the same recurring title, or anyone in
  * common other than you, newest first. Only finished meetings with notes; a
- * private one is never read.
+ * private one is never read, and nor is one whose meeting.json can't be read,
+ * since it might have said AI is off. Choosing writes nothing: each meeting is
+ * read from the folder the listing found, as agents read the library, so the
+ * recorder can count a brief's history every few minutes and change nothing.
  */
 export function relevantMeetings(libraryDir: string, upcoming: UpcomingMeeting, limit = MAX_BRIEF_MEETINGS): RelevantMeeting[] {
   const you = ownerKeys(libraryDir, upcoming);
@@ -119,10 +124,7 @@ export function relevantMeetings(libraryDir: string, upcoming: UpcomingMeeting, 
     if (isPrivate(entry.directory)) continue;
     let artifact: MeetingArtifact | undefined;
     let record: TranscriptRecord;
-    try {
-      artifact = loadMeetingArtifact(libraryDir, entry.id);
-      record = findTranscriptRecord(libraryDir, entry.id).record;
-    } catch { continue; }
+    try { ({ artifact, record } = readListed(entry)); } catch { continue; }
     if (!artifact || (!artifact.analysis?.summary && !(artifact.analysis?.claims ?? artifact.provisionalClaims).length)) continue;
     const pastTitle = normalizedTitle(artifact.calendar?.title ?? artifact.title);
     const series = (upcoming.eventId !== undefined && artifact.calendar?.eventId === upcoming.eventId) ||
@@ -131,7 +133,7 @@ export function relevantMeetings(libraryDir: string, upcoming: UpcomingMeeting, 
       .flatMap((person) => people.has(personKey(person)) ? [people.get(personKey(person))!] : []))];
     if (!series && !shared.length) continue;
     found.push({ id: entry.id, title: artifact.calendar?.title ?? artifact.title, startedAt: entry.createdAt,
-      why: series ? 'series' : 'people', shared, artifact, record });
+      why: series ? 'series' : 'people', shared, artifact, record, directory: entry.directory });
   }
   return found;
 }
@@ -257,6 +259,18 @@ export function findBrief(libraryDir: string, upcoming: Pick<UpcomingMeeting, 't
   } catch { return undefined; }
 }
 
+/**
+ * Whether a saved brief read a meeting that is private now, or whose settings
+ * can't be read. Its words came from that meeting, so an agent is not handed it.
+ */
+export function briefReadsPrivate(libraryDir: string, brief: Pick<Brief, 'meetings'>): boolean {
+  const folders = new Map(listTranscriptRecords(libraryDir).map((entry) => [entry.id, entry.directory]));
+  return brief.meetings.some((meeting) => {
+    const folder = folders.get(meeting.id);
+    return folder !== undefined && meetingIsPrivateAt(folder);
+  });
+}
+
 /** Every brief made, newest meeting first. */
 export function listBriefs(libraryDir: string, env: NodeJS.ProcessEnv = process.env): Brief[] {
   const directory = join(briefsDirectory(libraryDir, env), '.data');
@@ -294,9 +308,13 @@ export interface MakeBriefOptions {
  */
 export async function makeBrief(libraryDir: string, upcoming: UpcomingMeeting, options: MakeBriefOptions): Promise<Brief> {
   const env = options.env ?? process.env;
-  const chosen = relevantMeetings(libraryDir, upcoming);
-  if (!chosen.length) throw new NoBriefHistoryError(upcoming.title);
+  const found = relevantMeetings(libraryDir, upcoming);
+  if (!found.length) throw new NoBriefHistoryError(upcoming.title);
   if (await olderThanRevision4(engineCheck(options))) throw new Error(`This AI engine cannot write briefs yet. ${NEWER_ENGINE}`);
+  // Privacy again, just before anything leaves: checking the engine can take 20 seconds,
+  // and a meeting made private meanwhile, or whose settings stopped reading, is not sent.
+  const chosen = found.filter((meeting) => !meetingIsPrivateAt(meeting.directory));
+  if (!chosen.length) throw new NoBriefHistoryError(upcoming.title);
   options.onStatus?.(`Reading ${chosen.length} past ${chosen.length === 1 ? 'meeting' : 'meetings'}…`);
   const sent = new Map<string, Set<string>>();
   const meetings = chosen.map((meeting) => {

@@ -8,8 +8,10 @@ import {
   createMeetingArtifact,
   loadMeetingArtifact,
   MeetingAiOffError,
+  meetingIsPrivateAt,
   MEETING_CLAIM_TYPES,
   parseMeetingClaim,
+  readMeetingArtifact,
   saveMeetingArtifact,
   transcriptSegmentId,
   type MeetingAnalysis,
@@ -497,7 +499,11 @@ async function askHumain(
   },
 ): Promise<{ record: TranscriptRecord; artifact: MeetingArtifact | undefined; answer: string; evidenceSegmentIds: string[]; runId: string }> {
   const { record, path } = findTranscriptRecord(libraryDir, transcriptId);
-  const artifact = loadMeetingArtifact(libraryDir, transcriptId);
+  const directory = dirname(path);
+  // A meeting.json that can't be read might have said AI is off, so it counts as private.
+  if (meetingIsPrivateAt(directory)) throw new MeetingAiOffError();
+  // A question during the call saves nothing, so it reads the meeting without writing.
+  const artifact = options.partial ? readMeetingArtifact(directory, record) : loadMeetingArtifact(libraryDir, transcriptId);
   if (!artifact && !options.partial) throw new Error('Create the meeting artifact before using meeting chat');
   if (artifact?.ai?.off) throw new MeetingAiOffError();
   const trimmed = question.trim();
@@ -524,9 +530,11 @@ async function askHumain(
     ...(instructions ? [instructions] : []),
     ...(options.partial ? ['partial'] : []),
   ]);
-  const storeDir = join(dirname(path), '.humain');
+  const storeDir = join(directory, '.humain');
   const { runId, idempotencyKey: attemptKey } = retryableRun(storeDir,
     runSafeId(`meeting-${transcriptId}-${options.partial ? 'live-question' : 'chat'}`, idempotencyKey), idempotencyKey);
+  // Checking the engine can take 20 seconds: a meeting made private meanwhile is not sent.
+  if (meetingIsPrivateAt(directory)) throw new MeetingAiOffError();
   const result = await options.runner('chat', {
     meetingId: artifact?.meetingId ?? record.id,
     ...humainRouteRequest(route),

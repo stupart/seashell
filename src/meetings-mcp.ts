@@ -23,7 +23,7 @@ import {
 } from './extractors.ts';
 import type { HumainMeetingRoute, MeetingEngineCheck, runHumainMeeting } from './humain-client.ts';
 import { readMacCalendarEventsAsync } from './calendar.ts';
-import { briefCitation, findBrief, listBriefs, makeBrief, nextCalendarMeeting, upcomingFromEvent, type Brief, type UpcomingMeeting } from './briefs.ts';
+import { briefCitation, briefReadsPrivate, findBrief, listBriefs, makeBrief, nextCalendarMeeting, upcomingFromEvent, type Brief, type UpcomingMeeting } from './briefs.ts';
 import { draftFollowUp } from './drafts.ts';
 import { addMeetingNote } from './owner-notes.ts';
 import { loadVocabulary, readVocabularyFile, writeVocabulary } from './vocabulary.ts';
@@ -216,11 +216,14 @@ async function upcomingFor(libraryDir: string, title: string | undefined, deps: 
 
 async function getBriefTool(libraryDir: string, args: Arguments, deps: MeetingsMcpDependencies) {
   const title = text(args.title, 'title');
+  // A saved brief that read a meeting made private since is never handed over; writing it
+  // again leaves that meeting out and replaces the saved one.
+  const shareable = (brief: Brief | undefined) => brief && !briefReadsPrivate(libraryDir, brief) ? brief : undefined;
   // A brief already made for that title answers at once, without the calendar.
-  const saved = title ? listBriefs(libraryDir, deps.env).find((brief) => brief.upcoming.title.toLocaleLowerCase().includes(title.toLocaleLowerCase())) : undefined;
+  const saved = title ? shareable(listBriefs(libraryDir, deps.env).find((brief) => brief.upcoming.title.toLocaleLowerCase().includes(title.toLocaleLowerCase()))) : undefined;
   if (saved && args.make !== true) return briefResult(saved);
   const upcoming = await upcomingFor(libraryDir, title, deps);
-  const existing = findBrief(libraryDir, upcoming, deps.env);
+  const existing = shareable(findBrief(libraryDir, upcoming, deps.env));
   if (existing && args.make !== true) return briefResult(existing);
   const route = deps.route?.();
   if (!route) throw new Error('Meeting AI is not set up, so no brief can be written. The user can choose a provider with: seashell ai setup');

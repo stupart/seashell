@@ -260,6 +260,7 @@ test('agents fix a line and name a speaker without losing the notes; private mee
     ['edit_segment', { id: 'hr-chat', segmentId: 's000001', text: 'x' }], ['rename_speaker', { id: 'hr-chat', speaker: 'x', name: 'y' }],
     ['run_extractor', { id: 'hr-chat', extractor: 'x' }], ['get_insights', { id: 'hr-chat' }],
     ['get_video_moment', { id: 'hr-chat', segmentId: 's000001' }],
+    ['add_note', { id: 'hr-chat', text: 'x' }], ['draft_follow_up', { id: 'hr-chat' }],
   ] as const) {
     expect(await call(root, name, args, deps)).toEqual({ error: true, value: expect.stringContaining('This meeting is private') });
   }
@@ -277,6 +278,11 @@ test('a meeting whose settings cannot be read is treated as private, never share
     startedAt: '2026-10-01T00:00:00.000Z', private: true });
   expect(await call(root, 'get_transcript', { id: 'weekly-sync' })).toEqual({ error: true, value: expect.stringContaining('This meeting is private') });
   expect((await call(root, 'list_action_items', {})).value.items).toEqual([]);
+  // Your notes and follow-ups refuse it too, and nothing is added to it.
+  expect(await call(root, 'add_note', { id: 'weekly-sync', text: 'x' })).toEqual({ error: true, value: expect.stringContaining('This meeting is private') });
+  expect(await call(root, 'draft_follow_up', { id: 'weekly-sync' }, { chatRoute: () => ({ backend: 'codex', model: 'fixture' }),
+    runner: (async () => { throw new Error('must not run'); }) as any })).toEqual({ error: true, value: expect.stringContaining('This meeting is private') });
+  expect(readFileSync(join(directory, 'meeting.json'), 'utf8')).toBe('{"schemaVersion":1,"ai":{"off":tr');
   writeFileSync(join(directory, 'meeting.json'), 'null');
   expect((await call(root, 'search_transcripts', { query: 'launch email' })).value.matches).toEqual([]);
 });
@@ -343,5 +349,12 @@ test('a brief for an agent comes from the calendar\'s next meeting, saved, then 
     sources: [{ meetingId: 'weekly-sync', segmentIds: ['s000002'], cite: expect.stringMatching(/^Weekly sync, (Sep 30|Oct 1), 01:05$/u) }] });
   expect(existsSync(brief.path)).toBe(true);
   expect((await call(root, 'get_brief', { title: 'weekly' }, deps)).value.path).toBe(brief.path);
+  expect(runs).toBe(1);
+  // Once the meeting it read is private, the saved brief is not handed over, and a new one leaves the meeting out.
+  const { record } = findTranscriptRecord(root, 'weekly-sync');
+  saveMeetingArtifact(root, { ...createMeetingArtifact(record), ai: { off: true } });
+  for (const args of [{}, { title: 'weekly' }]) {
+    expect(await call(root, 'get_brief', args, deps)).toEqual({ error: true, value: expect.stringContaining('Nothing to brief from yet') });
+  }
   expect(runs).toBe(1);
 });

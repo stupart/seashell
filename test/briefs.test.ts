@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import {
   briefDue,
   briefKey,
@@ -18,7 +18,7 @@ import {
 import { draftFollowUp, draftText, mailtoUrl } from '../src/drafts.ts';
 import type { runHumainMeeting } from '../src/humain-client.ts';
 import { createMeetingArtifact, MeetingAiOffError, saveMeetingArtifact, type MeetingAttendee } from '../src/meeting-artifact.ts';
-import { saveTranscriptRecord } from '../src/transcript-library.ts';
+import { findTranscriptRecord, saveTranscriptRecord } from '../src/transcript-library.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 
 const roots: string[] = [];
@@ -210,4 +210,71 @@ test('a follow-up from a private meeting, or with an older engine, sends nothing
   await expect(draftFollowUp(root, 'acme-call', 'email', route, { runner: humain.runner, engine: rev3 }))
     .rejects.toThrow('This AI engine cannot write follow-ups yet. Install a newer AI engine');
   expect(humain.requests).toEqual([]);
+});
+
+/** The folder a made-up meeting was saved in. */
+const folderOf = (root: string, id: string) => dirname(findTranscriptRecord(root, id).path);
+
+/** An engine check that, while it runs (it can take 20 seconds), sees the owner turn AI off for a meeting. */
+const madePrivateDuringCheck = (root: string, id: string) => async () => {
+  const path = join(folderOf(root, id), 'meeting.json');
+  writeFileSync(path, `${JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), ai: { off: true } }, null, 2)}\n`);
+  return rev4();
+};
+
+test('a brief never reads a meeting whose settings cannot be read, and choosing its meetings writes nothing', async () => {
+  const { root, env, add } = library();
+  add('acme-call', 'Acme discovery call', 5, [you, dana]);
+  add('damaged', 'Acme pricing', 6, [you, dana]);
+  add('changed', 'Acme legal', 7, [you, dana]);
+  // Half-written, or damaged: it might have said AI is off.
+  writeFileSync(join(folderOf(root, 'damaged'), 'meeting.json'), '{"schemaVersion":1,"ai":{"off":tr');
+  // A transcript changed since its notes: loading it the writing way would rewrite meeting.json.
+  const changed = join(folderOf(root, 'changed'), 'transcript.json');
+  const record = JSON.parse(readFileSync(changed, 'utf8'));
+  writeFileSync(changed, `${JSON.stringify({ ...record, transcript: [...record.transcript, { start: 9, end: 10, speaker: 'LOCAL', text: 'One more thing.' }] }, null, 2)}\n`);
+  const meetingJson = join(folderOf(root, 'changed'), 'meeting.json');
+  const before = { text: readFileSync(meetingJson, 'utf8'), mtime: statSync(meetingJson).mtimeMs };
+
+  expect(relevantMeetings(root, upcoming('Acme pilot', [dana])).map((meeting) => meeting.id)).toEqual(['acme-call']);
+  const humain = fakeBrief();
+  await makeBrief(root, upcoming('Acme pilot', [dana]), { route, runner: humain.runner, engine: rev4, env });
+  expect(humain.requests[0].meetings.map((meeting: any) => meeting.meetingId)).toEqual(['acme-call']);
+  expect(readFileSync(meetingJson, 'utf8')).toBe(before.text);
+  expect(statSync(meetingJson).mtimeMs).toBe(before.mtime);
+});
+
+test('a meeting made private while the engine is checked is left out of the brief before anything is sent', async () => {
+  const { root, env, add } = library();
+  add('acme-call', 'Acme discovery call', 5, [you, dana]);
+  add('acme-pricing', 'Acme pricing', 6, [you, dana]);
+  const humain = fakeBrief();
+  await makeBrief(root, upcoming('Acme pilot', [dana]), { route, runner: humain.runner, engine: madePrivateDuringCheck(root, 'acme-pricing'), env });
+  expect(humain.requests[0].meetings.map((meeting: any) => meeting.meetingId)).toEqual(['acme-call']);
+  // With nothing left to read, nothing is sent at all.
+  const none = fakeBrief();
+  await expect(makeBrief(root, upcoming('Acme pilot', [dana]), { route, runner: none.runner, engine: madePrivateDuringCheck(root, 'acme-call'), env, now: new Date() }))
+    .rejects.toThrow(NoBriefHistoryError);
+  expect(none.requests).toEqual([]);
+});
+
+test('a follow-up refuses a meeting whose settings cannot be read or that turns private while the engine is checked, and writes nothing', async () => {
+  const { root, add } = library();
+  add('acme-call', 'Acme discovery call', 5, [you, dana]);
+  add('damaged', 'Acme pricing', 6, [you, dana]);
+  writeFileSync(join(folderOf(root, 'damaged'), 'meeting.json'), '{"schemaVersion":1,"ai":{"off":tr');
+  const humain = fakeDraft();
+  await expect(draftFollowUp(root, 'damaged', 'email', route, { runner: humain.runner, engine: rev4 })).rejects.toThrow(MeetingAiOffError);
+  // Drafting reads the meeting without writing it, even when its transcript changed since the notes.
+  const transcript = join(folderOf(root, 'acme-call'), 'transcript.json');
+  const record = JSON.parse(readFileSync(transcript, 'utf8'));
+  writeFileSync(transcript, `${JSON.stringify({ ...record, transcript: [...record.transcript, { start: 9, end: 10, speaker: 'LOCAL', text: 'One more thing.' }] }, null, 2)}\n`);
+  const meetingJson = join(folderOf(root, 'acme-call'), 'meeting.json');
+  const before = readFileSync(meetingJson, 'utf8');
+  await draftFollowUp(root, 'acme-call', 'email', route, { runner: humain.runner, engine: rev4 });
+  expect(readFileSync(meetingJson, 'utf8')).toBe(before);
+  expect(humain.requests).toHaveLength(1);
+  await expect(draftFollowUp(root, 'acme-call', 'email', route, { runner: humain.runner, engine: madePrivateDuringCheck(root, 'acme-call') }))
+    .rejects.toThrow(MeetingAiOffError);
+  expect(humain.requests).toHaveLength(1);
 });
