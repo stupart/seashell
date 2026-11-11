@@ -160,6 +160,14 @@ test('write tools say so in their annotations, and the server no longer calls it
   // A corrected line is kept in history, so editing is not destructive; an extractor talks to the AI provider.
   expect((byName.get('edit_segment') as any).destructiveHint).toBe(false);
   expect((byName.get('run_extractor') as any).openWorldHint).toBe(true);
+  // Your notes and the vocabulary are your files: adding a note writes, replacing the vocabulary replaces it.
+  expect(byName.get('get_vocabulary')).toEqual({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
+  expect(byName.get('add_note')).toEqual({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
+  expect(byName.get('update_vocabulary')).toEqual({ readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false });
+  // A follow-up goes to the AI provider and comes back as a draft: it changes nothing and sends nothing.
+  expect(byName.get('draft_follow_up')).toEqual({ readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true });
+  // A brief may be written through the AI provider and saved, replacing the saved one when asked to write it again.
+  expect(byName.get('get_brief')).toEqual({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
   expect(MEETINGS_MCP_INSTRUCTIONS).not.toContain('read-only');
 });
 

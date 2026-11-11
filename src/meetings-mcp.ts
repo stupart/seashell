@@ -259,6 +259,10 @@ const replaces = { readOnlyHint: false, destructiveHint: true, idempotentHint: t
 const removes = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
 /** An automation can replace files and, once the owner turns it on, send meetings outside. */
 const automates = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true };
+/** Saves a brief written by the AI provider; asked to write it again, it replaces the saved one. */
+const briefs = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true };
+/** Asks the AI provider for a draft and returns it: no meeting file changes, and nothing is sent anywhere. */
+const drafts = { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true };
 /** Changes a transcript; the previous version is kept in the meeting's history folder. */
 const edits = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 
@@ -353,13 +357,14 @@ export const MEETINGS_MCP_TOOLS: readonly Tool[] = [
       const note = addMeetingNote(libraryDir, record.id, text(args.text, 'text', true)!, seconds === undefined ? {} : { at: seconds });
       return { id: record.id, note: { text: note.text, ...(note.at === undefined ? {} : { at: formatTuiClock(note.at) }) } };
     } },
-  { name: 'get_brief', title: 'Get a brief before a meeting', annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    description: 'A brief for an upcoming meeting from past ones with the same title or the same people: what was decided, what is still open, what to bring up, each point cited. Returns the saved brief when there is one; otherwise writes it through the AI the user chose for final notes, which takes a minute or more, and saves it in the Briefs folder. Private meetings are never read.',
+  // A brief is written through the AI and saved; with make, the new one replaces the saved one.
+  { name: 'get_brief', title: 'Get a brief before a meeting', annotations: briefs,
+    description: 'A brief for an upcoming meeting from past ones with the same title or the same people: what was decided, what is still open, what to bring up, each point cited. Returns the saved brief when there is one; otherwise writes it through the AI the user chose for final notes, which takes a minute or more, and saves it in the Briefs folder. With make, a fresh brief replaces the saved one. Private meetings are never read.',
     inputSchema: { type: 'object', additionalProperties: false, properties: {
       title: string('Words from the meeting\'s title; leave out for the next meeting on the calendar'),
       make: { type: 'boolean', description: 'Write it again even if one is saved' } } },
     run: getBriefTool },
-  { name: 'draft_follow_up', title: 'Draft a follow-up', annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  { name: 'draft_follow_up', title: 'Draft a follow-up', annotations: drafts,
     description: 'Write a follow-up email (with a subject) or Slack message from one meeting, through the AI the user chose for chat. Returns the draft with the transcript lines each paragraph rests on. It never sends anything: show it to the user, and send it only if they ask, with their own tools.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['id'], properties: {
       id: string('Meeting ID'), kind: { type: 'string', enum: ['email', 'slack'], description: 'email (default) or slack' },
