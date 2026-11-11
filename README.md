@@ -1161,13 +1161,17 @@ Voiceprints never leave your Mac. They are not written into transcripts, notes,
 exports or anything sent to an AI provider, and they live outside your
 transcript library, in `~/Library/Application Support/Sea Shell/Voices`
 (`SEASHELL_VOICES_DIR` overrides it). That folder also keeps each meeting's
-unnamed voices, so a speaker you name later can be learned. Renaming a speaker
-moves their voice to the new name. Forgetting a person deletes their
-voiceprint:
+voices for 90 days, so a speaker you name in that time can be learned; after
+that only the voiceprints of people you named remain. A private meeting keeps
+no voices: turning AI off for one deletes them and takes them out of every
+voiceprint. Moving a meeting to the Trash deletes the voices it kept. Renaming
+a speaker moves their voice to the new name. Forgetting a person deletes their
+voiceprint and their voice in every meeting, and names Seashell suggested from
+it go back to a number; names you gave stay:
 
 ```bash
 seashell speakers voices                # who Sea Shell knows by voice
-seashell speakers voices forget "Ada"   # delete Ada's voiceprint
+seashell speakers voices forget "Ada"   # forget Ada's voice everywhere
 ```
 
 In Seashell, **,** → **Saved voices** lists everyone and forgets one after you

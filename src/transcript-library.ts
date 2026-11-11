@@ -16,7 +16,7 @@ import type { TranscriptFormat, TranscriptRecord } from './transcript-types.ts';
 import { archiveMeetingTranscript, synchronizeMeetingTranscript } from './meeting-artifact.ts';
 import { readBackgroundMeetingState, readBackgroundMeetingStatus, type BackgroundMeetingState, type BackgroundDraftStatus } from './background-meeting-status.ts';
 import { readCaptureHealth, type CaptureHealthSnapshot } from './capture-health.ts';
-import { rememberVoice } from './voiceprints.ts';
+import { forgetMeetingVoices, rememberVoice } from './voiceprints.ts';
 
 export interface TranscriptLibraryEntry {
   id: string;
@@ -375,7 +375,7 @@ export function writeTranscriptExport(
 }
 
 export function trashTranscriptRecord(libraryDir: string, transcriptId: string): string {
-  const { path } = findTranscriptRecord(libraryDir, transcriptId);
+  const { path, record } = findTranscriptRecord(libraryDir, transcriptId);
   const sourceDirectory = dirname(path);
   const captureState = readBackgroundMeetingState(sourceDirectory);
   if (captureState === 'recording' || captureState === 'processing') {
@@ -388,6 +388,8 @@ export function trashTranscriptRecord(libraryDir: string, transcriptId: string):
     `${basename(sourceDirectory)}--${Date.now()}`,
   );
   renameSync(sourceDirectory, target);
+  // Its voices waiting to be named go with it; voices already in a person's print stay theirs.
+  try { forgetMeetingVoices(record.id, { fromPrints: false }); } catch { /* Voices expire in 90 days anyway. */ }
 
   // Remove an empty date directory, but never recurse beyond that exact parent.
   const dateDirectory = dirname(sourceDirectory);

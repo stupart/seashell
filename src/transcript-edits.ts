@@ -14,6 +14,7 @@ import {
   saveTranscriptRecord,
 } from './transcript-library.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
+import { forgetVoiceprint, sameVoiceName } from './voiceprints.ts';
 
 /**
  * Changes to a saved transcript that keep its notes: a corrected line, a
@@ -91,6 +92,31 @@ export function renameMeetingSpeaker(
   keepTranscriptHistory(dirname(path), JSON.parse(readFileSync(path, 'utf8')) as TranscriptRecord, 'renamed-speaker');
   renameTranscriptSpeaker(libraryDir, record.id, found.id, name, { learnVoice: false });
   return { id: record.id, speakerId: found.id, from, to: name.trim() };
+}
+
+/**
+ * Forget a person's voice: their voiceprint, their voice in every meeting
+ * where a speaker bears their name, and the names Seashell suggested from the
+ * print, which go back to the number they had. Names Tyler gave stay.
+ */
+export function forgetPersonVoice(
+  libraryDir: string, name: string, env: NodeJS.ProcessEnv = process.env,
+): { forgotten: boolean; suggestionsUndone: number } {
+  const speakers: Array<{ transcriptId: string; speakerId: string }> = [];
+  let suggestionsUndone = 0;
+  for (const entry of listTranscriptRecords(libraryDir)) {
+    let record: TranscriptRecord;
+    try { record = findTranscriptRecord(libraryDir, entry.id).record; } catch { continue; }
+    for (const speaker of record.speakers.filter((candidate) => sameVoiceName(candidate.label, name))) {
+      speakers.push({ transcriptId: record.id, speakerId: speaker.id });
+      if (speaker.suggestion?.source !== 'voice') continue;
+      try {
+        renameTranscriptSpeaker(libraryDir, record.id, speaker.id, speaker.suggestion.previous, { learnVoice: false });
+        suggestionsUndone += 1;
+      } catch { /* Still recording or processing: its label stays as it is. */ }
+    }
+  }
+  return { forgotten: forgetVoiceprint(name, env, speakers), suggestionsUndone };
 }
 
 export interface PhantomCleanup {

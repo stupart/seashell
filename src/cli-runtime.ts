@@ -96,7 +96,7 @@ import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { setupDiarization } from './diarization-setup.ts';
 import { compareSavedSpeakers, renderSpeakerComparison } from './speaker-compare.ts';
-import { forgetVoiceprint, listVoiceprints } from './voiceprints.ts';
+import { listVoiceprints } from './voiceprints.ts';
 import { initializeFirstInstall } from './first-install.ts';
 import { SCREEN_CAPTURE_HELPER, screenCapturePermission } from './video-capture.ts';
 import { clearVideoRequest, DEFAULT_MEETING_VIDEO, startRecordingWithVideo } from './video-recording.ts';
@@ -116,7 +116,7 @@ import {
   runAutomations,
 } from './automations.ts';
 import { queryNotes } from './meeting-memory.ts';
-import { cleanPhantoms } from './transcript-edits.ts';
+import { cleanPhantoms, forgetPersonVoice } from './transcript-edits.ts';
 import { claimOwnerAndDue, type MeetingAttendee } from './meeting-artifact.ts';
 import type { MeetingIntelligenceCommand } from './cli-args.ts';
 
@@ -1233,8 +1233,10 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
     }
     case 'speaker-voices': {
       if (command.forget !== undefined) {
-        if (!forgetVoiceprint(command.forget)) throw new Error(`Sea Shell doesn't know a voice called "${command.forget}". See: seashell speakers voices`);
-        print(command.json ? JSON.stringify({ forgotten: command.forget }) : `Forgot ${command.forget}'s voice. Past transcripts keep the name.`);
+        const result = forgetPersonVoice(resolveLibraryDir(undefined, process.env, loadConfig()), command.forget);
+        if (!result.forgotten) throw new Error(`Sea Shell doesn't know a voice called "${command.forget}". See: seashell speakers voices`);
+        print(command.json ? JSON.stringify({ forgotten: command.forget, suggestionsUndone: result.suggestionsUndone })
+          : `Forgot ${command.forget}'s voice. Names you gave keep it; ${result.suggestionsUndone === 1 ? '1 name Seashell suggested goes' : `${result.suggestionsUndone} names Seashell suggested go`} back to a number.`);
         return 0;
       }
       const people = listVoiceprints();

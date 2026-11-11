@@ -14,6 +14,7 @@ import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
 import {
   captureChunkPath,
+  captureStoreLibrary,
   type CaptureSessionStore,
   loadCaptureSession,
   readVerifiedCaptureChunk,
@@ -22,12 +23,12 @@ import {
 } from './capture-session.ts';
 import { diarizationStatus } from './diarization-environment.ts';
 import { remoteVoiceCeiling, type SpeakerVoice } from './diarize.ts';
-import { parseMeetingArtifact, type MeetingAttendee } from './meeting-artifact.ts';
+import { meetingIsPrivateAt, parseMeetingArtifact, type MeetingAttendee } from './meeting-artifact.ts';
 import { isLikelySystemAudioLeak } from './live-echo.ts';
 import { meetSpeakerForSegment, nameRemoteSpeakers, readMeetSamples, type MeetSpeaker } from './meet-speakers.ts';
 import { amplifyPcm, hasAudiblePcmSignal, pcmS16leSignalLevel, pcmS16leToWav, quietAudioGain } from './live-system-audio.ts';
 import { createTranscriptRecord } from './transcript-record.ts';
-import { saveTranscriptRecord } from './transcript-library.ts';
+import { findTranscriptRecord, saveTranscriptRecord } from './transcript-library.ts';
 import { coalesceTranscriptSegments } from './transcript-renderer.ts';
 import type {
   StructuredTranscript,
@@ -35,7 +36,9 @@ import type {
   TranscriptSegment,
 } from './transcript-types.ts';
 import { transcribeMedia, type TranscribeMediaOptions } from './transcription-service.ts';
-import { applyVoiceSuggestions, matchKnownVoices, saveMeetingVoices, type VoiceMatch } from './voiceprints.ts';
+import {
+  applyVoiceSuggestions, forgetExpiredMeetingVoices, forgetMeetingVoices, matchKnownVoices, saveMeetingVoices, type VoiceMatch,
+} from './voiceprints.ts';
 import { transcribeWithTimestamps } from './whisper-timestamps.ts';
 import { concurrentTrackTranscription } from './local-asr-profile.ts';
 import {
@@ -192,6 +195,13 @@ export interface FinalizeCaptureOptions {
   readonly remoteTranscriber?: typeof runHumainTranscription;
   /** Transcribe both tracks at once. Defaults to whether this Mac has room; see concurrentTrackTranscription. */
   readonly concurrentTracks?: boolean;
+}
+
+/** The saved meeting a capture belongs to, if any yet: around a published capture, or found by ID from the capture store. */
+function meetingFolderOf(manifestPath: string, sessionId: string): string | undefined {
+  const library = captureStoreLibrary(manifestPath);
+  if (!library) return dirname(dirname(manifestPath));
+  try { return dirname(findTranscriptRecord(library, sessionId).path); } catch { return undefined; }
 }
 
 /** The invitees of a meeting already saved beside its capture, as when separating it again. */
@@ -423,8 +433,14 @@ export async function finalizeCaptureTranscript(
       title: options.title ?? `Recovered live capture ${new Date(manifest.createdAt).toLocaleString()}`,
       source: { filename: 'Live capture session', duration, format: 'capture-session/0.1' },
     });
-    // The voices go to the local voice library, never into the transcript.
-    try { saveMeetingVoices(record.id, remoteVoices); } catch { /* Naming a speaker later just won't learn the voice. */ }
+    // The voices go to the local voice library, never into the transcript; a private meeting keeps none,
+    // and voices nobody named in 90 days go as each meeting is finalized.
+    try {
+      forgetExpiredMeetingVoices();
+      const folder = meetingFolderOf(absoluteManifest, manifest.sessionId);
+      if (folder && meetingIsPrivateAt(folder)) forgetMeetingVoices(record.id);
+      else saveMeetingVoices(record.id, remoteVoices);
+    } catch { /* Naming a speaker later just won't learn the voice. */ }
     return applyVoiceSuggestions(record, voiceNames);
   } finally {
     for (const path of temporaryTracks) {

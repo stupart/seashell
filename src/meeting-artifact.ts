@@ -17,6 +17,7 @@ import { findTranscriptRecord } from './transcript-library.ts';
 import { renderSrt, renderText, renderVtt } from './transcript-renderer.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 import { compareMeetingEvidence, meetingEvidence, parseMeetingEvidence, type MeetingEvidence } from './meeting-evidence.ts';
+import { forgetMeetingVoices } from './voiceprints.ts';
 
 export const MEETING_CLAIM_TYPES = [
   'speaker_identity',
@@ -696,6 +697,8 @@ export function saveMeetingArtifact(
   artifact.updatedAt = new Date().toISOString();
   atomicWrite(join(directory, 'meeting.json'), `${JSON.stringify(artifact, null, 2)}\n`);
   writeMeetingProjections(directory, artifact, record);
+  // A private meeting keeps no voices, from the moment it is saved as private.
+  if (artifact.ai?.off) forgetMeetingVoices(artifact.transcriptId);
   return directory;
 }
 
