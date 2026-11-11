@@ -116,7 +116,8 @@ test('meetings heard with the inherited permission still count, and the check to
   const tested = await byId({ lastMeeting: () => meeting(), systemAudioRecorderSince: since,
     audioChecks: () => ({ computer: '2026-02-02T09:00:00.000Z' }) });
   expect(tested['computer-audio']).toMatchObject({ state: 'ok', summary: 'Heard in last meeting' });
-  expect(tested['computer-audio']!.detail).toContain('It records with Seashell System Audio.');
+  // Which helper records it is plumbing; the row says only what was heard.
+  expect(tested['computer-audio']!.detail).not.toContain('Seashell System Audio');
   expect(tested['computer-audio']!.action).toBeUndefined();
   expect((await byId({}))['computer-audio']).toMatchObject({ state: 'ok', summary: 'Heard in last meeting' });
 });

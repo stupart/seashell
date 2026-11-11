@@ -62,8 +62,8 @@ export const FEATURE_ACTION_LABEL: Record<FeatureAction, string> = {
   'open-speakers': 'Open speaker setup',
   'open-ai': 'Choose AI',
   'open-templates': 'Open your templates and About me',
-  'open-extractors': 'Open the Extractors folder',
-  'open-automations': 'Open the automations folder',
+  'open-extractors': 'Open Insights folder',
+  'open-automations': 'Open Automations folder',
   'turn-on-video': 'Turn video on',
   'allow-screen-recording': 'Allow Screen Recording',
   'check-computer-audio': 'Check computer audio',
@@ -269,7 +269,7 @@ export async function readFeatureStatuses(options: {
     ...(!helperReady ? { state: 'broken', summary: 'Recorder missing', detail: 'The computer-audio recorder is not installed.',
       fix: 'Update Seashell.', command: 'brew upgrade stupart/tap/seashell' } as const
     : evidence?.audibleComputerChunks ? { state: 'ok', summary: 'Heard in last meeting',
-      detail: `${computerDetail} Last meeting: "${evidence.title}" (${when(evidence)}).${ownConfirmed ? ' It records with Seashell System Audio.' : ''}`,
+      detail: `${computerDetail} Last meeting: "${evidence.title}" (${when(evidence)}).`,
       // Until a check at the Mac, it records with the background recorder's permission.
       ...(ownConfirmed ? {} : { ...check, fix: finish }) } as const
     : computerCheck ? { state: 'ok', summary: 'Heard during setup',

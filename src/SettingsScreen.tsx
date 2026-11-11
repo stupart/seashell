@@ -146,7 +146,8 @@ export function useSetupActions(props: SetupActionProps & { onFinished?: () => v
       try {
         const directory = action === 'open-extractors' ? ensureExtractorsDirectory(props.libraryDir) : ensureAutomationsDirectory(props.libraryDir);
         (props.actions?.openFolder ?? openFolder)(directory);
-        done(`Opened the ${action === 'open-extractors' ? 'Extractors' : 'Automations'} folder in Finder.`);
+        // The notes call them Insights; the folder on disk keeps its name, so the toast says both.
+        done(`Opened the ${action === 'open-extractors' ? 'Insights folder (Extractors)' : 'Automations folder'} in Finder.`);
         return true;
       } catch (cause) {
         failure(cause);
@@ -338,16 +339,18 @@ function whenWords(when: ExtractorWhen): string {
 }
 
 /**
- * A file that does not load, as a row beside the ones that do: its name, then what is wrong in a
- * few words. `"Risks" has no fields. Open it to add some.` is `Risks  ✗ Nothing to pull out yet`.
+ * A file that does not load, as a row beside the ones that do: its name, then that it will not load and
+ * why, in a few words. `"Risks" has no fields. Open it to add some.` is `Risks  ✗ Won't load: lists nothing to pull out`.
  */
 function problemParts(problem: { path: string; message: string }): [name: string, why: string] {
   const named = /^"([^"]*)"(?::)?\s*(.*)$/su.exec(problem.message);
   const name = named?.[1] || problem.path.split('/').at(-1)!.replace(/\.md$/u, '');
   const why = (named?.[2] ?? problem.message).trim();
-  const words = /^has no fields\b/u.test(why) ? 'Nothing to pull out yet' : /^has no actions\b/u.test(why) ? 'Nothing to do yet'
+  const words = /^has no fields\b/u.test(why) ? 'lists nothing to pull out' : /^has no actions\b/u.test(why) ? 'lists nothing to do'
     : why.replace(/\.$/u, '');
-  return [name, words.charAt(0).toUpperCase() + words.slice(1)];
+  // "when must be…" reads on after the colon; "URL" and "Use" keep their capitals.
+  const reason = /^\p{Lu}\p{Ll}/u.test(words) && !/^Use\b/u.test(words) ? words.charAt(0).toLowerCase() + words.slice(1) : words;
+  return [name, `Won't load: ${reason}`];
 }
 
 const RUN_SYMBOL: Record<AutomationRun['status'], [string, 'green' | 'red' | 'yellow']> = {
@@ -629,10 +632,14 @@ export default function SettingsScreen(props: SetupActionProps & {
     return <Text key={key} inverse={chosen} wrap="truncate-end">{chosen ? '› ' : '  '}{label.slice(0, labelWidth - 1).padEnd(labelWidth)}
       <Text dimColor={!chosen}>{value}</Text></Text>;
   };
-  // In the same columns as the files that load, so the broken one reads as one of them.
+  // In the same columns as the files that load, so the broken one reads as one of them. Why it will not
+  // load wraps under its own words rather than being cut.
   const problemLines = (problems: readonly { path: string; message: string }[]) => problems.map(problem => {
     const [name, why] = problemParts(problem);
-    return <Text key={problem.path} wrap="truncate-end">{'  '}{name.slice(0, 21).padEnd(22)}<Text color="red">✗ {why}</Text></Text>;
+    return <Box key={problem.path} flexShrink={0}>
+      <Box width={26} flexShrink={0}><Text wrap="truncate-end">{'  '}{name.slice(0, 21).padEnd(22)}<Text color="red">✗ </Text></Text></Box>
+      <Paragraph width={width - 26} color="red" text={why} />
+    </Box>;
   });
   const filesBody = (id: FeatureId) => {
     if (id === 'prompts') return files.prompts.map((prompt, i) => listRow(prompt.name, i, prompt.title, PROMPT_STATE[prompt.state], 18));
