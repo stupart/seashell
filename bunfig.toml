@@ -1,0 +1,3 @@
+[test]
+# Every test process (and the fixtures it spawns) gets private runtime helper copies.
+preload = ["./test/preload.ts"]

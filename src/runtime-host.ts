@@ -23,7 +23,10 @@ export interface RuntimeHostStatus {
 }
 
 function runtimeDirectory(options: RuntimeHostOptions): string {
-  return resolve(options.hostDirectory ?? join(homedir(), 'Library', 'Application Support', 'Sea Shell', 'Runtime'));
+  // SEASHELL_RUNTIME_DIR keeps tests and previews off the installed copies: replacing
+  // one gives macOS a new app, and the microphone permission no longer applies to it.
+  return resolve(options.hostDirectory ?? (process.env.SEASHELL_RUNTIME_DIR?.trim() ||
+    join(homedir(), 'Library', 'Application Support', 'Sea Shell', 'Runtime')));
 }
 
 export function meetingRuntimeHostPath(options: RuntimeHostOptions = {}): string {
