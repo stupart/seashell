@@ -8,7 +8,7 @@ import { runAutomaticExtractors, runExtractor } from './extractors.ts';
 import type { HumainMeetingRoute, runHumainMeeting } from './humain-client.ts';
 import { insightFileName, loadMeetingArtifact, saveMeetingArtifact, transcriptSegmentId, type MeetingArtifact } from './meeting-artifact.ts';
 import { meaningful, parseFrontmatter, phraseMatches } from './meeting-templates.ts';
-import { HEADING, META, meetingViewLines, SUBHEADING } from './meeting-tui.ts';
+import { HEADING, meetingViewLines, plainMeetingLines, SUBHEADING } from './meeting-tui.ts';
 import { findTranscriptRecord } from './transcript-library.ts';
 import { renderText, speakerLabel } from './transcript-renderer.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
@@ -309,7 +309,7 @@ export function meetingMarkdown(artifact: MeetingArtifact | undefined, record: T
   const day = record.createdAt.slice(0, 10);
   const notes = artifact?.analysis
     ? meetingViewLines(artifact, 'notes', record).map((line) => line.startsWith(SUBHEADING) ? `### ${line.slice(SUBHEADING.length)}`
-      : line.startsWith(HEADING) ? `## ${line.slice(HEADING.length)}` : line.replace(META, '  '))
+      : line.startsWith(HEADING) ? `## ${line.slice(HEADING.length)}` : plainMeetingLines([line])[0]!)
       .filter((line) => !/Press g\b/u.test(line))
     : ['No AI notes for this meeting.'];
   return [`# ${artifact?.title ?? record.title}`, '', `_${day}_`, '', ...notes, '', '## Transcript', '',
