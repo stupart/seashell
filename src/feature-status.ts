@@ -372,11 +372,11 @@ export async function readFeatureStatuses(options: {
 /** Names and words to spell right, as a file the owner edits. */
 function vocabularyStatus(libraryDir: string, vocabulary: ReturnType<typeof loadVocabulary>, older: boolean): FeatureStatus {
   const base = { id: 'vocabulary', label: 'Vocabulary', optional: true, action: 'open-vocabulary', command: 'seashell vocabulary',
-    detail: 'Names, companies and words for Seashell to spell right, one per line. Transcription and the meeting AI both use them.' } as const;
+    detail: 'Names, companies and words for Seashell to spell right. Transcription and the meeting AI both use them.' } as const;
   const count = `${vocabulary.terms.length} ${vocabulary.terms.length === 1 ? 'word' : 'words'}`;
   if (vocabulary.problems.length) return { ...base, state: 'attention', summary: `${count} · some left out`, fix: vocabulary.problems[0]! };
-  if (!vocabulary.terms.length) return { ...base, state: 'off', summary: existsSync(vocabularyPath(libraryDir)) ? 'No words yet' : 'None yet',
-    fix: 'Open it and add the names and words you use, one per line.' };
+  // Optional, so having none is not a step to take: the list is empty and a adds a word.
+  if (!vocabulary.terms.length) return { ...base, state: 'off', summary: existsSync(vocabularyPath(libraryDir)) ? 'No words yet' : 'None yet' };
   // Transcription still uses them; only the notes cannot.
   return older ? { ...base, state: 'attention', summary: `${count} · AI engine too old`,
     fix: 'Transcription uses them, but this AI engine is too old to. AI notes says what to do.', command: 'seashell ai install <package.tgz>' }

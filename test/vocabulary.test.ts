@@ -4,10 +4,12 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { pcmS16leToWav } from '../src/live-system-audio.ts';
 import {
+  addVocabularyTerm,
   defaultWhisperPrompt,
   ensureVocabularyFile,
   loadVocabulary,
   parseVocabulary,
+  removeVocabularyTerm,
   vocabularyPath,
   whisperPromptTokens,
   whisperVocabularyPrompt,
@@ -55,6 +57,21 @@ test('the file sits beside Prompts, starts with an explanation, and keeps it whe
   // Text with comments of its own replaces the file whole.
   writeVocabulary(library, '# mine\nAcme', {});
   expect(readFileSync(path, 'utf8')).toBe('# mine\nAcme\n');
+});
+
+test('a word added in the app goes at the end, once, and removing it keeps your notes in the file', () => {
+  const { library } = home();
+  const first = addVocabularyTerm(library, '  Humain ', {});
+  expect(first).toMatchObject({ term: 'Humain', added: true });
+  const path = vocabularyPath(library, {});
+  expect(readFileSync(path, 'utf8')).toStartWith('# Words for Seashell to spell right');
+  expect(addVocabularyTerm(library, 'humain', {}).added).toBe(false);
+  addVocabularyTerm(library, 'Priya Raman', {});
+  expect(loadVocabulary(library, {}).terms).toEqual(['Humain', 'Priya Raman']);
+  expect(() => addVocabularyTerm(library, '   ', {})).toThrow('Type a word');
+  expect(() => addVocabularyTerm(library, 'x'.repeat(81), {})).toThrow('under 80 characters');
+  expect(removeVocabularyTerm(library, 'HUMAIN', {}).terms).toEqual(['Priya Raman']);
+  expect(readFileSync(path, 'utf8')).toStartWith('# Words for Seashell to spell right');
 });
 
 test('Whisper gets whole terms in file order, within the room its prompt has', () => {

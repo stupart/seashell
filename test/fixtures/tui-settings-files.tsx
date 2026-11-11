@@ -106,6 +106,19 @@ try {
   await type(ENTER);
   await until(() => opened.length === 2, 'Enter opens the vocabulary');
   assert.ok(opened[1]!.endsWith('Vocabulary.txt') && existsSync(opened[1]!), 'the file is made beside the library');
+  // Words are added in the app: a, the word, Enter. The list shows it, and d removes it again.
+  await type('a', ...'Humain');
+  await until(() => frame().includes('Add a word: Humain'), 'a asks for a word in the key bar');
+  await type(ENTER);
+  await until(() => frame().includes('Added "Humain". The next call spells it that way.'), 'adding says what it does');
+  assert.ok(readFileSync(opened[1]!, 'utf8').trimEnd().endsWith('\nHumain'), 'the word is in the file, after its notes');
+  await until(() => frame().includes('Humain') && frame().includes('1 word'), 'the list shows it');
+  // Wide, Enter goes into the words; narrow, they are already being chosen, and any key clears the toast.
+  await type(narrow ? DOWN : ENTER);
+  await until(() => frame().includes('d remove') && frame().includes(narrow ? 'Enter TextEdit' : 'Enter open in TextEdit'), 'a chosen word can be removed');
+  await type('d');
+  await until(() => frame().includes('Removed "Humain".'), 'd removes the word');
+  assert.ok(!readFileSync(opened[1]!, 'utf8').includes('\nHumain'), 'and it is gone from the file');
 
   // Extractors: Enter opens the folder, made with its example the first time.
   await type(LEFT, DOWN, ENTER);
