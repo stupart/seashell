@@ -62,7 +62,7 @@ try {
   answer();
   await until(() => frame().includes('answered in 1.2 s'), 'a route that answered says how fast');
   const text = frame().replace(/\s+/gu, ' ');
-  // The provider people know, not its model id: the models are in Advanced.
+  // The provider people know, not its model id: the models are under Models.
   // Narrow, what each AI does goes on the line under it.
   assert.ok(text.includes(narrow ? '✓ Claude Code answered in 1.2 s live analysis, final notes'
     : '✓ Claude Code answered in 1.2 s · live analysis, final notes'), text);

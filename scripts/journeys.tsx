@@ -169,11 +169,11 @@ export const JOURNEYS: Journey[] = [
     ],
   },
   {
-    id: 'speakers', title: 'Put names on speakers', who: 'Someone who sees "Remote speaker 1" and wants a real name.',
+    id: 'speakers', title: 'Put names on speakers', who: 'Someone who sees "Speaker 1" and wants a real name.',
     machine: 'ready', library: 'demo', narrow: true,
     steps: [
       { title: 'History', history: true, until: 'Acme' },
-      { title: 'Meeting transcript', press: [ENTER, '2'], keys: 'Enter 2', until: 'Remote' },
+      { title: 'Meeting transcript', press: [ENTER, '2'], keys: 'Enter 2', until: 'Speaker 1' },
       { title: 'Picking a speaker', press: ['r'], keys: 'R', until: 'Name a speaker', note: 'Who can be named? Priya was suggested from a voice named before.' },
       { title: 'Chose one', press: [ENTER], keys: 'Enter' },
       { title: 'Name typed', press: [...'Dana'], keys: 'Dana' },

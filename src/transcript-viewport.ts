@@ -3,7 +3,7 @@ import wrapAnsi from 'wrap-ansi';
 import { stripVTControlCharacters } from 'util';
 import { coalesceTranscriptSegments, speakerLabel } from './transcript-renderer.ts';
 import type { StructuredTranscript } from './transcript-types.ts';
-import { formatTuiClock, SPEAKER_COLORS, speakerColorIndex } from './tui-state.ts';
+import { formatTuiClock, SPEAKER_COLORS, speakerColorIndex, speakerDisplayName } from './tui-state.ts';
 import { bulletParts } from './meeting-tui.ts';
 
 const color = new Chalk({ level: 1 });
@@ -41,7 +41,7 @@ export function timedTranscriptRows(
   const names = new Map(segments.map((segment) => {
     const label = options.speakers ? speakerLabel(record, segment.speaker) : undefined;
     const name = label ? stripVTControlCharacters(label) : '';
-    return [segment.speaker ?? '', segment.speaker === 'LOCAL' && name === 'Microphone' ? 'You' : name];
+    return [segment.speaker ?? '', name ? speakerDisplayName(segment.speaker, name) : ''];
   }));
   const nameWidth = Math.min(MAX_NAME_COLUMN, Math.max(0, ...[...names.values()].map((name) => name.length)));
   const clockWidth = options.timestamps ? formatTuiClock(segments.at(-1)?.start ?? 0).length : 0;

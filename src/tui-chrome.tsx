@@ -100,8 +100,12 @@ export function Prompt(props: {
 
 /** What just happened, in the key bar's row until the next key: green when it worked, red when it failed. */
 export function Toast(props: { text: string; columns: number; color?: Tone }) {
-  // A toast has no keys to keep, so a long one wraps rather than loses its end.
-  return <Paragraph text={props.text} width={props.columns} color={props.color ?? 'green'} />;
+  const color = props.color ?? 'green';
+  // A confirmation keeps to the key bar's one row: too long for it, its first sentence says enough.
+  // A warning or a failure has no keys to keep, so a long one wraps rather than loses its end.
+  const first = props.text.match(/^.+?[.!?](?=\s|$)/u)?.[0];
+  const text = color === 'green' && width(props.text) > props.columns && first && width(first) <= props.columns ? first : props.text;
+  return <Paragraph text={text} width={props.columns} color={color} />;
 }
 
 /** The status slot at the right of the title line: what needs the person, or what Seashell is doing. */

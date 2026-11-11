@@ -43,8 +43,8 @@ try{
   for(let i=0;i<20;i++)await type('\x1b[A');
   for(let i=0;i<9;i++)await type('\x1b[B');
   await type('\r');if(columns<72)await type('\r');
-  await until(()=>rendered.includes('Advanced · models and effort'));
-  // Existing power-user flow remains available behind Advanced.
+  await until(()=>rendered.includes('Models…'));
+  // Each role's model and effort, and the recommended ones, are under Models.
   await type('\x1b[B');await type('\x1b[B');await type('\r');
   await until(()=>/models by role/.test(stripVTControlCharacters(rendered)));
   await type('\r');await until(()=>/Codex · Ready/.test(stripVTControlCharacters(rendered)));

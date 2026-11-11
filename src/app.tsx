@@ -100,6 +100,7 @@ import {
   moveSelection,
   moveTranscriptScroll,
   formatTuiClock,
+  speakerDisplayName,
   tuiLayout,
 } from './tui-state.ts';
 import {
@@ -1819,12 +1820,11 @@ export default function App(props: {
       // A name Seashell suggested from a known voice: keep it, which also teaches the voice, or say it is not them.
       else if (input === 'y' && suggested) renameSpeaker(suggested.id, suggested.label, `Kept ${suggested.label}.`);
       else if (input === 'n' && suggested) renameSpeaker(suggested.id, suggested.suggestion!.previous,
-        `${suggested.label} is ${suggested.suggestion!.previous} again.`);
+        `${suggested.label} is ${speakerDisplayName(suggested.id, suggested.suggestion!.previous)} again.`);
       else if (key.return) {
         const speaker = speakers[speakerSelection];
         setSpeakerPickerOpen(false);
-        if (speaker) setRenameState({ speakerId: speaker.id, input: '',
-          label: speaker.id === 'LOCAL' && speaker.label === 'Microphone' ? 'You' : speaker.label });
+        if (speaker) setRenameState({ speakerId: speaker.id, input: '', label: speakerDisplayName(speaker.id, speaker.label) });
       }
       return;
     }
@@ -2524,7 +2524,7 @@ export default function App(props: {
   })() : null;
   const namedSpeakers = currentRecord?.speakers ?? [];
   const speakerName = (speaker: (typeof namedSpeakers)[number]) =>
-    `${speaker.id === 'LOCAL' && speaker.label === 'Microphone' ? 'You' : speaker.label}${speaker.suggestion ? ' · suggested' : ''}`;
+    `${speakerDisplayName(speaker.id, speaker.label)}${speaker.suggestion ? ' · suggested' : ''}`;
   const speakerColumn = Math.min(32, Math.max(18, ...namedSpeakers.map((speaker) => speakerName(speaker).length))) + 2;
   const speakerSheet = speakerPickerOpen && currentRecord ? <Sheet title="Name a speaker">
     {namedSpeakers.map((speaker, index) => {

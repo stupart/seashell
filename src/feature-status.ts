@@ -132,7 +132,7 @@ function aiEngineInstalled(): boolean {
   try { resolveHumainExecutable(); return true; } catch { return false; }
 }
 
-// Local time, written the way the meetings list writes it, so "6:44p" here is 6:44p there.
+// Local time, written the way the meetings list writes it, so "6:44 pm" here is 6:44 pm there.
 const when = (evidence: MeetingEvidence) => meetingWhen(evidence.createdAt);
 const checkedOn = (at: string) => meetingWhen(at);
 

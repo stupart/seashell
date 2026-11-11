@@ -52,7 +52,7 @@ export function preferredAIProvider(statuses: { id: string; ready: boolean }[]):
 
 export function meetingModelClass(model: import('./humain-client.ts').HumainModelOption): 'fast' | 'balanced' | 'deep' | 'unknown' {
   // Classify exact catalog IDs, not free-form descriptions or provider defaults.
-  // Unknown models remain available in Advanced; they are never assumed cheap.
+  // Unknown models remain available under Models; they are never assumed cheap.
   const id = model.id.replace(/\[[^\]]+\]$/, '');
   if (/(?:^|[-/_.])(?:astra|fable|opus|pro|ultra|deep)(?:$|[-/_.\d])/i.test(id)) return 'deep';
   if (/(?:^|[-/_.])(?:haiku|luna|mini|nano|flash)(?:$|[-/_.\d])/i.test(id)) return 'fast';
@@ -89,7 +89,7 @@ export function suggestedMeetingRoutes(backend: HumainBackend, models: import('.
   // Keep it an explicit advanced choice rather than a first-run default.
   const detailed = models.find((m) => meetingModelClass(m) === 'deep' && !/fable/i.test(m.id)) ?? ordinary
     ?? (backend === 'local-openai' ? models.find((m) => m.isDefault) ?? models[0] : undefined);
-  if (!detailed) throw new Error('No recognized meeting models. Open Advanced to choose a model.');
+  if (!detailed) throw new Error('No recognized meeting models. Open Models to choose one.');
   const chat = ordinary ?? detailed;
   const make = (role: MeetingRole, model: import('./humain-client.ts').HumainModelOption, preferred: import('./humain-client.ts').ModelEffort) =>
     roleRoute(current[role], backend, model.id, model.efforts.includes(preferred) ? preferred : model.defaultEffort);
