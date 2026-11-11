@@ -30,6 +30,8 @@ import {
   MeetingAutomationController,
   resolveMeetingCandidate,
   hasConfirmedMeetingEnd,
+  isBrowserApplication,
+  isVideoCallEvent,
   preserveMeetingCandidateDuringObservationGap,
   type MeetingAutomationAction,
   type MeetingCandidate,
@@ -196,18 +198,6 @@ export class AutomaticMeetingWatchService {
     const automation = this.#config.meeting?.automation;
     const browser = automation?.enabled === false || automation?.mode === 'off'
       ? undefined : this.#config.meeting?.speakerBrowser;
-    const meet = browser && browser !== 'off'
-      ? await this.#dependencies.readMeet(browser, this.#calendarAbort.signal).catch(() => ({
-        state: 'unavailable' as const, detail: 'Could not check Google Meet. Check the connection in Speakers.',
-      })) : undefined;
-    // Any browser window Accessibility cannot read lands here: with no call
-    // running that is routine, and a person cannot act on it. Lost access is not.
-    const routine = meet?.state === 'unavailable' && (meet as MeetProbe).accessibilityTrusted === true &&
-      !this.#active && this.#controller.state.phase === 'watching';
-    if (meet && !routine && ['permission', 'ambiguous', 'unavailable'].includes(meet.state)) {
-      if (this.#meetWarning !== meet.detail) this.emit({ type: 'watch.warning', at: now.toISOString(), message: meet.detail });
-      this.#meetWarning = meet.detail;
-    } else this.#meetWarning = undefined;
     let snapshot: MeetingSignalSnapshot;
     try {
       snapshot = await this.#dependencies.readSignals();
@@ -215,6 +205,20 @@ export class AutomaticMeetingWatchService {
       this.emit({ type: 'watch.warning', at: now.toISOString(), message: errorMessage(error) });
       snapshot = { schemaVersion: 1, capturedAtUnixMs: now.getTime(), supported: false, inputProcesses: [] };
     }
+    const skipMeet = Boolean(browser && browser !== 'off') && !this.meetCallPossible(snapshot, now);
+    const meet = browser && browser !== 'off' && !skipMeet
+      ? await this.#dependencies.readMeet(browser, this.#calendarAbort.signal).catch(() => ({
+        state: 'unavailable' as const, detail: 'Could not check Google Meet. Check the connection in Speakers.',
+      })) : undefined;
+    // Any browser window Accessibility cannot read lands here: with no call
+    // running that is routine, and a person cannot act on it. Lost access is not.
+    const routine = meet?.state === 'unavailable' && (meet as MeetProbe).accessibilityTrusted === true &&
+      !this.#active && this.#controller.state.phase === 'watching';
+    // A skipped check learned nothing new, so an earlier warning still stands.
+    if (meet && !routine && ['permission', 'ambiguous', 'unavailable'].includes(meet.state)) {
+      if (this.#meetWarning !== meet.detail) this.emit({ type: 'watch.warning', at: now.toISOString(), message: meet.detail });
+      this.#meetWarning = meet.detail;
+    } else if (!skipMeet) this.#meetWarning = undefined;
     if (this.#shuttingDown) {
       return { kind: 'none' };
     }
@@ -316,6 +320,23 @@ export class AutomaticMeetingWatchService {
     await this.#finalizationTail;
     this.#consentId = undefined;
     this.projectWatch();
+  }
+
+  /**
+   * Checking Meet spawns a helper that walks Safari's and Chrome's Accessibility
+   * trees, which is wasted work every few seconds while nothing call-like is
+   * happening. Check when a browser is in front (a muted call can be joined
+   * there with no microphone in use) or holds the microphone, while a call is
+   * being confirmed, recorded or held for resume, or when a video call is on
+   * the calendar. If the signals cannot say what is in front, check anyway.
+   */
+  private meetCallPossible(snapshot: MeetingSignalSnapshot, now: Date): boolean {
+    if (this.#shuttingDown) return false;
+    if (!snapshot.supported || snapshot.frontmostBundleId === undefined) return true;
+    if (this.#active || this.#parked || this.#controller.state.phase !== 'watching') return true;
+    if (isBrowserApplication(snapshot.frontmostBundleId) ||
+        snapshot.inputProcesses.some((process) => isBrowserApplication(process.bundleId))) return true;
+    return isVideoCallEvent(this.currentCalendar(now));
   }
 
   private currentCalendar(now: Date) {

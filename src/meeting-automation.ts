@@ -407,6 +407,11 @@ function patternFor(bundleId: string): AppPattern | undefined {
   ));
 }
 
+/** A browser a web call can run in, or one of its helper processes. */
+export function isBrowserApplication(bundleId: string): boolean {
+  return patternFor(bundleId)?.kind === 'browser';
+}
+
 /** Browsers capture audio in helper processes: Safari's microphone belongs to
  * com.apple.WebKit.GPU and Chrome's to com.google.Chrome.helper. Compare the
  * application family, never the literal bundle ID of the browser itself. */

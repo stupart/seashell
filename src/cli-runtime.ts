@@ -78,7 +78,9 @@ import {
   enableMeetingLaunchAtLogin,
   SEASHELL_LAUNCH_AGENT_LABEL,
   meetingLaunchAtLoginStatus,
+  meetingWatchLogFiles,
 } from './launch-at-login.ts';
+import { WarningRateLimit, watchLogWriter } from './watch-log.ts';
 import { MEETING_SIGNALS_HELPER, readMeetingSignalSnapshot } from './meeting-automation.ts';
 import { buildMeetingContext, loadMeetingContextFiles } from './meeting-context.ts';
 import { writeMeetingConsent } from './meeting-consent.ts';
@@ -766,6 +768,8 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       const stop = () => controller.abort();
       process.once('SIGINT', stop);
       process.once('SIGTERM', stop);
+      const warnings = new WarningRateLimit();
+      const writeEvent = command.json ? watchLogWriter(meetingWatchLogFiles(), { fallback: print }) : print;
       try {
         await runAutomaticMeetingWatch({
           config,
@@ -783,8 +787,15 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
           onEvent: (event) => {
             // Like the dialog, the notice is for someone at the Mac, not a one-shot check.
             if (!once) notifyOneSided(event);
+            // The same warning at most once per 10 minutes, with how often it recurred.
+            let repeats = 0;
+            if (event.type === 'watch.warning') {
+              const admitted = warnings.admit(event.message, Date.parse(event.at) || Date.now());
+              if (admitted === undefined) return;
+              repeats = admitted;
+            }
             if (command.json) {
-              print(JSON.stringify(event));
+              writeEvent(JSON.stringify(repeats ? { ...event, repeats } : event));
               return;
             }
             if (event.type === 'watch.ready') print('Sea Shell is watching for meetings.');

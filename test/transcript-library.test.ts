@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
@@ -124,6 +124,59 @@ describe('transcript library', () => {
     expect(renameTranscriptSpeaker(root, original.id, 'SPEAKER_00', 'Updated name').speakers[0]?.label)
       .toBe('Updated name');
     expect(findTranscriptRecord(root, original.id).record.speakers[0]?.label).toBe('Updated name');
+  });
+
+  test('repeat listings reuse unchanged transcripts and reread changed ones', () => {
+    const root = temporaryDirectory();
+    const saved = saveTranscriptRecord(root, record());
+    expect(listTranscriptRecords(root)[0]?.title).toBe('Meeting: Product / Launch');
+
+    const parse = spyOn(JSON, 'parse');
+    try {
+      expect(listTranscriptRecords(root)).toHaveLength(1);
+      expect(searchTranscriptRecords(root, 'launch')).toHaveLength(1);
+      expect(searchTranscriptRecords(root, 'notes')).toHaveLength(1);
+      expect(listTranscriptRecords(root)).toHaveLength(1);
+      // Only the first search reads the file again, to build its search text.
+      expect(parse).toHaveBeenCalledTimes(1);
+    } finally { parse.mockRestore(); }
+
+    saveTranscriptRecord(root, { ...record(), title: 'Renamed launch review' });
+    expect(listTranscriptRecords(root).map((entry) => entry.title)).toEqual(['Renamed launch review']);
+    expect(findTranscriptRecord(root, '20260806143000-test1234').record.title).toBe('Renamed launch review');
+  });
+
+  test('a damaged transcript reappears once it is repaired, and a removed one disappears', () => {
+    const root = temporaryDirectory();
+    const saved = saveTranscriptRecord(root, record());
+    const healthy = readFileSync(saved.jsonPath, 'utf8');
+    writeFileSync(saved.jsonPath, '{broken');
+    expect(listTranscriptRecords(root)).toEqual([]);
+    expect(searchTranscriptRecords(root, 'launch')).toEqual([]);
+    writeFileSync(saved.jsonPath, healthy);
+    expect(listTranscriptRecords(root).map((entry) => entry.id)).toEqual(['20260806143000-test1234']);
+    expect(searchTranscriptRecords(root, 'launch').map((entry) => entry.id)).toEqual(['20260806143000-test1234']);
+    rmSync(saved.directory, { recursive: true });
+    expect(listTranscriptRecords(root)).toEqual([]);
+    expect(searchTranscriptRecords(root, 'launch')).toEqual([]);
+  });
+
+  test('search follows edits to the text, speakers and title', () => {
+    const root = temporaryDirectory();
+    const original = record();
+    saveTranscriptRecord(root, original);
+    expect(searchTranscriptRecords(root, 'launch notes')).toHaveLength(1);
+    expect(searchTranscriptRecords(root, 'budget')).toEqual([]);
+
+    saveTranscriptRecord(root, { ...original, transcript: [{ ...original.transcript[0]!, text: 'Budget review.' }] });
+    expect(searchTranscriptRecords(root, 'launch notes')).toEqual([]);
+    expect(searchTranscriptRecords(root, 'BUDGET')).toHaveLength(1);
+
+    renameTranscriptSpeaker(root, original.id, 'SPEAKER_00', 'Avery Example');
+    expect(searchTranscriptRecords(root, 'avery example')).toHaveLength(1);
+    // A listing between searches keeps the search text it already built.
+    expect(listTranscriptRecords(root)).toHaveLength(1);
+    expect(searchTranscriptRecords(root, 'budget review')).toHaveLength(1);
   });
 
   test('generates exports on demand and moves deletion to recoverable trash', () => {
