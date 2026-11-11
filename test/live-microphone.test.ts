@@ -1,5 +1,7 @@
 import { expect, test } from 'bun:test';
-import { readFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { startMicrophoneCapture } from '../src/live-microphone.ts';
 
 test('a microphone that produces no PCM releases optional capture startup and exits', async () => {
@@ -77,19 +79,51 @@ test('microphone sample clock is anchored before delayed stdout delivery', async
   if (path) await Bun.file(path).delete();
 });
 
-test('a denied microphone permission is reported once instead of retried', async () => {
+test('a microphone macOS has not allowed is said once, rechecked for the whole recording, and recorded once allowed', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-mic-permission-'));
+  const allowed = join(root, 'allowed');
+  const launches = join(root, 'launches');
+  writeFileSync(launches, '');
+  // Like the helper: exit 77 while access is off; PCM once it is on.
+  const helper = join(root, 'helper.ts');
+  writeFileSync(helper, `
+import { appendFileSync, existsSync } from 'fs';
+appendFileSync(${JSON.stringify(launches)}, 'x');
+if (!existsSync(${JSON.stringify(allowed)})) { process.stderr.write('Microphone access is off for Seashell Microphone.'); process.exit(77); }
+setInterval(() => process.stdout.write(Buffer.alloc(3200, 1)), 100);
+`);
   const states: Array<{ state: string; code?: string; message?: string }> = [];
+  const chunks: string[] = [];
   const handle = startMicrophoneCapture({
-    sessionStartedAtUnixMs: Date.now(), restartDelayMs: 5,
-    command: process.execPath,
-    commandArgs: ['-e', 'process.stderr.write("Microphone access is off for Seashell Microphone."); process.exit(77)'],
-    onState: (state) => states.push(state), onChunk: (chunk) => { void Bun.file(chunk.path).delete(); },
+    sessionStartedAtUnixMs: Date.now(), permissionRecheckMs: 50, maxRestarts: 0,
+    chunkMilliseconds: 200, minimumChunkMilliseconds: 50,
+    command: process.execPath, commandArgs: [helper],
+    onState: (state) => states.push(state), onChunk: (chunk) => chunks.push(chunk.path),
   });
-  await handle.done;
-  expect(states.filter((state) => state.state === 'starting' && state.message === 'Opening microphone…')).toHaveLength(1);
-  expect(states.at(-1)).toMatchObject({ state: 'unavailable', code: 'microphone_permission',
-    message: 'Microphone access is off for Seashell Microphone.' });
-});
+  let settled = false;
+  void handle.done.then(() => { settled = true; });
+  try {
+    const deadline = Date.now() + 8_000;
+    while (readFileSync(launches, 'utf8').length < 4 && Date.now() < deadline) await Bun.sleep(10);
+    // Still trying, with no restart budget at all, and said exactly once.
+    expect(readFileSync(launches, 'utf8').length).toBeGreaterThanOrEqual(4);
+    expect(settled).toBe(false);
+    const said = states.filter((state) => state.code === 'microphone_permission');
+    expect(said).toHaveLength(1);
+    expect(said[0]).toMatchObject({ state: 'unavailable', message: 'Microphone access is off for Seashell Microphone.' });
+    expect(states.filter((state) => state.state === 'starting' && state.message === 'Opening microphone…')).toHaveLength(1);
+    // Allowed mid-call: the next recheck records.
+    writeFileSync(allowed, '');
+    while (chunks.length < 2 && Date.now() < deadline) await Bun.sleep(10);
+    expect(chunks.length).toBeGreaterThanOrEqual(2);
+    expect(states.at(-1)?.state).toBe('active');
+  } finally {
+    handle.stop();
+    await handle.done;
+    for (const path of chunks) rmSync(path, { force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 15_000);
 
 test('a recorder that keeps exiting is retried for the whole meeting, not twice', async () => {
   let attempts = 0;

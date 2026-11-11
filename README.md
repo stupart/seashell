@@ -286,7 +286,9 @@ Background meetings record your microphone through a small native helper,
 **Seashell Microphone**, which holds its own macOS Microphone permission (the
 background runtime itself cannot be granted one). Run
 `seashell meeting microphone setup` once and choose **Allow**; check it any time
-with `seashell meeting microphone`. Other people in a call are recorded from your
+with `seashell meeting microphone`. If macOS has not allowed it when a call starts,
+Seashell tells you, keeps checking, and records your side from the moment you
+allow it: press **Enter** in Seashell. Other people in a call are recorded from your
 Mac's sound. Meetings keep the background recorder's permission for this until
 you allow **Seashell System Audio**, the helper's own, at your Mac: press **,**
 → Computer audio → **Enter**, or run `seashell meeting computer-audio setup`.

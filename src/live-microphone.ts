@@ -60,7 +60,17 @@ export interface StartMicrophoneOptions {
   /** First retry delay; later retries back off to restartDelayMaxMs. */
   readonly restartDelayMs?: number;
   readonly restartDelayMaxMs?: number;
+  /** MICROPHONE_PERMISSION_RECHECK_MS. */
+  readonly permissionRecheckMs?: number;
 }
+
+/**
+ * While macOS has not allowed the microphone, check again this often, for the
+ * whole recording. Permission can be granted mid-call (a protocol bump resets
+ * it, and a prompt dismissed by accident denies it), and your side should be
+ * recorded from that moment, not lost for the rest of the call.
+ */
+export const MICROPHONE_PERMISSION_RECHECK_MS = 10_000;
 
 export const MICROPHONE_HELPER = join(dirname(fileURLToPath(import.meta.url)), '..', 'native', 'bin', 'seashell-microphone');
 /** The native helper's exit status when macOS Microphone access is off. */
@@ -115,12 +125,23 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
   const maximumDelay = Math.max(firstDelay, options.restartDelayMaxMs ?? 15_000);
   let restarts = 0;
   let stopped = false;
-  let permissionDenied = false;
+  /** The last attempt ended because macOS has not allowed the microphone. */
+  let refused = false;
+  /** That was said, and rechecks say nothing until the microphone opens or fails another way. */
+  let awaitingPermission = false;
   let cancelDelay: (() => void) | undefined;
   const retryLabel = () => Number.isFinite(maximumRestarts) ? `${restarts + 1}/${maximumRestarts}` : String(restarts + 1);
   const start = () => startMicrophoneAttempt({ ...options, onState(update) {
-    if (update.diagnostic?.reason === 'permission') permissionDenied = true;
-    if (update.state === 'unavailable' && !stopped && !permissionDenied && restarts < maximumRestarts) {
+    refused = update.diagnostic?.reason === 'permission';
+    if (refused) {
+      if (!awaitingPermission && !stopped) options.onState(update);
+      awaitingPermission = true;
+      return;
+    }
+    // A recheck opening the helper again is not news; what it finds is.
+    if (awaitingPermission && update.state === 'starting' && update.code === undefined) return;
+    awaitingPermission = false;
+    if (update.state === 'unavailable' && !stopped && restarts < maximumRestarts) {
       options.onState({ ...update, state: 'starting', code: 'microphone_reconnecting',
         message: `${update.message ?? 'Microphone capture failed.'} Retrying (${retryLabel()})…` });
     } else options.onState(update);
@@ -131,11 +152,16 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
     while (true) {
       const attemptStartedAt = Date.now();
       await current.done;
-      if (stopped || permissionDenied || restarts >= maximumRestarts) return;
-      // A recorder that ran for a while before failing is a fresh problem.
-      if (Date.now() - attemptStartedAt >= 60_000) restarts = 0;
-      const delay = Math.min(maximumDelay, firstDelay * 2 ** Math.min(restarts, 10));
-      restarts++;
+      if (stopped) return;
+      let delay = options.permissionRecheckMs ?? MICROPHONE_PERMISSION_RECHECK_MS;
+      // Permission is never given up on during a recording, whatever the restart limit.
+      if (!refused) {
+        if (restarts >= maximumRestarts) return;
+        // A recorder that ran for a while before failing is a fresh problem.
+        if (Date.now() - attemptStartedAt >= 60_000) restarts = 0;
+        delay = Math.min(maximumDelay, firstDelay * 2 ** Math.min(restarts, 10));
+        restarts++;
+      }
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => { cancelDelay = undefined; resolve(); }, delay);
         cancelDelay = () => { clearTimeout(timer); cancelDelay = undefined; resolve(); };
