@@ -41,6 +41,25 @@ test('detection separates missing permission from a call that is only out of sig
   expect((await byId({}, {})).detection).toMatchObject({ state: 'attention', summary: 'Google Meet not connected' });
 });
 
+test('a few audible moments in a long call do not count as hearing you', async () => {
+  // Shaped like the call that lost its microphone: 2 audible chunks of 681 while the others talked for 70 minutes.
+  const oneSided = meeting({ microphoneChunks: 681, audibleMicrophoneChunks: 2, computerChunks: 680, audibleComputerChunks: 425,
+    coverage: { yourSideAudibleSeconds: 20, otherSideAudibleSeconds: 4250, yourSideAudibleShare: 0.005, yourSideMissing: true } });
+  const after = await byId({ lastMeeting: () => oneSided });
+  expect(after.microphone).toMatchObject({ state: 'attention', summary: 'Allowed · your side almost silent' });
+  expect(after.microphone!.detail).toBe('Your side was almost silent in "Weekly sync" (' +
+    new Date('2026-01-15T10:00:00.000Z').toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) +
+    '). The others talked for about 71 minutes, but your microphone picked up almost nothing.');
+  expect(after.microphone!.fix).toContain('not muted');
+  expect(after.microphone!.fix).toContain('Sound → Input');
+  // Recorded before this recorder was installed: already explained as fixed.
+  const before = await byId({ lastMeeting: () => oneSided, microphoneRecorderSince: () => Date.parse('2026-02-01T00:00:00Z') });
+  expect(before.microphone).toMatchObject({ state: 'ok' });
+  const heard = await byId({ lastMeeting: () => meeting({ audibleMicrophoneChunks: 8,
+    coverage: { yourSideAudibleSeconds: 80, otherSideAudibleSeconds: 90, yourSideMissing: false } }) });
+  expect(heard.microphone).toMatchObject({ state: 'ok', summary: 'Heard in last meeting' });
+});
+
 test('microphone status uses permission first, then what the last meeting heard', async () => {
   expect((await byId({ microphone: async () => ({ authorization: 'notDetermined', detail: '' }) })).microphone)
     .toMatchObject({ state: 'broken', action: 'allow-microphone' });

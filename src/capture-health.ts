@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { loadCaptureSession, type CaptureChunk } from './capture-session.ts';
 import type { PcmSignalLevel, SystemAudioStateUpdate } from './live-system-audio.ts';
 
 export type CaptureHealthSource = 'microphone' | 'systemAudio';
 export type CaptureHealthState = 'starting' | 'receiving' | 'quiet' | 'reconnecting' | 'unavailable' | 'stopped' | 'disabled';
-export type CaptureHealthWarningKind = 'quiet' | 'reconnecting' | 'unavailable' | 'no-audio';
+/** one-sided: the others are talking and your microphone hears nothing. */
+export type CaptureHealthWarningKind = 'quiet' | 'reconnecting' | 'unavailable' | 'no-audio' | 'one-sided';
 export interface CaptureHealthWarning {
   readonly kind: CaptureHealthWarningKind;
   readonly message: string;
@@ -26,16 +28,42 @@ export interface CaptureSourceHealth {
   /** At most one entry per kind, retained through recovery and finalization. */
   readonly warnings: readonly CaptureHealthWarning[];
 }
+/** What your microphone captured compared with the other side, over a whole meeting. */
+export interface CaptureCoverage {
+  /** Seconds of saved microphone audio with sound in it. */
+  readonly yourSideAudibleSeconds: number;
+  /** Seconds of saved computer audio with sound in it: the others talking. */
+  readonly otherSideAudibleSeconds: number;
+  /** Your audible time over theirs. Absent until they have talked for a few minutes. */
+  readonly yourSideAudibleShare?: number;
+  /** They talked for minutes and your microphone heard almost nothing. */
+  readonly yourSideMissing: boolean;
+}
 export interface CaptureHealthSnapshot {
   readonly schemaVersion: 1;
   readonly updatedAtUnixMs: number;
   readonly microphone: CaptureSourceHealth;
   readonly systemAudio: CaptureSourceHealth;
+  /** Set when capture stops, from the meeting's saved audio. */
+  readonly coverage?: CaptureCoverage;
 }
+export type CoverageChunk = Pick<CaptureChunk, 'trackId' | 'audible' | 'startMs' | 'endMs'>;
+
+export const ONE_SIDED_MESSAGE = "Your microphone hasn't picked you up for a minute. Are you muted, or is the wrong mic selected?";
+export const YOUR_SIDE_MISSING_NOTICE = "Your side wasn't recorded. Your microphone picked up almost nothing while the others talked.";
+/** The others count as talking when their audio had sound this recently. */
+const OTHERS_TALKING_MS = 10_000;
+/** "A few minutes" of the others talking before a meeting's coverage is judged. */
+const JUDGE_AFTER_OTHERS_SECONDS = 180;
+/** A working microphone hears room sound most of the time: healthy calls measured
+ * two to four times the other side's audible time, broken ones 0 to 5 percent. */
+const YOUR_SIDE_MISSING_SHARE = 0.1;
 
 const sources = ['microphone', 'systemAudio'] as const;
 const states: readonly CaptureHealthState[] = ['starting', 'receiving', 'quiet', 'reconnecting', 'unavailable', 'stopped', 'disabled'];
-const kinds: readonly CaptureHealthWarningKind[] = ['quiet', 'reconnecting', 'unavailable', 'no-audio'];
+const kinds: readonly CaptureHealthWarningKind[] = ['quiet', 'reconnecting', 'unavailable', 'no-audio', 'one-sided'];
+/** Warnings that only sound, not just more PCM, resolves. */
+const untilSignal: readonly CaptureHealthWarningKind[] = ['quiet', 'one-sided'];
 const timestamp = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
 const clean = (text: string | undefined, limit = 600): string | undefined => text?.replace(/[\p{Cc}\p{Cf}]/gu, ' ').trim().slice(0, limit) || undefined;
 const label = (source: CaptureHealthSource) => source === 'microphone' ? 'Microphone' : 'Computer audio';
@@ -45,9 +73,12 @@ export class CaptureHealthTracker {
   #value: CaptureHealthSnapshot;
   readonly #startedAt: number;
   readonly #quietAfterMs: number;
-  constructor(options: { microphone?: boolean; systemAudio?: boolean; nowUnixMs?: number; quietAfterMs?: number } = {}) {
+  readonly #oneSidedAfterMs: number;
+  #microphoneSince?: number;
+  constructor(options: { microphone?: boolean; systemAudio?: boolean; nowUnixMs?: number; quietAfterMs?: number; oneSidedAfterMs?: number } = {}) {
     this.#startedAt = options.nowUnixMs ?? Date.now();
     this.#quietAfterMs = options.quietAfterMs ?? 30_000;
+    this.#oneSidedAfterMs = options.oneSidedAfterMs ?? 60_000;
     const initial = (enabled?: boolean): CaptureSourceHealth => ({ state: enabled === false ? 'disabled' : 'starting', updatedAtUnixMs: this.#startedAt, warnings: [] });
     this.#value = { schemaVersion: 1, updatedAtUnixMs: this.#startedAt, microphone: initial(options.microphone), systemAudio: initial(options.systemAudio) };
   }
@@ -93,26 +124,104 @@ export class CaptureHealthTracker {
       ...(signal ? { lastSignalAtUnixMs: now } : {}),
       code: quiet ? `${source === 'microphone' ? 'microphone' : 'system_audio'}_quiet` : undefined,
       message: quiet ? `${label(source)} is quiet. This may be silence or mute; check the input if sound is expected.` : undefined,
-      warnings: previous.warnings.map(warning => warning.resolvedAtUnixMs === undefined && (warning.kind !== 'quiet' || signal)
+      warnings: previous.warnings.map(warning => warning.resolvedAtUnixMs === undefined && (!untilSignal.includes(warning.kind) || signal)
         ? { ...warning, resolvedAtUnixMs: now } : warning),
     };
     if (quiet && (previous.state !== 'quiet' || !previous.warnings.some(warning => warning.kind === 'quiet' && warning.resolvedAtUnixMs === undefined))) {
       value = this.warn(value, 'quiet', value.message!, now, value.code);
     }
-    return this.set(source, value, now);
+    if (source === 'microphone') this.#microphoneSince ??= now;
+    this.set(source, value, now);
+    return this.oneSided(now);
   }
-  stop(nowUnixMs = Date.now()): CaptureHealthSnapshot {
+  /** Others talking while your microphone delivers PCM with nothing in it, for
+   * about a minute: muted, or the wrong input. Raised once until you are heard. */
+  private oneSided(now: number): CaptureHealthSnapshot {
+    const mic = this.#value.microphone, others = this.#value.systemAudio;
+    if (mic.warnings.some(warning => warning.kind === 'one-sided' && warning.resolvedAtUnixMs === undefined)) return this.#value;
+    const silentSince = Math.max(mic.lastSignalAtUnixMs ?? 0, this.#microphoneSince ?? now);
+    const delivering = (mic.state === 'receiving' || mic.state === 'quiet') && now - (mic.lastPcmAtUnixMs ?? -Infinity) <= 8_000;
+    const othersTalking = now - (others.lastSignalAtUnixMs ?? -Infinity) <= OTHERS_TALKING_MS;
+    if (!delivering || !othersTalking || now - silentSince < this.#oneSidedAfterMs) return this.#value;
+    return this.set('microphone', this.warn(mic, 'one-sided', ONE_SIDED_MESSAGE, now, 'microphone_one_sided'), now);
+  }
+  /** Pass the meeting's saved chunks to keep its coverage with the final health. */
+  stop(nowUnixMs = Date.now(), chunks?: readonly CoverageChunk[]): CaptureHealthSnapshot {
     for (const source of sources) if (this.#value[source].state !== 'disabled') {
       this.set(source, { ...this.#value[source], state: 'stopped', code: undefined, message: undefined }, Math.max(this.#value.updatedAtUnixMs, nowUnixMs));
     }
+    if (chunks) {
+      const coverage = captureCoverage(chunks, { microphone: this.#value.microphone.state !== 'disabled' });
+      this.#value = { ...this.#value, coverage: Object.freeze(coverage) };
+    }
     return this.#value;
   }
+}
+
+/**
+ * Judge a meeting by how much of the call your microphone heard compared with
+ * the others, not by whether it heard anything at all: a broken microphone
+ * still lets through a few seconds of an hour.
+ */
+export function captureCoverage(chunks: readonly CoverageChunk[], options: { readonly microphone?: boolean } = {}): CaptureCoverage {
+  const audible = (track: CoverageChunk['trackId']) => chunks.reduce((total, chunk) =>
+    chunk.trackId === track && chunk.audible ? total + Math.max(0, chunk.endMs - chunk.startMs) / 1_000 : total, 0);
+  const yours = audible('microphone'), theirs = audible('system-audio');
+  const judged = theirs >= JUDGE_AFTER_OTHERS_SECONDS;
+  return {
+    yourSideAudibleSeconds: Math.round(yours), otherSideAudibleSeconds: Math.round(theirs),
+    ...(judged ? { yourSideAudibleShare: Math.round(yours / theirs * 1_000) / 1_000 } : {}),
+    yourSideMissing: options.microphone !== false && judged && yours < theirs * YOUR_SIDE_MISSING_SHARE,
+  };
+}
+
+/** A saved meeting's coverage: kept by the recorder when it stopped, or worked
+ * out from the saved audio for meetings recorded before it kept one. Pass the
+ * library entry's captureHealth when you have it. */
+export function readMeetingCoverage(directory: string, health = readCaptureHealth(join(directory, 'capture'))): CaptureCoverage | undefined {
+  if (health?.coverage) return health.coverage;
+  try {
+    return captureCoverage(loadCaptureSession(join(directory, 'capture', 'manifest.json')).chunks,
+      { microphone: health?.microphone.state !== 'disabled' });
+  } catch { return undefined; }
+}
+
+/** "Your side wasn't recorded", for the meeting view and MCP to show, or nothing. */
+export function yourSideNotice(coverage: CaptureCoverage | undefined): string | undefined {
+  return coverage?.yourSideMissing ? YOUR_SIDE_MISSING_NOTICE : undefined;
+}
+
+/** The watch events the notice follows. Structural, so health does not depend on the watcher. */
+interface WatchEventLike { readonly type: string; readonly sessionId?: string; readonly message?: string }
+
+/**
+ * Tells you once per meeting that your side is not being heard. Muting on
+ * purpose is normal, so a meeting never gets a second notice, even after a pause.
+ */
+export function oneSidedNotifier(notify: (message: string) => void): (event: WatchEventLike) => void {
+  let meeting: string | undefined, notified: string | undefined;
+  return (event) => {
+    if (event.type === 'meeting.started' || event.type === 'meeting.resumed') meeting = event.sessionId;
+    else if (event.type === 'watch.warning' && meeting !== undefined && notified !== meeting && event.message?.includes(ONE_SIDED_MESSAGE)) {
+      notified = meeting;
+      notify(ONE_SIDED_MESSAGE);
+    }
+  };
+}
+
+const seconds = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+function validCoverage(value: unknown): value is CaptureCoverage {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const coverage = value as CaptureCoverage;
+  return seconds(coverage.yourSideAudibleSeconds) && seconds(coverage.otherSideAudibleSeconds) &&
+    (coverage.yourSideAudibleShare === undefined || seconds(coverage.yourSideAudibleShare)) && typeof coverage.yourSideMissing === 'boolean';
 }
 
 export function parseCaptureHealth(value: unknown): CaptureHealthSnapshot | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return;
   const raw = value as CaptureHealthSnapshot;
   if (raw.schemaVersion !== 1 || !timestamp(raw.updatedAtUnixMs)) return;
+  if (raw.coverage !== undefined && !validCoverage(raw.coverage)) return;
   const optionalTime = (value: unknown) => value === undefined || timestamp(value);
   const optionalText = (value: unknown, limit: number) => value === undefined || (typeof value === 'string' && value.length <= limit && clean(value, limit) === value);
   for (const source of sources) {
@@ -137,7 +246,11 @@ export function parseCaptureHealth(value: unknown): CaptureHealthSnapshot | unde
     ...(item.lastSignalAtUnixMs === undefined ? {} : { lastSignalAtUnixMs: item.lastSignalAtUnixMs }),
     ...(item.code === undefined ? {} : { code: item.code }), ...(item.message === undefined ? {} : { message: item.message }),
   });
-  return { schemaVersion: 1, updatedAtUnixMs: raw.updatedAtUnixMs, microphone: copy(raw.microphone), systemAudio: copy(raw.systemAudio) };
+  const coverage = raw.coverage && { yourSideAudibleSeconds: raw.coverage.yourSideAudibleSeconds, otherSideAudibleSeconds: raw.coverage.otherSideAudibleSeconds,
+    ...(raw.coverage.yourSideAudibleShare === undefined ? {} : { yourSideAudibleShare: raw.coverage.yourSideAudibleShare }),
+    yourSideMissing: raw.coverage.yourSideMissing };
+  return { schemaVersion: 1, updatedAtUnixMs: raw.updatedAtUnixMs, microphone: copy(raw.microphone), systemAudio: copy(raw.systemAudio),
+    ...(coverage ? { coverage } : {}) };
 }
 
 export function readCaptureHealth(directory: string): CaptureHealthSnapshot | undefined {

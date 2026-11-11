@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { currentMeetingRoutes } from './ai-provider.ts';
 import { readBackgroundMeetingStatus } from './background-meeting-status.ts';
 import { readBackgroundWatchStatus } from './background-watch-status.ts';
+import { captureCoverage, type CaptureCoverage } from './capture-health.ts';
 import { loadCaptureSession } from './capture-session.ts';
 import type { SeashellConfig } from './config.ts';
 import { diarizationStatus } from './diarization-environment.ts';
@@ -61,6 +62,8 @@ export interface MeetingEvidence {
   readonly audibleMicrophoneChunks: number;
   readonly computerChunks: number;
   readonly audibleComputerChunks: number;
+  /** Your side's share of the call, which a few audible moments cannot fake. */
+  readonly coverage?: CaptureCoverage;
   readonly meetingKey?: string;
 }
 
@@ -93,6 +96,8 @@ export function lastMeetingEvidence(libraryDir: string): MeetingEvidence | undef
         title: entry.title, createdAt: entry.createdAt,
         microphoneChunks: count('microphone'), audibleMicrophoneChunks: count('microphone', true),
         computerChunks: count('system-audio'), audibleComputerChunks: count('system-audio', true),
+        coverage: entry.captureHealth?.coverage
+          ?? captureCoverage(chunks, { microphone: entry.captureHealth?.microphone.state !== 'disabled' }),
         ...(meetingKey ? { meetingKey } : {}),
       };
     } catch { continue; }
@@ -179,6 +184,9 @@ export async function readFeatureStatuses(options: {
   }))();
   const predatesRecorder = Boolean(evidence && recorderSince !== undefined && Date.parse(evidence.createdAt) < recorderSince);
   const micSilent = evidence && evidence.microphoneChunks > 0 && evidence.audibleMicrophoneChunks === 0 && !predatesRecorder;
+  // A couple of audible moments in an hour is not your side of the call.
+  const almostSilent = evidence?.coverage?.yourSideMissing && !predatesRecorder
+    ? { evidence, minutes: Math.max(1, Math.round(evidence.coverage.otherSideAudibleSeconds / 60)) } : undefined;
   statuses.push({
     id: 'microphone', label: 'Your microphone', optional: false,
     ...(microphone.authorization === 'authorized'
@@ -186,6 +194,10 @@ export async function readFeatureStatuses(options: {
         ? { state: 'attention', summary: 'Allowed · last meeting silent',
           detail: `Access is allowed, but nothing was heard from your microphone in "${evidence.title}" (${when(evidence)}).`,
           fix: 'Check System Settings → Sound → Input, and that your Mac is not muted for Meet.' } as const
+        : almostSilent
+        ? { state: 'attention', summary: 'Allowed · your side almost silent',
+          detail: `Your side was almost silent in "${almostSilent.evidence.title}" (${when(almostSilent.evidence)}). The others talked for about ${almostSilent.minutes} minutes, but your microphone picked up almost nothing.`,
+          fix: 'Check that you are not muted, and that the right microphone is selected in System Settings → Sound → Input.' } as const
         : { state: 'ok', summary: evidence?.audibleMicrophoneChunks ? 'Heard in last meeting'
             : predatesRecorder ? 'Allowed · your next meeting confirms it' : 'Allowed',
           detail: 'Records your side of the conversation as its own track, so your words are labelled as you.' +

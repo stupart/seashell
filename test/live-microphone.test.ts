@@ -108,8 +108,13 @@ test('a recorder that keeps exiting is retried for the whole meeting, not twice'
 });
 
 test.skipIf(process.platform !== 'darwin' || !Bun.file(`${import.meta.dir}/../native/bin/seashell-microphone`).size)(
-  'a built-in microphone shape, three discrete channels, comes out as sound and not silence', () => {
+  'every input shape, from AirPods to aggregate devices, comes out as sound on the meeting timeline', () => {
+    // Int16, Int32 and Float32, interleaved or not, mono to 8 channels
+    // (spatial, discrete and partly silent), 8 to 192 kHz: 336 cases.
     const result = Bun.spawnSync([`${import.meta.dir}/../native/bin/seashell-microphone`, '--mix-check']);
+    const report = JSON.parse(result.stdout.toString());
+    expect(report.failures).toEqual([]);
+    expect(report.cases).toBe(336);
+    expect(report.peak).toBeGreaterThan(7_000);
     expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout.toString()).peak).toBeGreaterThan(4_000);
   });

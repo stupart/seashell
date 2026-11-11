@@ -214,7 +214,8 @@ export function startDurableLiveCapture(
         }
         return store.setStatus('captured', reason);
       }).finally(() => {
-        health.stop();
+        // The whole meeting's chunks, including any part before a pause.
+        health.stop(Date.now(), store.manifest.chunks);
         status(true);
       });
       return stopping;

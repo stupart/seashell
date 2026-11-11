@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { CaptureHealthTracker } from '../src/capture-health.ts';
-import { captureRecordingMode, recordingNeedsAttention } from '../src/RecordingStatus.tsx';
+import { captureRecordingMode, recordingNeedsAttention, recordingSummary } from '../src/RecordingStatus.tsx';
 
 test('record intent and helper readiness cannot claim capture before PCM arrives', () => {
   expect(captureRecordingMode()).toBe('starting');
@@ -59,4 +59,25 @@ test('a claimed active source without PCM eventually needs attention; disabled s
   const disabled = new CaptureHealthTracker({ microphone: false, systemAudio: false, nowUnixMs: 1 }).snapshot;
   expect(recordingNeedsAttention(disabled, false, 90_000)).toBe(false);
   expect(recordingNeedsAttention(undefined, false, 90_000)).toBe(false);
+});
+
+test('a one-sided call names the likely cause live, and a saved meeting says your side was not recorded', () => {
+  const health = new CaptureHealthTracker({ nowUnixMs: 0 });
+  for (let time = 500; time <= 61_000; time += 500) {
+    health.pcm('microphone', { peak: 1, rms: 1, rmsDbfs: -90 }, undefined, time);
+    health.pcm('systemAudio', { peak: 1000, rms: 100, rmsDbfs: -45 }, undefined, time);
+  }
+  const live = recordingSummary({ mode: 'recording', health: health.snapshot, nowUnixMs: 61_000 });
+  expect(live.problems[0]).toBe('Microphone: not hearing you — muted or wrong mic? · i audio help');
+  // Two audible chunks of 681: something was heard, but not your side of the call.
+  const chunk = (trackId: 'microphone' | 'system-audio', index: number, audible: boolean) =>
+    ({ trackId, audible, startMs: index * 10_000, endMs: (index + 1) * 10_000 });
+  health.stop(62_000, [
+    ...Array.from({ length: 681 }, (_, index) => chunk('microphone', index, index < 2)),
+    ...Array.from({ length: 680 }, (_, index) => chunk('system-audio', index, index < 425)),
+  ]);
+  expect(recordingNeedsAttention(health.snapshot, true, 62_000)).toBe(true);
+  const saved = recordingSummary({ mode: 'ready', health: health.snapshot, nowUnixMs: 62_000 });
+  expect(saved.headline).toBe('Saved · audio needs review');
+  expect(saved.problems).toEqual(['Microphone: your side wasn’t recorded']);
 });

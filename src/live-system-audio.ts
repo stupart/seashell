@@ -358,9 +358,13 @@ export interface StartSystemAudioOptions {
   readonly helperArgs?: readonly string[];
   readonly chunkMilliseconds?: number;
   readonly minimumChunkMilliseconds?: number;
-  /** Bound recovery from native output-device or format resets. */
+  /** Defaults to unlimited: switching output devices is normal, many times a call. */
   readonly maxRestarts?: number;
+  /** First retry delay; later retries back off to restartDelayMaxMs. */
   readonly restartDelayMs?: number;
+  readonly restartDelayMaxMs?: number;
+  /** A helper that sends no audio this long after it started sending is restarted. */
+  readonly stalledTimeoutMs?: number;
   readonly onChunk: (chunk: SystemAudioChunk) => void;
   readonly onState: (update: SystemAudioStateUpdate) => void;
   readonly onLevel?: (level: PcmSignalLevel) => void;
@@ -410,9 +414,12 @@ export function startSystemAudioCapture(
   }
   // Each attempt gets its own sample clock/chunker. Reusing a previous clock
   // would close a device-switch gap and move later audio earlier in the meeting.
-  const maximumRestarts = options.maxRestarts ?? 2;
+  const maximumRestarts = options.maxRestarts ?? Number.POSITIVE_INFINITY;
+  const firstDelay = options.restartDelayMs ?? 500;
+  const maximumDelay = Math.max(firstDelay, options.restartDelayMaxMs ?? 15_000);
   let restarts = 0;
   let stopped = false;
+  let heard = false;
   let retryEligible = false;
   let cancelDelay: (() => void) | undefined;
   let lastChunkEnd: number | undefined;
@@ -431,22 +438,29 @@ export function startSystemAudioCapture(
       options.onChunk(chunk);
       lastChunkEnd = chunk.endSeconds;
     }, onState(update) {
-      retryEligible = update.state === 'unavailable' && update.code === 'device_changed';
+      if (update.state === 'active') heard = true;
+      retryEligible = update.state === 'unavailable' && systemAudioCanRecover(update.code, heard);
       if (retryEligible && !stopped && restarts < maximumRestarts) {
         options.onState({ state: 'starting', code: 'system_audio_reconnecting',
-          message: 'Computer audio device changed · reconnecting…' });
+          message: update.code === 'system_audio_stalled' ? 'Computer audio stopped arriving · reconnecting…'
+            : update.code === 'device_changed' ? 'Computer audio device changed · reconnecting…'
+            : 'Computer audio stopped · reconnecting…' });
       } else options.onState(update);
-    } });
+    } }, { expectAudio: heard });
   };
   let current = start();
   const done = (async () => {
     while (true) {
+      const attemptStartedAt = Date.now();
       await current.done;
       if (stopped || !retryEligible || restarts >= maximumRestarts) return;
+      // A device that worked for a while before changing is a fresh change.
+      if (Date.now() - attemptStartedAt >= 60_000) restarts = 0;
+      const delay = Math.min(maximumDelay, firstDelay * 2 ** Math.min(restarts, 10));
       restarts++;
       waitingForRestartChunk = true;
       await new Promise<void>(resolve => {
-        const timer = setTimeout(() => { cancelDelay = undefined; resolve(); }, options.restartDelayMs ?? 500);
+        const timer = setTimeout(() => { cancelDelay = undefined; resolve(); }, delay);
         cancelDelay = () => { clearTimeout(timer); cancelDelay = undefined; resolve(); };
       });
       if (stopped) { options.onState({ state: 'stopped' }); return; }
@@ -464,7 +478,20 @@ export function startSystemAudioCapture(
   };
 }
 
-function startSystemAudioAttempt(options: StartSystemAudioOptions): SystemAudioCaptureHandle {
+/** Failures that another attempt cannot fix. */
+const permanentFailures = new Set(['permission_denied', 'unsupported_os', 'helper_missing', 'spawn_failed', 'protocol_error']);
+
+/**
+ * A device switch or a stall is always worth another attempt. Once computer
+ * audio has worked in this meeting, so is any other failure: a new output
+ * device can take a moment before a tap on it opens.
+ */
+export function systemAudioCanRecover(code: string | undefined, heard: boolean): boolean {
+  if (code === 'device_changed' || code === 'system_audio_stalled') return true;
+  return heard && !permanentFailures.has(code ?? '');
+}
+
+function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { readonly expectAudio: boolean }): SystemAudioCaptureHandle {
   const helperPath = options.helperPath ?? SYSTEM_AUDIO_HELPER;
   if (!existsSync(helperPath)) {
     options.onState({
@@ -488,6 +515,20 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions): SystemAudioC
   let lastLevelUpdate = 0;
   let resolveDone: () => void = () => {};
   const done = new Promise<void>((resolve) => { resolveDone = resolve; });
+  // The helper sends audio continuously, silence included. If it stops, its
+  // device stopped without telling us; nothing else would notice, and the
+  // rest of the meeting would be lost. A reconnect is watched from the start,
+  // since its permission was already granted; a first start may be waiting
+  // for the person to allow access.
+  const stalledTimeoutMs = options.stalledTimeoutMs ?? 8_000;
+  let lastDataAt = attempt.expectAudio ? Date.now() : undefined;
+  const watchdog = setInterval(() => {
+    if (requestedStop || lastDataAt === undefined || Date.now() - lastDataAt < stalledTimeoutMs) return;
+    lastDataAt = undefined;
+    nativeError = { type: 'error', code: 'system_audio_stalled', message: 'Computer audio stopped arriving.' };
+    void terminateManagedChild(child);
+  }, Math.max(10, Math.min(1_000, stalledTimeoutMs / 4)));
+  watchdog.unref();
 
   const publish = (chunk: PcmChunk) => {
     if (firstBufferAtUnixMs === undefined || clock === undefined) {
@@ -528,6 +569,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions): SystemAudioC
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
 
   child.stdout?.on('data', (data: Buffer) => {
+    if (nativeError?.code !== 'system_audio_stalled') lastDataAt = Date.now();
     try {
       const now = Date.now();
       if (options.onLevel && now - lastLevelUpdate >= 500 && data.byteLength >= 2) {
@@ -630,6 +672,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions): SystemAudioC
     nativeError = { type: 'error', code: 'spawn_failed', message: error.message };
   });
   child.on('close', (code, signal) => {
+    clearInterval(watchdog);
     if (stderr.trim()) consumeEventLine(stderr);
     const final = chunker.flush();
     if (final) {

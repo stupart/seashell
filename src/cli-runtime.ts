@@ -3,6 +3,7 @@ import { checkMeetConnection, requestMeetAccessibilityPermission, meetPermission
 import { microphonePermission } from './microphone-permission.ts';
 import { calendarPermission } from './calendar-permission.ts';
 import { readFeatureStatuses, renderFeatureStatusTable } from './feature-status.ts';
+import { oneSidedNotifier } from './capture-health.ts';
 import { runMeetingsMcpServer } from './meetings-mcp.ts';
 import { installMeetingsMcp } from './mcp-install.ts';
 import { mergeMeetingFragments, planMeetingMerges } from './meeting-merge.ts';
@@ -748,6 +749,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
     }
     case 'watch': {
       const once = command.action.once;
+      const notifyOneSided = oneSidedNotifier(notify);
       const controller = new AbortController();
       const stop = () => controller.abort();
       process.once('SIGINT', stop);
@@ -767,6 +769,8 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
           // The login agent has no window of its own, so it asks with a dialog.
           ...(!once ? { dependencies: { askToRecord: askToRecordWithDialog } } : {}),
           onEvent: (event) => {
+            // Like the dialog, the notice is for someone at the Mac, not a one-shot check.
+            if (!once) notifyOneSided(event);
             if (command.json) {
               print(JSON.stringify(event));
               return;
@@ -1092,6 +1096,12 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
     case 'meeting':
       return executeMeeting(command);
   }
+}
+
+/** A notification that needs no answer. The text is an argument, never part of the script. */
+function notify(message: string): void {
+  Bun.spawn(['osascript', '-e', 'on run argv', '-e', 'display notification (item 1 of argv) with title "Seashell"', '-e', 'end run', message],
+    { stdout: 'ignore', stderr: 'ignore' }).unref();
 }
 
 /** A real question, with the call's name, that waits about as long as the answer is useful. */
