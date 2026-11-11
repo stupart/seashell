@@ -2278,7 +2278,7 @@ export default function App(props: {
     }
     // During a call, a asks over what has been said so far; Enter alone asks what you missed.
     if (input === 'a' && recordingInView) {
-      if (currentMeeting?.ai?.off) { setCaution('AI is off for this meeting, so questions about it are not sent anywhere.'); return; }
+      if (currentMeeting?.ai?.off) { setCaution('AI is off for this meeting.'); return; }
       if (!configuredMeetingRoutes.chat) { setAiSetupIntent(null); setAiSetupOpen(true); return; }
       setChatInputState({ input: '', live: { lookedAtUnixMs } });
       return;
@@ -2699,7 +2699,8 @@ export default function App(props: {
   const nextMatch: Hint[] = searchHit !== null && matchRows.length > 1 && meetingView === 'transcript'
     ? [['n', `next match · ${(searchHit % matchRows.length) + 1} of ${matchRows.length}`]] : [];
   // During a call: what you missed, and a note at this moment. On a meeting: a note, and a follow-up.
-  const catchUp: Hint[] = recordingInView ? [['a', 'catch up']] : [];
+  // With AI off for the meeting there is no one to ask, so the key is not offered, as u is not.
+  const catchUp: Hint[] = recordingInView && !currentMeeting?.ai?.off ? [['a', 'catch up']] : [];
   const note: Hint[] = currentMeeting ? [['+', 'note']] : [];
   const followUp: Hint[] = currentMeeting && !currentMeeting.ai?.off ? [['u', 'follow-up']] : [];
   const brief: Hint[] = briefable && !recordingInView ? [['b', 'coming up']] : [];
@@ -2992,6 +2993,8 @@ export default function App(props: {
     : attention[0] && !settingUp ? attentionStatus(attention[0])
     : currentMeeting && meetingView === 'transcript' && reading && showSpeakers && currentRecord?.speakers.some((speaker) => speaker.id === 'SYSTEM')
       ? { text: 'Voices not separated', color: 'yellow', fix: [',', 'speaker setup'], focus: 'speaker-separation' }
+    // A meeting kept from AI says so where its state is, during the call and after.
+    : currentMeeting?.ai?.off ? { text: 'AI off' }
     : standing;
   shownSlot.current = slot;
   const toast = error ? { text: error, color: 'red' as const } : copied ? { text: 'Copied.', color: 'green' as const } : notice ?? undefined;

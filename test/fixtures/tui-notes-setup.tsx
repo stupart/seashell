@@ -78,6 +78,7 @@ try {
   await type('\x1b');
   await until(() => !screen().includes('Notes setup'), 'Esc closes the panel');
   await until(() => screen().includes('AI is off for this meeting.'), 'the Notes tab says AI is off');
+  assert(!screen().includes('u follow-up'), 'with AI off, nothing offers to write with it');
   await type('g');
   await until(() => screen().includes('Notes setup') && screen().includes('› AI'), 'with AI off, G opens on the switch');
   assert(!screen().includes('Enter write notes'), 'and Enter writes nothing, so nothing is sent to a model');

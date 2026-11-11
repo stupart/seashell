@@ -314,7 +314,8 @@ export const JOURNEYS: Journey[] = [
         world: async ({ library }) => {
           const { loadMeetingArtifact, saveMeetingArtifact } = await import('../src/meeting-artifact.ts');
           saveMeetingArtifact(library, { ...loadMeetingArtifact(library, 'demo-live')!, ai: { off: true } });
-        }, note: 'AI is off for it: nothing is sent, and it says so.' },
+        }, note: 'AI is off for it: nothing is sent, and it says so in a line, and in the title.' },
+      { title: 'Nothing to ask', press: ['l'], keys: 'L', note: 'With AI off, catch up is not offered, as follow-up is not.' },
     ],
   },
   {
