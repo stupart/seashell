@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { spawn, spawnSync, type ChildProcess } from 'child_process';
-import { existsSync } from 'fs';
+import { spawnSync } from 'child_process';
 import { Box, Text, useInput } from 'ink';
 import { rememberAudioCheck, type AudioCheckSource } from './audio-checks.ts';
 import { updateMeetingConfig, type SeashellConfig } from './config.ts';
@@ -12,100 +11,19 @@ import {
   type FeatureStatus,
   type FeatureStatusDependencies,
 } from './feature-status.ts';
-import { defaultMicrophoneRecorder, MICROPHONE_PERMISSION_EXIT_CODE } from './live-microphone.ts';
-import {
-  defaultSystemAudioHelper,
-  LIVE_CAPTURE_SAMPLE_RATE,
-  parseNativeSystemAudioEvent,
-  pcmS16leSignalLevel,
-  SYSTEM_AUDIO_HELPER,
-  type PcmSignalLevel,
-} from './live-system-audio.ts';
-import { terminateManagedChild, trackChildProcess } from './process-lifecycle.ts';
+import { COMPUTER_PASS, computerLevels, microphoneLevels, type LevelProblem, type LevelSource } from './audio-levels.ts';
 import { MENU_LABEL, useSetupActions, type SetupActionProps } from './SettingsScreen.tsx';
 import { KeyBar, Paragraph, ScreenTitle, type Hint } from './tui-chrome.tsx';
 
 // MARK: - Levels
 
-export interface LevelProblem {
-  readonly kind: 'permission' | 'missing' | 'stopped';
-  readonly message: string;
-}
-
-/** Starts listening and reports a level about ten times a second; the returned function stops it. */
-export type LevelSource = (listener: {
-  onLevel: (level: PcmSignalLevel) => void;
-  onProblem: (problem: LevelProblem) => void;
-}) => () => void;
+// The level sources live with the computer-audio check, which Settings and the CLI run too.
+export { computerLevels, microphoneLevels, type LevelProblem, type LevelSource } from './audio-levels.ts';
 
 export interface LevelSources {
   readonly microphone: LevelSource;
   readonly computer: LevelSource;
 }
-
-/** 100 ms of 16 kHz, 16-bit mono. */
-const WINDOW_BYTES = LIVE_CAPTURE_SAMPLE_RATE * 2 / 10;
-
-function listen(child: ChildProcess, onLevel: (level: PcmSignalLevel) => void): () => void {
-  const untrack = trackChildProcess(child);
-  let pending: Buffer = Buffer.alloc(0);
-  child.stdout?.on('data', (data: Buffer) => {
-    pending = pending.length ? Buffer.concat([pending, data]) : data;
-    while (pending.length >= WINDOW_BYTES) {
-      onLevel(pcmS16leSignalLevel(pending.subarray(0, WINDOW_BYTES)));
-      pending = pending.subarray(WINDOW_BYTES);
-    }
-  });
-  return () => { untrack(); void terminateManagedChild(child); };
-}
-
-/** The same recorder background meetings use, so a pass here means meetings hear you too. */
-export const microphoneLevels: LevelSource = ({ onLevel, onProblem }) => {
-  const recorder = defaultMicrophoneRecorder();
-  const child = spawn(recorder.command, [...recorder.args], { stdio: ['ignore', 'pipe', 'pipe'] });
-  let stopped = false;
-  let stderr = '';
-  child.stderr?.on('data', (data: Buffer) => { stderr = (stderr + data.toString()).slice(-400); });
-  child.on('error', (error) => { if (!stopped) onProblem({ kind: 'missing', message: `The microphone recorder could not start: ${error.message}` }); });
-  child.on('close', (code) => {
-    if (stopped) return;
-    onProblem(code === MICROPHONE_PERMISSION_EXIT_CODE
-      ? { kind: 'permission', message: 'Microphone access is off for Seashell Microphone.' }
-      : { kind: 'stopped', message: `The microphone recorder stopped${stderr.trim() ? `: ${stderr.trim()}` : '.'}` });
-  });
-  const stop = listen(child, onLevel);
-  return () => { stopped = true; stop(); };
-};
-
-/** The same computer-audio recorder background meetings use. It answers for its
- * own permission, so a pass from this window means meetings hear the others too. */
-export const computerLevels: LevelSource = ({ onLevel, onProblem }) => {
-  if (!existsSync(SYSTEM_AUDIO_HELPER)) {
-    onProblem({ kind: 'missing', message: 'The computer-audio recorder is not installed. Update Seashell.' });
-    return () => {};
-  }
-  const child = spawn(defaultSystemAudioHelper(), ['--sample-rate', String(LIVE_CAPTURE_SAMPLE_RATE), '--chunk-ms', '100'],
-    { stdio: ['ignore', 'pipe', 'pipe'] });
-  let stopped = false;
-  let failure: LevelProblem | undefined;
-  let events = '';
-  child.stderr?.on('data', (data: Buffer) => {
-    const lines = (events + data.toString()).split('\n');
-    events = lines.pop() ?? '';
-    for (const line of lines) {
-      try {
-        const event = parseNativeSystemAudioEvent(line);
-        if (event.type === 'error') failure = { kind: event.code === 'permission_denied' ? 'permission' : 'stopped', message: event.message };
-      } catch { /* Only errors matter here. */ }
-    }
-  });
-  child.on('error', (error) => { if (!stopped) onProblem({ kind: 'missing', message: `The computer-audio recorder could not start: ${error.message}` }); });
-  child.on('close', (code) => {
-    if (!stopped) onProblem(failure ?? { kind: 'stopped', message: `The computer-audio recorder stopped (exit ${code}).` });
-  });
-  const stop = listen(child, onLevel);
-  return () => { stopped = true; stop(); };
-};
 
 export const DEFAULT_LEVEL_SOURCES: LevelSources = { microphone: microphoneLevels, computer: computerLevels };
 
@@ -119,8 +37,6 @@ export function switchedOff(variable: string): LevelSource {
 
 /** Speech into a Mac's microphone sits well above a quiet room's -60 dBFS. */
 const MICROPHONE_PASS = { dbfs: -42, windows: 3 };
-/** Any sound the Mac plays, even a short alert. */
-const COMPUTER_PASS = { dbfs: -50, windows: 2 };
 const QUIET_AFTER_MS = 6_000;
 
 interface Meter {

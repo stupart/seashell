@@ -2,7 +2,7 @@ import { existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { currentMeetingRoutes } from './ai-provider.ts';
-import { readAudioChecks, type AudioChecks } from './audio-checks.ts';
+import { computerAudioConfirmed, readAudioChecks, type AudioChecks } from './audio-checks.ts';
 import { readBackgroundMeetingStatus } from './background-meeting-status.ts';
 import { readBackgroundWatchStatus } from './background-watch-status.ts';
 import { captureCoverage, type CaptureCoverage } from './capture-health.ts';
@@ -31,7 +31,7 @@ const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 /** ok: works · attention: works partly or needs one step · off: not set up (optional) · broken: should work and does not. */
 export type FeatureState = 'ok' | 'attention' | 'off' | 'broken';
 export type FeatureAction = 'enable-recorder' | 'connect-meet' | 'allow-microphone' | 'allow-calendar' | 'open-speakers' | 'open-ai' | 'open-templates'
-  | 'open-extractors' | 'open-automations' | 'turn-on-video' | 'allow-screen-recording';
+  | 'open-extractors' | 'open-automations' | 'turn-on-video' | 'allow-screen-recording' | 'check-computer-audio';
 export type FeatureId = 'recorder' | 'detection' | 'microphone' | 'computer-audio' | 'transcription'
   | 'meet-names' | 'speaker-separation' | 'voices' | 'ai-notes' | 'notes-templates' | 'prompts' | 'extractors' | 'automations'
   | 'calendar' | 'video';
@@ -65,6 +65,7 @@ export const FEATURE_ACTION_LABEL: Record<FeatureAction, string> = {
   'open-automations': 'Open the automations folder',
   'turn-on-video': 'Turn video on',
   'allow-screen-recording': 'Allow Screen Recording',
+  'check-computer-audio': 'Check computer audio',
 };
 
 /** What the most recent recorded meeting actually captured, per source. */
@@ -252,26 +253,28 @@ export async function readFeatureStatuses(options: {
   const computerSince = (deps.systemAudioRecorderSince ?? (() => {
     try { return statSync(systemAudioRuntimeHelperPath()).mtimeMs; } catch { return undefined; }
   }))();
-  const computerCheck = heardInSetup(checks.computer, computerSince) ? checks.computer : undefined;
-  // Heard by an earlier helper, with another permission: it says nothing about this one.
-  const computerPredates = Boolean(evidence && computerSince !== undefined && Date.parse(evidence.createdAt) < computerSince);
+  // Until a check at the Mac confirms Seashell System Audio, the recorder keeps
+  // the background recorder's permission (src/live-system-audio.ts), so meetings
+  // recorded with it still count.
+  const ownConfirmed = Boolean(computerAudioConfirmed(checks, computerSince));
+  const computerCheck = ownConfirmed && heardInSetup(checks.computer, computerSince) ? checks.computer : undefined;
   const computerDetail = 'Records everyone else from your Mac\'s audio output.';
+  const switchNote = ' It records with the background recorder\'s permission until you allow computer audio for Seashell System Audio: press Enter to check.';
+  const check = { action: 'check-computer-audio', command: 'seashell meeting computer-audio setup' } as const;
+  const allow = 'Allow computer audio for Seashell System Audio. Press Enter to check; Seashell plays a short sound and macOS asks once.';
   statuses.push({
     id: 'computer-audio', label: 'Other people (computer audio)', optional: false,
     ...(!helperReady ? { state: 'broken', summary: 'Recorder missing', detail: 'The computer-audio recorder is not installed.',
       fix: 'Update Seashell.', command: 'brew upgrade stupart/tap/seashell' } as const
-    : evidence?.audibleComputerChunks && !computerPredates ? { state: 'ok', summary: 'Heard in last meeting',
-      detail: `${computerDetail} Last meeting: "${evidence.title}" (${when(evidence)}).` } as const
+    : evidence?.audibleComputerChunks ? { state: 'ok', summary: 'Heard in last meeting',
+      detail: `${computerDetail} Last meeting: "${evidence.title}" (${when(evidence)}).${ownConfirmed ? ' It records with Seashell System Audio.' : switchNote}`,
+      ...(ownConfirmed ? {} : check) } as const
     : computerCheck ? { state: 'ok', summary: 'Heard during setup',
-      detail: `${computerDetail} The guided setup heard your Mac on ${checkedOn(computerCheck)}.` } as const
-    : evidence && !computerPredates ? { state: 'attention', summary: 'Silent in last meeting',
-      detail: `Nothing was heard from your computer in "${evidence.title}" (${when(evidence)}). macOS may need System Audio Recording access for Seashell System Audio.`,
-      fix: 'Allow Seashell System Audio in Privacy & Security → Screen & System Audio Recording.' } as const
-    : evidence ? { state: 'attention', summary: 'Not confirmed since the update',
-      detail: `${computerDetail} It now records with its own helper, Seashell System Audio, so macOS asks once more. Test it in the guided setup, or your next meeting confirms it.`,
-      fix: 'Test it in the guided setup and choose Allow if macOS asks.' } as const
+      detail: `${computerDetail} The check heard your Mac through Seashell System Audio on ${checkedOn(computerCheck)}.` } as const
+    : evidence ? { state: 'attention', summary: 'Silent in last meeting',
+      detail: `Nothing was heard from your computer in "${evidence.title}" (${when(evidence)}).`, fix: allow, ...check } as const
     : { state: 'attention', summary: 'Not confirmed yet',
-      detail: `${computerDetail} Test it in the guided setup, or your first recorded meeting confirms it.` } as const),
+      detail: `${computerDetail} Your first recorded meeting confirms it, or check it now.`, fix: allow, ...check } as const),
   });
 
   const transcriptionReady = (deps.transcriptionReady ?? (() =>

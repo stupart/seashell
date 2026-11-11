@@ -54,9 +54,12 @@ const output = Object.assign(new Writable({ write(chunk, _enc, cb) { rendered +=
 const opened: string[] = [];
 const folders: string[] = [];
 let screenRequests = 0;
+let computerChecks = 0;
 const app = render(<SettingsScreen config={loadConfig()} libraryDir={library} columns={columns} rows={30} dependencies={dependencies}
   actions={{ openFile: (path) => { opened.push(path); }, openFolder: (path) => { folders.push(path); },
-    allowScreenRecording: async () => { screenRequests++; screenAllowed = true; return { authorization: 'authorized', detail: 'Allowed.' }; } }}
+    allowScreenRecording: async () => { screenRequests++; screenAllowed = true; return { authorization: 'authorized', detail: 'Allowed.' }; },
+    checkComputerAudio: async () => { computerChecks++;
+      return { heard: true, refused: false, detail: 'Heard your Mac through Seashell System Audio. Meetings use it from the next call.' }; } }}
   onConnectMeet={() => {}} onEnableCalendar={() => {}} onOpenSpeakers={() => {}} onOpenAI={() => {}} onClose={() => {}} />,
 { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
 const frame = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('Settings') - 4));
@@ -108,6 +111,16 @@ try {
   await type(' ');
   await until(() => JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.video?.enabled === false, 'space turns video off');
   await until(() => frame().includes('Off · calls record audio only'), 'the item says it is off');
+
+  // Computer audio: the one-time check that lets meetings use Seashell System Audio.
+  await type(LEFT, ...Array(11).fill('\x1b[A'));
+  if (narrow) await type(ENTER);
+  await until(() => frame().includes('Enter check computer audio'), 'computer audio offers the check');
+  // Wide, the detail wraps beside the menu's border; read the words only.
+  const words = () => frame().split('\n').map((line) => line.split('│').at(-1)!.trim()).join(' ').replace(/\s+/gu, ' ');
+  assert.ok(words().includes("background recorder's permission until you allow computer audio for Seashell System Audio"), words());
+  await type(ENTER);
+  await until(() => computerChecks === 1 && words().includes('Meetings use it from the next call'), 'Enter runs the check and says what it found');
   for (const line of frame().split('\n')) assert.ok(Bun.stringWidth(line) <= columns, `fits ${columns} columns: ${line}`);
   console.log(JSON.stringify({ passed: true }));
 } finally {

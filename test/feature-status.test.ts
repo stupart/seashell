@@ -84,12 +84,14 @@ test('a check the guided setup passed still counts after a restart, until someth
   const heard = await byId({ lastMeeting: () => silent, audioChecks: () => later });
   expect(heard['computer-audio']).toMatchObject({ state: 'ok', summary: 'Heard during setup' });
   expect(heard.microphone).toMatchObject({ state: 'ok', summary: 'Heard during setup' });
-  expect(heard['computer-audio']!.detail).toContain('The guided setup heard your Mac');
+  expect(heard['computer-audio']!.detail).toContain('The check heard your Mac through Seashell System Audio');
+  expect(heard['computer-audio']!.action).toBeUndefined();
   // A meeting after the check is the newer evidence.
   const earlier = { microphone: '2026-01-14T09:00:00.000Z', computer: '2026-01-14T09:01:00.000Z' };
   const after = await byId({ lastMeeting: () => silent, audioChecks: () => earlier });
   expect(after['computer-audio']).toMatchObject({ state: 'attention', summary: 'Silent in last meeting' });
-  expect(after['computer-audio']!.fix).toContain('Seashell System Audio');
+  expect(after['computer-audio']).toMatchObject({ action: 'check-computer-audio' });
+  expect(after['computer-audio']!.fix).toContain('Allow computer audio for Seashell System Audio. Press Enter to check');
   expect(after.microphone).toMatchObject({ state: 'attention', summary: 'Allowed · last meeting silent' });
   // With no meeting yet, a passed check is all the proof there is.
   const fresh = await byId({ lastMeeting: () => undefined, audioChecks: () => ({ computer: later.computer }) });
@@ -101,15 +103,19 @@ test('a check the guided setup passed still counts after a restart, until someth
   expect(replaced['computer-audio']).toMatchObject({ state: 'attention', summary: 'Not confirmed yet' });
 });
 
-test('computer audio heard by an earlier helper is not proof for the one that records now', async () => {
+test('meetings heard with the inherited permission still count, and the check to switch stays on offer', async () => {
   const since = () => Date.parse('2026-02-01T00:00:00Z');
+  // Recorded before the helper had its own identity: the recorder still uses that permission, so it counts.
   const old = await byId({ lastMeeting: () => meeting(), systemAudioRecorderSince: since });
-  expect(old['computer-audio']).toMatchObject({ state: 'attention', summary: 'Not confirmed since the update' });
-  expect(old['computer-audio']!.detail).toContain('Seashell System Audio');
-  expect(old['computer-audio']!.fix).toContain('guided setup');
+  expect(old['computer-audio']).toMatchObject({ state: 'ok', summary: 'Heard in last meeting', action: 'check-computer-audio',
+    command: 'seashell meeting computer-audio setup' });
+  expect(old['computer-audio']!.detail).toContain("background recorder's permission until you allow computer audio for Seashell System Audio");
+  // Confirmed at the Mac: nothing left to check.
   const tested = await byId({ lastMeeting: () => meeting(), systemAudioRecorderSince: since,
     audioChecks: () => ({ computer: '2026-02-02T09:00:00.000Z' }) });
-  expect(tested['computer-audio']).toMatchObject({ state: 'ok', summary: 'Heard during setup' });
+  expect(tested['computer-audio']).toMatchObject({ state: 'ok', summary: 'Heard in last meeting' });
+  expect(tested['computer-audio']!.detail).toContain('It records with Seashell System Audio.');
+  expect(tested['computer-audio']!.action).toBeUndefined();
   expect((await byId({}))['computer-audio']).toMatchObject({ state: 'ok', summary: 'Heard in last meeting' });
 });
 

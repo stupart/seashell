@@ -251,6 +251,9 @@ export const JOURNEYS: Journey[] = [
       { title: 'Video', press: [LEFT, DOWN, DOWN], keys: '← ↓ ↓', note: 'On, but macOS has not allowed Screen Recording yet.' },
       { title: 'Allowing Screen Recording', press: [ENTER], keys: 'Enter', note: 'Wide, Enter asks macOS; narrow, it opens the item first.' },
       { title: 'Video off', press: [' '], keys: 'Space', until: 'audio only' },
+      { title: 'Computer audio', press: [LEFT, ...Array(11).fill(UP)], keys: '← ↑ × 11',
+        note: 'Meetings keep the background recorder\'s permission until a check at the Mac allows Seashell System Audio.' },
+      { title: 'Computer audio checked', press: [ENTER], keys: 'Enter', note: 'Wide, Enter plays a short sound and listens; narrow, it opens the item first.' },
     ],
   },
   {
@@ -468,6 +471,11 @@ function setupActions(mac: Mac): SettingsActions {
     connectMeet: async () => { mac.meet = true; return { detail: 'Google Meet connected.' }; },
     allowCalendar: async () => { mac.calendar = true; return { authorization: 'authorized', detail: 'Allowed.' }; },
     allowScreenRecording: async () => { mac.screen = true; return { authorization: 'authorized', detail: 'Allowed.' }; },
+    // A pass is remembered beside the pretend settings, as the real check does.
+    checkComputerAudio: async () => {
+      (await import('../src/audio-checks.ts')).rememberAudioCheck('computer');
+      return { heard: true, refused: false, detail: 'Heard your Mac through Seashell System Audio. Meetings use it from the next call.' };
+    },
     openTemplates: () => {}, openFolder: () => {}, openFile: () => {},
   };
 }

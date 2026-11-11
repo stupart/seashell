@@ -63,7 +63,12 @@ import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
 import {
   defaultSystemAudioHelper,
   parseNativeSystemAudioEvent,
+  systemAudioIdentity,
+  systemAudioIdentityArguments,
 } from './live-system-audio.ts';
+import { readAudioChecks } from './audio-checks.ts';
+import { checkComputerAudio } from './audio-levels.ts';
+import { systemAudioRuntimeHelperPath } from './runtime-host.ts';
 import {
   CaptureSessionStore,
   captureManifestPath,
@@ -352,6 +357,7 @@ export function doctorChecks(options: {
 } = {}): DoctorCheck[] {
   // The copy the recorder runs, so the probe tests the permission meetings use.
   const systemAudioHelper = options.systemAudioHelper ?? defaultSystemAudioHelper();
+  const identity = options.systemAudioHelper ? 'inherited' : systemAudioIdentity(systemAudioHelper);
   const meetingSignalsHelper = options.meetingSignalsHelper ?? MEETING_SIGNALS_HELPER;
   const meetingAccessibilityHelper = options.meetingAccessibilityHelper ?? MEETING_ACCESSIBILITY_HELPER;
   const commandCheck = (
@@ -377,7 +383,8 @@ export function doctorChecks(options: {
         help: 'Run ./install.sh before testing live system audio',
       };
     }
-    const result = spawnSync(systemAudioHelper, ['--probe-ms', '500'], {
+    // The identity meetings record with, so doctor never asks macOS about a new one.
+    const result = spawnSync(systemAudioHelper, [...systemAudioIdentityArguments(identity), '--probe-ms', '500'], {
       encoding: 'utf8',
       timeout: options.systemAudioProbeTimeoutMs ?? 5_000,
       // The native helper handles SIGTERM on its main queue, which CoreAudio
@@ -480,6 +487,13 @@ export function doctorChecks(options: {
       'Run ./install.sh; live system audio requires macOS 14.2+',
     ),
     systemAudioPermissionCheck(),
+    {
+      name: 'system-audio-identity',
+      ok: identity === 'own',
+      required: false,
+      ...(identity === 'own' ? { path: 'Meetings record computer audio with Seashell System Audio' }
+        : { help: 'Meetings record computer audio with the background recorder\'s permission. To switch, run seashell meeting computer-audio setup at your Mac, or press , in Seashell and check Computer audio.' }),
+    },
     meetingSignalCheck(),
     fileCheck(
       'meeting-accessibility-helper',
@@ -630,6 +644,25 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
         ...(result.executable ? [`Permission belongs to: ${result.executable}`] : []),
       ].join('\n'));
       return result.authorization === 'authorized' ? 0 : 2;
+    }
+    case 'computer-audio': {
+      if (command.action.operation === 'setup') {
+        process.stderr.write('Playing a short sound to check. If macOS asks about "Seashell System Audio", choose Allow.\n');
+        const result = await checkComputerAudio();
+        if (result.refused) {
+          spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'], { stdio: 'ignore', timeout: 5_000 });
+        }
+        print(command.json ? JSON.stringify(result) : result.detail);
+        return result.heard ? 0 : 2;
+      }
+      // Read only: which copy is installed, and whether a check confirmed it.
+      const identity = systemAudioIdentity(systemAudioRuntimeHelperPath());
+      const checkedAt = readAudioChecks().computer;
+      print(command.json ? JSON.stringify({ identity, ...(checkedAt ? { checkedAt } : {}) }) : identity === 'own'
+        ? 'Meetings record computer audio with Seashell System Audio.'
+        : 'Meetings record computer audio with the background recorder\'s permission.\n' +
+          'To switch to Seashell System Audio, run this at your Mac: seashell meeting computer-audio setup');
+      return 0;
     }
     case 'speakers': {
       const selected = command.action.browser;

@@ -26,6 +26,7 @@ import { ensureExtractorsDirectory, loadExtractors, type ExtractorWhen } from '.
 import { ensureAutomationsDirectory, loadAutomations, readAutomationRuns, type AutomationRun } from './automations.ts';
 import { forgetVoiceprint, listVoiceprints } from './voiceprints.ts';
 import { screenCapturePermission } from './video-capture.ts';
+import { checkComputerAudio, type ComputerAudioCheck } from './audio-levels.ts';
 import { listTranscriptRecords } from './transcript-library.ts';
 import { meetingWhen } from './tui-state.ts';
 import { DEFAULT_MEETING_AUTOMATION, meetingApps, type AppRecordingPolicy } from './meeting-automation.ts';
@@ -56,6 +57,8 @@ export interface SettingsActions {
   allowMicrophone?: (signal: AbortSignal) => Promise<{ authorization: string; detail: string }>;
   allowCalendar?: (signal: AbortSignal) => Promise<{ authorization: string; detail: string }>;
   allowScreenRecording?: (signal: AbortSignal) => Promise<{ authorization: string; detail: string }>;
+  /** The one-time check that lets the recorder use Seashell System Audio. */
+  checkComputerAudio?: (signal: AbortSignal) => Promise<ComputerAudioCheck>;
   openTemplates?: (directory: string) => void;
   /** Extractors and automations: the folder in Finder. */
   openFolder?: (directory: string) => void;
@@ -191,6 +194,15 @@ export function useSetupActions(props: SetupActionProps & { onFinished?: () => v
           }
           setMessage(result.detail);
         }
+      } else if (action === 'check-computer-audio') {
+        setMessage('Playing a short sound to check. If macOS asks about "Seashell System Audio", choose Allow.');
+        const result = await (props.actions?.checkComputerAudio ?? (signal => checkComputerAudio({ signal })))(controller.signal);
+        if (controller.signal.aborted) return false;
+        if (result.refused && !props.actions?.checkComputerAudio) {
+          spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'], { stdio: 'ignore', timeout: 5_000 });
+        }
+        finished = result.heard;
+        setMessage(result.detail);
       } else if (action === 'allow-screen-recording') {
         setMessage('macOS will ask about "Seashell Screen Capture". Choose Allow.');
         const result = await (props.actions?.allowScreenRecording ?? (signal => screenCapturePermission({ request: true, signal })))(controller.signal);
