@@ -312,11 +312,11 @@ With laptop speakers, playback can also reach the microphone. Seashell reduces
 strong transcript duplicates, but this is not acoustic echo cancellation; review
 attribution when echo or people sharing a room make sources ambiguous.
 
-Detected output-device changes trigger bounded reconnection while keeping the
-same meeting and preserving saved audio and timing gaps. Physical unplug/replug
-and speakerphone quality still need device acceptance. If changing an input
-device leaves the old microphone connected, pause and resume to select the new
-default input.
+Output-device changes, and computer audio that stops arriving, reconnect as
+often as needed. The meeting stays one recording, with its saved audio and
+timing gaps. The microphone follows default-input changes the same way, in
+whatever format the new device uses. Physical unplug/replug and speakerphone
+quality still need device acceptance.
 
 Before the meeting, prove both inputs with a disposable five-second check while
 speaking and playing computer audio:
