@@ -301,9 +301,15 @@ export default function SettingsScreen(props: SetupActionProps & {
     if (selected?.kind === 'guide') props.onOpenGuide?.();
     else if (compact && !inDetail || selected?.kind === 'recording') { setInDetail(true); setRowIndex(0); }
     else if (key.return && selected?.status.action) void setup.run(selected.status.action);
+    // Only hearing it proves a microphone or the Mac's sound works, and the guide listens.
+    else if (key.return && selected && testable(selected)) props.onOpenGuide?.();
   });
 
   const needs = (statuses ?? []).filter(status => !status.optional && status.state !== 'ok');
+  function testable(item: MenuItem): boolean {
+    return item.kind === 'status' && !item.status.action && (item.status.id === 'microphone' || item.status.id === 'computer-audio')
+      && Boolean(props.onOpenGuide);
+  }
   const summaryOf = (item: MenuItem) => item.kind === 'recording' ? recordingSummary(config)
     : item.kind === 'guide' ? 'Test mic and computer audio' : item.status.summary;
   const labelOf = (item: MenuItem) => item.kind === 'recording' ? 'Recording'
@@ -374,7 +380,7 @@ export default function SettingsScreen(props: SetupActionProps & {
     : inDetail && selected?.kind === 'recording' ? [['↑↓', 'choose'], ['←→', 'change'], ['Esc', 'done']]
     : [
       ...(selected?.kind === 'recording' ? [['Enter', 'change'] as Hint] : selected?.kind === 'guide' ? [['Enter', 'start'] as Hint]
-        : action ? [['Enter', FEATURE_ACTION_LABEL[action].toLowerCase()] as Hint] : []),
+        : action ? [['Enter', FEATURE_ACTION_LABEL[action].toLowerCase()] as Hint] : selected && testable(selected) ? [['Enter', 'test it now'] as Hint] : []),
       ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ['r', 'recheck'], ['Esc', 'back'],
     ];
   const titleDetail = statuses ? <Text color={needs.length ? 'yellow' : 'green'}>

@@ -2261,7 +2261,7 @@ export default function App(props: {
     <Text> </Text>
     {attention.map((status) => <Text key={status.id}>{status.label}: {status.summary}</Text>)}
     <Text> </Text>
-    <Text>Press <Text bold>Enter</Text> to set it up step by step, or <Text bold>,</Text> for Settings.</Text>
+    <Text>Press <Text bold>Enter</Text> to set it up step by step.</Text>
   </> : <>
     <Text bold>Seashell is ready.</Text>
     <Text> </Text>

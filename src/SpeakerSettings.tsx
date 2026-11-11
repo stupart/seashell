@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
-import { KeyBar, ScreenTitle } from './tui-chrome.tsx';
+import { KeyBar, Paragraph, ScreenTitle } from './tui-chrome.tsx';
 import { diarizationEnvironment, diarizationStatus } from './diarization-environment.ts';
 import { setupDiarization, type SpeakerSetupResult } from './diarization-setup.ts';
 import { checkMeetConnection, requestMeetAccessibilityPermission, type MeetBrowserMode, type MeetProbe } from './meet-speakers.ts';
@@ -34,11 +34,12 @@ export default function SpeakerSettings(props: {
   useEffect(() => () => request.current?.abort(), []);
   const meetOn = props.browser !== 'off';
   type Action = 'meet' | 'meet-off' | 'voices' | 'redo';
-  const entries: Array<[Action, string, string]> = [
-    ['meet', 'Names from Google Meet', meetOn ? 'On · Enter checks it' : 'Off · Enter connects it'],
-    ...(meetOn ? [['meet-off', 'Turn off names from Meet', ''] as [Action, string, string]] : []),
-    ['voices', 'Tell voices apart', ready ? 'Ready · Enter checks it' : `Not set up · Enter downloads ${props.modelSize ?? '21 MB'}`],
-    ...(props.canIdentify && ready ? [['redo', 'Redo speakers for this meeting', 'Makes a copy to review'] as [Action, string, string]] : []),
+  // The row says how it stands; the key bar says what Enter does to it.
+  const entries: Array<[Action, string, string, string]> = [
+    ['meet', 'Names from Google Meet', meetOn ? 'On' : 'Off', meetOn ? 'check' : 'connect'],
+    ...(meetOn ? [['meet-off', 'Turn off names from Meet', '', 'turn off'] as [Action, string, string, string]] : []),
+    ['voices', 'Tell voices apart', ready ? 'Ready' : `Not set up · ${props.modelSize ?? '21 MB'}`, ready ? 'check' : 'download'],
+    ...(props.canIdentify && ready ? [['redo', 'Redo speakers for this meeting', 'Makes a copy to review', 'redo'] as [Action, string, string, string]] : []),
   ];
   const action = entries[Math.min(index, entries.length - 1)]![0];
   const checkMeet = async (browser: MeetBrowserMode, connect = false) => {
@@ -84,6 +85,7 @@ export default function SpeakerSettings(props: {
   });
   const selected = entries[Math.min(index, entries.length - 1)]!;
   const labelWidth = Math.max(...entries.map(([, label]) => label.length)) + 2;
+  const width = props.columns - 2;
   return <Box flexDirection="column" paddingX={1} {...(props.rows ? { height: props.rows } : {})} overflow="hidden">
     <ScreenTitle name="Speaker names" />
     {entries.map(([id, label, value], i) => <Text key={id} inverse={i === index} wrap="truncate-end">
@@ -91,22 +93,22 @@ export default function SpeakerSettings(props: {
     </Text>)}
     <Box flexDirection="column" flexGrow={1} marginTop={1} overflow="hidden">
       {(selected[0] === 'meet' || selected[0] === 'meet-off') && <>
-        <Text>Reads who is talking from Google Meet in Chrome, using Accessibility. Names are hints.</Text>
-        <Text dimColor>Keep Meet's People panel open if you are unmuted, and avoid other audio playing.</Text>
-        {!message && props.meetStatus && meetOn && <Text>{meetStatusMessage(props.meetStatus)}</Text>}
+        <Paragraph width={width} text="Reads who is talking from Google Meet in Chrome, using Accessibility. Names are hints." />
+        <Paragraph width={width} dimColor text="Keep Meet's People panel open if you are unmuted, and avoid other audio playing." />
+        {!message && props.meetStatus && meetOn && <Paragraph width={width} text={meetStatusMessage(props.meetStatus)} />}
       </>}
       {selected[0] === 'voices' && (ready ? <>
-        <Text>Numbers are not names. In a meeting's transcript, press r to name them.</Text>
-        <Text dimColor>Shared microphones and people talking over each other need review.</Text>
+        <Paragraph width={width} text="Numbers are not names. In a meeting's transcript, press r to name them." />
+        <Paragraph width={width} dimColor text="Shared microphones and people talking over each other need review." />
       </> : engine === 'pyannote' ? <>
-        <Text>Downloads a model; needs Hugging Face access and publisher contact sharing.</Text>
+        <Paragraph width={width} text="Downloads a model; needs Hugging Face access and publisher contact sharing." />
         <Text color="cyan">{diarizationEnvironment().model.startsWith('/') ? diarizationEnvironment().model : `https://huggingface.co/${diarizationEnvironment().model}`}</Text>
         <Text color="yellow">seashell setup --speakers --login</Text>
-      </> : <Text>Downloads a voice model once. It runs on this Mac; no account needed.</Text>)}
-      {selected[0] === 'redo' && <Text>Separates voices again and saves a copy. This meeting and its notes stay as they are.</Text>}
-      {message && <Text color={result?.ready ? 'green' : 'yellow'}>{message}</Text>}
+      </> : <Paragraph width={width} text="Downloads a voice model once. It runs on this Mac; no account needed." />)}
+      {selected[0] === 'redo' && <Paragraph width={width} text="Separates voices again and saves a copy. This meeting and its notes stay as they are." />}
+      {message && <Paragraph width={width} color={result?.ready ? 'green' : 'yellow'} text={message} />}
     </Box>
     {busy ? <Text color="yellow">Working… Esc cancels</Text>
-      : <KeyBar hints={[['↑↓', 'choose'], ['Enter', 'select'], ['Esc', 'back']]} columns={props.columns - 2} help={false} />}
+      : <KeyBar hints={[['Enter', selected[3]], ['↑↓', 'choose'], ['Esc', 'back']]} columns={props.columns - 2} help={false} />}
   </Box>;
 }

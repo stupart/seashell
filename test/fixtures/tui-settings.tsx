@@ -136,6 +136,12 @@ try {
   await key('\x1b[B');
   await key('\r');
   assert.equal(guides, 1, 'The guided setup starts from Settings');
+  // A microphone that was silent is tested by listening to it, from its own item.
+  for (let n = 0; n < 3; n++) await key('\x1b[B');
+  if (narrow) await key('\r');
+  await until(() => r.all().includes('Enter test it now'), 'a silent microphone offers a test');
+  await key('\r');
+  assert.equal(guides, 2, 'Enter on the microphone starts the guide');
   recording.unmount();
   writeFileSync(process.env.SEASHELL_CONFIG!, JSON.stringify({ meeting: { speakerBrowser: 'auto', automation: { enabled: false } } }));
 
