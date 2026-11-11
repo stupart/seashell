@@ -5,7 +5,7 @@ import { dirname, join } from 'path';
 import { createMeetingArtifact, loadMeetingArtifact, saveMeetingArtifact, type MeetingClaim } from '../src/meeting-artifact.ts';
 import { enrichMeeting } from '../src/meeting-enrichment.ts';
 import { getMeeting, listActionItems, queryNotes } from '../src/meeting-memory.ts';
-import { meetingViewLines } from '../src/meeting-tui.ts';
+import { META, meetingViewLines } from '../src/meeting-tui.ts';
 import { findTranscriptRecord, saveTranscriptRecord } from '../src/transcript-library.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 
@@ -85,9 +85,10 @@ test('Notes lead with decisions, actions, risks, open questions and follow-ups, 
   const lines = meetingViewLines(artifact, 'notes', pricing);
   const headings = lines.filter((line) => line.startsWith('# '));
   expect(headings).toEqual(['# Decisions', '# Actions', '# Risks', '# Open questions', '# Follow-ups', '# Pricing', '# Facts and feedback']);
-  expect(lines).toContain('- Write the launch email. (Dana · by Thursday)  01:05');
-  expect(lines).toContain('- Send Sam the numbers. (You · next week)  01:35');
-  expect(lines).toContain('- Legal may block the copy.  01:20');
+  // Who and by when sit with the time, against the right edge (META splits them from the line).
+  expect(lines).toContain(`- Write the launch email.${META}Dana · by Thursday  01:05`);
+  expect(lines).toContain(`- Send Sam the numbers.${META}You · next week  01:35`);
+  expect(lines).toContain(`- Legal may block the copy.${META}01:20`);
 });
 
 test('agents read owners and due dates, and query notes across meetings by kind, person, topic and date', () => {

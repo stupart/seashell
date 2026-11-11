@@ -126,20 +126,22 @@ try {
   assert.ok(played[1]!.atSeconds! > 0, 'it opens where the transcript was scrolled to');
   await until(() => screen().includes(`Opened the video at ${top!.trim().slice(0, 5)}`), 'and says where');
 
-  // Suggested names: y keeps one, u undoes one.
+  // Suggested names: y keeps one, n says it is not them.
   await type('r');
   await until(() => screen().includes('Dana · suggested') && screen().includes('y keep'), 'suggested names are marked');
   await type('y');
   await until(() => speakers('filmed-call').find((speaker) => speaker.id === 'REMOTE_00')?.suggestion === undefined, 'y keeps Dana');
   assert.equal(speakers('filmed-call').find((speaker) => speaker.id === 'REMOTE_00')!.label, 'Dana');
-  await type('\x1b[B', 'u');
-  await until(() => speakers('filmed-call').find((speaker) => speaker.id === 'REMOTE_01')?.label === 'Remote speaker 2', 'u undoes Priya');
+  await type('\x1b[B');
+  await until(() => screen().includes('n not Priya'), 'the key bar names who it is not');
+  await type('n');
+  await until(() => speakers('filmed-call').find((speaker) => speaker.id === 'REMOTE_01')?.label === 'Remote speaker 2', 'n undoes Priya');
   assert.equal(speakers('filmed-call').find((speaker) => speaker.id === 'REMOTE_01')!.suggestion, undefined);
   await type('\x1b');
 
   // Rewriting notes runs the extractors that fit, then shows what they found.
   await type('1', 'g');
-  await until(() => screen().includes('Rewrite these notes?'), 'rewriting asks first');
+  await until(() => /Rewrite (and replace )?these notes\?/u.test(screen()), 'rewriting asks first, saying the notes are replaced');
   await type('y');
   await until(() => extracted.length === 1, 'the extractors run after the notes');
   assert.deepEqual(extracted[0], { id: 'filmed-call', route: { backend: 'claude-code', model: 'sonnet' } });

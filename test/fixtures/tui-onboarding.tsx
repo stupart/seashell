@@ -115,7 +115,7 @@ try {
   await type('\r');
   await until(() => plain().includes("You're set"), 'the end says what works');
   await type('\r');
-  await until(() => since("You're set").includes('Seashell is ready'), 'back in the app, nothing left to fix');
+  await until(() => since("You're set").includes('Join a call and recording starts by itself'), 'back in the app, nothing left to fix');
   app.unmount();
 
   // Later runs offer the guide instead of opening it; Enter takes it.
@@ -124,21 +124,22 @@ try {
   rendered = '';
   const again = render(<App levels={levels} setupActions={actions} openSettings={() => {}} />,
     { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
-  await until(() => plain().includes('one step at a time'), 'the home screen offers the guide');
+  // The title says it cannot record yet; the key bar offers the guide, once.
+  await until(() => plain().includes("Can't record yet") && plain().includes('Enter guided setup'), 'the home screen offers the guide');
   assert.ok(!plain().includes('Guided setup'), 'not opened by itself after the first run');
   await type('\r');
   await until(() => plain().includes('Guided setup') && plain().includes('Background recorder'), 'Enter starts the guide');
   // After a restart, computer audio heard during setup is not asked for again.
   await until(() => plain().includes('Step 1 of 3'), 'a remembered computer-audio check skips its step');
   await type('\x1b');
-  await until(() => since('Guided setup').includes('one step at a time'), 'Esc leaves it for later');
+  await until(() => since('Guided setup').includes('Enter guided setup'), 'Esc leaves it for later');
   again.unmount();
 
   // A window started with listening off never opens a real device, even for the guide.
   rendered = '';
   const off = render(<App setupActions={actions} openSettings={() => {}} />,
     { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
-  await until(() => plain().includes('one step at a time'), 'offered again');
+  await until(() => plain().includes('Enter guided setup'), 'offered again');
   await type('\r');
   await until(() => plain().includes('Background recorder'), 'guide');
   await type('s');

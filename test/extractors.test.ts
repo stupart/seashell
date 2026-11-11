@@ -111,7 +111,7 @@ test('running an extractor sends its fields and prompt, and saves cited results 
   expect(readFileSync(join(directory, 'insights', 'customer-pains.md'), 'utf8')).toContain('## Budget\n\n- Not covered.');
   const lines = meetingViewLines(loadMeetingArtifact(root, record.id)!, 'notes', record);
   expect(lines.slice(lines.indexOf('# Insights'))).toEqual([
-    '# Insights', 'Customer pains · Pains', '- Onboarding takes a week.  00:00', 'Customer pains · Tools', '- Spreadsheets.  00:03']);
+    '# Insights', '## Customer pains', '- Pains: Onboarding takes a week.\t00:00', '- Tools: Spreadsheets.\t00:03']);
 
   // Running it again replaces its result; deleting the extractor's insight file set stays in sync with meeting.json.
   await runExtractor(root, record.id, 'Customer pains', { route, runner: fakeHumain({}).runner, env });

@@ -31,7 +31,10 @@ export function sameDay(left: string, right: string): boolean {
 const clockTime = (date: Date) => date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
   .replace(/\s?([ap])\.?m\.?/iu, (_, half: string) => half.toLowerCase());
 
-/** When a meeting happened, short enough to sit beside its title. */
+/**
+ * When something happened, in local time, the one way Seashell writes it:
+ * "6:44p" today, "Nov 7 2:30p" before. Without the time, an older day is just "Nov 7".
+ */
 export function meetingWhen(createdAt: string, now = new Date(), withTime = true): string {
   const created = new Date(createdAt);
   if (created.toDateString() === now.toDateString()) return clockTime(created);
@@ -39,32 +42,38 @@ export function meetingWhen(createdAt: string, now = new Date(), withTime = true
   return withTime ? `${day} ${clockTime(created)}` : day;
 }
 
-const CLOCK_WIDTH = clockTime(new Date(2000, 0, 1, 12, 30)).length;
-
-/** The list's date column: the day and the time are padded, so "Nov  9" sits over
- * "Nov 10" and " 9:05a" over "10:30a" from one row to the next. */
-export function listWhen(createdAt: string, now = new Date(), withTime = true): string {
-  const created = new Date(createdAt);
-  const time = clockTime(created).padStart(CLOCK_WIDTH);
-  if (created.toDateString() === now.toDateString()) return time;
-  const day = new Intl.DateTimeFormat([], { month: 'short', day: 'numeric' }).formatToParts(created)
-    .map((part) => part.type === 'day' ? part.value.padStart(2) : part.value).join('');
-  return withTime ? `${day} ${time}` : day;
+/** The list's date column: the time for today's meetings, the day for older ones. */
+export function listWhen(createdAt: string, now = new Date()): string {
+  return meetingWhen(createdAt, now, false);
 }
 
-/** List row: the title first, its date against the right edge. The time appears
- * when it tells two meetings of the same day apart, and the date never truncates.
- * Given the widest date in the list, dates line up on the left of that column and
- * times on the right. */
-export function meetingEntryRow(entry: TranscriptLibraryEntry, width: number, now = new Date(), withTime = true, column = 0): string {
+/** Marks a list row for a meeting kept with its video; the app draws it dim. */
+export const VIDEO_MARK = '▶';
+
+/** List row: the title first, its date right-aligned in a column as wide as the
+ * widest date in view, so the titles keep the rest of the row. A meeting with video
+ * has ▶ beside its date. */
+export function meetingEntryRow(entry: TranscriptLibraryEntry, width: number, now = new Date(), column = 0, video = false): string {
   const marker = entry.captureState === 'recording' ? '● ' : entry.captureState === 'processing' ? '◐ ' : '';
-  const own = listWhen(entry.createdAt, now, withTime);
-  // Today's rows hold only a time, against the edge like every other time, so their titles keep the room.
-  const when = sameDay(entry.createdAt, now.toISOString()) ? own : own.padEnd(column);
+  const when = `${video ? `${VIDEO_MARK} ` : ''}${listWhen(entry.createdAt, now).padStart(column)}`;
   const room = Math.max(4, width - when.length - 1 - marker.length);
   // Old live recordings are titled by their own date, which the row already shows.
   const name = /^Live \d/u.test(entry.title) ? 'Live recording' : entry.title;
   return `${marker}${fitColumns(name, room)} ${when}`;
+}
+
+/** A line cut to this many columns around the first place it says the needle, with … where it was cut. */
+export function snippetAround(text: string, needle: string, columns: number): string {
+  const room = Math.max(8, columns);
+  if (Bun.stringWidth(text) <= room) return text;
+  const at = Math.max(0, text.toLocaleLowerCase().indexOf(needle.toLocaleLowerCase()));
+  // Start a word or two before the match, so it reads as part of a sentence.
+  let start = Math.max(0, Math.min(at - Math.floor(room / 3), text.length - room + 1));
+  if (start > 0) {
+    const space = text.indexOf(' ', start);
+    start = space >= 0 && space < at ? space + 1 : start;
+  }
+  return fitColumns(start > 0 ? `…${text.slice(start)}` : text, room).trimEnd();
 }
 
 /** Text cut or padded to exactly this many terminal columns. An emoji or a CJK

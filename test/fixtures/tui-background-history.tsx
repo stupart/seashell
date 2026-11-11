@@ -43,15 +43,20 @@ const until = async (condition: () => boolean, message: string) => {
   assert(condition(), `${message}\n${screen()}`);
 };
 try {
-  await until(() => screen().includes(meetWarning), 'idle watcher must expose detection failures');
-  assert(screen().includes('Not recording') && !screen().includes('● Recording'), 'detection failure cannot imply capture is active');
+  // Warnings take the title's status slot: whole when there is room, the first sentence when narrow.
+  const shownWarning = columns >= 80 ? 'Meet detection unavailable. Check Speakers' : 'Meet detection';
+  await until(() => screen().includes(shownWarning), 'idle watcher must expose detection failures');
+  // This Mac's own setup decides between the two; neither may claim a recording.
+  assert((screen().includes('Ready · watching for calls') || screen().includes("Can't record yet")) && !screen().includes('● Recording'),
+    `detection failure cannot imply capture is active\n${screen()}`);
   writeBackgroundWatchStatus(library, { phase: 'awaiting-consent', candidate: { id: 'call', title: 'Design meeting', appName: 'Chrome' }, consentId: 'suggestion-1' });
-  await until(() => screen().includes('record this?'), 'must explicitly show not recording before consent');
-  assert(!screen().includes(meetWarning), 'recovered detection clears the warning');
+  await until(() => screen().includes('Record "Design meeting"?  m record  x ignore'), 'asks in the key bar before recording');
+  assert(screen().includes('Call noticed') && !screen().includes('● Recording'), 'a noticed call is not a recording');
+  assert(!screen().includes('Meet detection unavailable'), 'recovered detection clears the warning');
   await type('m');
   assert.equal(decisions.length, 1);
   assert.equal(decisions[0]![3], 'suggestion-1', 'approval is scoped to this exact suggestion');
-  assert(screen().includes('Not recording yet'), 'request is not confirmation');
+  assert(screen().includes('Starting the recording'), 'request is not confirmation');
   const first = createTranscriptRecord({ transcript: [], speakers: [{ id: 'LOCAL', label: 'Microphone' }] },
     { id: 'background-call', title: 'Design meeting', now: new Date(Date.now() - 120_000) });
   const saved = saveTranscriptRecord(library, first);
@@ -62,8 +67,9 @@ try {
   writeBackgroundMeetingState(saved.directory, 'recording', { captureHealth: health.snapshot, audioSavedThroughMs: 110_000,
     draftStatus: { stage: 'waiting', detail: 'Waiting for speech', queueDepth: 0 } });
   writeBackgroundWatchStatus(library, { phase: 'recording', sessionId: first.id, warning: meetWarning });
-  await until(() => screen().includes('NOT CAPTURING'), 'new meeting opens automatically and exposes microphone failure');
-  assert(screen().includes(meetWarning) && screen().includes('● Recording'), 'observer warning remains visible while confirmed audio capture continues');
+  await until(() => screen().includes('Mic not heard'), 'new meeting opens automatically and exposes microphone failure');
+  // One status slot, most urgent first: the microphone outranks the observer's warning.
+  assert(screen().includes('● Recording'), 'confirmed audio capture continues');
   if (columns >= 80) assert(screen().includes('Audio saved through 1:50'), 'saved duration comes from committed audio');
   await type('i'); assert(screen().includes('Audio help'), `audio help is reachable\n${screen()}`);
   await type('\x1b'); assert(!screen().includes('Audio help'), 'Escape closes audio help without quitting');
@@ -83,8 +89,9 @@ try {
   await until(() => screen().includes('Saved · audio needs review'), 'capture failure remains visible after finalization');
   assert(!screen().includes(meetWarning), 'current detection warning must not attach to a saved transcript');
   writeBackgroundWatchStatus(library, { phase: 'awaiting-consent', candidate: { id: 'next', title: 'Next call', appName: 'Chrome' }, consentId: 'suggestion-2' });
-  await until(() => screen().includes('record this? · Next call'), 'next approval is visible separately');
-  assert(screen().includes('Design meeting') && screen().includes('Saved · audio needs review'), 'new approval must not relabel the saved transcript');
+  await until(() => screen().includes('Record "Next call"?'), 'next approval is visible separately');
+  // Narrow, the meeting's title gives way to what happened to it.
+  assert((columns < 80 || screen().includes('Design meeting')) && screen().includes('Saved · audio needs review'), 'new approval must not relabel the saved transcript');
   // A second meeting becomes the current view without reusing the old transcript.
   const second = createTranscriptRecord({ transcript: [{ start: 0, end: 1, text: 'Second meeting live text.' }], speakers: [] }, { id: 'second-call', title: 'Second meeting' });
   const secondSaved = saveTranscriptRecord(library, second);
@@ -93,7 +100,9 @@ try {
   writeBackgroundWatchStatus(library, { phase: 'recording', sessionId: second.id });
   await until(() => screen().includes('Second meeting live text.'), 'next meeting opens in its own transcript');
   await type('h'); await type('\x1b[B'); await type('\r');
-  assert(screen().includes('Design meeting') && screen().includes('Another meeting is recording'), 'history view keeps its identity while another call records');
+  // Narrow, the slot is cut short; the title still names the meeting being read.
+  assert(screen().includes(columns >= 80 ? 'Design meeting' : 'Saved · audio needs review') && screen().includes(columns >= 80 ? '● Another call is recording · l opens it' : '● Another'),
+    `history view keeps its identity while another call records\n${screen()}`);
   await type('l');
   writeBackgroundWatchStatus(library, { phase: 'recording', sessionId: second.id }, Date.now() - 31_000);
   await until(() => screen().includes('Recording status unconfirmed'), 'stale watcher heartbeat must not claim active recording');

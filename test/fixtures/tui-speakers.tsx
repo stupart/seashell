@@ -49,7 +49,7 @@ const speakerFrames: string[] = [];
 const output = Object.assign(new Writable({ write(chunk, _enc, cb) {
   rendered += chunk.toString();
   const frame = stripVTControlCharacters(chunk.toString());
-  if (frame.includes('Speaker names') && frame.includes('↑↓ choose')) speakerFrames.push(frame);
+  if (frame.includes('Speaker setup') && frame.includes('↑↓ choose')) speakerFrames.push(frame);
   cb();
 } }), { columns, rows: 24 });
 const app = render(<App />, { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
@@ -67,9 +67,8 @@ try {
   assert.equal(permissionRequests, 1, 'Only explicit Connect requests Accessibility');
   assert.equal(JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.speakerBrowser, 'auto');
   assert.equal(starts, 1, 'Connecting Meet preserves the running microphone');
-  await type('\r');
+  // Enter only switches the row; while macOS asks, it checks again by itself.
   await until(() => plain().includes('This window needs access'));
-  await type('\r');
   await until(() => plain().includes('Accessibility enabled'));
   assert.equal(permissionRequests, 1, 'Checking permission never requests it again');
   for (let n = 0; n < 2; n++) await type('\x1b[B');

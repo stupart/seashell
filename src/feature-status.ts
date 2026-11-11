@@ -1,7 +1,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { currentMeetingRoutes } from './ai-provider.ts';
+import { currentMeetingRoutes, providerName } from './ai-provider.ts';
 import { computerAudioConfirmed, readAudioChecks, type AudioChecks } from './audio-checks.ts';
 import { readBackgroundMeetingStatus } from './background-meeting-status.ts';
 import { readBackgroundWatchStatus } from './background-watch-status.ts';
@@ -25,6 +25,7 @@ import { automationsDirectory, loadAutomations, readAutomationRuns } from './aut
 import { listVoiceprints } from './voiceprints.ts';
 import { screenCapturePermission } from './video-capture.ts';
 import { DEFAULT_MEETING_VIDEO } from './video-recording.ts';
+import { meetingWhen } from './tui-state.ts';
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -131,9 +132,9 @@ function aiEngineInstalled(): boolean {
   try { resolveHumainExecutable(); return true; } catch { return false; }
 }
 
-const when = (evidence: MeetingEvidence) =>
-  new Date(evidence.createdAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-const checkedOn = (at: string) => new Date(at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+// Local time, written the way the meetings list writes it, so "6:44p" here is 6:44p there.
+const when = (evidence: MeetingEvidence) => meetingWhen(evidence.createdAt);
+const checkedOn = (at: string) => meetingWhen(at);
 
 /**
  * One honest checklist for every capability: permission and process state are
@@ -233,7 +234,7 @@ export async function readFeatureStatuses(options: {
         : { state: 'ok', summary: micCheck ? 'Heard during setup' : evidence?.audibleMicrophoneChunks ? 'Heard in last meeting'
             : predatesRecorder ? 'Allowed · your next meeting confirms it' : 'Allowed',
           detail: 'Records your side of the conversation as its own track, so your words are labelled as you.' +
-            (micCheck ? ` The guided setup heard you on ${checkedOn(micCheck)}.`
+            (micCheck ? ` The guided setup heard you at ${checkedOn(micCheck)}.`
               : predatesRecorder && !evidence?.audibleMicrophoneChunks
               ? ' Meetings recorded before this update could not hear you; that is fixed now.' : '') } as const
       : microphone.authorization === 'notDetermined'
@@ -259,18 +260,18 @@ export async function readFeatureStatuses(options: {
   const ownConfirmed = Boolean(computerAudioConfirmed(checks, computerSince));
   const computerCheck = ownConfirmed && heardInSetup(checks.computer, computerSince) ? checks.computer : undefined;
   const computerDetail = 'Records everyone else from your Mac\'s audio output.';
-  const switchNote = ' It records with the background recorder\'s permission until you allow computer audio for Seashell System Audio: press Enter to check.';
   const check = { action: 'check-computer-audio', command: 'seashell meeting computer-audio setup' } as const;
-  const allow = 'Allow computer audio for Seashell System Audio. Press Enter to check; Seashell plays a short sound and macOS asks once.';
+  const allow = 'Press Enter so Seashell hears computer audio directly.';
   statuses.push({
     id: 'computer-audio', label: 'Other people (computer audio)', optional: false,
     ...(!helperReady ? { state: 'broken', summary: 'Recorder missing', detail: 'The computer-audio recorder is not installed.',
       fix: 'Update Seashell.', command: 'brew upgrade stupart/tap/seashell' } as const
     : evidence?.audibleComputerChunks ? { state: 'ok', summary: 'Heard in last meeting',
-      detail: `${computerDetail} Last meeting: "${evidence.title}" (${when(evidence)}).${ownConfirmed ? ' It records with Seashell System Audio.' : switchNote}`,
-      ...(ownConfirmed ? {} : check) } as const
+      detail: `${computerDetail} Last meeting: "${evidence.title}" (${when(evidence)}).${ownConfirmed ? ' It records with Seashell System Audio.' : ''}`,
+      // Until a check at the Mac, it records with the background recorder's permission.
+      ...(ownConfirmed ? {} : { ...check, fix: allow }) } as const
     : computerCheck ? { state: 'ok', summary: 'Heard during setup',
-      detail: `${computerDetail} The check heard your Mac through Seashell System Audio on ${checkedOn(computerCheck)}.` } as const
+      detail: `${computerDetail} The check heard your Mac through Seashell System Audio at ${checkedOn(computerCheck)}.` } as const
     : evidence ? { state: 'attention', summary: 'Silent in last meeting',
       detail: `Nothing was heard from your computer in "${evidence.title}" (${when(evidence)}).`, fix: allow, ...check } as const
     : { state: 'attention', summary: 'Not confirmed yet',
@@ -321,7 +322,7 @@ export async function readFeatureStatuses(options: {
     ...(!engine ? { state: 'off', summary: 'Not installed', action: 'open-ai',
       detail: 'Writes notes, decisions and action items after each meeting and answers questions about it.',
       fix: 'Install the AI engine.', command: 'seashell ai install <package.tgz>' } as const
-    : aiConfigured ? { state: 'ok', summary: `Using ${backends.join(' + ')}`, action: 'open-ai',
+    : aiConfigured ? { state: 'ok', summary: `Using ${backends.map(providerName).join(' + ')}`, action: 'open-ai',
       detail: 'Writes notes, decisions and action items after each meeting and answers questions about it.' } as const
     : { state: 'off', summary: 'No model chosen', action: 'open-ai',
       detail: 'Writes notes, decisions and action items after each meeting and answers questions about it. The engine is installed; choose which AI to use.',
@@ -334,8 +335,8 @@ export async function readFeatureStatuses(options: {
   const titlesDetail = 'Names each meeting after its calendar event (matched by its Meet link) and lists the attendees, which later helps name speakers.';
   statuses.push({
     id: 'calendar', label: 'Meeting titles from Calendar', optional: true,
-    ...(!calendarOn ? { state: 'off', summary: 'Off · meetings are called "Google Meet"',
-      detail: `${titlesDetail} macOS asks for Calendar access once.`,
+    ...(!calendarOn ? { state: 'off', summary: 'Off',
+      detail: `${titlesDetail} Until then, Meet calls are called "Google Meet". macOS asks for Calendar access once.`,
       fix: 'Turn on calendar titles; macOS asks for Calendar access once.', action: 'allow-calendar',
       command: 'seashell meeting calendar setup' } as const
     : calendarAccess?.authorization !== 'authorized' ? { state: 'attention', summary: 'On · needs Calendar access',
@@ -373,12 +374,12 @@ function voicesStatus(voices: ReadonlyArray<{ name: string; meetings: number }>)
     detail: 'When you name a speaker, Seashell keeps their voice on this Mac and suggests the name in later meetings. Forget anyone here.' } as const;
   return voices.length
     ? { ...base, state: 'ok', summary: `${voices.length} ${voices.length === 1 ? 'person' : 'people'}` }
-    : { ...base, state: 'off', summary: 'None yet · name a speaker to add one' };
+    : { ...base, state: 'off', summary: 'None yet', fix: 'Name a speaker in a meeting to add one.' };
 }
 
 /** What each AI role is told, as files the owner edits. */
 function promptsStatus(libraryDir: string): FeatureStatus {
-  const detail = 'What the AI is told for live analysis, final notes and chat. Each is a Markdown file you can edit. Citing the transcript always applies.';
+  const detail = 'What the AI is told for live analysis, final notes and chat. Each is a Markdown file you can edit.';
   let summary = 'As shipped';
   try {
     const prompts = listPrompts(libraryDir);
@@ -422,7 +423,7 @@ function automationsStatus(libraryDir: string): FeatureStatus {
 
 /** Which notes templates meetings use, and whether the AI knows who it is writing for. */
 function templatesStatus(libraryDir: string): FeatureStatus {
-  const detail = 'Final notes follow a template picked from the meeting title (1:1, discovery call, standup…), with every point cited. "About me" tells the AI who you are and how you like notes. Per meeting: [N] in the meeting.';
+  const detail = 'Final notes follow a template picked from the meeting title (1:1, discovery call, standup…), with every point cited. "About me" tells the AI who you are and how you like notes. In a meeting, n picks its template.';
   let count = 0;
   let personalised = false;
   let profile = false;
@@ -433,7 +434,7 @@ function templatesStatus(libraryDir: string): FeatureStatus {
   } catch {}
   const base = { id: 'notes-templates', label: 'Notes templates & About me', optional: true, action: 'open-templates', command: 'seashell templates' } as const;
   if (!personalised) {
-    return { ...base, state: 'off', summary: `${count} built-in templates · not personalised`, detail,
+    return { ...base, state: 'off', summary: `${count} built in`, detail,
       fix: 'Open your templates folder and write a few lines in "About me".' };
   }
   return profile

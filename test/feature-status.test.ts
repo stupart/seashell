@@ -6,6 +6,7 @@ import { mkdirSync } from 'fs';
 import { ensureTemplatesDirectory, PROFILE_FILE } from '../src/meeting-templates.ts';
 import { readFeatureStatuses, renderFeatureStatusTable, type FeatureStatusDependencies, type MeetingEvidence } from '../src/feature-status.ts';
 import type { MeetProbe } from '../src/meet-speakers.ts';
+import { meetingWhen } from '../src/tui-state.ts';
 
 const meeting = (overrides: Partial<MeetingEvidence> = {}): MeetingEvidence => ({
   title: 'Weekly sync', createdAt: '2026-01-15T10:00:00.000Z', microphoneChunks: 10, audibleMicrophoneChunks: 0,
@@ -52,8 +53,8 @@ test('a few audible moments in a long call do not count as hearing you', async (
     coverage: { yourSideAudibleSeconds: 20, otherSideAudibleSeconds: 4250, yourSideAudibleShare: 0.005, yourSideMissing: true } });
   const after = await byId({ lastMeeting: () => oneSided });
   expect(after.microphone).toMatchObject({ state: 'attention', summary: 'Allowed · your side almost silent' });
-  expect(after.microphone!.detail).toBe('Your side was almost silent in "Weekly sync" (' +
-    new Date('2026-01-15T10:00:00.000Z').toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) +
+  // Written in local time the way the meetings list writes it, by the same formatter.
+  expect(after.microphone!.detail).toBe('Your side was almost silent in "Weekly sync" (' + meetingWhen('2026-01-15T10:00:00.000Z') +
     '). The others talked for about 71 minutes, but your microphone picked up almost nothing.');
   expect(after.microphone!.fix).toContain('not muted');
   expect(after.microphone!.fix).toContain('Sound → Input');
@@ -91,7 +92,7 @@ test('a check the guided setup passed still counts after a restart, until someth
   const after = await byId({ lastMeeting: () => silent, audioChecks: () => earlier });
   expect(after['computer-audio']).toMatchObject({ state: 'attention', summary: 'Silent in last meeting' });
   expect(after['computer-audio']).toMatchObject({ action: 'check-computer-audio' });
-  expect(after['computer-audio']!.fix).toContain('Allow computer audio for Seashell System Audio. Press Enter to check');
+  expect(after['computer-audio']!.fix).toBe('Press Enter so Seashell hears computer audio directly.');
   expect(after.microphone).toMatchObject({ state: 'attention', summary: 'Allowed · last meeting silent' });
   // With no meeting yet, a passed check is all the proof there is.
   const fresh = await byId({ lastMeeting: () => undefined, audioChecks: () => ({ computer: later.computer }) });
@@ -109,7 +110,7 @@ test('meetings heard with the inherited permission still count, and the check to
   const old = await byId({ lastMeeting: () => meeting(), systemAudioRecorderSince: since });
   expect(old['computer-audio']).toMatchObject({ state: 'ok', summary: 'Heard in last meeting', action: 'check-computer-audio',
     command: 'seashell meeting computer-audio setup' });
-  expect(old['computer-audio']!.detail).toContain("background recorder's permission until you allow computer audio for Seashell System Audio");
+  expect(old['computer-audio']!.fix).toBe('Press Enter so Seashell hears computer audio directly.');
   // Confirmed at the Mac: nothing left to check.
   const tested = await byId({ lastMeeting: () => meeting(), systemAudioRecorderSince: since,
     audioChecks: () => ({ computer: '2026-02-02T09:00:00.000Z' }) });
@@ -172,7 +173,7 @@ test('Settings shows whether templates are yours and whether the AI knows who yo
   try {
     const row = async () => (await readFeatureStatuses({ config: { meeting: { speakerBrowser: 'auto' } } as never, libraryDir, dependencies: healthy }))
       .find((status) => status.id === 'notes-templates')!;
-    expect(await row()).toMatchObject({ state: 'off', summary: '6 built-in templates · not personalised', action: 'open-templates' });
+    expect(await row()).toMatchObject({ state: 'off', summary: '6 built in', action: 'open-templates' });
     const directory = ensureTemplatesDirectory(libraryDir);
     expect(await row()).toMatchObject({ state: 'attention', summary: '6 templates · About me empty' });
     writeFileSync(join(directory, PROFILE_FILE), 'I run a studio.');
@@ -206,7 +207,7 @@ test('saved voices, prompts, extractors and automations each say how they stand'
     .map((status) => [status.id, status]));
   try {
     let now = await statuses();
-    expect(now.voices).toMatchObject({ state: 'off', summary: 'None yet · name a speaker to add one' });
+    expect(now.voices).toMatchObject({ state: 'off', summary: 'None yet', fix: 'Name a speaker in a meeting to add one.' });
     expect(now.prompts).toMatchObject({ state: 'ok', summary: 'As shipped' });
     expect(now.extractors).toMatchObject({ state: 'off', summary: 'None yet', action: 'open-extractors' });
     expect(now.automations).toMatchObject({ state: 'off', summary: 'None yet', action: 'open-automations' });

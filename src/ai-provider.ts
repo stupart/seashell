@@ -8,6 +8,11 @@ export const AI_PROVIDERS: { id: HumainBackend; name: string; privacy: string }[
   { id: 'openrouter', name: 'OpenRouter', privacy: 'Meeting text is sent through OpenRouter; API usage is billed.' },
 ];
 
+/** "Claude Code", never "claude-code": the name people know a provider by. */
+export function providerName(id: HumainBackend | string): string {
+  return AI_PROVIDERS.find((provider) => provider.id === id)?.name ?? id;
+}
+
 /** Apply one explicit provider choice to every meeting role, retaining compatible limits. */
 export function meetingProviderPatch(current: SeashellMeetingConfig | undefined,
   backend: HumainBackend, model: string): SeashellMeetingConfig {

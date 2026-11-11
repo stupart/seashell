@@ -4,6 +4,7 @@ import { stripVTControlCharacters } from 'util';
 import { coalesceTranscriptSegments, speakerLabel } from './transcript-renderer.ts';
 import type { StructuredTranscript } from './transcript-types.ts';
 import { formatTuiClock, SPEAKER_COLORS, speakerColorIndex } from './tui-state.ts';
+import { META } from './meeting-tui.ts';
 
 const color = new Chalk({ level: 1 });
 const MAX_NAME_COLUMN = 18;
@@ -63,13 +64,23 @@ export function timedTranscriptRows(
   });
 }
 
+/** Notes and chat as terminal rows: bullets hang under their dash, and their meta sits at the right. */
 export function wrappedMeetingRows(lines: readonly string[], columns: number): string[] {
   const width = Math.max(1, Math.floor(columns));
   return lines.flatMap((line) => {
-    const clean = stripVTControlCharacters(line) || ' ';
+    const [body = '', meta] = line.split(META);
+    const clean = stripVTControlCharacters(body) || ' ';
     if (!clean.startsWith('- ')) return wrapAnsi(clean, width, { hard: true }).split('\n');
-    return wrapAnsi(clean.slice(2), Math.max(1, width - 2), { hard: true }).split('\n')
+    const rows = wrapAnsi(clean.slice(2), Math.max(1, width - 2), { hard: true }).split('\n')
       .map((row, index) => (index === 0 ? `- ${row}` : `  ${row}`));
+    if (!meta) return rows;
+    // Who owns it and when it was said sit dim against the right edge: on the
+    // bullet's last row when there is room, otherwise on a row of their own.
+    const last = rows.at(-1)!;
+    const gap = width - Bun.stringWidth(last) - Bun.stringWidth(meta);
+    if (gap >= 3) rows[rows.length - 1] = `${last}${' '.repeat(gap)}${color.dim(meta)}`;
+    else rows.push(`${' '.repeat(Math.max(2, width - Bun.stringWidth(meta)))}${color.dim(meta)}`);
+    return rows;
   });
 }
 

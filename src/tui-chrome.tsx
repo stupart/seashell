@@ -3,40 +3,149 @@ import { Box, Text, useStdout } from 'ink';
 import wrapAnsi from 'wrap-ansi';
 
 export type Hint = readonly [key: string, label: string];
+type Tone = 'red' | 'yellow' | 'green' | 'cyan' | 'magenta';
 
 const ALWAYS: readonly Hint[] = [[',', 'settings'], ['?', 'help']];
+const width = (text: string) => Bun.stringWidth(text);
+
+/** How many columns these hints take, two spaces apart. */
+export function hintsWidth(hints: readonly Hint[]): number {
+  return hints.reduce((total, [key, label]) => total + width(key) + width(label) + 1, 0) + Math.max(0, hints.length - 1) * 2;
+}
 
 /** The hints that fit, most useful first. Help is never dropped, so everything stays findable. */
 export function fitHints(hints: readonly Hint[], columns: number, always: readonly Hint[] = ALWAYS): Hint[] {
-  const width = (list: readonly Hint[]) => list.reduce((total, [key, label]) => total + key.length + label.length + 1, 0) +
-    Math.max(0, list.length - 1) * 2;
   const pinned = always.slice(-1);
   const fitted: Hint[] = [];
   for (const hint of [...hints, ...always.slice(0, -1)]) {
     if ([...fitted, ...pinned].some(([key]) => key === hint[0])) continue;
-    if (width([...fitted, hint, ...pinned]) <= columns) fitted.push(hint);
+    if (hintsWidth([...fitted, hint, ...pinned]) <= columns) fitted.push(hint);
   }
   return [...fitted, ...pinned];
+}
+
+function Hints(props: { hints: readonly Hint[] }) {
+  return <>{props.hints.map(([key, label], index) => <React.Fragment key={key}>
+    {index > 0 ? '  ' : ''}<Text bold>{key}</Text><Text dimColor> {label}</Text>
+  </React.Fragment>)}</>;
 }
 
 /** The only key bar. Prompts and toasts take this row; nothing else adds one.
  * Without help, the way back is the hint that is never dropped. */
 export function KeyBar(props: { hints: readonly Hint[]; columns: number; help?: boolean }) {
   const always = props.help === false ? props.hints.filter(([key]) => key === 'Esc') : ALWAYS;
-  return <Text wrap="truncate-end">
-    {fitHints(props.hints, props.columns, always).map(([key, label], index) => <React.Fragment key={key}>
-      {index > 0 ? '  ' : ''}<Text bold>{key}</Text><Text dimColor> {label}</Text>
-    </React.Fragment>)}
+  const hints = fitHints(props.hints, props.columns, always);
+  return <Text key={shapeOf(hints)} wrap="truncate-end"><Hints hints={hints} /></Text>;
+}
+
+/**
+ * Ink keeps a line's measured width when only the parts inside it change, then cuts
+ * the longer line to the old width. A line keyed by its parts is measured afresh.
+ */
+const shapeOf = (hints: readonly Hint[]) => hints.map(([key, label]) => `${key} ${label}`).join('|');
+
+/** Text cut to this many columns from its end, keeping the start. */
+function cutEnd(text: string, columns: number): string {
+  if (width(text) <= columns) return text;
+  let cut = '';
+  for (const character of text) {
+    if (width(cut + character) > columns - 1) break;
+    cut += character;
+  }
+  return `${cut}…`;
+}
+
+/** Text cut to this many columns from its start, keeping the end in view, as a typed line scrolls. */
+function cutStart(text: string, columns: number): string {
+  if (width(text) <= columns) return text;
+  let cut = '';
+  for (const character of [...text].reverse()) {
+    if (width(character + cut) > columns - 1) break;
+    cut = character + cut;
+  }
+  return `…${cut}`;
+}
+
+/**
+ * A question, a typed answer or work in progress, in the key bar's row. The keys
+ * are never cut: a question gives way to its short form first, and typed text
+ * scrolls behind its label, which always stays.
+ */
+export function Prompt(props: {
+  /** The question, or the label in front of typed text. */
+  text: string;
+  /** The question, or the label, for a window too narrow for the whole of it. */
+  short?: string;
+  /** What has been typed so far; the label stays and this scrolls. */
+  input?: string;
+  hints?: readonly Hint[];
+  columns: number;
+  color?: Tone;
+}) {
+  const hints = props.hints ?? [];
+  const room = Math.max(4, props.columns - (hints.length ? hintsWidth(hints) + 2 : 0));
+  // Typed text keeps at least a few words in view: a long label gives way to its short form first.
+  const label = props.input !== undefined && props.short && room - width(props.text) - 1 < 16 ? props.short : props.text;
+  const typed = props.input === undefined ? undefined : cutStart(`${props.input}█`, Math.max(2, room - width(label) - 1));
+  const text = typed !== undefined ? label
+    : width(props.text) <= room ? props.text
+    : props.short && width(props.short) <= room ? props.short
+    : cutEnd(props.short ?? props.text, room);
+  return <Text key={shapeOf(hints)} wrap="truncate-end">
+    <Text {...(props.color ? { color: props.color } : {})}>{text}</Text>
+    {typed !== undefined ? ` ${typed}` : ''}
+    {hints.length ? <>{'  '}<Hints hints={hints} /></> : null}
   </Text>;
 }
 
-/** The same two rows every screen starts with, which never give way to its content. */
-export function ScreenTitle(props: { name: string; detail?: React.ReactNode }) {
+/** What just happened, in the key bar's row until the next key: green when it worked, red when it failed. */
+export function Toast(props: { text: string; columns: number; color?: Tone }) {
+  // A toast has no keys to keep, so a long one wraps rather than loses its end.
+  return <Paragraph text={props.text} width={props.columns} color={props.color ?? 'green'} />;
+}
+
+/** The status slot at the right of the title line: what needs the person, or what Seashell is doing. */
+export interface TitleStatus {
+  text: string;
+  /** For a narrow window, where the whole of text would push the title off its line. */
+  short?: string;
+  color?: Tone;
+}
+
+/**
+ * The same two rows every screen starts with, which never give way to its content:
+ * the mark and the screen's name, its status on the right, then a rule.
+ */
+export function ScreenTitle(props: { name: string; color?: Tone; bold?: boolean; detail?: string; status?: TitleStatus | undefined;
+  /** How much of the name must stay in view, such as "Saved · audio needs review" before a meeting's title.
+   * A screen's own name stays whole unless told otherwise; its status gives way instead. */
+  keep?: number }) {
   const { stdout } = useStdout();
   const columns = stdout?.columns ?? 80;
+  const room = columns - 2;
+  const nameWidth = props.name ? 2 + width(props.name) : 0;
+  // The status gives way to its short form, then to a short screen name: a long meeting title is cut before it.
+  const fits = (text?: string) => text !== undefined && 2 + nameWidth + 2 + width(text) <= room;
+  // One more column for the … that ends a cut name.
+  const statusRoom = room - 2 - Math.min(nameWidth, 3 + (props.keep ?? width(props.name))) - 2;
+  const statusText = !props.status ? undefined : fits(props.status.text) ? props.status.text : fits(props.status.short) ? props.status.short
+    : statusRoom >= 8 ? cutEnd(props.status.short ?? props.status.text, statusRoom) : undefined;
+  const statusWidth = statusText ? 2 + width(statusText) : 0;
+  // Narrow, the name of the app gives way first; it stays whenever there is room for it.
+  const brand = columns >= 72 || 2 + 9 + nameWidth + statusWidth <= room;
+  const detail = props.detail && 2 + (brand ? 9 : 0) + nameWidth + 2 + width(props.detail) + statusWidth <= room ? props.detail : undefined;
   return <Box flexDirection="column" flexShrink={0}>
-    <Text wrap="truncate-end">🐚{columns < 72 ? '' : <Text> <Text bold color="cyan">Seashell</Text></Text>}  <Text bold>{props.name}</Text>{props.detail}</Text>
-    <Text dimColor wrap="truncate-end">{'─'.repeat(Math.max(1, columns - 2))}</Text>
+    <Box justifyContent="space-between">
+      {/* Keyed by its shape, as the key bar is, so a longer title is measured afresh. */}
+      <Text key={`${brand}-${Boolean(detail)}`} wrap="truncate-end">🐚{brand ? <Text> <Text bold color="cyan">Seashell</Text></Text> : ''}{props.name ? '  ' : ''}
+        <Text bold={props.bold ?? true} {...(props.color ? { color: props.color } : {})}>{props.name}</Text>
+        {detail ? <Text dimColor>  {detail}</Text> : null}
+      </Text>
+      {statusText && <Box flexShrink={0} marginLeft={2}>
+        <Text {...(props.status?.color ? { color: props.status.color } : { dimColor: true })}>{statusText}</Text>
+      </Box>}
+    </Box>
+    <Text dimColor wrap="truncate-end">{'─'.repeat(Math.max(1, room))}</Text>
   </Box>;
 }
 
@@ -60,20 +169,20 @@ export function HelpRow(props: { group: string; keys: string }) {
 }
 
 /** Text wrapped at word breaks with no stray space starting a line, which Ink's own wrapping leaves. */
-export function Paragraph(props: { text: string; width: number; color?: 'red' | 'yellow' | 'green' | 'cyan'; dimColor?: boolean; bold?: boolean }) {
-  const { text, width, ...style } = props;
+export function Paragraph(props: { text: string; width: number; color?: Tone; dimColor?: boolean; bold?: boolean }) {
+  const { text, width: columns, ...style } = props;
   return <Box flexDirection="column" flexShrink={0}>
-    {wrapAnsi(text, Math.max(8, width), { hard: true, trim: true }).split('\n')
+    {wrapAnsi(text, Math.max(8, columns), { hard: true, trim: true }).split('\n')
       .map((line, index) => <Text key={index} {...style}>{line || ' '}</Text>)}
   </Box>;
 }
 
 export const HELP_ROWS: ReadonlyArray<readonly [string, string]> = [
-  ['Move', '↑↓ move · Enter read · h meetings · Esc back · / search · q quit, recording carries on'],
+  ['Move', 'Enter read · h meetings · / search · ↑↓ move · Esc back · q quit, recording carries on'],
   ['Meeting', '1 notes · 2 transcript · 3 chat · a ask · g write notes · n notes options · r name speakers · w watch video · c copy · e export · o open folder · d move to Trash'],
-  ['Transcript', 't times · s speaker names · l latest words'],
+  ['Transcript', 't show/hide times · s show/hide speakers · l latest words · n next match'],
   ['When asked', 'm record · x ignore'],
   ['Recording', 'starts and stops with the call · space record or stop by hand · V record with video · i audio help'],
   ['Add', 'f import a file · F import and separate speakers'],
-  ['Setup', ', settings · p AI · v speaker names'],
+  ['Setup', ', settings · p AI · v speaker setup'],
 ];

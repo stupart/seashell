@@ -6,6 +6,7 @@ import { PassThrough, Writable } from 'stream';
 import { stripVTControlCharacters } from 'util';
 
 const columns = process.argv[2] === 'narrow' ? 56 : 100;
+const narrow = columns < 72;
 Object.defineProperty(process.stdout, 'columns', { value: columns });
 Object.defineProperty(process.stdout, 'rows', { value: 30 });
 const client = { ...await import('../../src/humain-client.ts') };
@@ -44,9 +45,11 @@ const until = async (check: () => boolean, label: string) => {
 };
 const type = async (...keys: string[]) => { for (const key of keys) { input.write(key); await Bun.sleep(60); } };
 try {
-  await until(() => frame().includes('Test connection'), 'a chosen AI can be tested');
-  await type('\x1b[B', '\r');
-  await until(() => frame().includes('Testing… Esc cancels'), 'the test runs, and says how to stop it');
+  // Once AI is chosen there is no "Done" row: the test leads.
+  await until(() => frame().includes('› Test connection'), 'a chosen AI can be tested');
+  assert.ok(!frame().includes('Done'), frame());
+  await type('\r');
+  await until(() => frame().includes('Testing…  Esc cancel'), 'the test runs, and says how to stop it');
   assert.equal(tests.length, 1);
   assert.equal(tests[0]!.mode, 'hybrid');
   assert.deepEqual(Object.keys(tests[0]!.routes).sort(), ['chat', 'observer', 'reconciliation']);
@@ -59,8 +62,12 @@ try {
   answer();
   await until(() => frame().includes('answered in 1.2 s'), 'a route that answered says how fast');
   const text = frame().replace(/\s+/gu, ' ');
-  assert.ok(text.includes('✓ Claude Code · sonnet answered in 1.2 s · live anal'), text);
-  assert.ok(text.includes('✗ Codex · gpt-5.5 chat'), text);
+  // The provider people know, not its model id: the models are in Advanced.
+  // Narrow, what each AI does goes on the line under it.
+  assert.ok(text.includes(narrow ? '✓ Claude Code answered in 1.2 s live analysis, final notes'
+    : '✓ Claude Code answered in 1.2 s · live analysis, final notes'), text);
+  assert.ok(text.includes('✗ Codex chat'), text);
+  assert.ok(!text.includes('sonnet') && !text.includes('gpt-5.5'), text);
   assert.ok(text.includes('Codex is not signed in. Run codex login, then test again.'), text);
   assert.ok(text.includes('Enter test again'), text);
   for (const line of frame().split('\n')) assert.ok(Bun.stringWidth(line) <= columns, `fits ${columns} columns: ${line}`);
