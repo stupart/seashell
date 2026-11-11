@@ -4,11 +4,11 @@ import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { runExtractor } from '../src/extractors.ts';
 import type { runHumainMeeting } from '../src/humain-client.ts';
-import { createMeetingArtifact, loadMeetingArtifact, saveMeetingArtifact, type MeetingArtifact } from '../src/meeting-artifact.ts';
+import { createMeetingArtifact, loadMeetingArtifact, saveMeetingArtifact, sourceLineRemoved, type MeetingArtifact } from '../src/meeting-artifact.ts';
 import { meetingEvidence } from '../src/meeting-evidence.ts';
 import { chatWithMeeting, enrichMeeting } from '../src/meeting-enrichment.ts';
 import { getInsights, getMeeting, queryNotes } from '../src/meeting-memory.ts';
-import { meetingViewLines } from '../src/meeting-tui.ts';
+import { FROM_YOUR_NOTES, meetingViewLines } from '../src/meeting-tui.ts';
 import { findTranscriptRecord, saveTranscriptRecord } from '../src/transcript-library.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 import type { TranscriptRecord } from '../src/transcript-types.ts';
@@ -168,4 +168,53 @@ test('meetings cleaned before this fix heal as they are read, with no migration'
   const healed = JSON.parse(readFileSync(path, 'utf8')) as MeetingArtifact;
   expect(healed.provisionalClaims[0]).toMatchObject({ evidenceSegmentIds: [], removedEvidenceSegmentIds: ['s000001'] });
   expect(healed.chat[1]).toMatchObject({ evidenceSegmentIds: [], removedEvidenceSegmentIds: ['s000001'] });
+});
+
+test('a point only your notes support is never "source line removed": it stays yours, and its note still reaches Humain', async () => {
+  const { root, record } = library();
+  // One point rests on your note alone and never cited a line; one cited the
+  // phantom line as well as your note; one cited only the phantom line (c2).
+  const artifact = loadMeetingArtifact(root, record.id)!;
+  saveMeetingArtifact(root, { ...artifact,
+    ownerNotes: [{ id: 'n1', text: 'Dana sounded unsure about Friday', at: 7, addedAt: '2026-10-02T09:01:00.000Z' }],
+    analysis: { ...artifact.analysis!,
+      claims: [...artifact.analysis!.claims,
+        { id: 'c4', type: 'risk', text: 'Friday may slip.', evidenceSegmentIds: [], ownerNoteIds: ['n1'], confidence: 0.6 },
+        { id: 'c5', type: 'feedback', text: 'Thanks, though Dana sounded unsure.', evidenceSegmentIds: ['s000001'], ownerNoteIds: ['n1'], confidence: 0.5 }],
+      notes: [...artifact.analysis!.notes!, { heading: 'Worries', items: [{ text: 'Friday may slip.', evidenceSegmentIds: [], ownerNoteIds: ['n1'] }] }] } });
+  saveTranscriptRecord(root, withoutFirstLine(record), { keepNotes: 'Lines heard in silence were removed' });
+
+  // Saved: nothing moves aside for the note-only point, since it cited no line.
+  const directory = dirname(findTranscriptRecord(root, record.id).path);
+  const raw = JSON.parse(readFileSync(join(directory, 'meeting.json'), 'utf8')) as MeetingArtifact;
+  const saved = (id: string) => raw.analysis!.claims.find((claim) => claim.id === id)!;
+  expect(saved('c4')).toEqual({ id: 'c4', type: 'risk', text: 'Friday may slip.', evidenceSegmentIds: [], ownerNoteIds: ['n1'], confidence: 0.6 });
+  expect(saved('c5')).toMatchObject({ evidenceSegmentIds: [], removedEvidenceSegmentIds: ['s000001'], ownerNoteIds: ['n1'] });
+  expect(raw.analysis!.notes![1]!.items[0]).toEqual({ text: 'Friday may slip.', evidenceSegmentIds: [], ownerNoteIds: ['n1'] });
+  expect(sourceLineRemoved(saved('c4'))).toBe(false);
+  expect(sourceLineRemoved(raw.analysis!.notes![1]!.items[0]!)).toBe(false);
+  expect(sourceLineRemoved(saved('c2'))).toBe(true);
+  expect(sourceLineRemoved(saved('c5'))).toBe(true);
+
+  // Shown as yours (✎ at the note's time), never as a removed line; only points whose cited lines went say so.
+  const lines = meetingViewLines(loadMeetingArtifact(root, record.id)!, 'notes', findTranscriptRecord(root, record.id).record);
+  expect(lines).toContain(`- Friday may slip.${'\t'}${'\t'}${FROM_YOUR_NOTES} 00:07`);
+  expect(lines.filter((line) => line.startsWith('- Friday may slip.')).every((line) => !line.includes('source line removed'))).toBe(true);
+  expect(lines).toContain(`- Thanks, though Dana sounded unsure. (source line removed)${'\t'}${'\t'}${FROM_YOUR_NOTES} 00:07`);
+  expect(lines).toContain('- Everyone was grateful. (source line removed)');
+  const documents = join(directory, 'documents');
+  expect(readFileSync(join(documents, 'meeting-notes.md'), 'utf8')).toContain('- Friday may slip. _(your notes)_');
+  expect(readFileSync(join(documents, 'risks.md'), 'utf8')).toContain('- Friday may slip. _(your notes)_');
+  const meeting = getMeeting(root, { id: record.id });
+  expect(meeting.notes.items.find((item) => item.text === 'Friday may slip.')).toMatchObject({ evidence: [], fromYourNotes: true });
+
+  // To Humain: no claim without a current line goes back as a claim, in the shape every engine
+  // accepts, but your note itself goes with final notes, as every owner note does.
+  const sent: Array<{ role: string; request: any }> = [];
+  const runner = strictHumain(sent, answers);
+  await chatWithMeeting(root, record.id, 'When do we ship?', route, undefined, runner);
+  await enrichMeeting(root, record.id, { mode: 'post-session', route, instructions: null, runner });
+  expect(sent.map((call) => call.role)).toEqual(['chat', 'reconcile']);
+  expect(sent[0]!.request.finalClaims.map((claim: any) => claim.id)).toEqual(['c1', 'c3']);
+  expect(sent[1]!.request.ownerNotes).toEqual([{ id: 'n1', text: 'Dana sounded unsure about Friday', at: 7 }]);
 });
