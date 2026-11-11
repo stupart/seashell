@@ -110,7 +110,7 @@ import {
 } from './automations.ts';
 import { queryNotes } from './meeting-memory.ts';
 import { cleanPhantoms } from './transcript-edits.ts';
-import { claimOwnerAndDue } from './meeting-artifact.ts';
+import { claimOwnerAndDue, type MeetingAttendee } from './meeting-artifact.ts';
 import type { MeetingIntelligenceCommand } from './cli-args.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1041,7 +1041,11 @@ async function executeCapture(
     ].join('\n'));
     return 0;
   }
+  // A live meeting saved its calendar event beside its transcript; its invitees cap how many voices there are.
+  let attendees: readonly MeetingAttendee[] | undefined;
+  try { attendees = loadMeetingArtifact(libraryDir, command.action.id)?.calendar?.attendees; } catch { /* No meeting saved for it yet. */ }
   const record = await finalizeCaptureTranscript(manifestPath, {
+    ...(attendees?.length ? { attendees } : {}),
     onStatus: (message) => process.stderr.write(`${message}\n`),
   });
   const saved = saveTranscriptRecord(libraryDir, record);
