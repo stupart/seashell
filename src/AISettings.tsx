@@ -113,7 +113,7 @@ export default function AISettings(props: {
     <Text>{screen === 'providers' ? 'Connect once. Seashell chooses the models.' : busy ? 'Finding your connected AI…'
       : canUse ? `${proposal ? 'Write notes with' : 'Using'} ${providerName}${proposal ? '?' : ''}` : 'No connected AI found. Recording still works.'}</Text>
     <Box flexDirection="column" marginTop={1}>
-      {entries.map((label, i) => <Text key={label} color={index === i ? 'cyan' : undefined}>{index === i ? '›' : ' '} {label}</Text>)}
+      {entries.map((label, i) => <Text key={label} inverse={index === i} wrap="truncate-end">{index === i ? '› ' : '  '}{label}</Text>)}
     </Box>
     <Box flexDirection="column" marginTop={1}>
       {screen === 'home' && canUse && <Text dimColor>{backends.some((id) => id !== 'local-openai')

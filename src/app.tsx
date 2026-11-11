@@ -10,6 +10,7 @@ import {
   suggestCalendarMeeting,
 } from './calendar.ts';
 import {
+  defaultConfigPath,
   loadConfig,
   updateMeetingConfig,
   resolveLibraryDir,
@@ -72,7 +73,8 @@ import {
 } from './transcription-routing.ts';
 import AIProviderPicker from './AISettings.tsx';
 import SpeakerSettings from './SpeakerSettings.tsx';
-import SettingsScreen from './SettingsScreen.tsx';
+import SettingsScreen, { type SettingsActions } from './SettingsScreen.tsx';
+import Onboarding, { DEFAULT_LEVEL_SOURCES, switchedOff, type GuideProgress, type LevelSources, type SystemSettingsPane } from './Onboarding.tsx';
 import { readFeatureStatuses, type FeatureStatus } from './feature-status.ts';
 import { stripVTControlCharacters } from 'util';
 import { startMeetSpeakerReader, meetBrowserMatchesApp, probeMeetSpeakers, type MeetSpeakerReader, type MeetProbe } from './meet-speakers.ts';
@@ -90,6 +92,7 @@ import {
 } from './model-config.ts';
 import {
   meetingEntryRow,
+  listWhen,
   sameDay,
   meetingWhen,
   moveSelection,
@@ -195,17 +198,33 @@ function useTerminalSize(): { columns: number; rows: number } {
   return size;
 }
 
-export default function App(props: { libraryDir?: string } = {}) {
+export default function App(props: {
+  libraryDir?: string;
+  /** Open on the guided setup, as `seashell setup` does. */
+  guide?: boolean;
+  /** Tests and journeys pass fakes: nothing here may open a real microphone, launch agent or System Settings. */
+  levels?: LevelSources;
+  setupActions?: SettingsActions;
+  openSettings?: (pane: SystemSettingsPane) => void;
+} = {}) {
   const { exit } = useApp();
+  // No settings file yet: Seashell has never been set up on this Mac.
+  const [firstRun] = useState(() => !existsSync(defaultConfigPath()));
   const [config, setConfig] = useState(() => loadConfig());
   const [speakerSetupOpen, setSpeakerSetupOpen] = useState(false);
   const [meetSpeakerStatus, setMeetSpeakerStatus] = useState<MeetProbe>();
   const [captureAppBundle, setCaptureAppBundle] = useState<string>();
   const [aiSetupOpen, setAiSetupOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  // Speakers and AI open from Settings return there when closed.
-  const [returnToSettings, setReturnToSettings] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(Boolean(props.guide));
+  const [guideProgress, setGuideProgress] = useState<GuideProgress>();
+  // The guide offers itself once, on a first run that still needs it.
+  const guideOffered = useRef(Boolean(props.guide));
+  // Speakers and AI return to whatever opened them; the guide returns to Settings when started there.
+  const [returnTo, setReturnTo] = useState<'settings' | 'guide'>();
+  const [guideFromSettings, setGuideFromSettings] = useState(false);
   const [attention, setAttention] = useState<FeatureStatus[]>([]);
+  const [setupNeeded, setSetupNeeded] = useState(false);
   const [aiSetupIntent, setAiSetupIntent] = useState<'notes' | 'chat' | null>(null);
   const libraryRoot = useMemo(
     () => resolveLibraryDir(props.libraryDir, process.env, config),
@@ -1562,7 +1581,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const { stdin } = useStdin();
   const { stdout } = useStdout();
   const mouseDecoder = useRef(new MouseScrollDecoder());
-  const mouseEnabled = !speakerSetupOpen && !aiSetupOpen && !chatInputState && !renameState && !speakerPickerOpen && !searchMode && !exportMode && !confirmTrashId && !notesSetup;
+  const mouseEnabled = !speakerSetupOpen && !aiSetupOpen && !guideOpen && !chatInputState && !renameState && !speakerPickerOpen && !searchMode && !exportMode && !confirmTrashId && !notesSetup;
 
   const saveMeetingAi = useCallback((change: (ai: NonNullable<MeetingArtifact['ai']>) => void) => {
     if (!currentMeeting) return;
@@ -1992,6 +2011,11 @@ export default function App(props: { libraryDir?: string } = {}) {
       } catch (cause) { setError(`Could not start recording: ${cause instanceof Error ? cause.message : String(cause)}`); }
       return;
     }
+    // Until recording works, Enter at home starts the guided setup; Space still records by hand.
+    if (key.return && view === 'live' && !historyOpen && pausedRef.current && !currentMeeting && attention.length) {
+      openGuide(false);
+      return;
+    }
     if ((input === ' ' || key.return) && view === 'live' && !historyOpen) {
       if (pausedRef.current && automaticCandidate) {
         meetingAutomationController.current.decline();
@@ -2058,41 +2082,87 @@ export default function App(props: { libraryDir?: string } = {}) {
         setJumpTo(searchQuery.trim());
       }
     }
-  }, { isActive: !aiSetupOpen && !speakerSetupOpen && !settingsOpen });
+  }, { isActive: !aiSetupOpen && !speakerSetupOpen && !settingsOpen && !guideOpen });
 
   // A quiet footer nudge when something needed for recording meetings is broken.
+  // What the guided setup just heard outweighs a silent or unconfirmed meeting from before.
+  const heard = guideProgress?.heard;
   useEffect(() => {
-    if (settingsOpen) return;
+    if (settingsOpen || guideOpen) return;
     const controller = new AbortController();
     void readFeatureStatuses({ config, libraryDir: libraryRoot, signal: controller.signal })
-      .then(statuses => { if (!controller.signal.aborted) setAttention(statuses.filter(status => !status.optional && (status.state === 'broken' ||
-        (status.state === 'attention' && (status.id === 'microphone' || status.id === 'computer-audio'))))); })
+      .then(statuses => {
+        if (controller.signal.aborted) return;
+        setAttention(statuses.filter(status => !status.optional && (status.state === 'broken' ||
+          (status.state === 'attention' && (status.id === 'microphone' && !heard?.microphone || status.id === 'computer-audio' && !heard?.computer)))));
+        setSetupNeeded(statuses.some(status => (status.id === 'recorder' || status.id === 'microphone') && status.state !== 'ok' && Boolean(status.action)));
+      })
       .catch(() => {});
     return () => controller.abort();
-  }, [settingsOpen, libraryRoot, backgroundWatch?.phase]);
+  }, [settingsOpen, guideOpen, libraryRoot, backgroundWatch?.phase, heard?.microphone, heard?.computer]);
+  useEffect(() => {
+    if (!firstRun || !setupNeeded || guideOffered.current) return;
+    guideOffered.current = true;
+    setGuideOpen(true);
+  }, [firstRun, setupNeeded]);
 
+  // A window started with listening off never opens a device for the guide either.
+  const guideLevels = useMemo(() => props.levels ?? {
+    microphone: listenerDisabled ? switchedOff('SEASHELL_DISABLE_LISTENER') : DEFAULT_LEVEL_SOURCES.microphone,
+    computer: systemAudioDisabled ? switchedOff(listenerDisabled ? 'SEASHELL_DISABLE_LISTENER' : 'SEASHELL_DISABLE_SYSTEM_AUDIO')
+      : DEFAULT_LEVEL_SOURCES.computer,
+  }, [props.levels, listenerDisabled, systemAudioDisabled]);
+
+  const openGuide = (fromSettings: boolean) => {
+    setGuideProgress(undefined);
+    setGuideFromSettings(fromSettings);
+    setSettingsOpen(false);
+    setGuideOpen(true);
+  };
   const connectMeetReader = () => {
     updateMeetingConfig({ speakerBrowser: 'auto' });
     setConfig(current => ({ ...current, meeting: { ...current.meeting, speakerBrowser: 'auto' } }));
     setMeetSpeakerStatus(undefined);
   };
+  const enableCalendarTitles = () => {
+    const policy = config.meeting?.calendar?.policy ?? 'ask';
+    updateMeetingConfig({ calendar: { enabled: true, policy: policy === 'off' ? 'ask' : policy } });
+    setConfig(current => ({ ...current, meeting: { ...current.meeting,
+      calendar: { ...current.meeting?.calendar, enabled: true, policy: policy === 'off' ? 'ask' : policy } } }));
+  };
+  const openSpeakers = (from: 'settings' | 'guide') => {
+    setSettingsOpen(false); setGuideOpen(false); setReturnTo(from); setSpeakerSetupOpen(true);
+  };
+  const openAI = (from: 'settings' | 'guide') => {
+    setSettingsOpen(false); setGuideOpen(false); setReturnTo(from); setAiSetupIntent(null); setAiSetupOpen(true);
+  };
   const closeSubSettings = () => {
-    if (!returnToSettings) return;
-    setReturnToSettings(false);
-    setSettingsOpen(true);
+    if (returnTo === 'settings') setSettingsOpen(true);
+    if (returnTo === 'guide') setGuideOpen(true);
+    setReturnTo(undefined);
+  };
+  const setupActionProps = {
+    libraryDir: libraryRoot,
+    ...(props.setupActions ? { actions: props.setupActions } : {}),
+    onConnectMeet: connectMeetReader,
+    onEnableCalendar: enableCalendarTitles,
+    onConfigChange: setConfig,
   };
 
-  if (settingsOpen) return <SettingsScreen config={config} libraryDir={libraryRoot} columns={terminal.columns} rows={terminal.rows}
-    onConnectMeet={connectMeetReader}
-    onEnableCalendar={() => {
-      const policy = config.meeting?.calendar?.policy ?? 'ask';
-      updateMeetingConfig({ calendar: { enabled: true, policy: policy === 'off' ? 'ask' : policy } });
-      setConfig(current => ({ ...current, meeting: { ...current.meeting,
-        calendar: { ...current.meeting?.calendar, enabled: true, policy: policy === 'off' ? 'ask' : policy } } }));
-    }}
-    onOpenSpeakers={() => { setSettingsOpen(false); setReturnToSettings(true); setSpeakerSetupOpen(true); }}
-    onOpenAI={() => { setSettingsOpen(false); setReturnToSettings(true); setAiSetupIntent(null); setAiSetupOpen(true); }}
+  if (settingsOpen) return <SettingsScreen {...setupActionProps} config={config} columns={terminal.columns} rows={terminal.rows}
+    onOpenSpeakers={() => openSpeakers('settings')}
+    onOpenAI={() => openAI('settings')}
+    onOpenGuide={() => openGuide(true)}
     onClose={() => setSettingsOpen(false)} />;
+
+  if (guideOpen) return <Onboarding {...setupActionProps} config={config} columns={terminal.columns} rows={terminal.rows}
+    progress={guideProgress} onProgress={setGuideProgress}
+    levels={guideLevels}
+    {...(props.openSettings ? { openSettings: props.openSettings } : {})}
+    onOpenSpeakers={() => openSpeakers('guide')}
+    onOpenAI={() => openAI('guide')}
+    fromSettings={guideFromSettings}
+    onClose={() => { setGuideOpen(false); if (guideFromSettings) setSettingsOpen(true); }} />;
 
   if (speakerSetupOpen) return <SpeakerSettings columns={terminal.columns} rows={terminal.rows}
     recording={Boolean(activeBackgroundEntry) || (!paused && !listenerDisabled)}
@@ -2140,7 +2210,7 @@ export default function App(props: { libraryDir?: string } = {}) {
   const atHome = view === 'live' && paused && !currentMeeting;
   const byHand: Hint[] = watchOwnership === 'external' ? [['space', activeBackgroundEntry ? 'stop' : 'record']] : [];
   const hints: Hint[] = consentPending ? [['m', 'record'], ['x', 'ignore']]
-    : atHome && attention.length ? [[',', 'fix setup'], ['f', 'import']]
+    : atHome && attention.length ? [['Enter', 'guided setup'], [',', 'settings'], ['f', 'import']]
     : !historyOpen && activeBackgroundEntry && currentRecordBusy ? [['space', 'stop'], ['↑↓', 'scroll'],
       ...(followLiveTranscript ? [] : [['l', 'latest'] as Hint]), ['h', 'meetings'], ['i', 'audio']]
     : !navigationItems.some((item) => item.kind === 'record') && historyOpen ? [['f', 'import'], ['/', 'search']]
@@ -2156,6 +2226,14 @@ export default function App(props: { libraryDir?: string } = {}) {
     : meetingView === 'chat' ? [['a', 'ask'], ['h', 'meetings'], ['↑↓', 'scroll'], ['c', 'copy']]
     : [['↑↓', 'scroll'], ['h', 'meetings'], ['r', 'name speakers'], ['a', 'ask'], ['e', 'export'], ['c', 'copy']];
 
+  // The time appears when it tells two meetings of the same day apart.
+  const withTime = (entry: TranscriptLibraryEntry) =>
+    visibleEntries.some((other) => other.id !== entry.id && sameDay(other.createdAt, entry.createdAt));
+  // Dates line up as a column when titles still keep their room; a narrow sidebar gives the room to titles.
+  const listRowWidth = (layout.compact ? terminal.columns - 2 : layout.sidebarWidth - 2) - 2;
+  const widestDate = Math.max(0, ...navigationItems.slice(sidebarStart, sidebarStart + layout.visibleLibraryItems)
+    .map((item) => item.kind === 'record' ? listWhen(item.entry.createdAt, new Date(statusNow), withTime(item.entry)).length : 0));
+  const dateColumn = listRowWidth - widestDate >= 24 ? widestDate : 0;
   const list = (
     <Box width={layout.compact ? undefined : layout.sidebarWidth} flexGrow={layout.compact ? 1 : 0} flexShrink={0}
       flexDirection="column" overflow="hidden" paddingRight={layout.compact ? 0 : 1}
@@ -2169,7 +2247,7 @@ export default function App(props: { libraryDir?: string } = {}) {
         const selected = selectionIndex === index;
         const rowWidth = (layout.compact ? terminal.columns - 2 : layout.sidebarWidth - 2) - 2;
         const label = item.kind === 'record' ? meetingEntryRow(item.entry, rowWidth, new Date(statusNow),
-          visibleEntries.some((other) => other.id !== item.entry.id && sameDay(other.createdAt, item.entry.createdAt))) : item.label;
+          withTime(item.entry), dateColumn) : item.label;
         return <Text key={item.kind === 'record' ? item.entry.id : item.kind} inverse={selected} wrap="truncate-end"
           aria-role="option" aria-state={{ selected }}>{selected ? '› ' : '  '}{truncate(label, rowWidth)}</Text>;
       })}
@@ -2187,7 +2265,7 @@ export default function App(props: { libraryDir?: string } = {}) {
     <Text> </Text>
     {attention.map((status) => <Text key={status.id}>{status.label}: {status.summary}</Text>)}
     <Text> </Text>
-    <Text>Press <Text bold>,</Text> to fix this.</Text>
+    <Text>Press <Text bold>Enter</Text> for a guided setup, one step at a time.</Text>
   </> : <>
     <Text bold>Seashell is ready.</Text>
     <Text> </Text>

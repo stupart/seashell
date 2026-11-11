@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   filterLibraryEntries,
   meetingEntryRow,
+  listWhen,
   formatTuiClock,
   moveSelection,
   moveTranscriptScroll,
@@ -78,11 +79,33 @@ test('meeting rows lead with day, time and length so same-titled meetings differ
   const now = new Date(2026, 9, 2, 15, 0);
   const earlier = new Date(2026, 9, 1, 9, 28);
   const today = new Date(2026, 9, 2, 10, 3);
-  const day = earlier.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const day = earlier.toLocaleDateString([], { month: 'short', day: 'numeric' }).replace(/(\D)(\d)$/u, '$1 $2');
   expect(meetingEntryRow(entry(earlier.toISOString(), 2_064), 30, now, false)).toBe(`Google Meet${' '.repeat(30 - 12 - day.length)} ${day}`);
   // A second meeting that day brings the time in, so same-titled rows stay apart.
-  expect(meetingEntryRow(entry(earlier.toISOString(), 2_064), 30, now)).toEndWith(`${day} 9:28a`);
+  expect(meetingEntryRow(entry(earlier.toISOString(), 2_064), 30, now)).toEndWith(`${day}  9:28a`);
   expect(meetingEntryRow(entry(today.toISOString(), 4_400), 30, now)).toEndWith(' 10:03a');
   expect(meetingEntryRow(entry(today.toISOString(), 300, 'recording'), 30, now)).toStartWith('● Google Meet');
-  expect(meetingEntryRow({ ...entry(earlier.toISOString()), title: 'A very long meeting title that cannot fit' }, 24, now)).toEndWith(`… ${day} 9:28a`);
+  expect(meetingEntryRow({ ...entry(earlier.toISOString()), title: 'A very long meeting title that cannot fit' }, 24, now)).toEndWith(`… ${day}  9:28a`);
+});
+
+test('dates and times line up in a column at 56 columns', () => {
+  const entry = (title: string, createdAt: Date) => ({
+    id: title, title, createdAt: createdAt.toISOString(), updatedAt: createdAt.toISOString(), sourceFilename: 'Live capture session',
+    speakerCount: 0, segmentCount: 0, kind: 'meeting' as const, directory: '/tmp/m',
+  });
+  const now = new Date(2026, 10, 10, 16, 0);
+  const list: Array<[string, Date, boolean]> = [
+    ['Design review', new Date(2026, 10, 10, 9, 5), true],
+    ['Acme discovery call', new Date(2026, 10, 10, 10, 30), true],
+    ['Weekly product sync', new Date(2026, 10, 9, 10, 0), false],
+    ['Board prep', new Date(2026, 9, 28, 13, 0), true],
+    ['Hiring loop debrief', new Date(2026, 9, 28, 10, 0), true],
+  ];
+  const column = Math.max(...list.map(([, at, withTime]) => listWhen(at.toISOString(), now, withTime).length));
+  const rows = list.map(([title, at, withTime]) => meetingEntryRow(entry(title, at), 52, now, withTime, column));
+  for (const row of rows) expect(row).toHaveLength(52);
+  // Each part of the date starts in the same column on every row that has it.
+  const starts = (pattern: RegExp) => new Set(rows.flatMap((row) => { const at = row.search(pattern); return at < 0 ? [] : [at]; }));
+  expect(starts(/[ \d]\d:\d\d[ap]/u).size).toBe(1);
+  expect(starts(/[A-Z][a-z]{2} [ \d]\d/u).size).toBe(1);
 });

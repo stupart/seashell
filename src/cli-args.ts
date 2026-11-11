@@ -932,7 +932,8 @@ Usage:
   seashell ai status [--json]             Check engine and Node readiness
   seashell ai setup                       Choose meeting AI interactively
   seashell ai providers [--json]          Discover providers and login/setup steps
-  seashell setup [--no-autostart] [--json]  Apply safe defaults on a true first install
+  seashell setup [--no-autostart] [--json]  Safe defaults on a first install, then a guided setup
+                                            that hears your mic (in a terminal)
   seashell library speakers <id> identify   Separate saved voices into a review copy
   seashell setup --speakers [--login]       Set up optional local speaker identification
   seashell setup --speakers --check [--json] Verify the cached speaker model offline

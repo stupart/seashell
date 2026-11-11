@@ -39,11 +39,28 @@ export function meetingWhen(createdAt: string, now = new Date(), withTime = true
   return withTime ? `${day} ${clockTime(created)}` : day;
 }
 
+const CLOCK_WIDTH = clockTime(new Date(2000, 0, 1, 12, 30)).length;
+
+/** The list's date column: the day and the time are padded, so "Nov  9" sits over
+ * "Nov 10" and " 9:05a" over "10:30a" from one row to the next. */
+export function listWhen(createdAt: string, now = new Date(), withTime = true): string {
+  const created = new Date(createdAt);
+  const time = clockTime(created).padStart(CLOCK_WIDTH);
+  if (created.toDateString() === now.toDateString()) return time;
+  const day = new Intl.DateTimeFormat([], { month: 'short', day: 'numeric' }).formatToParts(created)
+    .map((part) => part.type === 'day' ? part.value.padStart(2) : part.value).join('');
+  return withTime ? `${day} ${time}` : day;
+}
+
 /** List row: the title first, its date against the right edge. The time appears
- * when it tells two meetings of the same day apart, and the date never truncates. */
-export function meetingEntryRow(entry: TranscriptLibraryEntry, width: number, now = new Date(), withTime = true): string {
+ * when it tells two meetings of the same day apart, and the date never truncates.
+ * Given the widest date in the list, dates line up on the left of that column and
+ * times on the right. */
+export function meetingEntryRow(entry: TranscriptLibraryEntry, width: number, now = new Date(), withTime = true, column = 0): string {
   const marker = entry.captureState === 'recording' ? '● ' : entry.captureState === 'processing' ? '◐ ' : '';
-  const when = meetingWhen(entry.createdAt, now, withTime);
+  const own = listWhen(entry.createdAt, now, withTime);
+  // Today's rows hold only a time, against the edge like every other time, so their titles keep the room.
+  const when = sameDay(entry.createdAt, now.toISOString()) ? own : own.padEnd(column);
   const room = Math.max(4, width - when.length - 1 - marker.length);
   // Old live recordings are titled by their own date, which the row already shows.
   const name = /^Live \d/u.test(entry.title) ? 'Live recording' : entry.title;
