@@ -199,6 +199,8 @@ cp '${join(root, 'response.json')}' "$out.json"
     const fallbacks: string[] = [];
     const units = await transcribeWithTimestamps(whisper.audio, {
       whisperCli: whisper.cli, modelPath: whisper.model, hardware: mac, onFallback: (message) => fallbacks.push(message),
+      // These tests are about the Metal and CPU choice; the real speech detector would make them slow and flaky.
+      detectSpeech: async () => undefined,
     });
     expect(units.map((unit) => unit.text)).toEqual(['Made-up words.']);
     expect(fallbacks).toEqual(['Metal transcription failed; retrying on CPU…']);
@@ -213,6 +215,7 @@ cp '${join(root, 'response.json')}' "$out.json"
     const fallbacks: string[] = [];
     await transcribeWithTimestamps(whisper.audio, {
       whisperCli: whisper.cli, modelPath: whisper.model, hardware: intel, onFallback: (message) => fallbacks.push(message),
+      detectSpeech: async () => undefined,
     });
     expect(fallbacks).toEqual([]);
     expect(whisper.calls()).toHaveLength(1);
