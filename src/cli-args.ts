@@ -119,6 +119,12 @@ export type MeetingIntelligenceCommand =
   | { kind: 'prompts'; action: 'reset'; name: string; json: boolean }
   | { kind: 'extractors'; json: boolean }
   | { kind: 'extract'; id: string; extractor: string; json: boolean }
+  /** A note for the recording, or with --meeting for any meeting, at a moment when --at says. */
+  | { kind: 'note'; text: string; meeting?: string; atSeconds?: number; json: boolean }
+  /** The brief for the next meeting on the calendar, or for the meeting with this title. */
+  | { kind: 'brief'; target: 'next' | { title: string }; json: boolean }
+  | { kind: 'draft'; id: string; slack: boolean; ask?: string; json: boolean }
+  | { kind: 'vocabulary'; json: boolean }
   | { kind: 'automations'; action: 'list'; json: boolean }
   | { kind: 'automations'; action: 'run'; id: string; name?: string; json: boolean }
   | {
@@ -834,6 +840,46 @@ function parseMeetingIntelligence(args: string[]): MeetingIntelligenceCommand {
   const json = args.includes('--json');
   const rest = args.slice(1).filter((arg) => arg !== '--json');
   switch (args[0]) {
+    case 'note': {
+      const usage = 'Usage: seashell note "<text>" [--meeting <id>] [--at 12:34] [--json]';
+      const words: string[] = [];
+      let meeting: string | undefined;
+      let atSeconds: number | undefined;
+      for (let index = 0; index < rest.length; index += 1) {
+        const arg = rest[index]!;
+        if (arg === '--meeting') [meeting, index] = takeValue(rest, index, arg);
+        else if (arg === '--at') {
+          const [value, consumed] = takeValue(rest, index, arg);
+          atSeconds = clockSeconds(arg, value);
+          index = consumed;
+        } else if (arg.startsWith('--')) throw new Error(usage);
+        else words.push(arg);
+      }
+      if (!words.join(' ').trim() || (atSeconds !== undefined && meeting === undefined)) throw new Error(usage);
+      return { kind: 'note', text: words.join(' '), ...(meeting ? { meeting } : {}), ...(atSeconds === undefined ? {} : { atSeconds }), json };
+    }
+    case 'brief':
+      if (rest.some((arg) => arg.startsWith('-'))) throw new Error('Usage: seashell brief [next | <meeting title>] [--json]');
+      return { kind: 'brief', target: !rest.length || (rest.length === 1 && rest[0] === 'next') ? 'next' : { title: rest.join(' ') }, json };
+    case 'draft': {
+      const usage = 'Usage: seashell draft <meeting-id> [--slack] [--ask "keep it to three bullets"] [--json]';
+      const positional: string[] = [];
+      let ask: string | undefined;
+      let slack = false;
+      for (let index = 0; index < rest.length; index += 1) {
+        const arg = rest[index]!;
+        if (arg === '--slack') slack = true;
+        else if (arg === '--email') slack = false;
+        else if (arg === '--ask') [ask, index] = takeValue(rest, index, arg);
+        else if (arg.startsWith('-')) throw new Error(usage);
+        else positional.push(arg);
+      }
+      if (positional.length !== 1) throw new Error(usage);
+      return { kind: 'draft', id: positional[0]!, slack, ...(ask?.trim() ? { ask: ask.trim() } : {}), json };
+    }
+    case 'vocabulary':
+      if (rest.length) throw new Error('Usage: seashell vocabulary [--json]');
+      return { kind: 'vocabulary', json };
     case 'prompts':
       if (rest.length === 0) return { kind: 'prompts', action: 'list', json };
       if (rest[0] === 'reset' && rest.length === 2) return { kind: 'prompts', action: 'reset', name: rest[1]!, json };
@@ -1003,7 +1049,7 @@ export function parseCliArgs(args: string[]): CliCommand {
     if (unknown.length) throw new Error(`Unknown update option: ${unknown[0]}`);
     return { kind: 'update', check: args.includes('--check'), json: args.includes('--json') };
   }
-  if (['prompts', 'extractors', 'extract', 'automations', 'query'].includes(args[0]!)) return parseMeetingIntelligence(args);
+  if (['prompts', 'extractors', 'extract', 'automations', 'query', 'note', 'brief', 'draft', 'vocabulary'].includes(args[0]!)) return parseMeetingIntelligence(args);
   if (args[0] === 'capture') return parseCapture(args);
   if (args[0] === 'meeting' && args[1] === 'video') return parseMeetingVideo(args);
   if (args[0] === 'meeting') return parseMeeting(args);
@@ -1042,6 +1088,10 @@ Usage:
   seashell extract <id> <extractor>         Run one extractor on one meeting
   seashell automations [--json]             What runs when a meeting is ready, and its recent runs
   seashell automations run <id> [<name>]    Run automations for one meeting now
+  seashell vocabulary [--json]              Names and words to spell right, in a file you edit
+  seashell note "<text>" [--meeting <id> [--at 12:34]]  A note for the recording, or for a meeting
+  seashell brief [next | <title>] [--json]  A brief for your next meeting from past ones, saved in Briefs
+  seashell draft <id> [--slack] [--ask "…"] Draft a follow-up email or Slack message; nothing is sent
   seashell record [stop]                    Record now, by hand, or stop the recording
   seashell record --video [--window <app> | --display <n>]  Record by hand with video of a call, app or screen
   seashell meeting video <id> [--at 12:34]  Watch a meeting's video beside its transcript

@@ -20,7 +20,13 @@ import {
   type ExtractorDefinition,
   type ExtractorField,
 } from './extractors.ts';
-import type { HumainMeetingRoute, runHumainMeeting } from './humain-client.ts';
+import type { HumainMeetingRoute, MeetingEngineCheck, runHumainMeeting } from './humain-client.ts';
+import { readMacCalendarEventsAsync } from './calendar.ts';
+import { briefCitation, findBrief, listBriefs, makeBrief, nextCalendarMeeting, upcomingFromEvent, type Brief, type UpcomingMeeting } from './briefs.ts';
+import { draftFollowUp } from './drafts.ts';
+import { addMeetingNote } from './owner-notes.ts';
+import { loadVocabulary, readVocabularyFile, writeVocabulary } from './vocabulary.ts';
+import { formatTuiClock } from './tui-state.ts';
 import {
   count,
   getInsights,
@@ -57,17 +63,22 @@ export const MEETINGS_MCP_INSTRUCTIONS = [
   'Find meetings with list_meetings, search_transcripts or query_notes before reading one; never invent meeting IDs or segment IDs.',
   'Quote with the segment ID and time, e.g. [s000123 12:04], so the user can check the source.',
   'Transcripts are machine-generated. "Microphone" is the user; "Remote speaker N" and "System audio" are other people unless renamed.',
-  'Reading is safe. Tools that change things (fixing a transcript line, naming a speaker, editing prompts, templates, extractors or automations, running an extractor) change the user\'s own files: use them only when the user asks.',
-  'Ask the user before sending anything (email, Slack, Linear) based on a meeting.',
+  'Reading is safe. Tools that change things (fixing a transcript line, naming a speaker, adding a note, editing the vocabulary, prompts, templates, extractors or automations, running an extractor, writing a brief) change the user\'s own files: use them only when the user asks.',
+  'Ask the user before sending anything (email, Slack, Linear) based on a meeting. draft_follow_up only writes a draft; Seashell never sends it.',
   'A meeting marked private has AI turned off by its owner: say so, and do not try to reach its content another way.',
 ].join(' ');
 
-/** What the server needs from its host to run an extractor. Tests pass fakes. */
+/** What the server needs from its host to run the AI. Tests pass fakes. */
 export interface MeetingsMcpDependencies {
-  /** The final-notes route; undefined when meeting AI is not set up. */
+  /** The final-notes route, for extractors and briefs; undefined when meeting AI is not set up. */
   route?: () => HumainMeetingRoute | undefined;
+  /** The chat route, for follow-up drafts. */
+  chatRoute?: () => HumainMeetingRoute | undefined;
   runner?: typeof runHumainMeeting;
+  engine?: MeetingEngineCheck;
   env?: NodeJS.ProcessEnv;
+  /** The calendar a week ahead; the Mac's calendar unless a test passes one. */
+  calendar?: () => Promise<Awaited<ReturnType<typeof readMacCalendarEventsAsync>>>;
 }
 
 function strings(value: unknown, name: string): string[] | undefined {
@@ -166,6 +177,62 @@ async function runExtractorTool(libraryDir: string, args: Arguments, deps: Meeti
   return getInsights(libraryDir, { id: record.id, extractor: args.extractor });
 }
 
+/** A brief as an agent reads it: each point with its sources named and timed, and the file it is saved in. */
+function briefResult(brief: Brief) {
+  return {
+    meeting: { title: brief.upcoming.title, startsAt: brief.upcoming.startsAt }, madeAt: brief.createdAt, summary: brief.summary,
+    sections: brief.sections.map((section) => ({ heading: section.heading, items: section.items.map((item) => ({ text: item.text,
+      sources: item.sources.map((source) => ({ meetingId: source.meetingId, segmentIds: source.evidenceSegmentIds, cite: briefCitation(brief, source) })) })) })),
+    readFrom: brief.meetings.map((meeting) => ({ id: meeting.id, title: meeting.title, startedAt: meeting.startedAt })),
+    path: brief.path,
+  };
+}
+
+/** The upcoming meeting to brief: the next on the calendar, or the next with these title words. */
+async function upcomingFor(libraryDir: string, title: string | undefined, deps: MeetingsMcpDependencies): Promise<UpcomingMeeting> {
+  const events = await (deps.calendar ?? (() => readMacCalendarEventsAsync({ leadMinutes: 7 * 24 * 60, lookbackMinutes: 0 })))();
+  if (!title) {
+    const next = nextCalendarMeeting(events);
+    if (!next) throw new Error('Nothing on the calendar in the next week. Pass the meeting\'s title instead.');
+    return upcomingFromEvent(next);
+  }
+  const words = title.toLocaleLowerCase().split(/\s+/u);
+  const has = (candidate: string) => words.every((word) => candidate.toLocaleLowerCase().includes(word));
+  const event = events.filter((candidate) => has(candidate.title)).toSorted((left, right) => left.startAt.localeCompare(right.startAt))[0];
+  return event ? upcomingFromEvent(event) : { title, startsAt: new Date().toISOString(), attendees: [] };
+}
+
+async function getBriefTool(libraryDir: string, args: Arguments, deps: MeetingsMcpDependencies) {
+  const title = text(args.title, 'title');
+  // A brief already made for that title answers at once, without the calendar.
+  const saved = title ? listBriefs(libraryDir, deps.env).find((brief) => brief.upcoming.title.toLocaleLowerCase().includes(title.toLocaleLowerCase())) : undefined;
+  if (saved && args.make !== true) return briefResult(saved);
+  const upcoming = await upcomingFor(libraryDir, title, deps);
+  const existing = findBrief(libraryDir, upcoming, deps.env);
+  if (existing && args.make !== true) return briefResult(existing);
+  const route = deps.route?.();
+  if (!route) throw new Error('Meeting AI is not set up, so no brief can be written. The user can choose a provider with: seashell ai setup');
+  return briefResult(await makeBrief(libraryDir, upcoming, { route, ...(deps.runner ? { runner: deps.runner } : {}),
+    ...(deps.engine ? { engine: deps.engine } : {}), ...(deps.env ? { env: deps.env } : {}) }));
+}
+
+async function draftTool(libraryDir: string, args: Arguments, deps: MeetingsMcpDependencies) {
+  const { record } = loadMeeting(libraryDir, args.id);
+  const route = deps.chatRoute?.();
+  if (!route) throw new Error('Meeting AI is not set up for chat, so no draft can be written. The user can choose a provider with: seashell ai setup');
+  const kind = args.kind === undefined ? 'email' : args.kind;
+  if (kind !== 'email' && kind !== 'slack') throw new Error('kind must be email or slack');
+  const draft = await draftFollowUp(libraryDir, record.id, kind, route, {
+    ...(text(args.ask, 'ask') ? { ask: text(args.ask, 'ask')! } : {}), ...(text(args.audience, 'audience') ? { audience: text(args.audience, 'audience')! } : {}),
+    ...(deps.runner ? { runner: deps.runner } : {}), ...(deps.engine ? { engine: deps.engine } : {}),
+  });
+  return {
+    sent: false, kind: draft.kind, ...(draft.subject ? { subject: draft.subject } : {}), ...(draft.to.length ? { to: draft.to } : {}),
+    paragraphs: draft.paragraphs.map((paragraph) => ({ kind: paragraph.kind, text: paragraph.text,
+      evidence: paragraph.evidenceSegmentIds.map((id) => `${id} ${formatTuiClock(draft.moments[id] ?? 0)}`) })),
+  };
+}
+
 const string = (description: string) => ({ type: 'string', description });
 const integer = (description: string) => ({ type: 'integer', minimum: 0, description });
 const stringList = (description: string) => ({ type: 'array', items: { type: 'string' }, description });
@@ -255,6 +322,44 @@ export const MEETINGS_MCP_TOOLS: readonly Tool[] = [
     inputSchema: { type: 'object', additionalProperties: false, required: ['id', 'segmentId'], properties: {
       id: string('Meeting ID'), segmentId: string('Segment ID, e.g. s000123') } },
     run: (libraryDir, args) => ({ id: args.id, segmentId: args.segmentId, video: videoMoment(libraryDir, args) ?? null }) },
+  { name: 'add_note', title: 'Add a note to a meeting', annotations: adds,
+    description: 'Add one of the user\'s own notes to a meeting, optionally at a moment ("12:34" into it). While it is recording, the note joins the recording. Final notes read the user\'s notes the next time they are written.',
+    inputSchema: { type: 'object', additionalProperties: false, required: ['id', 'text'], properties: {
+      id: string('Meeting ID'), text: string('The note, up to 2,000 characters'), at: string('When in the meeting, e.g. 12:34; leave out for the whole meeting') } },
+    run: (libraryDir, args) => {
+      const { record } = loadMeeting(libraryDir, args.id);
+      const at = text(args.at, 'at');
+      const seconds = at === undefined ? undefined : at.split(':').reduce((total, part) => {
+        if (!/^\d+(\.\d+)?$/u.test(part)) throw new Error('at must be a time like 12:34');
+        return total * 60 + Number(part);
+      }, 0);
+      const note = addMeetingNote(libraryDir, record.id, text(args.text, 'text', true)!, seconds === undefined ? {} : { at: seconds });
+      return { id: record.id, note: { text: note.text, ...(note.at === undefined ? {} : { at: formatTuiClock(note.at) }) } };
+    } },
+  { name: 'get_brief', title: 'Get a brief before a meeting', annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description: 'A brief for an upcoming meeting from past ones with the same title or the same people: what was decided, what is still open, what to bring up, each point cited. Returns the saved brief when there is one; otherwise writes it through the AI the user chose for final notes, which takes a minute or more, and saves it in the Briefs folder. Private meetings are never read.',
+    inputSchema: { type: 'object', additionalProperties: false, properties: {
+      title: string('Words from the meeting\'s title; leave out for the next meeting on the calendar'),
+      make: { type: 'boolean', description: 'Write it again even if one is saved' } } },
+    run: getBriefTool },
+  { name: 'draft_follow_up', title: 'Draft a follow-up', annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    description: 'Write a follow-up email (with a subject) or Slack message from one meeting, through the AI the user chose for chat. Returns the draft with the transcript lines each paragraph rests on. It never sends anything: show it to the user, and send it only if they ask, with their own tools.',
+    inputSchema: { type: 'object', additionalProperties: false, required: ['id'], properties: {
+      id: string('Meeting ID'), kind: { type: 'string', enum: ['email', 'slack'], description: 'email (default) or slack' },
+      ask: string('Anything else, e.g. "keep it to three bullets"'), audience: string('Who it is for; the people invited, except the user, when left out') } },
+    run: draftTool },
+  { name: 'get_vocabulary', title: 'Read the vocabulary', annotations: readOnly,
+    description: 'The user\'s vocabulary: names, companies and words that transcription and the meeting AI spell as written. One term per line; lines starting with # are comments.',
+    inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+    run: (libraryDir, _args, deps) => ({ ...loadVocabulary(libraryDir, deps.env), file: readVocabularyFile(libraryDir, deps.env) }) },
+  { name: 'update_vocabulary', title: 'Change the vocabulary', annotations: replaces,
+    description: 'Replace the vocabulary with these terms, one per line (at most 200, each up to 80 characters). The file\'s comment at the top is kept. It applies to the next transcription and AI run.',
+    inputSchema: { type: 'object', additionalProperties: false, required: ['terms'], properties: { terms: stringList('Every term, in the order to keep them') } },
+    run: (libraryDir, args, deps) => {
+      const terms = strings(args.terms, 'terms');
+      if (!terms) throw new Error('terms must be a list of strings');
+      return writeVocabulary(libraryDir, terms.join('\n'), deps.env);
+    } },
   { name: 'list_extractors', title: 'List extractors', annotations: readOnly,
     description: 'The user\'s insight extractors: name, when each runs, its fields and prompt, and its file. Files that do not parse are listed under problems.',
     inputSchema: { type: 'object', additionalProperties: false, properties: {} },

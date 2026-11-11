@@ -52,6 +52,8 @@ export interface SeashellMeetingConfig {
   automation?: MeetingAutomationConfig;
   /** Record the call's window alongside its audio. */
   video?: MeetingVideoConfig;
+  /** A brief about 15 minutes before a calendar meeting with history. On unless turned off. */
+  briefs?: { enabled?: boolean };
 }
 
 export type MeetingRouteRole = 'observer' | 'reconciliation' | 'chat';
@@ -336,7 +338,22 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
     ...(automation === undefined ? {} : { automation }),
     ...(routes === undefined ? {} : { routes }),
     ...(meeting.video === undefined ? {} : { video: parseMeetingVideoConfig(meeting.video) }),
+    ...(meeting.briefs === undefined ? {} : { briefs: parseBriefsConfig(meeting.briefs) }),
   };
+}
+
+function parseBriefsConfig(value: unknown): NonNullable<SeashellMeetingConfig['briefs']> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Sea Shell config meeting.briefs must be an object');
+  const briefs = value as Record<string, unknown>;
+  const unknown = Object.keys(briefs).find((key) => key !== 'enabled');
+  if (unknown) throw new Error(`Sea Shell config meeting.briefs.${unknown} is not supported`);
+  if (briefs.enabled !== undefined && typeof briefs.enabled !== 'boolean') throw new Error('Sea Shell config meeting.briefs.enabled must be a boolean');
+  return briefs.enabled === undefined ? {} : { enabled: briefs.enabled };
+}
+
+/** Briefs before meetings are on unless the owner turned them off. */
+export function briefsEnabled(config: SeashellConfig): boolean {
+  return config.meeting?.briefs?.enabled !== false;
 }
 
 function parseTranscriptionConfig(value: unknown): TranscriptionRoutingConfig | undefined {
@@ -544,6 +561,16 @@ export function updateMeetingConfig(
                 ? currentMeeting.automation as Record<string, unknown>
                 : {}),
               ...patch.automation,
+            },
+          }),
+      ...(patch.briefs === undefined
+        ? {}
+        : {
+            briefs: {
+              ...(currentMeeting.briefs && typeof currentMeeting.briefs === 'object'
+                ? currentMeeting.briefs as Record<string, unknown>
+                : {}),
+              ...patch.briefs,
             },
           }),
       ...(patch.video === undefined

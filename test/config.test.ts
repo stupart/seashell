@@ -167,3 +167,19 @@ test('meeting video settings are validated, and on/off keeps the rest', () => {
     expect(() => loadConfig(path)).toThrow(message);
   }
 });
+
+test('briefs before meetings are on unless turned off, and the setting is checked', async () => {
+  const { briefsEnabled } = await import('../src/config.ts');
+  const root = mkdtempSync(join(tmpdir(), 'seashell-config-briefs-'));
+  try {
+    const path = join(root, 'config.json');
+    expect(briefsEnabled(loadConfig(path))).toBe(true);
+    updateMeetingConfig({ briefs: { enabled: false } }, path);
+    expect(loadConfig(path).meeting?.briefs).toEqual({ enabled: false });
+    expect(briefsEnabled(loadConfig(path))).toBe(false);
+    writeFileSync(path, JSON.stringify({ meeting: { briefs: { enabled: 'yes' } } }));
+    expect(() => loadConfig(path)).toThrow('meeting.briefs.enabled must be a boolean');
+    writeFileSync(path, JSON.stringify({ meeting: { briefs: { lead: 15 } } }));
+    expect(() => loadConfig(path)).toThrow('meeting.briefs.lead is not supported');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

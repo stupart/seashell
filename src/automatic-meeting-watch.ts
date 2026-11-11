@@ -14,11 +14,24 @@ import type { CommittedCaptureChunk } from './capture-session.ts';
 import { captureHealthTransitionKey } from './capture-health.ts';
 import { createTranscriptRecord } from './transcript-record.ts';
 import {
+  briefsEnabled,
   loadConfig,
   resolveLibraryDir,
   resolveMeetingRoute,
   type SeashellConfig,
 } from './config.ts';
+import {
+  briefDue,
+  briefKey,
+  findBrief,
+  makeBrief,
+  nextCalendarMeeting,
+  NoBriefHistoryError,
+  recordBriefAttempt,
+  relevantMeetings,
+  upcomingFromEvent,
+  writeNextMeeting,
+} from './briefs.ts';
 import {
   startDurableLiveCapture,
   type DurableLiveCaptureHandle,
@@ -55,6 +68,7 @@ import { acquireMeetingWatchLock } from './watch-lock.ts';
 import { buildMeetingContext } from './meeting-context.ts';
 import { consumeMeetingConsent, writeMeetingConsent } from './meeting-consent.ts';
 import { consumeMeetingCommand } from './meeting-command.ts';
+import { addRecordingNote, consumeNoteCommands, mergeOwnerNotes, readBundleNotes, savedOwnerNotes } from './owner-notes.ts';
 import { meetingVideoRequest } from './video-recording.ts';
 
 export type AutomaticMeetingWatchEvent =
@@ -66,6 +80,7 @@ export type AutomaticMeetingWatchEvent =
   | { readonly type: 'meeting.resumed'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string; readonly pausedSeconds: number }
   | { readonly type: 'meeting.capture-finished'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string }
   | { readonly type: 'meeting.ready'; readonly at: string; readonly candidate: MeetingCandidate; readonly transcriptId: string; readonly directory: string }
+  | { readonly type: 'brief.ready'; readonly at: string; readonly title: string; readonly path: string }
   | { readonly type: 'watch.warning'; readonly at: string; readonly message: string }
   | { readonly type: 'watch.restarting'; readonly at: string; readonly reason: string }
   | { readonly type: 'watch.error'; readonly at: string; readonly message: string };
@@ -81,12 +96,21 @@ export interface AutomaticMeetingWatchDependencies {
   readonly enrich?: typeof enrichMeeting;
   readonly consumeConsent?: typeof consumeMeetingConsent;
   readonly consumeCommand?: typeof consumeMeetingCommand;
+  /** Notes typed with `seashell note` during a recording. */
+  readonly consumeNotes?: typeof consumeNoteCommands;
   /**
    * Ask the person directly whether to record, when no Seashell window may be
    * open to ask. Resolves with their answer, or undefined if they did not
    * answer. Only the login agent passes one: tests and embedders never prompt.
    */
   readonly askToRecord?: (candidate: MeetingCandidate, signal: AbortSignal) => Promise<'approve' | 'decline' | undefined>;
+  /** Writes a brief before a meeting; tests pass one that sends nothing. */
+  readonly makeBrief?: typeof makeBrief;
+  /**
+   * Tells the person a brief is ready, once per meeting. Only the login agent
+   * passes one: tests and embedders never notify.
+   */
+  readonly notify?: (message: string) => void;
 }
 
 export interface AutomaticMeetingWatchOptions {
@@ -157,6 +181,10 @@ export class AutomaticMeetingWatchService {
   #consentId?: string;
   #asking?: AbortController;
   #lastNowUnixMs = Date.now();
+  /** The calendar a few hours ahead, read every few minutes, for the next meeting and its brief. */
+  #ahead?: { readAtUnixMs: number; events: Awaited<ReturnType<typeof readMacCalendarEventsAsync>> };
+  #aheadRead?: Promise<void>;
+  #briefing?: Promise<void>;
 
   constructor(options: AutomaticMeetingWatchOptions = {}) {
     this.#config = options.config ?? loadConfig();
@@ -179,7 +207,10 @@ export class AutomaticMeetingWatchService {
       enrich: options.dependencies?.enrich ?? enrichMeeting,
       consumeConsent: options.dependencies?.consumeConsent ?? consumeMeetingConsent,
       consumeCommand: options.dependencies?.consumeCommand ?? consumeMeetingCommand,
+      consumeNotes: options.dependencies?.consumeNotes ?? consumeNoteCommands,
       askToRecord: options.dependencies?.askToRecord ?? (async () => undefined),
+      makeBrief: options.dependencies?.makeBrief ?? makeBrief,
+      notify: options.dependencies?.notify ?? (() => {}),
     };
   }
 
@@ -222,12 +253,15 @@ export class AutomaticMeetingWatchService {
     if (this.#shuttingDown) {
       return { kind: 'none' };
     }
+    this.lookAhead(now);
     this.expireParked(now);
     const calendar = this.currentCalendar(now);
     const candidate = preserveMeetingCandidateDuringObservationGap(
       resolveMeetingCandidate(snapshot, calendar, this.#config.meeting?.automation, meet),
       this.#controller.state, snapshot, meet, this.#parked?.candidate,
     );
+    // Notes first, so one typed just before stopping still lands in this recording.
+    this.takeNotes(now);
     const command = this.#dependencies.consumeCommand(undefined, now.getTime());
     if (command === 'stop' && this.#active) {
       const stopped = this.#controller.stopByHand(now.getTime()) ?? this.#active.candidate;
@@ -279,6 +313,79 @@ export class AutomaticMeetingWatchService {
     return action;
   }
 
+  /**
+   * Notes from a terminal go into the recording's bundle, timed by when they
+   * were typed. A recording paused for resume still takes them.
+   */
+  private takeNotes(now: Date): void {
+    const meeting = this.#active ?? this.#parked;
+    for (const note of this.#dependencies.consumeNotes(undefined, now.getTime())) {
+      if (!meeting) {
+        this.emit({ type: 'watch.warning', at: now.toISOString(), message: 'A note arrived with nothing recording, so it was not kept.' });
+        continue;
+      }
+      try { addRecordingNote(meeting.capture.store.root, note.text, note.createdAtUnixMs); }
+      catch (error) { this.emit({ type: 'watch.warning', at: now.toISOString(), message: `Could not keep a note: ${errorMessage(error)}` }); }
+    }
+  }
+
+  /**
+   * The next meeting on the calendar, for the app, and a brief about 15 minutes
+   * before one that has history. Never waits: the calendar read and the brief
+   * run beside the poll, one at a time. A meeting with no history, or a brief
+   * that fails, is tried once and never mentioned.
+   */
+  private lookAhead(now: Date): void {
+    const calendar = this.#config.meeting?.calendar;
+    if (!calendar?.enabled || (calendar.policy ?? 'ask') === 'off') return;
+    if ((!this.#ahead || now.getTime() - this.#ahead.readAtUnixMs >= 5 * 60_000) && !this.#aheadRead &&
+        now.getTime() >= this.#calendarRetryAtUnixMs) {
+      this.#aheadRead = this.#dependencies.readCalendar({ leadMinutes: 12 * 60, lookbackMinutes: 0, signal: this.#calendarAbort.signal })
+        .then((events) => {
+          this.#ahead = { readAtUnixMs: this.#dependencies.now().getTime(), events };
+          this.publishNext(this.#dependencies.now());
+        })
+        // The calendar's own read reports a failure; this one waits for the next window.
+        .catch(() => { this.#ahead = { readAtUnixMs: this.#dependencies.now().getTime(), events: this.#ahead?.events ?? [] }; })
+        .finally(() => { this.#aheadRead = undefined; });
+    }
+    const route = resolveMeetingRoute(this.#config.meeting, 'reconciliation');
+    if (!this.#ahead || this.#briefing || !route || !briefsEnabled(this.#config)) return;
+    const due = briefDue(this.#ahead.events, this.#libraryDir, now);
+    if (!due) return;
+    const key = briefKey(due);
+    this.#briefing = (async () => {
+      try {
+        const brief = await this.#dependencies.makeBrief(this.#libraryDir, due, { route, signal: this.#calendarAbort.signal });
+        recordBriefAttempt(this.#libraryDir, key, { at: new Date().toISOString(), outcome: 'made' });
+        this.#dependencies.notify(`Brief ready for ${due.title}`);
+        this.emit({ type: 'brief.ready', at: this.#dependencies.now().toISOString(), title: due.title, path: brief.path });
+      } catch (error) {
+        if (this.#shuttingDown) return;
+        const noHistory = error instanceof NoBriefHistoryError;
+        recordBriefAttempt(this.#libraryDir, key, { at: new Date().toISOString(), outcome: noHistory ? 'no-history' : 'failed',
+          ...(noHistory ? {} : { detail: errorMessage(error) }) });
+        if (!noHistory) this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(), message: `No brief for ${due.title}: ${errorMessage(error)}` });
+      } finally {
+        this.publishNext(this.#dependencies.now());
+      }
+    })().finally(() => { this.#briefing = undefined; });
+  }
+
+  /** What the app shows as the next meeting: when it is, whether there is a brief, or past meetings to make one from. */
+  private publishNext(now: Date): void {
+    try {
+      const event = this.#ahead ? nextCalendarMeeting(this.#ahead.events, now) : undefined;
+      if (!event) { writeNextMeeting(this.#libraryDir, undefined); return; }
+      const upcoming = upcomingFromEvent(event);
+      const brief = findBrief(this.#libraryDir, upcoming);
+      writeNextMeeting(this.#libraryDir, { upcoming, history: brief ? brief.meetings.length : relevantMeetings(this.#libraryDir, upcoming).length,
+        ...(brief ? { brief: brief.path } : {}) }, now.getTime());
+    } catch (error) {
+      this.emit({ type: 'watch.warning', at: now.toISOString(), message: `Could not save the next meeting: ${errorMessage(error)}` });
+    }
+  }
+
   /** The answer goes through the consent file, so the next poll acts on it like any other. */
   private askToRecord(candidate: MeetingCandidate, consentId: string): void {
     this.#asking?.abort();
@@ -317,6 +424,8 @@ export class AutomaticMeetingWatchService {
     if (this.#active) await this.finish(this.#active.candidate, 'watch-stopped');
     this.finalizeParked();
     await this.#calendarRead?.catch(() => {});
+    await this.#aheadRead?.catch(() => {});
+    await this.#briefing?.catch(() => {});
     await this.#finalizationTail;
     this.#consentId = undefined;
     this.projectWatch();
@@ -628,14 +737,16 @@ export class AutomaticMeetingWatchService {
     const saved = saveTranscriptRecord(this.#libraryDir, record);
     capture.store.setStatus('completed', 'automatic-meeting-finalized');
     capture.store.attachTo(saved.directory);
-    // The owner may have chosen a template, a note, or no AI while the call ran.
+    // The owner may have chosen a template, a note, or no AI while the call ran, and typed notes of their own.
     const ai = readMeetingAiSettings(this.#libraryDir, record.id);
+    const ownerNotes = mergeOwnerNotes(savedOwnerNotes(saved.directory), readBundleNotes(join(saved.directory, 'capture')));
     let artifact = createMeetingArtifact(record, {
       mode: this.#config.meeting?.mode ?? 'hybrid',
       ...(candidate.calendar === undefined ? {} : { calendar: candidate.calendar }),
       maxObserverRuns: this.#config.meeting?.maxObserverRuns,
     });
     if (ai) artifact = { ...artifact, ai };
+    if (ownerNotes.length) artifact = { ...artifact, ownerNotes };
     saveMeetingArtifact(this.#libraryDir, artifact);
     // Live analysis only helps while someone watches the call. After a
     // background meeting, replaying every window first would add minutes (19
