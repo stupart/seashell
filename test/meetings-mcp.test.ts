@@ -266,3 +266,17 @@ test('agents fix a line and name a speaker without losing the notes; private mee
   expect((await call(root, 'query_notes', {}, deps)).value.items.every((item: any) => item.meetingId !== 'hr-chat')).toBe(true);
   expect(findTranscriptRecord(root, 'hr-chat').record.transcript[0]!.text).toBe('Confidential.');
 });
+
+test('a meeting whose settings cannot be read is treated as private, never shared by mistake', async () => {
+  const root = library();
+  const directory = dirname(findTranscriptRecord(root, 'weekly-sync').path);
+  // Half-written, or damaged: it might have said "AI off".
+  writeFileSync(join(directory, 'meeting.json'), '{"schemaVersion":1,"ai":{"off":tr');
+  expect((await call(root, 'search_transcripts', { query: 'launch email' })).value.matches).toEqual([]);
+  expect((await call(root, 'list_meetings', {})).value.meetings[0]).toEqual({ id: 'weekly-sync', title: 'Weekly sync',
+    startedAt: '2026-10-01T00:00:00.000Z', private: true });
+  expect(await call(root, 'get_transcript', { id: 'weekly-sync' })).toEqual({ error: true, value: expect.stringContaining('This meeting is private') });
+  expect((await call(root, 'list_action_items', {})).value.items).toEqual([]);
+  writeFileSync(join(directory, 'meeting.json'), 'null');
+  expect((await call(root, 'search_transcripts', { query: 'launch email' })).value.matches).toEqual([]);
+});

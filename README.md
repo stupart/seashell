@@ -918,7 +918,8 @@ Tools that change your files, which the agent uses only when you ask:
 `delete_automation`. A corrected line keeps the old transcript in the meeting's
 history and keeps the notes, marked as possibly out of date. An automation an
 agent adds or changes stays off until you turn it on in its file, and still
-asks you before sending anything outside. Every tool refuses private meetings.
+asks you before sending anything outside. Every tool refuses private meetings,
+and a meeting whose `meeting.json` can't be read counts as private.
 
 ### Google Meet status
 

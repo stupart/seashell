@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { AutomaticMeetingWatchService } from '../src/automatic-meeting-watch.ts';
@@ -9,6 +9,7 @@ import {
   createMeetingArtifact,
   loadMeetingArtifact,
   MeetingAiOffError,
+  meetingArtifactPath,
   readMeetingAiSettings,
   saveMeetingArtifact,
 } from '../src/meeting-artifact.ts';
@@ -100,6 +101,12 @@ describe('AI off for one meeting', () => {
     await service.shutdown();
     expect(enriched).toBe(0);
     expect(readMeetingAiSettings(root, 'private-call')).toEqual({ note: 'Sensitive', off: true });
+  });
+
+  test('a meeting.json that cannot be read reads as AI off, so the recorder writes no notes for it', () => {
+    const { root, open } = library();
+    writeFileSync(meetingArtifactPath(root, open.id), '{"ai":{"off":');
+    expect(readMeetingAiSettings(root, open.id)).toEqual({ off: true });
   });
 
   test('parses as a meeting command', () => {
