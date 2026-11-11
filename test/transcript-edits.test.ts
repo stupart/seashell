@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, expect, setSystemTime, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
@@ -7,9 +7,13 @@ import { pcmS16leToWav } from '../src/live-system-audio.ts';
 import { createMeetingArtifact, loadMeetingArtifact, saveMeetingArtifact } from '../src/meeting-artifact.ts';
 import { meetingEvidence } from '../src/meeting-evidence.ts';
 import { meetingViewLines } from '../src/meeting-tui.ts';
-import { cleanPhantoms, editTranscriptSegment, renameMeetingSpeaker } from '../src/transcript-edits.ts';
-import { findTranscriptRecord, saveTranscriptRecord } from '../src/transcript-library.ts';
+import { parseCliArgs } from '../src/cli-args.ts';
+import {
+  cleanPhantoms, editTranscriptSegment, keepTranscriptHistory, listTranscriptHistory, renameMeetingSpeaker, restoreTranscript,
+} from '../src/transcript-edits.ts';
+import { findTranscriptRecord, renameTranscriptSpeaker, saveTranscriptRecord } from '../src/transcript-library.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
+import { listVoiceprints, saveMeetingVoices } from '../src/voiceprints.ts';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -117,4 +121,110 @@ test('clean-phantoms leaves meetings alone without saved audio or speech detecti
   expect((await cleanPhantoms(root, { detect: async () => undefined }))[0]?.skipped).toBe('speech detection is not available');
   expect(findTranscriptRecord(root, record.id).record.transcript).toHaveLength(4);
   await expect(cleanPhantoms(root, { ids: ['nope'] })).rejects.toThrow('Transcript not found: nope');
+});
+
+test('a speaker an agent names keeps the old transcript in history and teaches no voice', () => {
+  const { root, record, directory } = library();
+  const voices = mkdtempSync(join(tmpdir(), 'seashell-edit-voices-'));
+  roots.push(voices);
+  const original = process.env.SEASHELL_VOICES_DIR;
+  process.env.SEASHELL_VOICES_DIR = voices;
+  try {
+    // A long, clean voice for the speaker, as the finalizer keeps it: a name would normally teach it.
+    saveMeetingVoices(record.id, new Map([['REMOTE_SPEAKER_00', { embedding: [1, 0, 0, 0], seconds: 30, spans: [[0, 10]] }]]));
+    renameMeetingSpeaker(root, record.id, 'Remote speaker 1', 'Dana');
+    expect(listVoiceprints()).toEqual([]);
+    const history = readdirSync(join(directory, 'history', 'transcripts'));
+    expect(history).toEqual([expect.stringContaining('renamed-speaker')]);
+    expect(JSON.parse(readFileSync(join(directory, 'history', 'transcripts', history[0]!), 'utf8')).speakers[1].label).toBe('Remote speaker 1');
+    // The owner naming the same speaker does teach it.
+    renameTranscriptSpeaker(root, record.id, 'REMOTE_SPEAKER_00', 'Dana');
+    expect(listVoiceprints()).toEqual([{ name: 'Dana', meetings: 1 }]);
+  } finally {
+    if (original === undefined) delete process.env.SEASHELL_VOICES_DIR;
+    else process.env.SEASHELL_VOICES_DIR = original;
+  }
+});
+
+test('an earlier transcript can be put back from history; the notes stay, marked, and the restore can be undone', () => {
+  const { root, record, directory } = library();
+  editTranscriptSegment(root, record.id, 's000002', 'We ship on Monday.');
+  const [kept] = listTranscriptHistory(root, record.id);
+  expect(kept).toMatchObject({ why: 'corrected-line', segments: 4 });
+  expect(Date.parse(kept!.savedAt)).toBeGreaterThan(Date.parse('2026-01-01'));
+
+  expect(restoreTranscript(root, record.id, kept!.file.replace(/\.json$/u, ''))).toEqual({ id: record.id, file: kept!.file, segments: 4, restored: true });
+  const { record: restored } = findTranscriptRecord(root, record.id);
+  expect(restored.transcript[1]!.text).toBe('We ship on Fryday.');
+  expect(restored.title).toBe('Standup');
+  const artifact = loadMeetingArtifact(root, record.id)!;
+  expect(artifact.analysis?.claims[0]?.text).toBe('Ship on Friday.');
+  expect(artifact.notesOutdated?.reason).toBe('An earlier transcript was restored');
+  // The transcript it replaced is kept too, so the restore can be undone the same way.
+  expect(listTranscriptHistory(root, record.id).map((copy) => copy.why)).toEqual(['before-restore', 'corrected-line']);
+  expect(restoreTranscript(root, record.id, kept!.file).restored).toBe(false);
+
+  expect(() => restoreTranscript(root, record.id, '../transcript.json')).toThrow(`No copy "../transcript.json" in this meeting's history`);
+  expect(() => restoreTranscript(root, record.id, 'nope')).toThrow(`See: seashell meeting restore ${record.id} --list`);
+  writeFileSync(join(directory, 'history', 'transcripts', '2026-01-01T00-00-00-000Z-other-0000abcd.json'),
+    JSON.stringify({ ...restored, id: 'someone-else' }));
+  expect(() => restoreTranscript(root, record.id, '2026-01-01T00-00-00-000Z-other-0000abcd.json')).toThrow('a copy of another meeting');
+
+  expect(parseCliArgs(['meeting', 'restore', record.id, '--list'])).toMatchObject({ action: { kind: 'restore', id: record.id } });
+  expect(parseCliArgs(['meeting', 'restore', record.id, kept!.file, '--json'])).toMatchObject({ json: true, action: { kind: 'restore', id: record.id, file: kept!.file } });
+  expect(() => parseCliArgs(['meeting', 'restore', record.id, kept!.file, '--list'])).toThrow('Usage: seashell meeting restore');
+  expect(() => parseCliArgs(['meeting', 'note', record.id, '--list'])).toThrow('do not apply');
+});
+
+test('a meeting keeps its 20 most recent transcript copies', () => {
+  const { record, directory } = library();
+  try {
+    for (let minute = 0; minute < 25; minute += 1) {
+      setSystemTime(new Date(Date.UTC(2026, 9, 3, 9, minute)));
+      keepTranscriptHistory(directory, record, `change-${minute}`);
+    }
+  } finally {
+    setSystemTime();
+  }
+  const kept = readdirSync(join(directory, 'history', 'transcripts')).sort();
+  expect(kept).toHaveLength(20);
+  expect(kept[0]).toStartWith('2026-10-03T09-05-00-000Z-change-5-');
+  expect(kept.at(-1)).toStartWith('2026-10-03T09-24-00-000Z-change-24-');
+});
+
+test('clean-phantoms keeps a line with no recorded audio under it: a gap, a dropout, or past the end', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'seashell-edits-gaps-'));
+  roots.push(home);
+  const root = join(home, 'Transcripts');
+  mkdirSync(root);
+  const record = createTranscriptRecord({
+    transcript: [
+      { start: 2, end: 3, text: 'Okay.', speaker: 'REMOTE_SPEAKER_00' },
+      { start: 6, end: 7, text: 'Sure.', speaker: 'REMOTE_SPEAKER_00' },
+      { start: 8.5, end: 9, text: 'Right.', speaker: 'REMOTE_SPEAKER_00' },
+      { start: 12, end: 13, text: 'Bye.', speaker: 'REMOTE_SPEAKER_00' },
+    ],
+    speakers: [{ id: 'REMOTE_SPEAKER_00', label: 'Remote speaker 1' }],
+  }, { id: 'gappy', now: new Date('2026-10-02T09:00:00Z'), title: 'Gappy call' });
+  saveTranscriptRecord(root, record);
+  const directory = dirname(findTranscriptRecord(root, record.id).path);
+  // Computer audio, silent wherever it was recorded: 0-5 s and 7.5-10 s, with a dropout reported at 8-9 s.
+  const silence = (name: string, seconds: number) => {
+    const path = join(home, name);
+    writeFileSync(path, pcmS16leToWav(Buffer.alloc(16_000 * 2 * seconds)));
+    return path;
+  };
+  const store = new CaptureSessionStore({ libraryDir: root, sessionId: record.id, startedAtUnixMs: 1 });
+  store.commitChunk({ sourcePath: silence('a.wav', 5), trackId: 'system-audio', startSeconds: 0, endSeconds: 5, audible: false });
+  store.commitChunk({ sourcePath: silence('b.wav', 2.5), trackId: 'system-audio', startSeconds: 7.5, endSeconds: 10, audible: false });
+  store.recordDiscontinuity({ trackId: 'system-audio', atSeconds: 8, durationSeconds: 1, reason: 'capture-overrun' });
+  store.setStatus('completed', 'test');
+  store.attachTo(directory);
+  const detect = async () => [];
+
+  expect(await cleanPhantoms(root, { dryRun: true, detect })).toEqual([
+    { id: record.id, title: 'Gappy call', segments: 4, phantoms: 1, unrecorded: 3, removed: false }]);
+  await cleanPhantoms(root, { detect });
+  // Only the line over recorded silence goes; nothing is known about the others.
+  expect(findTranscriptRecord(root, record.id).record.transcript.map((segment) => segment.text)).toEqual(['Sure.', 'Right.', 'Bye.']);
 });

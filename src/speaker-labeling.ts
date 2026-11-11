@@ -251,7 +251,12 @@ export class EvidenceSpeakerLabeler implements SpeakerLabeler {
       }
       // A voice match and the meeting's own evidence that disagree are both
       // set aside: the speaker goes back to its number rather than a guess.
-      if (suggested) return namesAgree(bestName, speaker.label) ? { ...speaker } : { ...speaker, label: speaker.suggestion!.previous };
+      if (suggested) {
+        if (namesAgree(bestName, speaker.label)) return { ...speaker };
+        // No longer a suggestion, so it doesn't stay marked as one.
+        const { suggestion, ...unsuggested } = speaker;
+        return { ...unsuggested, label: suggestion!.previous };
+      }
       return { ...speaker, label: bestName };
     });
   }

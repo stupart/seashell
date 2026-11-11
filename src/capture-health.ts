@@ -39,6 +39,15 @@ export interface CaptureCoverage {
   /** They talked for minutes and your microphone heard almost nothing. */
   readonly yourSideMissing: boolean;
 }
+export type CaptureVideoState = 'starting' | 'recording' | 'waiting' | 'stopped' | 'unavailable';
+/** The video track, when the recording has one: what it films, in words, never a window's title. */
+export interface CaptureVideoHealth {
+  readonly state: CaptureVideoState;
+  /** "the Google Meet window", "display 1, the whole screen". */
+  readonly filming?: string;
+  /** A whole display was filmed in this recording; said for as long as the recording shows. */
+  readonly screenFilmed?: boolean;
+}
 export interface CaptureHealthSnapshot {
   readonly schemaVersion: 1;
   readonly updatedAtUnixMs: number;
@@ -46,6 +55,7 @@ export interface CaptureHealthSnapshot {
   readonly systemAudio: CaptureSourceHealth;
   /** Set when capture stops, from the meeting's saved audio. */
   readonly coverage?: CaptureCoverage;
+  readonly video?: CaptureVideoHealth;
 }
 export type CoverageChunk = Pick<CaptureChunk, 'trackId' | 'audible' | 'startMs' | 'endMs'>;
 
@@ -62,6 +72,7 @@ const YOUR_SIDE_MISSING_SHARE = 0.1;
 const sources = ['microphone', 'systemAudio'] as const;
 const states: readonly CaptureHealthState[] = ['starting', 'receiving', 'quiet', 'reconnecting', 'unavailable', 'stopped', 'disabled'];
 const kinds: readonly CaptureHealthWarningKind[] = ['quiet', 'reconnecting', 'unavailable', 'no-audio', 'one-sided'];
+const videoStates: readonly CaptureVideoState[] = ['starting', 'recording', 'waiting', 'stopped', 'unavailable'];
 /** Warnings that only sound, not just more PCM, resolves. */
 const untilSignal: readonly CaptureHealthWarningKind[] = ['quiet', 'one-sided'];
 const timestamp = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
@@ -145,6 +156,15 @@ export class CaptureHealthTracker {
     if (!delivering || !othersTalking || now - silentSince < this.#oneSidedAfterMs) return this.#value;
     return this.set('microphone', this.warn(mic, 'one-sided', ONE_SIDED_MESSAGE, now, 'microphone_one_sided'), now);
   }
+  /** What the video track is doing and filming. Once a display is filmed, that stays said. */
+  video(state: CaptureVideoState, filming?: { readonly kind: 'window' | 'display'; readonly name: string }, nowUnixMs = Date.now()): CaptureHealthSnapshot {
+    const previous = this.#value.video;
+    const name = clean(filming?.name, 100) ?? previous?.filming;
+    const screenFilmed = previous?.screenFilmed === true || filming?.kind === 'display';
+    this.#value = { ...this.#value, updatedAtUnixMs: Math.max(this.#value.updatedAtUnixMs, nowUnixMs),
+      video: Object.freeze({ state, ...(name ? { filming: name } : {}), ...(screenFilmed ? { screenFilmed: true } : {}) }) };
+    return this.#value;
+  }
   /** Pass the meeting's saved chunks to keep its coverage with the final health. */
   stop(nowUnixMs = Date.now(), chunks?: readonly CoverageChunk[]): CaptureHealthSnapshot {
     for (const source of sources) if (this.#value[source].state !== 'disabled') {
@@ -222,6 +242,10 @@ export function parseCaptureHealth(value: unknown): CaptureHealthSnapshot | unde
   const raw = value as CaptureHealthSnapshot;
   if (raw.schemaVersion !== 1 || !timestamp(raw.updatedAtUnixMs)) return;
   if (raw.coverage !== undefined && !validCoverage(raw.coverage)) return;
+  const video = raw.video as CaptureVideoHealth | undefined;
+  if (video !== undefined && (!video || typeof video !== 'object' || !videoStates.includes(video.state) ||
+      (video.filming !== undefined && (typeof video.filming !== 'string' || clean(video.filming, 100) !== video.filming)) ||
+      (video.screenFilmed !== undefined && video.screenFilmed !== true))) return;
   const optionalTime = (value: unknown) => value === undefined || timestamp(value);
   const optionalText = (value: unknown, limit: number) => value === undefined || (typeof value === 'string' && value.length <= limit && clean(value, limit) === value);
   for (const source of sources) {
@@ -250,7 +274,8 @@ export function parseCaptureHealth(value: unknown): CaptureHealthSnapshot | unde
     ...(raw.coverage.yourSideAudibleShare === undefined ? {} : { yourSideAudibleShare: raw.coverage.yourSideAudibleShare }),
     yourSideMissing: raw.coverage.yourSideMissing };
   return { schemaVersion: 1, updatedAtUnixMs: raw.updatedAtUnixMs, microphone: copy(raw.microphone), systemAudio: copy(raw.systemAudio),
-    ...(coverage ? { coverage } : {}) };
+    ...(coverage ? { coverage } : {}),
+    ...(video ? { video: { state: video.state, ...(video.filming ? { filming: video.filming } : {}), ...(video.screenFilmed ? { screenFilmed: true } : {}) } } : {}) };
 }
 
 export function readCaptureHealth(directory: string): CaptureHealthSnapshot | undefined {
@@ -263,11 +288,11 @@ export function readCaptureHealth(directory: string): CaptureHealthSnapshot | un
 
 /** Key excludes continuous PCM timestamps, which are persisted at most once/sec. */
 export function captureHealthTransitionKey(health: CaptureHealthSnapshot): string {
-  return JSON.stringify(sources.map(source => {
+  return JSON.stringify([...sources.map(source => {
     const { state, code, message, warnings } = health[source];
     return { state, code, message, signal: health[source].lastSignalAtUnixMs !== undefined,
       warnings: warnings.map(w => ({ kind: w.kind, code: w.code, message: w.message, resolved: w.resolvedAtUnixMs !== undefined })) };
-  }));
+  }), health.video ?? null]);
 }
 
 export class CaptureHealthWriter {

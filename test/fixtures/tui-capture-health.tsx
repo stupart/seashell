@@ -18,7 +18,12 @@ delete process.env.SEASHELL_DISABLE_SYSTEM_AUDIO;
 writeFileSync(process.env.SEASHELL_CONFIG, JSON.stringify({ meeting: { automation: { enabled: false } } }));
 const mics: microphone.StartMicrophoneOptions[] = [];
 const systems: Parameters<typeof computer.startSystemAudioCapture>[0][] = [];
-const handle = () => ({ stop() {}, done: Promise.resolve(), startup: Promise.resolve(), process: {} });
+let stops = 0;
+const handle = () => ({ stop() { stops++; }, done: Promise.resolve(), startup: Promise.resolve(), process: {} });
+let allowed = 0;
+const permission = await import('../../src/microphone-permission.ts');
+mock.module('../../src/microphone-permission.ts', () => ({ ...permission,
+  allowMicrophone: async () => { allowed++; return { authorization: 'authorized', detail: 'Allowed.' }; } }));
 mock.module('../../src/live-microphone.ts', () => ({ ...microphone, startMicrophoneCapture: (options: microphone.StartMicrophoneOptions) => { mics.push(options); return handle(); } }));
 mock.module('../../src/live-system-audio.ts', () => ({ ...computer, startSystemAudioCapture: (options: Parameters<typeof computer.startSystemAudioCapture>[0]) => { systems.push(options); return handle(); } }));
 const { default: App } = await import('../../src/app.tsx');
@@ -45,5 +50,16 @@ try {
   mics[1]!.onState({ state: 'unavailable' }); await tick();
   assert(screen().includes('● Recording') && screen().includes('Mic silent') && screen().includes('i mic help'),
     'one useful source keeps recording with a visible warning, and its help key leads the key bar');
+  // macOS has not allowed the microphone: the recorder keeps checking, and Enter asks.
+  mics[1]!.onState({ state: 'unavailable', code: 'microphone_permission', message: 'Microphone access is off for Seashell Microphone.' });
+  await tick();
+  assert(screen().includes('● Recording') && screen().includes('Mic not allowed') && screen().includes('Enter allow mic'),
+    'a microphone macOS has not allowed is named, and Enter to allow leads the key bar');
+  const stopsBefore = stops;
+  input.write('\r'); await tick();
+  assert.equal(allowed, 1, 'Enter asks macOS for the microphone');
+  assert.equal(stops, stopsBefore, 'Enter does not stop the recording');
+  assert.equal(mics.length, 2, 'the same recording carries on');
+  assert(screen().includes('Microphone allowed'), 'says it worked');
   process.stdout.write(JSON.stringify({ passed: true }) + '\n');
 } finally { app.unmount(); input.destroy(); output.destroy(); rmSync(root, { recursive: true, force: true }); }

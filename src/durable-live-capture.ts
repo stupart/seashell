@@ -19,7 +19,16 @@ import {
   type SystemAudioCaptureHandle,
   type SystemAudioCaptureState,
 } from './live-system-audio.ts';
-import { startVideoTrack, type VideoCaptureRequest, type VideoState, type VideoTrackHandle } from './video-capture.ts';
+import { screenFilmedNotice, startVideoTrack, type VideoCaptureRequest, type VideoState, type VideoTrackHandle } from './video-capture.ts';
+import { signalProcessGroup } from './process-lifecycle.ts';
+
+/**
+ * The longest a stop waits for its sources. Each settles well before this on
+ * its own (a helper is killed within a few seconds); past it, whatever still
+ * holds on is killed and the meeting is saved with the audio that arrived, so
+ * no helper can keep a recording, or the watcher behind it, open forever.
+ */
+export const CAPTURE_STOP_DEADLINE_MS = 20_000;
 
 export interface DurableLiveCaptureStatus {
   readonly microphone: SystemAudioCaptureState;
@@ -59,6 +68,8 @@ export interface StartDurableLiveCaptureOptions {
   /** Also record the call's window or a display. Video never holds up or fails audio: its problems are warnings. */
   readonly video?: VideoCaptureRequest;
   readonly videoStarter?: typeof startVideoTrack;
+  /** Tests only: CAPTURE_STOP_DEADLINE_MS. */
+  readonly stopDeadlineMs?: number;
 }
 
 function sessionId(now: Date): string {
@@ -88,6 +99,7 @@ export function startDurableLiveCapture(
   let captureFailure: Error | undefined;
   let audioSavedThroughMs = 0;
   const health = new CaptureHealthTracker({ microphone: options.microphone, systemAudio: options.systemAudio });
+  if (videoState) health.video(videoState);
   const healthWriter = new CaptureHealthWriter(store.root);
   let healthWriteFailed = false;
 
@@ -210,11 +222,18 @@ export function startDurableLiveCapture(
         sessionStartedAtUnixMs: store.manifest.startedAtUnixMs,
         nextSegment: () => store.nextVideoSegment(),
         onSegment: (segment) => store.recordVideoSegmentAsync(segment),
-        onState: (state) => { videoState = state; status(); },
+        onState: (state) => { videoState = state; health.video(state); status(); },
         onWarning: warn,
+        // What is filmed shows with the recording; a whole display is also said aloud, as a notice.
+        onTarget: (filming) => {
+          health.video(videoState ?? 'starting', filming);
+          if (filming.kind === 'display') warn(screenFilmedNotice(filming));
+          status();
+        },
       });
     } catch (error) {
       videoState = 'unavailable';
+      health.video('unavailable');
       warn(`Video was not recorded: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
@@ -236,7 +255,16 @@ export function startDurableLiveCapture(
       systemAudio?.stop();
       video?.stop();
       // Video settles on its own deadline and never rejects.
-      stopping = Promise.all([microphone?.done, systemAudio?.done, video?.done]).then(async () => {
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      const late = new Promise<'late'>((resolve) => {
+        deadline = setTimeout(() => resolve('late'), options.stopDeadlineMs ?? CAPTURE_STOP_DEADLINE_MS);
+      });
+      stopping = Promise.race([Promise.all([microphone?.done, systemAudio?.done, video?.done]), late]).then(async (outcome) => {
+        clearTimeout(deadline);
+        if (outcome === 'late') {
+          for (const handle of [microphone, systemAudio]) if (handle?.process) signalProcessGroup(handle.process, 'SIGKILL');
+          options.onError?.(new Error('Capture did not stop in time. The audio saved so far is kept.'));
+        }
         await store.drainCommits();
         if (captureFailure && store.manifest.chunks.length === 0) {
           store.setStatus('interrupted', 'capture-source-failed');

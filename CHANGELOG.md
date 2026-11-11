@@ -2,6 +2,44 @@
 
 ## Unreleased — watch a call back, and notes that do more
 
+**Security and privacy**
+
+An outside review of rc33 found these. All are fixed.
+
+- **Automations can't overwrite your files.** A `write` action never replaces
+  a file Seashell didn't write, and never writes through a link; when a file is
+  already there, the notes go beside it as `… (2).md`. Its files are readable
+  only by you. A meeting's title can no longer point a `write` at another
+  folder. Writing outside the Sea Shell folder asks you first, as `shell` and
+  `webhook` do.
+- **An agent can't turn an automation on.** One an agent adds or changes
+  through the meetings server is saved off. Read it, then turn it on in its
+  file. Settings shows it as "Off: made by an agent".
+- **Approvals can't be forged.** Your answers to automation dialogs are signed
+  with a key in your login Keychain. Editing the script a `shell` action runs
+  asks again, and the dialog shows which file runs. Commands get only `PATH`,
+  `HOME`, `LANG`, `TMPDIR` and the meeting's variables. The dialog shows a
+  command exactly as it will run: hidden and right-to-left characters can't
+  disguise it. Each automation asks once more after this update.
+- **Webhooks go only where the file says.** https only, never on to a redirect,
+  and never to this Mac or your local network unless the file names that
+  address itself.
+- **Video never films your screen in place of the call.** With no call window,
+  the audio records alone and Seashell looks for the window every 30 seconds.
+  A browser is filmed only while its tab shows the call; another tab pauses the
+  video. The title line says what is filmed. Only `seashell record --video
+  --display N` films a whole display, and then you get a notification. macOS
+  asks once more for Screen Recording for the updated helper.
+- **Private means private.** A meeting whose settings can't be read counts as
+  private. Seashell checks again just before each automation action, so a
+  meeting made private mid-run sends nothing more.
+- **Voices are kept only as long as needed.** A private meeting keeps no
+  voices. Voices nobody named go after 90 days, and a meeting moved to the
+  Trash loses its own. Forgetting a person removes their voice from every
+  meeting, and names Seashell suggested from it go back to a number.
+- **A name an agent gives a speaker doesn't teach Seashell their voice**, and
+  the old transcript is kept in the meeting's history.
+
 **Video**
 
 - Calls now record their window beside the audio: the Meet tab, or the Zoom,
@@ -93,6 +131,36 @@
 - The meetings list and search read each transcript once, not every second.
 - Meet is checked only when a call is possible, not every few seconds all day.
 - The watch log no longer fills with the same warning.
+
+**Fixes**
+
+- After `library clean-phantoms`, rewriting notes, chat and extractors failed
+  for every cleaned meeting: the notes still cited the removed lines, and
+  agents saw those lines at 00:00. A note now keeps only the lines the
+  transcript still has. One whose only line was removed stays, marked "source
+  line removed", and is no longer sent to the AI. Meetings cleaned before this
+  heal by themselves.
+- Undoing a suggested name, or correcting a real one, left the old name in the
+  notes and as the action's owner. The name now changes there too, and the
+  notes say "Dana was renamed to Remote speaker 1". Agents see which names are
+  only Seashell's suggestion.
+- Notes no longer hide an action behind a similar line ("…to Acme" hid "…to
+  Globex"), or show it with someone else's name and date.
+- An extractor no longer saves what it found if the transcript changed while
+  it ran. Each insight says "may be out of date" until it runs again, even
+  after the notes are rewritten. `seashell query` and the meetings server say
+  when a note may be out of date.
+- `seashell query --person dan` no longer finds Jordan's actions, and an action
+  belongs to its owner, not whoever said it. `--person me` finds yours.
+- Dates in `seashell query` and the meetings server are your local day, as the
+  library's folders are.
+- The meetings server answers questions across the library about 35 times
+  faster at 200 meetings, and reading never changes a meeting.
+- `seashell meeting restore <id>` lists the transcripts kept in a meeting's
+  history, and puts one back. The notes stay. Each meeting keeps its 20 most
+  recent.
+- `library clean-phantoms` keeps lines with no recorded audio under them, in a
+  gap, a dropout or past the end, instead of treating them as silence.
 
 ## Unreleased — your side of the call, and no more phantom words
 

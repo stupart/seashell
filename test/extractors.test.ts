@@ -15,7 +15,10 @@ import {
 } from '../src/extractors.ts';
 import type { runHumainMeeting } from '../src/humain-client.ts';
 import { createMeetingArtifact, loadMeetingArtifact, MeetingAiOffError, saveMeetingArtifact } from '../src/meeting-artifact.ts';
+import { enrichMeeting } from '../src/meeting-enrichment.ts';
+import { getInsights, listActionItems, queryNotes } from '../src/meeting-memory.ts';
 import { meetingViewLines } from '../src/meeting-tui.ts';
+import { editTranscriptSegment } from '../src/transcript-edits.ts';
 import { findTranscriptRecord, saveTranscriptRecord } from '../src/transcript-library.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 
@@ -170,4 +173,63 @@ test('extractors can be created, changed and deleted as files', () => {
   expect(deleteExtractor(root, 'objections', env)).toBe(created.path);
   expect(existsSync(created.path)).toBeFalse();
   expect(() => updateExtractor(root, 'Objections', {}, env)).toThrow('No extractor named "Objections"');
+});
+
+test('an insight found on an older transcript is never saved as current', async () => {
+  const { root, record, env } = library();
+  writeFileSync(join(ensureExtractorsDirectory(root, env), 'customer-pains.md'), PAINS);
+  const { runner: answer } = fakeHumain({ Pains: [{ text: 'Onboarding takes a week.', evidenceSegmentIds: ['s000001'] }] });
+  // A line is corrected while the extractor is still reading the old one.
+  const runner: typeof runHumainMeeting = async (...args) => {
+    editTranscriptSegment(root, record.id, 's000001', 'Onboarding takes us a month.');
+    return answer(...args);
+  };
+  await expect(runExtractor(root, record.id, 'Customer pains', { route, runner, env }))
+    .rejects.toThrow('The transcript changed while Customer pains ran, so what it found was not saved. Run it again.');
+  expect(loadMeetingArtifact(root, record.id)!.insights).toBeUndefined();
+});
+
+test('each insight says it may be out of date until it runs again, even after the notes are rewritten', async () => {
+  const { root, record, env } = library();
+  saveMeetingArtifact(root, { ...loadMeetingArtifact(root, record.id)!, analysis: { final: true, summary: 'Discovery with Acme.', runId: 'r',
+    createdAt: '2026-10-04T16:00:00Z', claims: [{ id: 'a', type: 'action_item', text: 'Send a proposal.', person: 'You', evidenceSegmentIds: ['s000003'], confidence: 0.9 }] } });
+  writeFileSync(join(ensureExtractorsDirectory(root, env), 'customer-pains.md'), PAINS.replace('when: always', 'when: manual'));
+  await runExtractor(root, record.id, 'Customer pains', { route, env,
+    runner: fakeHumain({ Pains: [{ text: 'Onboarding takes a week.', evidenceSegmentIds: ['s000001'] }] }).runner });
+  editTranscriptSegment(root, record.id, 's000001', 'Onboarding takes us a month.');
+  // The notes and the insight are both marked, and agents are told so with each note.
+  expect(queryNotes(root, { kind: 'actions' }).items[0]!.possiblyOutOfDate).toBe('A transcript line was corrected');
+  expect(listActionItems(root).items[0]!.possiblyOutOfDate).toBe('A transcript line was corrected');
+
+  // Rewriting the notes clears their mark, but not the insight's: a manual extractor did not run.
+  await enrichMeeting(root, record.id, { mode: 'post-session', route, instructions: null,
+    runner: async () => ({ runId: 'n', compiledRunId: 'c', status: 'succeeded', receipt: {}, output: { summary: 'S', claims: [
+      { id: 'b', type: 'action_item', text: 'Send a proposal.', person: 'You', evidenceSegmentIds: ['s000003'], confidence: 0.9 }] } }) });
+  const rewritten = loadMeetingArtifact(root, record.id)!;
+  expect(rewritten.notesOutdated).toBeUndefined();
+  expect(rewritten.insights![0]!.outdated?.reason).toBe('A transcript line was corrected');
+  const lines = meetingViewLines(rewritten, 'notes', findTranscriptRecord(root, record.id).record);
+  expect(lines).toContain('## Customer pains (may be out of date)');
+  expect(lines.some((line) => line.includes('may be out of date. Press g'))).toBeFalse();
+  expect(getInsights(root, { id: record.id }).insights[0]!.possiblyOutOfDate).toBe('A transcript line was corrected');
+  expect(readFileSync(join(dirname(findTranscriptRecord(root, record.id).path), 'insights', 'customer-pains.md'), 'utf8'))
+    .toContain('_A transcript line was corrected after this was found, so it may be out of date._');
+  expect(queryNotes(root, { kind: 'actions' }).items.map((item) => [item.text, item.possiblyOutOfDate])).toEqual([['Send a proposal.', undefined]]);
+
+  // Running it again clears its mark.
+  await runExtractor(root, record.id, 'Customer pains', { route, env, runner: fakeHumain({}).runner });
+  expect(loadMeetingArtifact(root, record.id)!.insights![0]!.outdated).toBeUndefined();
+  expect(getInsights(root, { id: record.id }).insights[0]!.possiblyOutOfDate).toBeUndefined();
+});
+
+test('insights saved before each kept its own mark take the meeting\'s, when they are older than it', () => {
+  const { root, record } = library();
+  const directory = dirname(findTranscriptRecord(root, record.id).path);
+  const stored = JSON.parse(readFileSync(join(directory, 'meeting.json'), 'utf8'));
+  const insight = (extractor: string, createdAt: string) => ({ extractor, createdAt, runId: 'x', fields: [{ name: 'A', items: [] }] });
+  writeFileSync(join(directory, 'meeting.json'), JSON.stringify({ ...stored,
+    notesOutdated: { at: '2026-10-05T10:00:00.000Z', reason: 'Lines heard in silence were removed' },
+    insights: [insight('Before', '2026-10-05T09:00:00.000Z'), insight('After', '2026-10-05T11:00:00.000Z')] }));
+  expect(loadMeetingArtifact(root, record.id)!.insights!.map((item) => [item.extractor, item.outdated?.reason])).toEqual([
+    ['Before', 'Lines heard in silence were removed'], ['After', undefined]]);
 });

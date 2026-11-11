@@ -8,10 +8,13 @@ import type { SpeakerVoice } from '../src/diarize.ts';
 import { pcmS16leToWav } from '../src/live-system-audio.ts';
 import { applySpeakerLabels, EvidenceSpeakerLabeler } from '../src/speaker-labeling.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
-import { findTranscriptRecord, renameTranscriptSpeaker, saveTranscriptRecord } from '../src/transcript-library.ts';
+import { createMeetingArtifact, saveMeetingArtifact } from '../src/meeting-artifact.ts';
+import { forgetPersonVoice } from '../src/transcript-edits.ts';
+import { findTranscriptRecord, renameTranscriptSpeaker, saveTranscriptRecord, trashTranscriptRecord } from '../src/transcript-library.ts';
 import type { TranscriptRecord } from '../src/transcript-types.ts';
 import {
-  applyVoiceSuggestions, forgetVoiceprint, listVoiceprints, matchKnownVoices, rememberVoice, saveMeetingVoices, voicesDirectory,
+  applyVoiceSuggestions, forgetExpiredMeetingVoices, forgetVoiceprint, listVoiceprints, matchKnownVoices, rememberVoice, saveMeetingVoices,
+  voicesDirectory,
 } from '../src/voiceprints.ts';
 
 let root = '';
@@ -179,4 +182,96 @@ test('finalizing a call suggests known voices and keeps its voices out of the tr
   const kept = JSON.parse(readFileSync(join(root, 'Voices', 'meetings', 'call.json'), 'utf8'));
   expect(Object.keys(kept.voices)).toEqual(['REMOTE_A', 'REMOTE_B']);
   expect(existsSync(join(library, 'Voices'))).toBe(false);
+});
+
+/** Finalize a two-second call in the library's capture store, its voices from a stand-in separation. */
+async function finalizeCall(id: string): Promise<TranscriptRecord> {
+  const store = new CaptureSessionStore({ libraryDir: library, sessionId: id, startedAtUnixMs: 1 });
+  const pcm = Buffer.alloc(64_000);
+  for (let offset = 0; offset < pcm.length; offset += 2) pcm.writeInt16LE(Math.round(3000 * Math.sin(offset / 5)), offset);
+  writeFileSync(join(root, `${id}.wav`), pcmS16leToWav(pcm));
+  store.commitChunk({ sourcePath: join(root, `${id}.wav`), trackId: 'system-audio', startSeconds: 0, endSeconds: 2, audible: true });
+  return finalizeCaptureTranscript(store.manifestPath, {
+    diarizeSystemAudio: true, strictSpeakers: true,
+    systemDiarizer: async (_path, options) => {
+      options.onVoices?.(new Map([['A', { ...voice(2), spans: [[0, 2]] }]]));
+      return { speakers: [{ id: 'A', label: 'A' }], transcript: [{ start: 0.1, end: 1.9, speaker: 'A', text: 'Morning.' }] };
+    },
+  });
+}
+
+const meetingVoices = () => readdirSync(join(root, 'Voices', 'meetings')).sort();
+
+test('a private meeting keeps no voices: not when it is made private, and not when it is finalized', async () => {
+  const record = meeting('m1', { REMOTE_SPEAKER_00: voice(0), REMOTE_SPEAKER_01: voice(3) });
+  meeting('m2', { REMOTE_SPEAKER_00: voice(0, 0.1, 4) });
+  renameTranscriptSpeaker(library, 'm1', 'REMOTE_SPEAKER_00', 'Ada');
+  renameTranscriptSpeaker(library, 'm2', 'REMOTE_SPEAKER_00', 'Ada');
+  expect(listVoiceprints()).toEqual([{ name: 'Ada', meetings: 2 }]);
+  // Turning AI off keeps nothing of its voices, in its own file or in a print.
+  saveMeetingArtifact(library, { ...createMeetingArtifact(findTranscriptRecord(library, record.id).record), ai: { off: true } });
+  expect(meetingVoices()).toEqual(['m2.json']);
+  expect(listVoiceprints()).toEqual([{ name: 'Ada', meetings: 1 }]);
+
+  // A call made private while it recorded: its folder says so when it is finalized.
+  const placeholder = createTranscriptRecord({ transcript: [], speakers: [] }, { id: 'call', title: 'HR', now: new Date('2026-11-11T09:00:00Z') });
+  saveTranscriptRecord(library, placeholder);
+  saveMeetingArtifact(library, { ...createMeetingArtifact(placeholder), ai: { off: true } });
+  await finalizeCall('call');
+  expect(meetingVoices()).toEqual(['m2.json']);
+  await finalizeCall('open-call');
+  expect(meetingVoices()).toEqual(['m2.json', 'open-call.json']);
+});
+
+test('forgetting a person takes their voice out of every meeting and puts the names Seashell suggested back', () => {
+  meeting('m1', { REMOTE_SPEAKER_00: voice(0), REMOTE_SPEAKER_01: voice(3) });
+  renameTranscriptSpeaker(library, 'm1', 'REMOTE_SPEAKER_00', 'Ada');
+  renameTranscriptSpeaker(library, 'm1', 'REMOTE_SPEAKER_01', 'Grace');
+  const later = meeting('m2', { REMOTE_SPEAKER_00: voice(0, 0.2, 5), REMOTE_SPEAKER_01: voice(6) });
+  saveTranscriptRecord(library, applyVoiceSuggestions(later, matchKnownVoices(new Map([['REMOTE_SPEAKER_00', voice(0, 0.2, 5)]]))));
+  expect(findTranscriptRecord(library, 'm2').record.speakers[0]!.suggestion).toBeDefined();
+
+  expect(forgetPersonVoice(library, 'ada')).toEqual({ forgotten: true, suggestionsUndone: 1 });
+  expect(listVoiceprints()).toEqual([{ name: 'Grace', meetings: 1 }]);
+  // The name Tyler gave stays; the one Seashell suggested goes back to its number, no longer marked suggested.
+  expect(findTranscriptRecord(library, 'm1').record.speakers.map((speaker) => speaker.label)).toEqual(['Ada', 'Grace']);
+  expect(findTranscriptRecord(library, 'm2').record.speakers[0]).toEqual({ id: 'REMOTE_SPEAKER_00', label: 'Remote speaker 1' });
+  for (const id of ['m1', 'm2']) {
+    expect(Object.keys(JSON.parse(readFileSync(join(root, 'Voices', 'meetings', `${id}.json`), 'utf8')).voices)).toEqual(['REMOTE_SPEAKER_01']);
+  }
+  // Naming her again can't bring the voice back.
+  renameTranscriptSpeaker(library, 'm1', 'REMOTE_SPEAKER_00', 'Ada');
+  expect(listVoiceprints()).toEqual([{ name: 'Grace', meetings: 1 }]);
+});
+
+test('moving a meeting to the Trash deletes the voices it kept for naming, not the prints', () => {
+  meeting('m1', { REMOTE_SPEAKER_00: voice(0), REMOTE_SPEAKER_01: voice(3) });
+  renameTranscriptSpeaker(library, 'm1', 'REMOTE_SPEAKER_00', 'Ada');
+  trashTranscriptRecord(library, 'm1');
+  expect(meetingVoices()).toEqual([]);
+  expect(listVoiceprints()).toEqual([{ name: 'Ada', meetings: 1 }]);
+});
+
+test('voices nobody named go after 90 days, swept when a meeting is finalized', async () => {
+  const day = 86_400_000;
+  meeting('old', { REMOTE_SPEAKER_00: voice(0) });
+  meeting('recent', { REMOTE_SPEAKER_00: voice(1) });
+  const age = (id: string, days: number) => {
+    const path = join(root, 'Voices', 'meetings', `${id}.json`);
+    writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), savedAt: new Date(Date.now() - days * day).toISOString() }));
+  };
+  age('old', 91);
+  age('recent', 89);
+  await finalizeCall('call');
+  expect(meetingVoices()).toEqual(['call.json', 'recent.json']);
+  expect(forgetExpiredMeetingVoices(process.env, Date.now() + 2 * day)).toEqual(['recent']);
+});
+
+test('the labeler itself drops a suggestion the meeting\'s evidence contradicts', async () => {
+  const speakers = await new EvidenceSpeakerLabeler().labelSpeakers({
+    transcript: [{ start: 0, end: 4, speaker: 'REMOTE_SPEAKER_00', text: 'Hi everyone, this is Grace.' }],
+    speakers: [{ id: 'REMOTE_SPEAKER_00', label: 'Ada', suggestion: { source: 'voice', previous: 'Remote speaker 1', similarity: 0.8 } }],
+    evidence: { screenshots: [], attendees: [{ name: 'Ada Example' }, { name: 'Grace Example' }] },
+  });
+  expect(speakers).toEqual([{ id: 'REMOTE_SPEAKER_00', label: 'Remote speaker 1' }]);
 });

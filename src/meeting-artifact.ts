@@ -17,6 +17,7 @@ import { findTranscriptRecord } from './transcript-library.ts';
 import { renderSrt, renderText, renderVtt } from './transcript-renderer.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 import { compareMeetingEvidence, meetingEvidence, parseMeetingEvidence, type MeetingEvidence } from './meeting-evidence.ts';
+import { forgetMeetingVoices } from './voiceprints.ts';
 
 export const MEETING_CLAIM_TYPES = [
   'speaker_identity',
@@ -60,6 +61,8 @@ export interface MeetingClaim {
   type: MeetingClaimType;
   text: string;
   evidenceSegmentIds: string[];
+  /** Lines this cited that are no longer in the transcript. See withCurrentCitations. */
+  removedEvidenceSegmentIds?: string[];
   confidence: number;
   speakerId?: string;
   /** Who owns an action or follow-up, as said. */
@@ -72,6 +75,8 @@ export interface MeetingClaim {
 export interface MeetingNoteItem {
   text: string;
   evidenceSegmentIds: string[];
+  /** Lines this cited that are no longer in the transcript. See withCurrentCitations. */
+  removedEvidenceSegmentIds?: string[];
 }
 
 /** A template heading and what the meeting said under it; empty when it did not come up. */
@@ -116,6 +121,12 @@ export interface MeetingInsight {
   runId: string;
   summary?: string;
   fields: { name: string; items: MeetingNoteItem[] }[];
+  /**
+   * The transcript changed after this was found (see notesOutdated). Each
+   * insight keeps its own mark until it runs again: rewriting the notes does
+   * not run an extractor that only runs by hand.
+   */
+  outdated?: { at: string; reason: string };
 }
 
 export interface MeetingProvisionalOverlay {
@@ -135,6 +146,8 @@ export interface MeetingChatMessage {
   text: string;
   createdAt: string;
   evidenceSegmentIds?: string[];
+  /** Lines this cited that are no longer in the transcript. See withCurrentCitations. */
+  removedEvidenceSegmentIds?: string[];
   runId?: string;
 }
 
@@ -251,6 +264,15 @@ function optionalString(value: unknown, label: string): string | undefined {
   return value === undefined ? undefined : string(value, label);
 }
 
+/** A saved list of cited lines no longer in the transcript; absent when there are none. */
+function parseRemovedEvidence(value: unknown, label: string): { removedEvidenceSegmentIds?: string[] } {
+  if (value === undefined) return {};
+  if (!Array.isArray(value) || value.some((id) => typeof id !== 'string' || !id.trim())) {
+    throw new Error(`${label} removedEvidenceSegmentIds must be strings`);
+  }
+  return value.length ? { removedEvidenceSegmentIds: [...value] as string[] } : {};
+}
+
 function parseAttendees(value: unknown): MeetingAttendee[] {
   if (!Array.isArray(value)) throw new Error('meeting attendees must be an array');
   return value.map((raw, index) => {
@@ -297,6 +319,7 @@ export function parseMeetingClaim(value: unknown, label = 'meeting claim'): Meet
     type: claim.type as MeetingClaimType,
     text: string(claim.text, `${label} text`),
     evidenceSegmentIds: [...claim.evidenceSegmentIds] as string[],
+    ...parseRemovedEvidence(claim.removedEvidenceSegmentIds, label),
     confidence: claim.confidence,
     ...(optionalString(claim.speakerId, `${label} speakerId`) === undefined
       ? {}
@@ -358,7 +381,10 @@ function parseAnalysis(value: unknown): MeetingAnalysis | undefined {
   };
 }
 
-/** A cited point: notes, insights. Every one must rest on at least one segment. */
+/**
+ * A cited point: notes, insights. Every one must rest on at least one segment,
+ * or record the lines it rested on that were since removed.
+ */
 export function parseMeetingNoteItems(value: unknown, label: string): MeetingNoteItem[] {
   if (!Array.isArray(value)) throw new Error(`${label} items must be an array`);
   return value.map((item, itemIndex) => {
@@ -366,13 +392,15 @@ export function parseMeetingNoteItems(value: unknown, label: string): MeetingNot
       throw new Error(`${label} item ${itemIndex} is invalid`);
     }
     const note = item as Record<string, unknown>;
-    if (!Array.isArray(note.evidenceSegmentIds) || note.evidenceSegmentIds.length === 0 ||
+    const removed = parseRemovedEvidence(note.removedEvidenceSegmentIds, `${label} item ${itemIndex}`);
+    if (!Array.isArray(note.evidenceSegmentIds) || (note.evidenceSegmentIds.length === 0 && !removed.removedEvidenceSegmentIds) ||
         note.evidenceSegmentIds.some((id) => typeof id !== 'string' || !id.trim())) {
       throw new Error(`${label} item ${itemIndex} must cite transcript segments`);
     }
     return {
       text: string(note.text, `${label} item ${itemIndex} text`),
       evidenceSegmentIds: [...note.evidenceSegmentIds] as string[],
+      ...removed,
     };
   });
 }
@@ -389,16 +417,24 @@ export function parseMeetingNotes(value: unknown, label = 'meeting notes'): Meet
   });
 }
 
+function parseOutdated(value: unknown, label: string): { at: string; reason: string } | undefined {
+  if (value === undefined) return undefined;
+  const outdated = value as Record<string, unknown> | null;
+  return { at: string(outdated?.at, `${label} at`), reason: string(outdated?.reason, `${label} reason`) };
+}
+
 export function parseMeetingInsight(value: unknown, label = 'meeting insight'): MeetingInsight {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`);
   const insight = value as Record<string, unknown>;
   if (!Array.isArray(insight.fields)) throw new Error(`${label} fields must be an array`);
   const summary = typeof insight.summary === 'string' && insight.summary.trim() ? insight.summary.trim() : undefined;
+  const outdated = parseOutdated(insight.outdated, `${label} outdated`);
   return {
     extractor: string(insight.extractor, `${label} extractor`),
     createdAt: string(insight.createdAt, `${label} createdAt`),
     runId: string(insight.runId, `${label} runId`),
     ...(summary ? { summary } : {}),
+    ...(outdated ? { outdated } : {}),
     fields: insight.fields.map((raw, index) => {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`${label} field ${index} is invalid`);
       const field = raw as Record<string, unknown>;
@@ -436,16 +472,25 @@ export function readMeetingAiSettings(libraryDir: string, transcriptId: string):
   }
 }
 
-/** The same, for a transcript folder already in hand. */
+/**
+ * The same, for a transcript folder already in hand. A meeting.json that is
+ * there but can't be read might have said AI is off, so it reads as off: when
+ * in doubt, nothing is shared, and the owner can turn AI back on.
+ */
 export function readMeetingAiSettingsAt(directory: string): MeetingAiSettings | undefined {
+  const path = join(directory, 'meeting.json');
+  if (!existsSync(path)) return undefined;
   try {
-    const path = join(directory, 'meeting.json');
-    if (!existsSync(path)) return undefined;
     const ai = parseAiSettings((JSON.parse(readFileSync(path, 'utf8')) as { ai?: unknown }).ai);
     return ai && Object.keys(ai).length ? ai : undefined;
   } catch {
-    return undefined;
+    return { off: true };
   }
+}
+
+/** Whether the owner turned AI off for the meeting in this folder, or its settings can't be read to tell. */
+export function meetingIsPrivateAt(directory: string): boolean {
+  return readMeetingAiSettingsAt(directory)?.off === true;
 }
 
 export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): MeetingArtifact {
@@ -482,8 +527,10 @@ export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): Mee
   const ai = parseAiSettings(artifact.ai);
   const transcriptEvidence = parseMeetingEvidence(artifact.transcriptEvidence);
   if (artifact.insights !== undefined && !Array.isArray(artifact.insights)) throw new Error(`${path} insights must be an array`);
-  const insights = artifact.insights?.map((insight, index) => parseMeetingInsight(insight, `insight ${index}`));
-  const outdated = artifact.notesOutdated as Record<string, unknown> | undefined;
+  const outdated = parseOutdated(artifact.notesOutdated, 'notesOutdated');
+  // Insights saved before each kept its own mark share the meeting's, if they are older than it.
+  const insights = artifact.insights?.map((insight, index) => parseMeetingInsight(insight, `insight ${index}`))
+    .map((insight) => outdated && !insight.outdated && Date.parse(insight.createdAt) <= Date.parse(outdated.at) ? { ...insight, outdated } : insight);
   return {
     schemaVersion: 1,
     meetingId: string(artifact.meetingId, 'meetingId'),
@@ -514,9 +561,7 @@ export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): Mee
     ...(ai === undefined || Object.keys(ai).length === 0 ? {} : { ai }),
     ...(optionalString(artifact.app, 'meeting app') === undefined ? {} : { app: artifact.app as string }),
     ...(insights?.length ? { insights } : {}),
-    ...(outdated === undefined ? {} : { notesOutdated: {
-      at: string(outdated?.at, 'notesOutdated at'), reason: string(outdated?.reason, 'notesOutdated reason'),
-    } }),
+    ...(outdated === undefined ? {} : { notesOutdated: outdated }),
     chat: artifact.chat.map((raw, index) => {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
         throw new Error(`chat message ${index} is invalid`);
@@ -536,6 +581,7 @@ export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): Mee
               message.evidenceSegmentIds.every((id) => typeof id === 'string' && id.trim())
             ? { evidenceSegmentIds: [...message.evidenceSegmentIds] as string[] }
             : (() => { throw new Error(`chat message ${index} evidence is invalid`); })()),
+        ...parseRemovedEvidence(message.removedEvidenceSegmentIds, `chat message ${index}`),
         ...(optionalString(message.runId, `chat message ${index} runId`) === undefined
           ? {}
           : { runId: message.runId as string }),
@@ -559,11 +605,62 @@ export function loadMeetingArtifact(
   const path = join(dirname(found.path), 'meeting.json');
   if (!existsSync(path)) return undefined;
   try {
-    return synchronizeMeetingTranscript(dirname(path), found.record);
+    const artifact = synchronizeMeetingTranscript(dirname(path), found.record);
+    return artifact && withCurrentCitations(artifact, found.record);
   } catch (error) {
     if (error instanceof SyntaxError) throw new Error(`${path} contains malformed JSON`);
     throw error;
   }
+}
+
+type Cited = Pick<MeetingNoteItem, 'removedEvidenceSegmentIds'> & { evidenceSegmentIds?: string[] };
+
+/** Every line a point cited, those still in the transcript first. */
+export function citedSegmentIds(item: Cited): string[] {
+  return [...(item.evidenceSegmentIds ?? []), ...(item.removedEvidenceSegmentIds ?? [])];
+}
+
+/** A point that cited lines, none of which the transcript still has. */
+export function sourceLineRemoved(item: Cited): boolean {
+  return !item.evidenceSegmentIds?.length && Boolean(item.removedEvidenceSegmentIds?.length);
+}
+
+/**
+ * Every citation split into the lines the transcript has now and the lines
+ * removed from it: a phantom line cleaned away, or an older transcript
+ * restored without it. A point whose every line is gone stays, marked, rather
+ * than vanishing or pointing at nothing; one whose lines come back cites them
+ * again. Notes, insights and chat answers saved before this split heal the
+ * next time they are read. Returns the same object when nothing changed.
+ */
+export function withCurrentCitations(artifact: MeetingArtifact, record: TranscriptRecord): MeetingArtifact {
+  const current = new Set(record.transcript.map((_segment, index) => transcriptSegmentId(record, index)));
+  let changed = false;
+  const cite = <T extends Cited>(item: T): T => {
+    const evidence = item.evidenceSegmentIds ?? [];
+    const removed = item.removedEvidenceSegmentIds ?? [];
+    if (evidence.every((id) => current.has(id)) && !removed.some((id) => current.has(id))) return item;
+    changed = true;
+    const all = [...new Set([...evidence, ...removed])];
+    const gone = all.filter((id) => !current.has(id));
+    const { removedEvidenceSegmentIds: _removed, ...rest } = item;
+    return { ...rest, evidenceSegmentIds: all.filter((id) => current.has(id)), ...(gone.length ? { removedEvidenceSegmentIds: gone } : {}) } as T;
+  };
+  const next: MeetingArtifact = {
+    ...artifact,
+    provisionalClaims: artifact.provisionalClaims.map(cite),
+    ...(artifact.analysis ? { analysis: { ...artifact.analysis, claims: artifact.analysis.claims.map(cite),
+      ...(artifact.analysis.notes ? { notes: artifact.analysis.notes.map((section) => ({ ...section, items: section.items.map(cite) })) } : {}) } } : {}),
+    ...(artifact.insights ? { insights: artifact.insights.map((insight) => ({ ...insight,
+      fields: insight.fields.map((field) => ({ ...field, items: field.items.map(cite) })) })) } : {}),
+    chat: artifact.chat.map(cite),
+  };
+  return changed ? next : artifact;
+}
+
+/** The lines a point cites, for the Markdown copies of the notes. */
+function citationText(item: Cited): string {
+  return sourceLineRemoved(item) ? 'source line removed' : (item.evidenceSegmentIds ?? []).join(', ');
 }
 
 /** "Dana · by Friday": who owns an action or follow-up and when it is due, as said. */
@@ -575,7 +672,7 @@ function markdownList(claims: MeetingClaim[]): string {
   return claims.length > 0
     ? claims.map((claim) => {
       const owner = claim.type === 'action_item' || claim.type === 'follow_up' ? claimOwnerAndDue(claim) : undefined;
-      return `- ${claim.text}${owner ? ` (${owner})` : ''} _(${claim.evidenceSegmentIds.join(', ')})_`;
+      return `- ${claim.text}${owner ? ` (${owner})` : ''} _(${citationText(claim)})_`;
     }).join('\n')
     : '- None captured.';
 }
@@ -590,7 +687,7 @@ function documentFor(artifact: MeetingArtifact, type: MeetingClaimType, title: s
 export function templatedNotesMarkdown(title: string, analysis: MeetingAnalysis): string {
   const sections = (analysis.notes ?? []).map((section) => `## ${section.heading}\n\n${
     section.items.length
-      ? section.items.map((item) => `- ${item.text} _(${item.evidenceSegmentIds.join(', ')})_`).join('\n')
+      ? section.items.map((item) => `- ${item.text} _(${citationText(item)})_`).join('\n')
       : '- Not discussed.'
   }`);
   return `# ${title}\n\n${analysis.template ? `_${analysis.template} notes_\n\n` : ''}${analysis.summary}\n\n${sections.join('\n\n')}\n`;
@@ -604,9 +701,10 @@ export function insightFileName(extractor: string): string {
 
 export function insightMarkdown(title: string, insight: MeetingInsight): string {
   const fields = insight.fields.map((field) => `## ${field.name}\n\n${field.items.length
-    ? field.items.map((item) => `- ${item.text} _(${item.evidenceSegmentIds.join(', ')})_`).join('\n')
+    ? field.items.map((item) => `- ${item.text} _(${citationText(item)})_`).join('\n')
     : '- Not covered.'}`);
-  return `# ${insight.extractor}\n\n_${title}_\n\n${insight.summary ? `${insight.summary}\n\n` : ''}${fields.join('\n\n')}\n`;
+  const outdated = insight.outdated ? `_${insight.outdated.reason} after this was found, so it may be out of date._\n\n` : '';
+  return `# ${insight.extractor}\n\n_${title}_\n\n${outdated}${insight.summary ? `${insight.summary}\n\n` : ''}${fields.join('\n\n')}\n`;
 }
 
 /** insights/ mirrors meeting.json: one JSON and one Markdown file per extractor, nothing stale. */
@@ -683,10 +781,13 @@ export function saveMeetingArtifact(
   if (change === 'append' && (artifact.analysis?.final || artifact.chat.length)) {
     throw new Error('Transcript grew while meeting analysis was running. Retry with the current transcript.');
   }
+  Object.assign(artifact, withCurrentCitations(artifact, record));
   artifact.transcriptEvidence = evidence;
   artifact.updatedAt = new Date().toISOString();
   atomicWrite(join(directory, 'meeting.json'), `${JSON.stringify(artifact, null, 2)}\n`);
   writeMeetingProjections(directory, artifact, record);
+  // A private meeting keeps no voices, from the moment it is saved as private.
+  if (artifact.ai?.off) forgetMeetingVoices(artifact.transcriptId);
   return directory;
 }
 
@@ -708,25 +809,78 @@ function retainMeetingRevision(directory: string, artifact: MeetingArtifact, tra
   if (!existsSync(path)) atomicWrite(path, content);
 }
 
-/** Also repairs interruption between transcript replacement and projection refresh. */
 /**
- * Notes written before a speaker had a name say "Remote speaker 1". Only such
- * placeholders are replaced: an ordinary name could also be an ordinary word.
+ * Notes, chat and every insight marked as possibly out of date, when the
+ * meeting has any. Each insight keeps its mark until it runs again.
  */
-function renamedInNotes(artifact: MeetingArtifact, rename: { from: string; to: string }): MeetingArtifact {
-  if (!/^(?:Remote speaker \d+|SPEAKER_\d+)$/u.test(rename.from)) return artifact;
-  const pattern = new RegExp(`\\b${rename.from}\\b`, 'gu');
-  const renamed = <T>(value: T): T => JSON.parse(JSON.stringify(value), (_key, item: unknown) =>
-    (typeof item === 'string' ? item.replace(pattern, rename.to) : item)) as T;
+function markedOutdated(artifact: MeetingArtifact, reason: string): MeetingArtifact {
+  if (!artifact.analysis && !artifact.provisionalClaims.length && !artifact.chat.length && !artifact.insights?.length) return artifact;
+  const outdated = { at: new Date().toISOString(), reason };
+  return { ...artifact, notesOutdated: outdated,
+    ...(artifact.insights ? { insights: artifact.insights.map((insight) => insight.outdated ? insight : { ...insight, outdated }) } : {}) };
+}
+
+/** The same name, or one a fuller form of the other: "Dana" and "Dana Lee". */
+function sameName(left: string, right: string): boolean {
+  const words = (name: string): string[] => name.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}]+/gu) ?? [];
+  const [a, b] = [words(left), words(right)];
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  return shorter.length > 0 && shorter.every((word, index) => word === longer[index]);
+}
+
+/** `name` as a whole word, exactly as written: "Dana", not "Danae" or "dana". */
+function wholeName(name: string): RegExp {
+  return new RegExp(`(?<![\\p{L}\\p{N}_])${name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}(?![\\p{L}\\p{N}_])`, 'gu');
+}
+
+/**
+ * Notes written before a speaker had a name say "Remote speaker 1": every such
+ * placeholder takes the name, and the notes stand. A real name that changes,
+ * a suggested "Dana" undone or a misheard name corrected, may have put the
+ * wrong person in them. An action Dana owned moves to the new name, and so
+ * does "Dana" written as a whole word, unless another speaker here is also
+ * called that. Either way the notes are marked out of date, since "Dana"
+ * might also be someone the meeting only talked about.
+ */
+function renamedInNotes(
+  artifact: MeetingArtifact, rename: { from: string; to: string }, speakers: TranscriptRecord['speakers'],
+): { artifact: MeetingArtifact; outdated?: string } {
+  if (/^(?:Remote speaker \d+|SPEAKER_\d+)$/u.test(rename.from)) {
+    const pattern = new RegExp(`\\b${rename.from}\\b`, 'gu');
+    const renamed = <T>(value: T): T => JSON.parse(JSON.stringify(value), (_key, item: unknown) =>
+      (typeof item === 'string' ? item.replace(pattern, rename.to) : item)) as T;
+    return { artifact: {
+      ...artifact,
+      provisionalClaims: renamed(artifact.provisionalClaims),
+      chat: renamed(artifact.chat),
+      ...(artifact.analysis ? { analysis: renamed(artifact.analysis) } : {}),
+      ...(artifact.insights ? { insights: renamed(artifact.insights) } : {}),
+    } };
+  }
+  // "Microphone" and "System audio" name a source, not a person; a fuller or shorter form names the same one.
+  if (/^(?:Microphone|System audio)$/u.test(rename.from) || sameName(rename.from, rename.to)) return { artifact };
+  const pattern = wholeName(rename.from);
+  const shared = speakers.some((speaker) => speaker.label !== rename.to && wholeName(rename.from).test(speaker.label));
+  const say = (text: string) => shared || wholeName(rename.from).test(rename.to) ? text : text.replace(pattern, rename.to);
+  const claim = (item: MeetingClaim): MeetingClaim => ({ ...item, text: say(item.text),
+    ...(item.person === undefined ? {} : { person: !shared && item.person === rename.from ? rename.to : item.person }) });
+  const point = <T extends { text: string }>(item: T): T => ({ ...item, text: say(item.text) });
   return {
-    ...artifact,
-    provisionalClaims: renamed(artifact.provisionalClaims),
-    chat: renamed(artifact.chat),
-    ...(artifact.analysis ? { analysis: renamed(artifact.analysis) } : {}),
-    ...(artifact.insights ? { insights: renamed(artifact.insights) } : {}),
+    artifact: {
+      ...artifact,
+      provisionalClaims: artifact.provisionalClaims.map(claim),
+      chat: artifact.chat.map(point),
+      ...(artifact.analysis ? { analysis: { ...artifact.analysis, summary: say(artifact.analysis.summary), claims: artifact.analysis.claims.map(claim),
+        ...(artifact.analysis.notes ? { notes: artifact.analysis.notes.map((section) => ({ ...section, items: section.items.map(point) })) } : {}) } } : {}),
+      ...(artifact.insights ? { insights: artifact.insights.map((insight) => ({ ...insight,
+        ...(insight.summary === undefined ? {} : { summary: say(insight.summary) }),
+        fields: insight.fields.map((field) => ({ ...field, items: field.items.map(point) })) })) } : {}),
+    },
+    outdated: `${rename.from} was renamed to ${rename.to}`,
   };
 }
 
+/** Also repairs interruption between transcript replacement and projection refresh. */
 export function synchronizeMeetingTranscript(
   directory: string,
   record: TranscriptRecord,
@@ -742,25 +896,34 @@ export function synchronizeMeetingTranscript(
   // The evidence hash includes labels, and stored hashes depend on that, so the
   // caller says so rather than the hash changing.
   if (options.namesOnly) {
-    const updated: MeetingArtifact = { ...renamedInNotes(artifact, options.namesOnly),
-      transcriptEvidence: evidence, updatedAt: new Date().toISOString() };
+    const renamed = renamedInNotes(artifact, options.namesOnly, record.speakers);
+    const named: MeetingArtifact = { ...renamed.artifact, transcriptEvidence: evidence, updatedAt: new Date().toISOString() };
+    const updated = renamed.outdated ? markedOutdated(named, renamed.outdated) : named;
     atomicWrite(path, `${JSON.stringify(updated, null, 2)}\n`);
     writeMeetingProjections(directory, updated, record);
     return updated;
   }
   // A corrected word or a removed phantom line leaves the meeting's notes
   // mostly right, so they are kept and marked rather than thrown away. Segment
-  // IDs do not move, so every citation still points at the same moment.
+  // IDs do not move, so every citation still points at the same moment, and
+  // a citation of a removed line moves aside, marked (withCurrentCitations).
   if (options.keepNotes) {
-    const updated: MeetingArtifact = { ...artifact, transcriptEvidence: evidence, updatedAt: new Date().toISOString(),
-      ...(artifact.analysis || artifact.provisionalClaims.length || artifact.chat.length || artifact.insights?.length
-        ? { notesOutdated: { at: new Date().toISOString(), reason: options.keepNotes } } : {}) };
+    const updated = withCurrentCitations(markedOutdated({ ...artifact, transcriptEvidence: evidence,
+      updatedAt: new Date().toISOString() }, options.keepNotes), record);
     atomicWrite(path, `${JSON.stringify(updated, null, 2)}\n`);
     writeMeetingProjections(directory, updated, record);
     return updated;
   }
   if (change === 'revised' || artifact.analysis?.final || artifact.chat.length) retainMeetingRevision(directory, artifact);
-  const updated: MeetingArtifact = {
+  const updated = resetForTranscript(artifact, evidence, change);
+  atomicWrite(path, `${JSON.stringify(updated, null, 2)}\n`);
+  writeMeetingProjections(directory, updated, record);
+  return updated;
+}
+
+/** What a meeting keeps when its transcript grew or changed in a way its notes cannot follow. */
+function resetForTranscript(artifact: MeetingArtifact, evidence: MeetingEvidence, change: 'append' | 'revised'): MeetingArtifact {
+  return {
     ...artifact,
     transcriptEvidence: evidence,
     status: 'base-only',
@@ -779,9 +942,27 @@ export function synchronizeMeetingTranscript(
     chat: [],
     failure: undefined,
   };
-  atomicWrite(path, `${JSON.stringify(updated, null, 2)}\n`);
-  writeMeetingProjections(directory, updated, record);
-  return updated;
+}
+
+/**
+ * A meeting as loadMeetingArtifact would leave it, from a folder already in
+ * hand, without writing anything: for readers such as agents, which must
+ * never change what they read, and which list the library once rather than
+ * search it for every meeting.
+ */
+export function readMeetingArtifact(directory: string, record: TranscriptRecord): MeetingArtifact | undefined {
+  const path = join(directory, 'meeting.json');
+  if (!existsSync(path)) return undefined;
+  let artifact: MeetingArtifact;
+  try {
+    artifact = parseMeetingArtifact(JSON.parse(readFileSync(path, 'utf8')), path);
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error(`${path} contains malformed JSON`);
+    throw error;
+  }
+  const evidence = meetingEvidence(record);
+  const change = compareMeetingEvidence(artifact.transcriptEvidence, evidence);
+  return withCurrentCitations(change === 'same' ? artifact : resetForTranscript(artifact, evidence, change), record);
 }
 
 export function appendProvisionalOverlay(

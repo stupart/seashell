@@ -1,13 +1,14 @@
 import { existsSync, readFileSync } from 'fs';
 import { dirname, isAbsolute, join, resolve } from 'path';
 import {
-  loadMeetingArtifact,
+  citedSegmentIds,
   readMeetingAiSettingsAt,
+  readMeetingArtifact,
   type MeetingArtifact,
   type MeetingClaim,
   type MeetingClaimType,
 } from './meeting-artifact.ts';
-import { findTranscriptRecord, listTranscriptRecords, loadTranscriptPath } from './transcript-library.ts';
+import { findTranscriptRecord, listTranscriptRecords, loadTranscriptPath, type TranscriptLibraryEntry } from './transcript-library.ts';
 import { videoMapIn } from './video-meeting.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 
@@ -15,7 +16,8 @@ import type { TranscriptRecord } from './transcript-types.ts';
  * Seashell's memory: reads and queries over the meeting library, with no
  * transport. The MCP server is one way in; anything else that wants to ask the
  * library questions (an Atlas connector, the CLI) calls these directly. Every
- * function refuses or hides meetings the owner turned AI off for.
+ * function refuses or hides meetings the owner turned AI off for, and none
+ * writes: each reads a meeting's folder once, as the listing found it.
  */
 
 export type Arguments = Record<string, unknown>;
@@ -32,12 +34,26 @@ export function count(value: unknown, name: string, fallback: number, maximum: n
   return Math.min(value as number, maximum);
 }
 
-function date(value: unknown, name: string): number | undefined {
+/**
+ * A day or a moment, as first and last millisecond. A plain date is that day
+ * where the user is, as meeting folders are named: "2026-10-01" runs from
+ * local midnight to the next. A full timestamp is that exact moment.
+ */
+function date(value: unknown, name: string): { start: number; end: number } | undefined {
   const raw = text(value, name);
   if (raw === undefined) return undefined;
+  const plain = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(raw);
+  if (plain) {
+    const [year, month, day] = [Number(plain[1]), Number(plain[2]) - 1, Number(plain[3])];
+    const start = new Date(year, month, day);
+    if (start.getFullYear() !== year || start.getMonth() !== month || start.getDate() !== day) {
+      throw new Error(`${name} must be an ISO date such as 2026-10-01`);
+    }
+    return { start: start.getTime(), end: new Date(year, month, day + 1).getTime() - 1 };
+  }
   const parsed = Date.parse(raw);
   if (!Number.isFinite(parsed)) throw new Error(`${name} must be an ISO date such as 2026-10-01`);
-  return parsed;
+  return { start: parsed, end: parsed };
 }
 
 export function clock(seconds: number): string {
@@ -47,11 +63,21 @@ export function clock(seconds: number): string {
   return hours ? `${hours}:${rest}` : rest;
 }
 
-function labels(record: TranscriptRecord): Map<string, string> {
-  const names = new Map(record.speakers.map(speaker => [speaker.id, speaker.label]));
-  names.set('LOCAL', names.get('LOCAL') ?? 'Microphone');
-  names.set('SYSTEM', names.get('SYSTEM') ?? 'System audio');
+/**
+ * Each speaker's label. One Seashell matched from a known voice, which nobody
+ * has confirmed, is marked suggested so an agent does not take it as fact.
+ */
+function labels(record: TranscriptRecord): Map<string, { label: string; suggested?: true }> {
+  const names = new Map(record.speakers.map(speaker => [speaker.id, { label: speaker.label, ...(speaker.suggestion ? { suggested: true as const } : {}) }]));
+  if (!names.has('LOCAL')) names.set('LOCAL', { label: 'Microphone' });
+  if (!names.has('SYSTEM')) names.set('SYSTEM', { label: 'System audio' });
   return names;
+}
+
+/** Who said a line, for agents: the label, and whether it is only a suggestion. */
+function saidBy(names: ReturnType<typeof labels>, speaker: string | undefined) {
+  const name = names.get(speaker ?? 'SYSTEM');
+  return { speaker: name?.label ?? speaker ?? 'Unknown', ...(name?.suggested ? { speakerSuggested: true } : {}) };
 }
 
 function segmentId(record: TranscriptRecord, index: number): string {
@@ -73,13 +99,24 @@ export function isPrivate(directory: string): boolean {
 export function loadMeeting(libraryDir: string, id: unknown) {
   const found = findTranscriptRecord(libraryDir, text(id, 'id', true)!);
   if (isPrivate(dirname(found.path))) throw new Error(PRIVATE_MEETING);
-  return { ...found, directory: dirname(found.path), artifact: loadMeetingArtifact(libraryDir, found.record.id) };
+  return { ...found, directory: dirname(found.path), artifact: readMeetingArtifact(dirname(found.path), found.record) };
 }
 
-/** "s000002 01:05": a citation an agent can quote and a person can find. */
+/** A listed meeting's transcript and notes, from the folder the listing found. */
+function readListed(entry: TranscriptLibraryEntry): { record: TranscriptRecord; artifact: MeetingArtifact | undefined } {
+  const record = loadTranscriptPath(join(entry.directory, 'transcript.json'));
+  return { record, artifact: readMeetingArtifact(entry.directory, record) };
+}
+
+/**
+ * "s000002 01:05": a citation an agent can quote and a person can find. A line
+ * no longer in the transcript (a phantom line cleaned away) says so, rather
+ * than pointing at the start of the meeting.
+ */
 function citer(record: TranscriptRecord) {
   const starts = new Map(record.transcript.map((segment, index) => [segmentId(record, index), segment.start]));
-  return (ids: string[]) => ids.map(id => `${id} ${clock(starts.get(id) ?? 0)}`);
+  return (item: { evidenceSegmentIds?: string[]; removedEvidenceSegmentIds?: string[] }) => citedSegmentIds(item)
+    .map(id => { const start = starts.get(id); return start === undefined ? `${id} (no longer in the transcript)` : `${id} ${clock(start)}`; });
 }
 
 function claimsOf(artifact: MeetingArtifact | undefined): MeetingClaim[] {
@@ -94,7 +131,7 @@ export function listMeetings(libraryDir: string, args: Arguments = {}) {
   const meetings = [];
   for (const entry of listTranscriptRecords(libraryDir)) {
     const started = Date.parse(entry.createdAt);
-    if ((from !== undefined && started < from) || (to !== undefined && started > to + 86_400_000 - 1)) continue;
+    if ((from !== undefined && started < from.start) || (to !== undefined && started > to.end)) continue;
     if (isPrivate(entry.directory)) {
       // Listed so a question about it gets a straight answer, but nothing of its content.
       if (!query || entry.title.toLocaleLowerCase().includes(query)) {
@@ -103,10 +140,9 @@ export function listMeetings(libraryDir: string, args: Arguments = {}) {
       }
       continue;
     }
-    const artifact = loadMeetingArtifact(libraryDir, entry.id);
+    const { record, artifact } = readListed(entry);
     const summary = artifact?.analysis?.summary;
     if (query) {
-      const record = loadTranscriptPath(`${entry.directory}/transcript.json`);
       const haystack = [entry.title, summary ?? '', ...record.transcript.map(segment => segment.text)].join('\n').toLocaleLowerCase();
       if (!query.split(/\s+/u).every(word => haystack.includes(word))) continue;
     }
@@ -134,7 +170,7 @@ export function getMeeting(libraryDir: string, args: Arguments) {
     ...(artifact?.calendar ? { calendar: { title: artifact.calendar.title, startAt: artifact.calendar.startAt,
       attendees: artifact.calendar.attendees.map(person => ({ name: person.name, ...(person.email ? { email: person.email } : {}) })) } } : {}),
     speakers: [...new Set(record.transcript.map(segment => segment.speaker ?? 'SYSTEM'))]
-      .map(id => ({ id, label: names.get(id) ?? id })),
+      .map(id => ({ id, label: names.get(id)?.label ?? id, ...(names.get(id)?.suggested ? { suggested: true } : {}) })),
     notes: {
       status: artifact?.analysis?.final ? 'final' : artifact?.analysis ? 'draft' : claims.length ? 'live-draft' : 'none',
       ...(artifact?.notesOutdated ? { possiblyOutOfDate: artifact.notesOutdated.reason } : {}),
@@ -143,14 +179,14 @@ export function getMeeting(libraryDir: string, args: Arguments) {
         type: claim.type, text: claim.text,
         ...(claim.person ? { person: claim.person } : {}),
         ...(claim.due ? { due: claim.due } : {}),
-        evidence: cite(claim.evidenceSegmentIds),
+        evidence: cite(claim),
       })),
       // The notes in the owner's template, section by section, each point cited.
       ...(artifact?.analysis?.notes ? {
         template: artifact.analysis.template,
         sections: artifact.analysis.notes.map(section => ({
           heading: section.heading,
-          items: section.items.map(item => ({ text: item.text, evidence: cite(item.evidenceSegmentIds) })),
+          items: section.items.map(item => ({ text: item.text, evidence: cite(item) })),
         })),
       } : {}),
     },
@@ -167,7 +203,7 @@ export function getTranscript(libraryDir: string, args: Arguments) {
   const names = labels(record);
   const segments = record.transcript.map((segment, index) => ({
     id: segmentId(record, index), at: clock(segment.start), start: segment.start, end: segment.end,
-    speaker: names.get(segment.speaker ?? 'SYSTEM') ?? segment.speaker ?? 'Unknown', text: segment.text,
+    ...saidBy(names, segment.speaker), text: segment.text,
   })).filter(segment => !speaker || segment.speaker.toLocaleLowerCase().includes(speaker));
   const page = segments.slice(offset, offset + limit);
   return { id: record.id, title: record.title, total: segments.length, offset, segments: page,
@@ -188,7 +224,7 @@ export function searchTranscripts(libraryDir: string, args: Arguments) {
       if (!words.every(word => lower.includes(word))) continue;
       matches.push({ meetingId: record.id, title: record.title, startedAt: record.createdAt,
         segmentId: segmentId(record, index), at: clock(segment.start),
-        speaker: names.get(segment.speaker ?? 'SYSTEM') ?? segment.speaker ?? 'Unknown', text: segment.text });
+        ...saidBy(names, segment.speaker), text: segment.text });
       if (matches.length >= limit) return { matches, truncated: true };
     }
   }
@@ -200,14 +236,15 @@ export function listActionItems(libraryDir: string, args: Arguments = {}) {
   const limit = count(args.limit, 'limit', 50, 500);
   const items = [];
   for (const entry of listTranscriptRecords(libraryDir)) {
-    if (since !== undefined && Date.parse(entry.createdAt) < since) continue;
+    if (since !== undefined && Date.parse(entry.createdAt) < since.start) continue;
     if (isPrivate(entry.directory)) continue;
-    const artifact = loadMeetingArtifact(libraryDir, entry.id);
+    const { artifact } = readListed(entry);
     for (const claim of claimsOf(artifact)) {
       if (claim.type !== 'action_item') continue;
       items.push({ meetingId: entry.id, title: entry.title, startedAt: entry.createdAt, text: claim.text,
         ...(claim.person ? { person: claim.person } : {}), ...(claim.due ? { due: claim.due } : {}),
-        evidence: claim.evidenceSegmentIds, final: Boolean(artifact?.analysis?.final) });
+        evidence: claim.evidenceSegmentIds, final: Boolean(artifact?.analysis?.final),
+        ...(artifact?.notesOutdated ? { possiblyOutOfDate: artifact.notesOutdated.reason } : {}) });
       if (items.length >= limit) return { items };
     }
   }
@@ -235,15 +272,36 @@ function noteKinds(value: unknown): MeetingClaimType[] {
   }))];
 }
 
+/** A name's words, lowercase and without accents: "Zoë Lee" is zoe, lee. */
+function nameWords(name: string): string[] {
+  return name.normalize('NFKD').replace(/\p{M}/gu, '').toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+}
+
+/**
+ * How the user is named in their own notes. Humain writes their actions as
+ * "You"; Seashell has no setting for the user's name, so "me" and "I" ask for
+ * them too, and so does the name they gave their microphone in that meeting.
+ */
+const SELF = new Set(['you', 'me', 'i', 'myself']);
+
+/** Each word asked for starts a word of the name: "dan" finds Dana, not Jordan. */
+function namedAs(wanted: string[], name: string | undefined): boolean {
+  const words = name ? nameWords(name) : [];
+  return wanted.length > 0 && wanted.every(word => words.some(candidate => candidate.startsWith(word)));
+}
+
 /**
  * Notes across meetings, from the claims each meeting's notes stored: "action
  * items for Dana", "decisions about pricing since October". A topic matches the
- * note's words or the transcript lines it cites; a person matches the owner
- * or the speaker. Seashell does not track whether an action was done.
+ * note's words or the transcript lines it cites; a person matches the note's
+ * owner, or who said it when it has no owner. Seashell does not track whether
+ * an action was done.
  */
 export function queryNotes(libraryDir: string, args: Arguments = {}) {
   const kinds = noteKinds(args.kind);
-  const person = text(args.person, 'person')?.toLocaleLowerCase();
+  const person = text(args.person, 'person');
+  const wanted = person === undefined ? undefined : nameWords(person);
+  const asksForSelf = Boolean(wanted?.length && wanted.every(word => SELF.has(word)));
   const about = text(args.about, 'about')?.toLocaleLowerCase().split(/\s+/u);
   const meeting = text(args.meeting, 'meeting')?.toLocaleLowerCase().split(/\s+/u);
   const since = date(args.since, 'since');
@@ -252,29 +310,38 @@ export function queryNotes(libraryDir: string, args: Arguments = {}) {
   const items = [];
   for (const entry of listTranscriptRecords(libraryDir)) {
     const started = Date.parse(entry.createdAt);
-    if ((since !== undefined && started < since) || (until !== undefined && started > until + 86_400_000 - 1)) continue;
+    if ((since !== undefined && started < since.start) || (until !== undefined && started > until.end)) continue;
     if (meeting && !meeting.every(word => entry.title.toLocaleLowerCase().includes(word))) continue;
     if (isPrivate(entry.directory)) continue;
-    const artifact = loadMeetingArtifact(libraryDir, entry.id);
+    const { record, artifact } = readListed(entry);
     const claims = claimsOf(artifact).filter(claim => kinds.includes(claim.type));
     if (!claims.length) continue;
-    let record: TranscriptRecord;
-    try { record = loadTranscriptPath(`${entry.directory}/transcript.json`); } catch { continue; }
     const names = labels(record);
     const said = new Map(record.transcript.map((segment, index) => [segmentId(record, index), segment.text]));
     const cite = citer(record);
+    // The user's own name, when they gave it to their microphone in this meeting.
+    const mine = names.get('LOCAL')!.label === 'Microphone' ? undefined : names.get('LOCAL')!.label;
     for (const claim of claims) {
-      const speaker = claim.speakerId ? names.get(claim.speakerId) : undefined;
-      if (person && ![claim.person, speaker].some(name => name?.toLocaleLowerCase().includes(person))) continue;
+      if (wanted) {
+        // The owner, when one was recorded: Dana saying "Jordan will" makes it Jordan's.
+        const owner = claim.person ?? (claim.speakerId ? names.get(claim.speakerId)?.label : undefined);
+        const ownerIsSelf = claim.person
+          ? nameWords(claim.person).some(word => SELF.has(word))
+            || (mine !== undefined && (namedAs(nameWords(mine), claim.person) || namedAs(nameWords(claim.person), mine)))
+          : claim.speakerId === 'LOCAL';
+        const matches = asksForSelf ? ownerIsSelf : namedAs(wanted, owner) || (ownerIsSelf && namedAs(wanted, mine));
+        if (!matches) continue;
+      }
       const quotes = claim.evidenceSegmentIds.flatMap(id => said.get(id) ?? []);
       const haystack = [claim.text, ...quotes].join('\n').toLocaleLowerCase();
       if (about && !about.every(word => haystack.includes(word))) continue;
       const quote = quotes[0]?.replace(/\s+/gu, ' ').trim();
       items.push({ meetingId: entry.id, title: entry.title, startedAt: entry.createdAt, type: claim.type, text: claim.text,
         ...(claim.person ? { person: claim.person } : {}), ...(claim.due ? { due: claim.due } : {}),
-        evidence: cite(claim.evidenceSegmentIds),
+        evidence: cite(claim),
         ...(quote ? { quote: quote.length > 200 ? `${quote.slice(0, 199)}…` : quote } : {}),
-        final: Boolean(artifact?.analysis?.final) });
+        final: Boolean(artifact?.analysis?.final),
+        ...(artifact?.notesOutdated ? { possiblyOutOfDate: artifact.notesOutdated.reason } : {}) });
       if (items.length >= limit) return { items, truncated: true };
     }
   }
@@ -290,15 +357,16 @@ export function getInsights(libraryDir: string, args: Arguments) {
     .filter(insight => !wanted || insight.extractor.toLocaleLowerCase() === wanted)
     .map(insight => ({
       extractor: insight.extractor, createdAt: insight.createdAt,
+      // Each insight is stale or not on its own: rewriting the notes does not run every extractor.
+      ...(insight.outdated ? { possiblyOutOfDate: insight.outdated.reason } : {}),
       ...(insight.summary ? { summary: insight.summary } : {}),
       fields: insight.fields.map(field => ({
         name: field.name,
-        items: field.items.map(item => ({ text: item.text, evidence: cite(item.evidenceSegmentIds) })),
+        items: field.items.map(item => ({ text: item.text, evidence: cite(item) })),
       })),
     }));
   if (wanted && !insights.length) throw new Error(`No insights from "${String(args.extractor)}" for this meeting yet. Run it with run_extractor.`);
-  return { id: record.id, title: record.title, insights,
-    ...(artifact?.notesOutdated && insights.length ? { possiblyOutOfDate: artifact.notesOutdated.reason } : {}) };
+  return { id: record.id, title: record.title, insights };
 }
 
 /**

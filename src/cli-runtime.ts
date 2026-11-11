@@ -1,6 +1,6 @@
 import { installHumainPackage, requireHumainNode } from './humain-install.ts';
 import { checkMeetConnection, requestMeetAccessibilityPermission, meetPermissionHelp, MEETING_ACCESSIBILITY_HELPER } from './meet-speakers.ts';
-import { microphonePermission } from './microphone-permission.ts';
+import { microphonePermission, microphoneStartNotifier, microphoneUpdateNotice } from './microphone-permission.ts';
 import { calendarPermission } from './calendar-permission.ts';
 import { readFeatureStatuses, renderFeatureStatusTable } from './feature-status.ts';
 import { oneSidedNotifier } from './capture-health.ts';
@@ -96,9 +96,9 @@ import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { setupDiarization } from './diarization-setup.ts';
 import { compareSavedSpeakers, renderSpeakerComparison } from './speaker-compare.ts';
-import { forgetVoiceprint, listVoiceprints } from './voiceprints.ts';
+import { listVoiceprints } from './voiceprints.ts';
 import { initializeFirstInstall } from './first-install.ts';
-import { SCREEN_CAPTURE_HELPER, screenCapturePermission } from './video-capture.ts';
+import { SCREEN_CAPTURE_HELPER, screenCapturePermission, screenFilmedNotifier } from './video-capture.ts';
 import { clearVideoRequest, DEFAULT_MEETING_VIDEO, startRecordingWithVideo } from './video-recording.ts';
 import { openMeetingVideo } from './video-meeting.ts';
 import { testMeetingAi, type MeetingAiRole } from './humain-client.ts';
@@ -107,14 +107,16 @@ import { ensureExtractorsDirectory, loadExtractors, runAutomaticExtractors, runE
 import {
   afterMeetingReady,
   askAutomationApprovalWithDialog,
+  automationApprovalNote,
   automationDecision,
+  automationNeedsApproval,
   ensureAutomationsDirectory,
   loadAutomations,
   readAutomationRuns,
   runAutomations,
 } from './automations.ts';
 import { queryNotes } from './meeting-memory.ts';
-import { cleanPhantoms } from './transcript-edits.ts';
+import { cleanPhantoms, forgetPersonVoice, listTranscriptHistory, restoreTranscript } from './transcript-edits.ts';
 import { claimOwnerAndDue, type MeetingAttendee } from './meeting-artifact.ts';
 import type { MeetingIntelligenceCommand } from './cli-args.ts';
 
@@ -331,10 +333,12 @@ async function executeCleanPhantoms(libraryDir: string, ids: string[], dryRun: b
   const found = results.filter((result) => result.phantoms > 0);
   const problems = results.filter((result) => result.skipped && result.skipped !== 'no saved audio');
   const total = found.reduce((sum, result) => sum + result.phantoms, 0);
+  const unrecorded = results.reduce((sum, result) => sum + (result.unrecorded ?? 0), 0);
   print([
     ...found.map((result) => `${result.title} (${result.id}): ${result.phantoms} of ${result.segments} lines ${dryRun ? 'heard in silence' : 'removed'}`),
     ...problems.map((result) => `${result.title} (${result.id}): skipped, ${result.skipped}`),
     `${results.length - results.filter((result) => result.skipped).length} meetings checked; ${total} lines ${dryRun ? 'heard in silence' : 'removed'}.`,
+    ...(unrecorded ? [`${unrecorded} lines have no recorded audio under them, so they are kept.`] : []),
     ...(dryRun && total ? ['Dry run: nothing changed. Remove them: seashell library clean-phantoms'] : []),
     ...(!dryRun && total ? ['Each old transcript is in its meeting\'s history folder. Notes were kept and marked as possibly out of date.'] : []),
   ].join('\n'));
@@ -588,6 +592,25 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       })), null, 2) : merged.length
         ? merged.map(result => `Merged ${result.trashed.length} pieces into ${result.record.id} (${result.record.transcript.length} segments): ${result.directory}`).join('\n')
         : 'No split meetings found.');
+      return 0;
+    }
+    case 'restore': {
+      const { id, file } = command.action;
+      const lines = (count: number) => `${count} line${count === 1 ? '' : 's'}`;
+      if (file !== undefined) {
+        const result = restoreTranscript(libraryDir, id, file);
+        print(command.json ? JSON.stringify(result, null, 2) : result.restored
+          ? `Restored ${result.file} (${lines(result.segments)}). The transcript it replaced is in history too; the notes stay, marked as possibly out of date.`
+          : `${result.file} is already the transcript. Nothing changed.`);
+        return 0;
+      }
+      const copies = listTranscriptHistory(libraryDir, id);
+      const time = (iso: string) => new Date(iso).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+      print(command.json ? JSON.stringify(copies, null, 2) : copies.length ? [
+        'Kept before each change, newest first:',
+        ...copies.map((copy) => `  ${time(copy.savedAt)}  ${copy.why.replace(/-/gu, ' ')}  ${lines(copy.segments)}  ${copy.file}`),
+        `Restore one: seashell meeting restore ${id} <file>`,
+      ].join('\n') : 'No earlier transcripts are kept for this meeting.');
       return 0;
     }
     case 'template':
@@ -845,12 +868,21 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
     case 'watch': {
       const once = command.action.once;
       const notifyOneSided = oneSidedNotifier(notify);
+      const notifyMicrophone = microphoneStartNotifier(notify);
+      // A new Seashell Microphone copy macOS has not decided on would ask mid-call: ask now, at a calm moment.
+      if (process.env.XPC_SERVICE_NAME === SEASHELL_LAUNCH_AGENT_LABEL && !once) {
+        void microphoneUpdateNotice().then((message) => { if (message) notify(message); }).catch(() => {});
+      }
+      const notifyScreenFilmed = screenFilmedNotifier(notify);
       const controller = new AbortController();
       const stop = () => controller.abort();
       process.once('SIGINT', stop);
       process.once('SIGTERM', stop);
-      const warnings = new WarningRateLimit();
       const writeEvent = command.json ? watchLogWriter(meetingWatchLogFiles(), { fallback: print }) : print;
+      // A warning that stopped recurring is forgotten with how often it came back unseen.
+      const warnings = new WarningRateLimit(undefined, (message, repeats) => command.json
+        ? writeEvent(JSON.stringify({ type: 'watch.warning', at: new Date().toISOString(), message, repeats, final: true }))
+        : process.stderr.write(`watch.warning: ${message} (repeated ${repeats} more times)\n`));
       // After a meeting is ready: extractors, then automations, one meeting at a time.
       let followUps: Promise<void> = Promise.resolve();
       const followUp = (transcriptId: string, app: string) => {
@@ -885,7 +917,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
           ...(!once ? { dependencies: { askToRecord: askToRecordWithDialog } } : {}),
           onEvent: (event) => {
             // Like the dialog, the notice is for someone at the Mac, not a one-shot check.
-            if (!once) notifyOneSided(event);
+            if (!once) { notifyOneSided(event); notifyMicrophone(event); notifyScreenFilmed(event); }
             // The same warning at most once per 10 minutes, with how often it recurred.
             let repeats = 0;
             if (event.type === 'watch.warning') {
@@ -1231,8 +1263,10 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
     }
     case 'speaker-voices': {
       if (command.forget !== undefined) {
-        if (!forgetVoiceprint(command.forget)) throw new Error(`Sea Shell doesn't know a voice called "${command.forget}". See: seashell speakers voices`);
-        print(command.json ? JSON.stringify({ forgotten: command.forget }) : `Forgot ${command.forget}'s voice. Past transcripts keep the name.`);
+        const result = forgetPersonVoice(resolveLibraryDir(undefined, process.env, loadConfig()), command.forget);
+        if (!result.forgotten) throw new Error(`Sea Shell doesn't know a voice called "${command.forget}". See: seashell speakers voices`);
+        print(command.json ? JSON.stringify({ forgotten: command.forget, suggestionsUndone: result.suggestionsUndone })
+          : `Forgot ${command.forget}'s voice. Names you gave keep it; ${result.suggestionsUndone === 1 ? '1 name Seashell suggested goes' : `${result.suggestionsUndone} names Seashell suggested go`} back to a number.`);
         return 0;
       }
       const people = listVoiceprints();
@@ -1396,13 +1430,14 @@ async function executeMeetingIntelligence(command: MeetingIntelligenceCommand): 
         `Automations: ${directory}`,
         ...automations.map((automation) => {
           const last = runs.filter((run) => run.automation === automation.name).at(-1);
-          const outward = automation.actions.some((action) => action.kind === 'shell' || action.kind === 'webhook');
+          const outward = automationNeedsApproval(automation, libraryDir);
           const decision = automationDecision(automation);
-          return `  ${automation.name} — ${automation.enabled ? 'on' : 'off'} · ${automation.actions.map((action) => action.kind).join(', ')}` +
+          return `  ${automation.name} — ${automation.enabled ? 'on' : automation.by === 'agent' ? 'off: made by an agent; turn on in the file' : 'off'} · ${automation.actions.map((action) => action.kind).join(', ')}` +
             `${outward ? ` · ${decision === 'allow' ? 'allowed to send' : decision === 'deny' ? 'not allowed to send' : 'asks before sending'}` : ''}` +
             `${last ? ` · last run ${last.status} ${last.at.slice(0, 10)}` : ''}`;
         }),
         ...problems.map((problem) => `  ✗ ${problem.path}: ${problem.message}`),
+        ...(automations.some((automation) => automationNeedsApproval(automation, libraryDir)) ? [automationApprovalNote()].flatMap((note) => note ?? []) : []),
         `Runs are logged in ${join(libraryDir, 'automation-runs.jsonl')}. Run them for one meeting: seashell automations run <meeting-id>`,
       ].join('\n'));
       return problems.length ? 1 : 0;

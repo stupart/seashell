@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
 import { dirname, join } from 'path';
 import type { SeashellConfig } from './config.ts';
-import { meetingApps, sameApplicationFamily, type MeetingCandidate } from './meeting-automation.ts';
+import { browserBundleIds, meetingApps, sameApplicationFamily, type MeetingCandidate } from './meeting-automation.ts';
 import { meetingCommandPath, writeMeetingCommand } from './meeting-command.ts';
 import type { VideoCaptureRequest, VideoQuality, VideoTarget } from './video-capture.ts';
 
@@ -24,7 +24,7 @@ export interface MeetingVideoConfig {
  */
 export const DEFAULT_MEETING_VIDEO = Object.freeze({ enabled: true, fps: 2, quality: 'medium' as VideoQuality });
 
-/** What a recording started by hand asked to film; neither means "the call, or the screen". */
+/** What a recording started by hand asked to film; neither means the call's window. Only `display` films a whole screen. */
 export interface VideoChoice {
   readonly window?: string;
   readonly display?: number;
@@ -104,14 +104,17 @@ export function videoTargetFor(choice: VideoChoice): VideoTarget {
     const app = meetingApps().find((candidate) => candidate.id === wanted || candidate.name.toLocaleLowerCase() === wanted);
     return { kind: 'window', appName: app?.name ?? choice.window, ...(app ? { bundleIds: app.bundleIds } : {}) };
   }
-  // Nothing named: a call's window if one is open, otherwise the main display.
-  return { kind: 'window', bundleIds: meetingApps().flatMap((app) => app.bundleIds), callWindowOnly: true };
+  // Nothing named: a call's window, and a browser's only while it shows the call. Never the screen.
+  return { kind: 'window', bundleIds: meetingApps().flatMap((app) => app.bundleIds), callWindowOnly: true, browserBundleIds: browserBundleIds() };
 }
 
 /**
  * Whether this recording gets video, and of what. A call records its app's
- * window when video is on for that app. A recording started by hand gets video
- * only when it was asked for, so pressing Space never films the screen unasked.
+ * window when video is on for that app: in a browser, only while the tab looks
+ * like the call (its service, or the calendar event's title). With no such
+ * window, nothing is filmed until one shows. A recording started by hand gets
+ * video only when it was asked for, so pressing Space never films the screen
+ * unasked, and only `--display` films a whole screen.
  */
 export function meetingVideoRequest(
   config: SeashellConfig,
@@ -129,8 +132,10 @@ export function meetingVideoRequest(
     const app = meetingAppFor(candidate.bundleId);
     if (app && video?.apps?.[app.id] === false) return undefined;
     const bundleIds = [...new Set([candidate.bundleId, ...(app?.bundleIds ?? [])].filter(Boolean))];
+    const callTitle = candidate.calendar?.title.trim();
     return {
-      target: { kind: 'window', ...(candidate.pid > 0 ? { pid: candidate.pid } : {}), bundleIds, ...(app ? { appName: app.name } : {}) },
+      target: { kind: 'window', ...(candidate.pid > 0 ? { pid: candidate.pid } : {}), bundleIds, ...(app ? { appName: app.name } : {}),
+        browserBundleIds: browserBundleIds(), ...(callTitle ? { callTitle } : {}) },
       ...settings,
     };
   } catch {

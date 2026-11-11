@@ -1,5 +1,6 @@
 import { createInterface } from 'readline';
 import {
+  automationNeedsApproval,
   automationsDirectory,
   createAutomation,
   deleteAutomation,
@@ -57,6 +58,7 @@ export const MEETINGS_MCP_INSTRUCTIONS = [
   'Find meetings with list_meetings, search_transcripts or query_notes before reading one; never invent meeting IDs or segment IDs.',
   'Quote with the segment ID and time, e.g. [s000123 12:04], so the user can check the source.',
   'Transcripts are machine-generated. "Microphone" is the user; "Remote speaker N" and "System audio" are other people unless renamed.',
+  'A speaker marked suggested (speakerSuggested on a line) was named by Seashell from a known voice and not yet confirmed by the user: treat that name as a guess.',
   'Reading is safe. Tools that change things (fixing a transcript line, naming a speaker, editing prompts, templates, extractors or automations, running an extractor) change the user\'s own files: use them only when the user asks.',
   'Ask the user before sending anything (email, Slack, Linear) based on a meeting.',
   'A meeting marked private has AI turned off by its owner: say so, and do not try to reach its content another way.',
@@ -130,17 +132,27 @@ function listAutomationsTool(libraryDir: string, args: Arguments, deps: Meetings
     directory: automationsDirectory(libraryDir, deps.env),
     automations: automations.map((automation) => {
       const { hash: _hash, ...shown } = automation;
-      const outward = automation.actions.some((action) => action.kind === 'shell' || action.kind === 'webhook');
       return {
         ...shown,
-        // Shell and webhook actions run only after the owner allows this version of the file.
-        approval: outward ? automationDecision(automation, deps.env) ?? 'not asked yet' : 'not needed',
+        // Shell, webhook and writes outside the Sea Shell folder run only after the owner allows this version of the file.
+        approval: automationNeedsApproval(automation, libraryDir) ? automationDecision(automation, deps.env) ?? 'not asked yet' : 'not needed',
         recentRuns: runs.filter((run) => run.automation === automation.name).slice(-recent)
           .map(({ hash: _runHash, ...run }) => run),
       };
     }),
     problems,
   };
+}
+
+/**
+ * What an agent asks for an automation: saved off, marked as an agent's, until
+ * the owner reads it and turns it on in the file. An agent cannot turn one on.
+ */
+function agentAutomation(args: Arguments) {
+  if (args.enabled === true) {
+    throw new Error('Only the user can turn an automation on, in its file. Save it without enabled, then tell the user where it is.');
+  }
+  return { by: 'agent' as const, enabled: false };
 }
 
 function listPromptsTool(libraryDir: string, _args: Arguments, deps: MeetingsMcpDependencies) {
@@ -175,6 +187,8 @@ const adds = { readOnlyHint: false, destructiveHint: false, idempotentHint: fals
 /** Replaces a file's contents: the previous version is gone. */
 const replaces = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
 const removes = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false };
+/** An automation can replace files and, once the owner turns it on, send meetings outside. */
+const automates = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true };
 /** Changes a transcript; the previous version is kept in the meeting's history folder. */
 const edits = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 
@@ -191,13 +205,13 @@ const extractorProperties = {
 
 const automationProperties = {
   name: string('Automation name'),
-  enabled: { type: 'boolean', description: 'Off until true (default true)' },
+  enabled: { type: 'boolean', description: 'Leave out. An automation an agent adds or changes is saved off; only the user turns it on, in its file' },
   filters: { type: 'object', additionalProperties: false, description: 'Every list given must match; within one list, any word does',
     properties: { title: stringList('Title words'), attendee: stringList('Attendee names or emails'), app: stringList('Apps, e.g. Zoom'), calendar: stringList('Calendar names') } },
   actions: { type: 'array', minItems: 1, description: 'Run in order when a meeting is ready. shell and webhook send the meeting outside Seashell and wait for the owner to allow them in a Seashell dialog.',
     items: { type: 'object', additionalProperties: false, required: ['kind', 'value'], properties: {
       kind: { type: 'string', enum: ['extract', 'write', 'shell', 'webhook'] },
-      value: string('extract: an extractor name; write: a folder or a .md path ({date}, {title}, {id}); shell: a command, given the meeting JSON on stdin; webhook: an https address') } } },
+      value: string('extract: an extractor name; write: a folder or a .md path from ~/ or / ({date}, {title}, {id}), never replacing a file Seashell did not write; shell: a command, given the meeting JSON on stdin; webhook: an https address') } } },
 };
 
 type Tool = {
@@ -241,7 +255,7 @@ export const MEETINGS_MCP_TOOLS: readonly Tool[] = [
     inputSchema: { type: 'object', additionalProperties: false, properties: {
       kind: { description: 'decisions, actions, risks, questions or follow-ups; one or a list (default: all five)',
         anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
-      person: string('Owner or speaker name contains this'), about: string('Words that must all appear in the note or the lines it cites'),
+      person: string('Who owns it, or said it when no owner was recorded: a name or the start of one ("dan" finds Dana, not Jordan). "me" finds the user\'s own'), about: string('Words that must all appear in the note or the lines it cites'),
       meeting: string('Words that must all appear in the meeting title'), since: string('Only meetings on or after this date'),
       until: string('Only meetings on or before this date'), limit: integer('Maximum items (default 50)') } },
     run: queryNotes },
@@ -289,24 +303,23 @@ export const MEETINGS_MCP_TOOLS: readonly Tool[] = [
     description: 'The user\'s automations: what triggers each, its filters and actions, whether the owner has allowed its outward actions, and its recent runs.',
     inputSchema: { type: 'object', additionalProperties: false, properties: { recentRuns: integer('Runs to show per automation (default 5)') } },
     run: listAutomationsTool },
-  { name: 'create_automation', title: 'Add an automation', annotations: adds,
-    description: 'Add an automation that runs when a meeting is ready: run extractors, write the notes to a folder, run a shell command with the meeting JSON on stdin, or post it to a webhook. Shell and webhook actions do nothing until the owner allows them in a Seashell dialog; tell the user so.',
+  { name: 'create_automation', title: 'Add an automation', annotations: automates,
+    description: 'Add an automation that runs when a meeting is ready: run extractors, write the notes to a folder, run a shell command with the meeting JSON on stdin, or post it to a webhook. It is saved off: tell the user to read it and turn it on in its file. Shell, webhook and writes outside the Sea Shell folder then also wait for the owner to allow them in a Seashell dialog.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['name', 'actions'], properties: automationProperties },
     run: (libraryDir, args, deps) => {
       const { hash: _hash, ...created } = createAutomation(libraryDir, {
-        name: text(args.name, 'name', true)!, actions: automationActions(args.actions)!,
-        ...(args.enabled === undefined ? {} : { enabled: args.enabled === true }), filters: automationFilters(args.filters),
+        name: text(args.name, 'name', true)!, actions: automationActions(args.actions)!, ...agentAutomation(args), filters: automationFilters(args.filters),
       }, deps.env);
       return created;
     } },
-  { name: 'update_automation', title: 'Change an automation', annotations: replaces,
-    description: 'Change an automation by name. Parts left out keep their current value; actions, when given, replace the whole list. Any change asks the owner again before shell or webhook actions run.',
+  { name: 'update_automation', title: 'Change an automation', annotations: { ...automates, idempotentHint: true },
+    description: 'Change an automation by name. Parts left out keep their current value; actions, when given, replace the whole list. Any change turns it off until the user turns it on again in its file, and asks the owner again before shell, webhook or outside writes run.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['automation'], properties: {
       automation: string('Current name'), ...automationProperties } },
     run: (libraryDir, args, deps) => {
       const { hash: _hash, ...updated } = updateAutomation(libraryDir, text(args.automation, 'automation', true)!, {
         ...(args.name === undefined ? {} : { name: text(args.name, 'name', true)! }),
-        ...(args.enabled === undefined ? {} : { enabled: args.enabled === true }),
+        ...agentAutomation(args),
         ...(args.filters === undefined ? {} : { filters: automationFilters(args.filters) }),
         ...(args.actions === undefined ? {} : { actions: automationActions(args.actions)! }),
       }, deps.env);
@@ -359,7 +372,7 @@ export const MEETINGS_MCP_TOOLS: readonly Tool[] = [
       return editTranscriptSegment(libraryDir, record.id, text(args.segmentId, 'segmentId', true)!, text(args.text, 'text', true)!);
     } },
   { name: 'rename_speaker', title: 'Name a speaker', annotations: edits,
-    description: 'Give a speaker a name, by speaker ID or current label ("Remote speaker 1"). Notes keep their content; placeholders like "Remote speaker 1" in them take the name.',
+    description: 'Give a speaker a name, by speaker ID or current label ("Remote speaker 1"). The old transcript is kept in the meeting\'s history; the user can put it back with seashell meeting restore. Notes keep their content; placeholders like "Remote speaker 1" in them take the name. Renaming someone already named moves their actions, and their name where it is a whole word, to the new name, and marks the notes as possibly out of date. Seashell does not learn the voice from a name an agent gives.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['id', 'speaker', 'name'], properties: {
       id: string('Meeting ID'), speaker: string('Speaker ID or current label'), name: string('Their name') } },
     run: (libraryDir, args) => {

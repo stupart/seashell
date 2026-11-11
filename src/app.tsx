@@ -84,7 +84,8 @@ import { readBackgroundWatchStatus, type BackgroundWatchStatus } from './backgro
 import { writeMeetingConsent } from './meeting-consent.ts';
 import { writeMeetingCommand } from './meeting-command.ts';
 import { CaptureHealthTracker, readMeetingCoverage, yourSideNotice, type CaptureHealthSnapshot } from './capture-health.ts';
-import { captureRecordingMode, recordingSummary, sourceFinding, type RecordingMode } from './RecordingStatus.tsx';
+import { ALLOW_MIC, captureRecordingMode, recordingSummary, sourceFinding, type RecordingMode } from './RecordingStatus.tsx';
+import { allowMicrophone } from './microphone-permission.ts';
 import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { runHumainTranscription } from './humain-client.ts';
@@ -245,6 +246,12 @@ export default function App(props: {
   const [subNotice, setSubNotice] = useState<string>();
   const [guideFromSettings, setGuideFromSettings] = useState(false);
   const [attention, setAttention] = useState<FeatureStatus[]>([]);
+  /** What the screen shows needs doing, for keys: Ink hands a key to the last render's handler
+   * until its effect runs, so Enter pressed as the statuses appear must not act on none. */
+  const attentionShown = useRef(attention);
+  attentionShown.current = attention;
+  /** macOS has not allowed Seashell Microphone (undecided, or said no): Enter at home asks. */
+  const micToAllow = attention.some(needsMicrophone);
   /** Everything Settings checks, read once more whenever Settings or the guide closes. Speaker setup reads it too. */
   const [featureStatuses, setFeatureStatuses] = useState<FeatureStatus[]>();
   const [setupNeeded, setSetupNeeded] = useState(false);
@@ -2001,6 +2008,8 @@ export default function App(props: {
     }
     if (processing) return;
     if (input === 'i') { setAudioHelpOpen(true); return; }
+    // "Mic not allowed" during a call: Enter leads the key bar, and asks for it.
+    if (key.return && shownSlot.current?.fix === ALLOW_MIC) { askForMicrophone(); return; }
     // A noticed call is a question like any other: y records it, n ignores it.
     const answer = input.toLowerCase();
     if (watchOwnership === 'external' && (answer === 'y' || answer === 'n') && backgroundWatch?.phase === 'awaiting-consent'
@@ -2165,7 +2174,7 @@ export default function App(props: {
       } catch (cause) { setError(`Could not start recording: ${cause instanceof Error ? cause.message : String(cause)}`); }
       return;
     }
-    // V records by hand with video: the call's window if one is open, otherwise the screen.
+    // V records by hand with video of the call's window, never the screen.
     if (input === 'V') {
       if (watchOwnership !== 'external') { setCaution('Recording with video needs the background recorder. Press , to start it.'); return; }
       if (activeBackgroundEntry) { setCaution('Already recording. Video can only start with a new recording.'); return; }
@@ -2175,9 +2184,10 @@ export default function App(props: {
       } catch (cause) { setError(`Could not start recording: ${cause instanceof Error ? cause.message : String(cause)}`); }
       return;
     }
-    // Until recording works, Enter at home starts the guided setup; Space still records by hand.
-    if (key.return && view === 'live' && !historyOpen && pausedRef.current && !currentMeeting && attention.length) {
-      openGuide(false);
+    // Until recording works, Enter at home asks for the microphone if that is missing, then starts
+    // the guided setup; Space still records by hand.
+    if (key.return && view === 'live' && !historyOpen && pausedRef.current && !currentMeeting && attentionShown.current.length) {
+      if (attentionShown.current.some(needsMicrophone)) askForMicrophone(); else openGuide(false);
       return;
     }
     if ((input === ' ' || key.return) && view === 'live' && !historyOpen) {
@@ -2278,6 +2288,16 @@ export default function App(props: {
       : DEFAULT_LEVEL_SOURCES.computer,
   }, [props.levels, listenerDisabled, systemAudioDisabled]);
 
+  /** macOS's prompt for Seashell Microphone, or its Privacy pane once it said no. A recording
+   * already running picks the microphone up by itself within seconds. */
+  const askForMicrophone = () => {
+    setNotice('macOS will ask about "Seashell Microphone". Choose Allow.');
+    void allowMicrophone().then((status) => {
+      if (status.authorization !== 'authorized') { setCaution(status.detail); return; }
+      setAttention((current) => current.filter((item) => item.id !== 'microphone'));
+      setNotice('Microphone allowed. Seashell records your side now.');
+    }).catch((cause: unknown) => setError(`Could not ask for the microphone: ${cause instanceof Error ? cause.message : String(cause)}`));
+  };
   const openGuide = (fromSettings: boolean, test?: 'microphone' | 'computer') => {
     setGuideProgress(undefined);
     setGuideTest(test);
@@ -2396,7 +2416,7 @@ export default function App(props: {
     ? [['n', `next match · ${(searchHit % matchRows.length) + 1} of ${matchRows.length}`]] : [];
   // One order everywhere: what can be done here, then moving, then Esc. The way back to
   // the meetings comes early, so a narrow window keeps it.
-  const hints: Hint[] = atHome && attention.length ? [['Enter', 'guided setup'], ...byHand, ['f', 'import']]
+  const hints: Hint[] = atHome && attention.length ? [micToAllow ? ALLOW_MIC : ['Enter', 'guided setup'], ...byHand, ['f', 'import']]
     : historyOpen && searchQuery.trim() ? visibleEntries.length ? [['Enter', 'read'], ['/', 'search again'], ['Esc', 'clear search'], ['↑↓', 'choose']]
       : [['/', 'search again'], ['Esc', 'clear search']]
     : historyOpen && !navigationItems.some((item) => item.kind === 'record') ? [...byHand, ['f', 'import'], ['/', 'search']]
@@ -2716,6 +2736,11 @@ function Highlighted(props: { text: string; query: string }) {
 /** The list's heading during a search: how many meetings say it, and what was searched for. */
 function searchHeading(count: number, query: string): string {
   return `${count === 0 ? 'No meeting mentions' : count === 1 ? '1 meeting mentions' : `${count} meetings mention`} "${query}"`;
+}
+
+/** The microphone is not allowed yet, and Seashell can ask macOS (or open its pane). */
+function needsMicrophone(status: FeatureStatus): boolean {
+  return status.id === 'microphone' && status.action === 'allow-microphone';
 }
 
 /** A setup problem in the title's status slot: what is wrong in a word or two. The key that helps

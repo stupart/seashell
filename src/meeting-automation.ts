@@ -88,6 +88,11 @@ export function meetingApps(): ReadonlyArray<{ id: string; name: string; bundleI
   return APP_PATTERNS.map(({ id, name, bundleIds }) => ({ id, name, bundleIds }));
 }
 
+/** Browsers' bundle IDs: a call in one is a tab, so its window is filmed only while that tab shows. */
+export function browserBundleIds(): string[] {
+  return APP_PATTERNS.filter((app) => app.kind === 'browser').flatMap((app) => app.bundleIds);
+}
+
 const APP_PATTERNS: readonly AppPattern[] = Object.freeze([
   {
     id: 'zoom',
@@ -463,6 +468,45 @@ const VIDEO_CALL_HOSTS = ['meet.google.com', 'zoom.us', 'teams.microsoft.com', '
 export function isVideoCallEvent(calendar?: MeetingCalendarEvent): boolean {
   const text = `${calendar?.joinUrl ?? ''} ${calendar?.location ?? ''}`.toLocaleLowerCase();
   return VIDEO_CALL_HOSTS.some((host) => text.includes(host));
+}
+
+/** The services each app's calls run on, by app id. A browser can run any of them. */
+const APP_CALL_HOSTS: Readonly<Record<string, readonly string[]>> = {
+  zoom: ['zoom.us'],
+  teams: ['teams.microsoft.com', 'teams.live.com'],
+  webex: ['webex.com'],
+};
+/** An event counts as the call being recorded only if it starts this close to the recording. */
+export const CALENDAR_CALL_START_MS = 10 * 60_000;
+
+function linkHosts(calendar: MeetingCalendarEvent): string[] {
+  return `${calendar.joinUrl ?? ''} ${calendar.location ?? ''}`.match(/https?:\/\/[^\s<>"]+/giu)?.flatMap((link) => {
+    try { return [new URL(link).hostname.toLocaleLowerCase()]; } catch { return []; }
+  }) ?? [];
+}
+
+/**
+ * Whether the calendar event attached to a call is provably that call, so its
+ * invitees may cap how many voices it has. The nearest event in the window is
+ * not proof: a small meeting beside a large call would cap the call at two
+ * voices. Proof is the event's Meet link naming the call joined in the
+ * browser, or a join link on the app's own service with the event starting
+ * within 10 minutes of the recording.
+ */
+export function calendarEventIsThisCall(
+  candidate: Pick<MeetingCandidate, 'id' | 'bundleId' | 'kind' | 'calendar'>,
+  recordingStartedAtUnixMs: number,
+): boolean {
+  const calendar = candidate.calendar;
+  if (!calendar) return false;
+  // A joined Meet call is named by its code, as resolveMeetingCandidate matched it.
+  const meet = /^meet:[^:]+:(.+)$/su.exec(candidate.id)?.[1];
+  if (meet) return calendar.joinUrl?.includes(`meet.google.com${meet}`) === true;
+  const start = Date.parse(calendar.startAt);
+  if (!Number.isFinite(start) || Math.abs(start - recordingStartedAtUnixMs) > CALENDAR_CALL_START_MS) return false;
+  const app = patternFor(candidate.bundleId);
+  const hosts = candidate.kind === 'browser' && app?.kind === 'browser' ? VIDEO_CALL_HOSTS : app ? APP_CALL_HOSTS[app.id] ?? [] : [];
+  return linkHosts(calendar).some((host) => hosts.some((service) => host === service || host.endsWith(`.${service}`)));
 }
 
 /** Calendar alone never starts capture. A joined Meet call also works with the mic muted. */
