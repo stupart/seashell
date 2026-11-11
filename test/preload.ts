@@ -18,3 +18,7 @@ process.env.SEASHELL_VOICES_DIR ||= mkdtempSync(join(tmpdir(), 'seashell-test-vo
 const scratch = mkdtempSync(join(tmpdir(), 'seashell-test-files-'));
 process.env.SEASHELL_VOCABULARY_FILE ||= join(scratch, 'Vocabulary.txt');
 process.env.SEASHELL_BRIEFS_DIR ||= join(scratch, 'Briefs');
+
+// `seashell note` leaves its notes beside the recorder's command file, and every watch poll
+// reads and deletes them. A test's watch must never take a note typed during a real call.
+process.env.SEASHELL_MEETING_COMMAND_PATH ||= join(scratch, 'meeting-command.json');
