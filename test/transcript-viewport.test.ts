@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test';
 import { stripVTControlCharacters } from 'util';
-import { transcriptRows, MouseScrollDecoder } from '../src/transcript-viewport.ts';
+import { timedTranscriptRows, transcriptRows, MouseScrollDecoder } from '../src/transcript-viewport.ts';
 
 test('one long paragraph remains reachable row by row at narrow widths', () => {
   const words = Array.from({ length: 100 }, (_, i) => `word${i}`);
@@ -24,4 +24,28 @@ test('wheel reports are decoded across chunks; releases, clicks and horizontal w
     expect(decoder.read(report)).toEqual({ consumed: true, events: [] });
   }
   expect(decoder.read('m')).toEqual({ consumed: false, events: [] });
+});
+
+const timedRecord = {
+  transcript: [
+    { start: 0, end: 4, speaker: 'LOCAL', text: 'A made-up opening line that is long enough to wrap onto a second row here.' },
+    { start: 65, end: 70, speaker: 'REMOTE_00', text: 'A short reply.' },
+  ],
+  speakers: [{ id: 'LOCAL', label: 'Microphone' }, { id: 'REMOTE_00', label: 'Remote speaker 1' }],
+};
+
+test('each transcript row knows when its line was said, wrapped rows included', () => {
+  for (const [columns, options] of [[40, { timestamps: true, speakers: true }], [80, { timestamps: true, speakers: true }],
+    [40, { timestamps: false, speakers: true }]] as const) {
+    const timed = timedTranscriptRows(timedRecord, columns, options);
+    expect(timed.map((row) => row.text)).toEqual(transcriptRows(timedRecord, columns, options));
+    // The opening line wraps; every one of its rows, and none of the reply's, starts at 0.
+    const reply = timed.findIndex((row) => row.start === 65);
+    expect(reply).toBeGreaterThan(1);
+    expect(timed.slice(0, reply).every((row) => row.start === 0)).toBe(true);
+    expect(timed.slice(reply).every((row) => row.start === 65)).toBe(true);
+    expect(stripVTControlCharacters(timed.slice(reply).map((row) => row.text).join(' '))).toContain('A short reply');
+  }
+  // Words run together without lines: no row can say when.
+  expect(timedTranscriptRows(timedRecord, 40, { timestamps: false, speakers: false }).every((row) => row.start === undefined)).toBe(true);
 });

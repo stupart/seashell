@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { mkdirSync } from 'fs';
 import { ensureTemplatesDirectory, PROFILE_FILE } from '../src/meeting-templates.ts';
 import { readFeatureStatuses, renderFeatureStatusTable, type FeatureStatusDependencies, type MeetingEvidence } from '../src/feature-status.ts';
 import type { MeetProbe } from '../src/meet-speakers.ts';
@@ -21,6 +22,8 @@ const healthy: FeatureStatusDependencies = {
   microphoneRecorderSince: () => Date.parse('2026-01-01T00:00:00Z'),
   systemAudioRecorderSince: () => Date.parse('2026-01-01T00:00:00Z'),
   audioChecks: () => ({}),
+  screenRecording: async () => ({ authorization: 'authorized', detail: 'Allowed.' }),
+  voices: () => [],
 };
 const read = (dependencies: FeatureStatusDependencies, meetingConfig: Record<string, unknown> = { speakerBrowser: 'auto' }) =>
   readFeatureStatuses({ config: { meeting: meetingConfig } as never, libraryDir: '/fixture', dependencies: { ...healthy, ...dependencies } });
@@ -171,6 +174,61 @@ test('Settings shows whether templates are yours and whether the AI knows who yo
   } finally {
     if (previous === undefined) delete process.env.SEASHELL_TEMPLATES_DIR;
     else process.env.SEASHELL_TEMPLATES_DIR = previous;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('video says whether it is on and whether macOS lets it record, asking only while it is on', async () => {
+  let asked = 0;
+  const screen = (authorization: 'authorized' | 'notDetermined' | 'unavailable') => async () => { asked++; return { authorization, detail: 'fixture' }; };
+  expect((await byId({ screenRecording: screen('authorized') }, { speakerBrowser: 'auto', video: { enabled: false } })).video)
+    .toMatchObject({ state: 'off', summary: 'Off · calls record audio only', action: 'turn-on-video' });
+  expect(asked).toBe(0);
+  // Video is on unless turned off.
+  expect((await byId({ screenRecording: screen('authorized') })).video).toMatchObject({ state: 'ok', summary: 'On · Screen Recording allowed' });
+  expect((await byId({ screenRecording: screen('notDetermined') })).video)
+    .toMatchObject({ state: 'attention', summary: 'On · needs Screen Recording', action: 'allow-screen-recording' });
+  expect((await byId({ screenRecording: screen('unavailable') })).video).toMatchObject({ state: 'attention', summary: 'On · video recorder missing' });
+});
+
+test('saved voices, prompts, extractors and automations each say how they stand', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'seashell-files-status-'));
+  const libraryDir = join(home, 'Transcripts');
+  mkdirSync(libraryDir, { recursive: true });
+  const statuses = async (voices: Array<{ name: string; meetings: number }> = []) => Object.fromEntries((await readFeatureStatuses({
+    config: { meeting: { speakerBrowser: 'auto' } } as never, libraryDir, dependencies: { ...healthy, voices: () => voices } }))
+    .map((status) => [status.id, status]));
+  try {
+    let now = await statuses();
+    expect(now.voices).toMatchObject({ state: 'off', summary: 'None yet · name a speaker to add one' });
+    expect(now.prompts).toMatchObject({ state: 'ok', summary: 'As shipped' });
+    expect(now.extractors).toMatchObject({ state: 'off', summary: 'None yet', action: 'open-extractors' });
+    expect(now.automations).toMatchObject({ state: 'off', summary: 'None yet', action: 'open-automations' });
+
+    expect((await statuses([{ name: 'Dana', meetings: 3 }])).voices).toMatchObject({ state: 'ok', summary: '1 person' });
+    mkdirSync(join(home, 'Prompts'));
+    for (const name of ['live', 'chat']) writeFileSync(join(home, 'Prompts', `${name}.md`), 'Be brief.\n');
+    writeFileSync(join(home, 'Prompts', 'notes.md'), '<!-- nothing -->\n');
+    expect((await statuses()).prompts).toMatchObject({ state: 'ok', summary: '2 edited · 1 empty' });
+
+    mkdirSync(join(home, 'Extractors'));
+    writeFileSync(join(home, 'Extractors', 'pains.md'), '---\nname: Pains\nwhen: always\nfields:\n  Pains: What hurts\n---\n');
+    expect((await statuses()).extractors).toMatchObject({ state: 'ok', summary: '1 · 1 run by themselves' });
+    writeFileSync(join(home, 'Extractors', 'broken.md'), '---\nname: Broken\n---\n');
+    expect((await statuses()).extractors).toMatchObject({ state: 'broken', summary: '1 file does not load' });
+
+    mkdirSync(join(home, 'Automations'));
+    writeFileSync(join(home, 'Automations', 'save.md'), '---\nname: Save\n---\n- write: ~/Notes\n');
+    expect((await statuses()).automations).toMatchObject({ state: 'ok', summary: '1 on' });
+    const run = (status: string, detail?: string) => `${JSON.stringify({ at: new Date().toISOString(), automation: 'Save', hash: 'h',
+      meetingId: 'm', trigger: 'meeting-ready', status, actions: [{ kind: 'webhook', target: 'x', status, ...(detail ? { detail } : {}) }] })}\n`;
+    writeFileSync(join(libraryDir, 'automation-runs.jsonl'), run('skipped', 'Waiting for your approval. To be asked now: seashell automations run m "Save"'));
+    expect((await statuses()).automations).toMatchObject({ state: 'attention', summary: '1 on · waiting for you' });
+    writeFileSync(join(libraryDir, 'automation-runs.jsonl'), run('failed', 'HTTP 500'));
+    expect((await statuses()).automations).toMatchObject({ state: 'broken', summary: '1 on · last run failed' });
+    writeFileSync(join(home, 'Automations', 'save.md'), '---\nname: Save\nenabled: false\n---\n- write: ~/Notes\n');
+    expect((await statuses()).automations).toMatchObject({ state: 'off', summary: '1 · all off' });
+  } finally {
     rmSync(home, { recursive: true, force: true });
   }
 });
