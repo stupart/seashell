@@ -96,9 +96,9 @@ import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { setupDiarization } from './diarization-setup.ts';
 import { compareSavedSpeakers, renderSpeakerComparison } from './speaker-compare.ts';
-import { forgetVoiceprint, listVoiceprints } from './voiceprints.ts';
+import { listVoiceprints } from './voiceprints.ts';
 import { initializeFirstInstall } from './first-install.ts';
-import { SCREEN_CAPTURE_HELPER, screenCapturePermission } from './video-capture.ts';
+import { SCREEN_CAPTURE_HELPER, screenCapturePermission, screenFilmedNotifier } from './video-capture.ts';
 import { clearVideoRequest, DEFAULT_MEETING_VIDEO, startRecordingWithVideo } from './video-recording.ts';
 import { openMeetingVideo } from './video-meeting.ts';
 import { testMeetingAi, type MeetingAiRole } from './humain-client.ts';
@@ -107,14 +107,16 @@ import { ensureExtractorsDirectory, loadExtractors, runAutomaticExtractors, runE
 import {
   afterMeetingReady,
   askAutomationApprovalWithDialog,
+  automationApprovalNote,
   automationDecision,
+  automationNeedsApproval,
   ensureAutomationsDirectory,
   loadAutomations,
   readAutomationRuns,
   runAutomations,
 } from './automations.ts';
 import { queryNotes } from './meeting-memory.ts';
-import { cleanPhantoms } from './transcript-edits.ts';
+import { cleanPhantoms, forgetPersonVoice } from './transcript-edits.ts';
 import { claimOwnerAndDue, type MeetingAttendee } from './meeting-artifact.ts';
 import type { MeetingIntelligenceCommand } from './cli-args.ts';
 
@@ -850,6 +852,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       if (process.env.XPC_SERVICE_NAME === SEASHELL_LAUNCH_AGENT_LABEL && !once) {
         void microphoneUpdateNotice().then((message) => { if (message) notify(message); }).catch(() => {});
       }
+      const notifyScreenFilmed = screenFilmedNotifier(notify);
       const controller = new AbortController();
       const stop = () => controller.abort();
       process.once('SIGINT', stop);
@@ -893,7 +896,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
           ...(!once ? { dependencies: { askToRecord: askToRecordWithDialog } } : {}),
           onEvent: (event) => {
             // Like the dialog, the notice is for someone at the Mac, not a one-shot check.
-            if (!once) { notifyOneSided(event); notifyMicrophone(event); }
+            if (!once) { notifyOneSided(event); notifyMicrophone(event); notifyScreenFilmed(event); }
             // The same warning at most once per 10 minutes, with how often it recurred.
             let repeats = 0;
             if (event.type === 'watch.warning') {
@@ -1239,8 +1242,10 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
     }
     case 'speaker-voices': {
       if (command.forget !== undefined) {
-        if (!forgetVoiceprint(command.forget)) throw new Error(`Sea Shell doesn't know a voice called "${command.forget}". See: seashell speakers voices`);
-        print(command.json ? JSON.stringify({ forgotten: command.forget }) : `Forgot ${command.forget}'s voice. Past transcripts keep the name.`);
+        const result = forgetPersonVoice(resolveLibraryDir(undefined, process.env, loadConfig()), command.forget);
+        if (!result.forgotten) throw new Error(`Sea Shell doesn't know a voice called "${command.forget}". See: seashell speakers voices`);
+        print(command.json ? JSON.stringify({ forgotten: command.forget, suggestionsUndone: result.suggestionsUndone })
+          : `Forgot ${command.forget}'s voice. Names you gave keep it; ${result.suggestionsUndone === 1 ? '1 name Seashell suggested goes' : `${result.suggestionsUndone} names Seashell suggested go`} back to a number.`);
         return 0;
       }
       const people = listVoiceprints();
@@ -1404,13 +1409,14 @@ async function executeMeetingIntelligence(command: MeetingIntelligenceCommand): 
         `Automations: ${directory}`,
         ...automations.map((automation) => {
           const last = runs.filter((run) => run.automation === automation.name).at(-1);
-          const outward = automation.actions.some((action) => action.kind === 'shell' || action.kind === 'webhook');
+          const outward = automationNeedsApproval(automation, libraryDir);
           const decision = automationDecision(automation);
-          return `  ${automation.name} — ${automation.enabled ? 'on' : 'off'} · ${automation.actions.map((action) => action.kind).join(', ')}` +
+          return `  ${automation.name} — ${automation.enabled ? 'on' : automation.by === 'agent' ? 'off: made by an agent; turn on in the file' : 'off'} · ${automation.actions.map((action) => action.kind).join(', ')}` +
             `${outward ? ` · ${decision === 'allow' ? 'allowed to send' : decision === 'deny' ? 'not allowed to send' : 'asks before sending'}` : ''}` +
             `${last ? ` · last run ${last.status} ${last.at.slice(0, 10)}` : ''}`;
         }),
         ...problems.map((problem) => `  ✗ ${problem.path}: ${problem.message}`),
+        ...(automations.some((automation) => automationNeedsApproval(automation, libraryDir)) ? [automationApprovalNote()].flatMap((note) => note ?? []) : []),
         `Runs are logged in ${join(libraryDir, 'automation-runs.jsonl')}. Run them for one meeting: seashell automations run <meeting-id>`,
       ].join('\n'));
       return problems.length ? 1 : 0;

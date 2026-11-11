@@ -88,6 +88,11 @@ export function meetingApps(): ReadonlyArray<{ id: string; name: string; bundleI
   return APP_PATTERNS.map(({ id, name, bundleIds }) => ({ id, name, bundleIds }));
 }
 
+/** Browsers' bundle IDs: a call in one is a tab, so its window is filmed only while that tab shows. */
+export function browserBundleIds(): string[] {
+  return APP_PATTERNS.filter((app) => app.kind === 'browser').flatMap((app) => app.bundleIds);
+}
+
 const APP_PATTERNS: readonly AppPattern[] = Object.freeze([
   {
     id: 'zoom',

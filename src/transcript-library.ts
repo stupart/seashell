@@ -16,7 +16,7 @@ import type { TranscriptFormat, TranscriptRecord } from './transcript-types.ts';
 import { archiveMeetingTranscript, synchronizeMeetingTranscript } from './meeting-artifact.ts';
 import { readBackgroundMeetingState, readBackgroundMeetingStatus, type BackgroundMeetingState, type BackgroundDraftStatus } from './background-meeting-status.ts';
 import { readCaptureHealth, type CaptureHealthSnapshot } from './capture-health.ts';
-import { rememberVoice } from './voiceprints.ts';
+import { forgetMeetingVoices, rememberVoice } from './voiceprints.ts';
 
 export interface TranscriptLibraryEntry {
   id: string;
@@ -334,6 +334,8 @@ export function renameTranscriptSpeaker(
   transcriptId: string,
   speakerId: string,
   label: string,
+  /** learnVoice false: a name that must not teach the voice library, such as an agent's. */
+  options: { learnVoice?: boolean } = {},
 ): TranscriptRecord {
   const trimmed = label.trim();
   if (!trimmed) throw new Error('Speaker name cannot be empty');
@@ -351,7 +353,7 @@ export function renameTranscriptSpeaker(
   record.updatedAt = new Date().toISOString();
   saveTranscriptRecord(libraryDir, record, { namesOnly: { from: previous, to: trimmed } });
   // The name teaches the local voice library this voice (src/voiceprints.ts).
-  rememberVoice(record, speakerId, trimmed);
+  if (options.learnVoice !== false) rememberVoice(record, speakerId, trimmed);
   return record;
 }
 
@@ -373,7 +375,7 @@ export function writeTranscriptExport(
 }
 
 export function trashTranscriptRecord(libraryDir: string, transcriptId: string): string {
-  const { path } = findTranscriptRecord(libraryDir, transcriptId);
+  const { path, record } = findTranscriptRecord(libraryDir, transcriptId);
   const sourceDirectory = dirname(path);
   const captureState = readBackgroundMeetingState(sourceDirectory);
   if (captureState === 'recording' || captureState === 'processing') {
@@ -386,6 +388,8 @@ export function trashTranscriptRecord(libraryDir: string, transcriptId: string):
     `${basename(sourceDirectory)}--${Date.now()}`,
   );
   renameSync(sourceDirectory, target);
+  // Its voices waiting to be named go with it; voices already in a person's print stay theirs.
+  try { forgetMeetingVoices(record.id, { fromPrints: false }); } catch { /* Voices expire in 90 days anyway. */ }
 
   // Remove an empty date directory, but never recurse beyond that exact parent.
   const dateDirectory = dirname(sourceDirectory);

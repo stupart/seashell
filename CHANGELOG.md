@@ -2,6 +2,44 @@
 
 ## Unreleased — watch a call back, and notes that do more
 
+**Security and privacy**
+
+An outside review of rc33 found these. All are fixed.
+
+- **Automations can't overwrite your files.** A `write` action never replaces
+  a file Seashell didn't write, and never writes through a link; when a file is
+  already there, the notes go beside it as `… (2).md`. Its files are readable
+  only by you. A meeting's title can no longer point a `write` at another
+  folder. Writing outside the Sea Shell folder asks you first, as `shell` and
+  `webhook` do.
+- **An agent can't turn an automation on.** One an agent adds or changes
+  through the meetings server is saved off. Read it, then turn it on in its
+  file. Settings shows it as "Off: made by an agent".
+- **Approvals can't be forged.** Your answers to automation dialogs are signed
+  with a key in your login Keychain. Editing the script a `shell` action runs
+  asks again, and the dialog shows which file runs. Commands get only `PATH`,
+  `HOME`, `LANG`, `TMPDIR` and the meeting's variables. The dialog shows a
+  command exactly as it will run: hidden and right-to-left characters can't
+  disguise it. Each automation asks once more after this update.
+- **Webhooks go only where the file says.** https only, never on to a redirect,
+  and never to this Mac or your local network unless the file names that
+  address itself.
+- **Video never films your screen in place of the call.** With no call window,
+  the audio records alone and Seashell looks for the window every 30 seconds.
+  A browser is filmed only while its tab shows the call; another tab pauses the
+  video. The title line says what is filmed. Only `seashell record --video
+  --display N` films a whole display, and then you get a notification. macOS
+  asks once more for Screen Recording for the updated helper.
+- **Private means private.** A meeting whose settings can't be read counts as
+  private. Seashell checks again just before each automation action, so a
+  meeting made private mid-run sends nothing more.
+- **Voices are kept only as long as needed.** A private meeting keeps no
+  voices. Voices nobody named go after 90 days, and a meeting moved to the
+  Trash loses its own. Forgetting a person removes their voice from every
+  meeting, and names Seashell suggested from it go back to a number.
+- **A name an agent gives a speaker doesn't teach Seashell their voice**, and
+  the old transcript is kept in the meeting's history.
+
 **Video**
 
 - Calls now record their window beside the audio: the Meet tab, or the Zoom,

@@ -10,3 +10,8 @@ test('tests never touch the installed runtime helpers', () => {
   expect(meetingRuntimeHostPath().startsWith(installed)).toBe(false);
   expect(microphoneRuntimeHelperPath()).toBe(join(process.env.SEASHELL_RUNTIME_DIR!, 'Seashell Microphone'));
 });
+
+test('tests never reach the login Keychain', () => {
+  // Automation approval keys would otherwise be read from, or added to, the real one.
+  expect(process.env.SEASHELL_APPROVAL_KEYCHAIN).toBe('off');
+});

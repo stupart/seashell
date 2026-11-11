@@ -224,6 +224,12 @@ function captureRoot(libraryDir: string): string {
   return join(resolve(libraryDir), '_Capture');
 }
 
+/** The library whose capture store holds this manifest; undefined once the capture sits beside its meeting. */
+export function captureStoreLibrary(manifestPath: string): string | undefined {
+  const store = dirname(dirname(resolve(manifestPath)));
+  return captureRoot(dirname(store)) === store ? dirname(store) : undefined;
+}
+
 function sessionRoot(libraryDir: string, sessionId: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(sessionId)) throw new Error('Capture session ID is unsafe');
   return join(captureRoot(libraryDir), sessionId);

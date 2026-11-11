@@ -14,6 +14,7 @@ import {
   saveTranscriptRecord,
 } from './transcript-library.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
+import { forgetVoiceprint, sameVoiceName } from './voiceprints.ts';
 
 /**
  * Changes to a saved transcript that keep its notes: a corrected line, a
@@ -69,11 +70,16 @@ export function editTranscriptSegment(
   return { id: record.id, segmentId, before, after };
 }
 
-/** Name a speaker by ID or by the label they have now ("Remote speaker 1"). */
+/**
+ * Name a speaker by ID or by the label they have now ("Remote speaker 1"), as
+ * an agent does through the meetings server. The transcript as it was is kept
+ * in history, and the name never teaches the voice library: an agent's name
+ * is a reading of the transcript, not the owner knowing the voice.
+ */
 export function renameMeetingSpeaker(
   libraryDir: string, transcriptId: string, speaker: string, name: string,
 ): { id: string; speakerId: string; from: string; to: string } {
-  const { record } = findTranscriptRecord(libraryDir, transcriptId);
+  const { path, record } = findTranscriptRecord(libraryDir, transcriptId);
   const wanted = speaker.trim().toLocaleLowerCase('en-US');
   const found = record.speakers.find((candidate) => candidate.id === speaker.trim())
     ?? record.speakers.find((candidate) => candidate.label.toLocaleLowerCase('en-US') === wanted);
@@ -81,8 +87,36 @@ export function renameMeetingSpeaker(
     throw new Error(`No speaker "${speaker}" in this meeting. Speakers: ${record.speakers.map((candidate) => `${candidate.label} (${candidate.id})`).join(', ') || 'none'}`);
   }
   const from = found.label;
-  renameTranscriptSpeaker(libraryDir, record.id, found.id, name);
+  if (!name.trim()) throw new Error('Speaker name cannot be empty');
+  assertNotCapturing(dirname(path));
+  keepTranscriptHistory(dirname(path), JSON.parse(readFileSync(path, 'utf8')) as TranscriptRecord, 'renamed-speaker');
+  renameTranscriptSpeaker(libraryDir, record.id, found.id, name, { learnVoice: false });
   return { id: record.id, speakerId: found.id, from, to: name.trim() };
+}
+
+/**
+ * Forget a person's voice: their voiceprint, their voice in every meeting
+ * where a speaker bears their name, and the names Seashell suggested from the
+ * print, which go back to the number they had. Names Tyler gave stay.
+ */
+export function forgetPersonVoice(
+  libraryDir: string, name: string, env: NodeJS.ProcessEnv = process.env,
+): { forgotten: boolean; suggestionsUndone: number } {
+  const speakers: Array<{ transcriptId: string; speakerId: string }> = [];
+  let suggestionsUndone = 0;
+  for (const entry of listTranscriptRecords(libraryDir)) {
+    let record: TranscriptRecord;
+    try { record = findTranscriptRecord(libraryDir, entry.id).record; } catch { continue; }
+    for (const speaker of record.speakers.filter((candidate) => sameVoiceName(candidate.label, name))) {
+      speakers.push({ transcriptId: record.id, speakerId: speaker.id });
+      if (speaker.suggestion?.source !== 'voice') continue;
+      try {
+        renameTranscriptSpeaker(libraryDir, record.id, speaker.id, speaker.suggestion.previous, { learnVoice: false });
+        suggestionsUndone += 1;
+      } catch { /* Still recording or processing: its label stays as it is. */ }
+    }
+  }
+  return { forgotten: forgetVoiceprint(name, env, speakers), suggestionsUndone };
 }
 
 export interface PhantomCleanup {

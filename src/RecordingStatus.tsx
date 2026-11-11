@@ -1,4 +1,4 @@
-import type { CaptureHealthSnapshot, CaptureSourceHealth } from './capture-health.ts';
+import type { CaptureHealthSnapshot, CaptureSourceHealth, CaptureVideoHealth } from './capture-health.ts';
 import type { Hint } from './tui-chrome.tsx';
 
 export type RecordingMode = 'watching' | 'awaiting-consent' | 'starting' | 'recording' | 'no-audio' | 'paused' | 'processing' | 'ready' | 'unavailable';
@@ -124,6 +124,15 @@ function warningAlert(warning: string): { text: string; short?: string; fix?: Hi
   return { text: whole.length <= 56 ? whole : cut(first, 56), short: cut(first, 32) };
 }
 
+/** What the video films while a call records: always said, so it is never a surprise. */
+export function videoStatus(video: CaptureVideoHealth | undefined): string | undefined {
+  if (!video) return undefined;
+  if (video.state === 'recording') return video.filming ? `Filming ${video.filming}` : 'Filming the call';
+  if (video.state === 'waiting') return 'Not filming: no call window showing';
+  if (video.state === 'starting') return 'Video starting…';
+  return video.state === 'unavailable' ? 'No video' : undefined;
+}
+
 /**
  * One line for the title bar: capture, audible signal, durable save and text
  * generation stay distinct, but only what is wrong takes up rows. "Recording"
@@ -142,16 +151,19 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
     : props.mode === 'starting' ? 'Starting recording…'
     : props.mode === 'processing' ? 'Call ended'
     : props.mode === 'ready' ? attention ? 'Saved · audio needs review' : 'Saved · transcript ready'
-    : `● Recording ${recordingClock(props.elapsedSeconds)}`;
+    // Filming a whole display is said in the title itself, where nothing cuts it off.
+    : `● Recording ${recordingClock(props.elapsedSeconds)}${props.health?.video?.screenFilmed ? ' · filming the whole screen' : ''}`;
   const headline = props.title ? `${label} · ${props.title}` : label;
   const showSources = ['starting', 'recording', 'no-audio', 'processing', 'ready'].includes(props.mode);
   const mic = sourceLabel(props.health?.microphone, finished, now, props.health?.coverage?.yourSideMissing);
   const computer = sourceLabel(props.health?.systemAudio, finished, now).replace('check if speaking', 'check if others are speaking');
   const healthy = (value: string) => ['sound detected', 'sound captured', 'off'].includes(value);
   // Once the call is over, how far the audio got only matters when it did not all arrive.
-  const saved = props.mode === 'processing' ? 'Audio saved · writing notes'
+  const audio = props.mode === 'processing' ? 'Audio saved · writing notes'
     : props.savedThroughSeconds === undefined ? 'Saved audio: not confirmed'
     : props.savedThroughSeconds > 0 ? `Audio saved through ${recordingClock(props.savedThroughSeconds)}` : 'Waiting for the first audio save…';
+  const video = finished ? undefined : videoStatus(props.health?.video);
+  const saved = video ? `${audio} · ${video}` : audio;
   const micBad = showSources && attention && !healthy(mic);
   const computerBad = showSources && attention && !healthy(computer);
   const failing = [

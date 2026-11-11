@@ -14,7 +14,7 @@ import {
   pcmS16leToWav,
   type StartSystemAudioOptions,
 } from '../src/live-system-audio.ts';
-import { startVideoTrack, type VideoCaptureRequest, type VideoCaptureResult } from '../src/video-capture.ts';
+import { screenFilmedNotifier, startVideoTrack, type VideoCaptureRequest, type VideoCaptureResult } from '../src/video-capture.ts';
 
 const roots: string[] = [];
 
@@ -349,4 +349,32 @@ test('without a video request no video starts', async () => {
   await handle.stop();
   expect(started).toBe(false);
   expect(statuses.every((status) => status.video === undefined)).toBe(true);
+});
+
+test('what the video films is saved with the capture health, and a filmed screen is said as a notice once per meeting', async () => {
+  const libraryDir = mkdtempSync(join(tmpdir(), 'seashell-durable-video-filming-'));
+  roots.push(libraryDir);
+  const warnings: string[] = [];
+  const handle = startDurableLiveCapture({
+    libraryDir, sessionId: 'screen', systemAudio: false,
+    microphoneStarter: microphoneWithOneChunk(libraryDir),
+    video: { target: { kind: 'display', display: 1 }, fps: 2, quality: 'medium' },
+    videoStarter: (options) => startVideoTrack({ ...options, starter: (run) => {
+      run.onTarget?.({ kind: 'display', name: 'display 1, the whole screen' });
+      let finish: (result: VideoCaptureResult) => void = () => {};
+      return { done: new Promise((resolve) => { finish = resolve; }),
+        stop: () => finish({ saved: false, reason: 'no-frames', message: 'none', requestedStop: true }) };
+    } }),
+    onError: (error) => warnings.push(error.message),
+  });
+  expect(handle.health?.video).toEqual({ state: 'starting', filming: 'display 1, the whole screen', screenFilmed: true });
+  expect(readCaptureHealth(handle.store.root)?.video?.screenFilmed).toBe(true);
+  expect(warnings).toEqual(['Seashell is filming your whole screen (display 1) for this recording, as asked: everything on it is in the video.']);
+  await handle.stop();
+
+  const notices: string[] = [];
+  const notify = screenFilmedNotifier((message) => notices.push(message));
+  const event = { type: 'watch.warning', message: warnings[0] };
+  for (const next of [{ type: 'meeting.started' }, event, event, { type: 'watch.warning', message: 'Microphone is quiet.' }, { type: 'meeting.started' }, event]) notify(next);
+  expect(notices).toEqual([warnings[0]!, warnings[0]!]);
 });

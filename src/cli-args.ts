@@ -1043,7 +1043,7 @@ Usage:
   seashell automations [--json]             What runs when a meeting is ready, and its recent runs
   seashell automations run <id> [<name>]    Run automations for one meeting now
   seashell record [stop]                    Record now, by hand, or stop the recording
-  seashell record --video [--window <app> | --display <n>]  Record by hand with video of a call, app or screen
+  seashell record --video [--window <app> | --display <n>]  Record by hand with video of the call's window, an app, or a whole display
   seashell meeting video <id> [--at 12:34]  Watch a meeting's video beside its transcript
   seashell meeting video on|off             Record the call's window with each call (or: <app> on|off)
   seashell meeting apps [<app> on|off|ask]  Which apps record by themselves, ask first, or never

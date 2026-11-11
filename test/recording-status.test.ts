@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { CaptureHealthTracker } from '../src/capture-health.ts';
+import { CaptureHealthTracker, parseCaptureHealth } from '../src/capture-health.ts';
 import { captureRecordingMode, recordingNeedsAttention, recordingSummary } from '../src/RecordingStatus.tsx';
 
 test('record intent and helper readiness cannot claim capture before PCM arrives', () => {
@@ -105,4 +105,25 @@ test('the title slot gets the most urgent problem in a few words, its key apart:
   // After the call: audio is safe and the notes are coming, not how far the audio got.
   expect(recordingSummary({ mode: 'processing', title: 'Design review', savedThroughSeconds: 110 }))
     .toMatchObject({ headline: 'Call ended · Design review', detail: 'Audio saved · writing notes' });
+});
+
+test('while a call records, the status says what the video films, and a whole screen in the title itself', () => {
+  const health = new CaptureHealthTracker({ nowUnixMs: 1000 });
+  health.pcm('microphone', undefined, true, 1001);
+  health.video('starting', { kind: 'window', name: 'the Google Meet window' }, 1002);
+  health.video('recording', undefined, 1003);
+  const summary = (snapshot = health.snapshot) => recordingSummary({ mode: 'recording', health: snapshot, savedThroughSeconds: 12, elapsedSeconds: 20, nowUnixMs: 1004 });
+  expect(summary().detail).toBe('Audio saved through 0:12 · Filming the Google Meet window');
+  expect(summary().label).toBe('● Recording 0:20');
+  health.video('waiting', undefined, 1005);
+  expect(summary().detail).toBe('Audio saved through 0:12 · Not filming: no call window showing');
+  // Only ever asked for, and said where nothing cuts it off, for the rest of the recording.
+  health.video('recording', { kind: 'display', name: 'display 1, the whole screen' }, 1006);
+  expect(summary().detail).toBe('Audio saved through 0:12 · Filming display 1, the whole screen');
+  expect(summary().label).toBe('● Recording 0:20 · filming the whole screen');
+  // It survives the trip through capture-health.json to the window showing it.
+  const saved = parseCaptureHealth(JSON.parse(JSON.stringify(health.snapshot)));
+  expect(saved?.video).toEqual({ state: 'recording', filming: 'display 1, the whole screen', screenFilmed: true });
+  expect(summary(saved).label).toBe('● Recording 0:20 · filming the whole screen');
+  expect(parseCaptureHealth({ ...health.snapshot, video: { state: 'filming the bank' } })).toBeUndefined();
 });

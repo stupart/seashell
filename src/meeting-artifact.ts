@@ -17,6 +17,7 @@ import { findTranscriptRecord } from './transcript-library.ts';
 import { renderSrt, renderText, renderVtt } from './transcript-renderer.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 import { compareMeetingEvidence, meetingEvidence, parseMeetingEvidence, type MeetingEvidence } from './meeting-evidence.ts';
+import { forgetMeetingVoices } from './voiceprints.ts';
 
 export const MEETING_CLAIM_TYPES = [
   'speaker_identity',
@@ -436,16 +437,25 @@ export function readMeetingAiSettings(libraryDir: string, transcriptId: string):
   }
 }
 
-/** The same, for a transcript folder already in hand. */
+/**
+ * The same, for a transcript folder already in hand. A meeting.json that is
+ * there but can't be read might have said AI is off, so it reads as off: when
+ * in doubt, nothing is shared, and the owner can turn AI back on.
+ */
 export function readMeetingAiSettingsAt(directory: string): MeetingAiSettings | undefined {
+  const path = join(directory, 'meeting.json');
+  if (!existsSync(path)) return undefined;
   try {
-    const path = join(directory, 'meeting.json');
-    if (!existsSync(path)) return undefined;
     const ai = parseAiSettings((JSON.parse(readFileSync(path, 'utf8')) as { ai?: unknown }).ai);
     return ai && Object.keys(ai).length ? ai : undefined;
   } catch {
-    return undefined;
+    return { off: true };
   }
+}
+
+/** Whether the owner turned AI off for the meeting in this folder, or its settings can't be read to tell. */
+export function meetingIsPrivateAt(directory: string): boolean {
+  return readMeetingAiSettingsAt(directory)?.off === true;
 }
 
 export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): MeetingArtifact {
@@ -687,6 +697,8 @@ export function saveMeetingArtifact(
   artifact.updatedAt = new Date().toISOString();
   atomicWrite(join(directory, 'meeting.json'), `${JSON.stringify(artifact, null, 2)}\n`);
   writeMeetingProjections(directory, artifact, record);
+  // A private meeting keeps no voices, from the moment it is saved as private.
+  if (artifact.ai?.off) forgetMeetingVoices(artifact.transcriptId);
   return directory;
 }
 

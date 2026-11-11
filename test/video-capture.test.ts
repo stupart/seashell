@@ -43,8 +43,12 @@ const writeSidecar = (finished, extra = {}) => fs.writeFileSync(sidecar, JSON.st
   target: { kind: 'window', app: 'zoom.us', bundleId: 'us.zoom.xos', title: 'Zoom Meeting (private)' }, ...extra }));
 if (mode === 'permission') { emit({ type: 'error', code: 'permission', message: 'Screen Recording is off.' }); process.exit(77); }
 if (mode === 'args') { fs.writeFileSync(output + '.args', JSON.stringify(args)); }
-emit({ type: 'target', kind: 'window', app: 'zoom.us', bundleId: 'us.zoom.xos', width: 1920, height: 1080 });
-if (mode === 'fallback') emit({ type: 'target', kind: 'display', display: 1, note: 'No window of that app fits, so the main display is recorded.' });
+if (mode === 'no-window') { emit({ type: 'error', code: 'no-window', message: 'No call window is open to film.' }); process.exit(4); }
+if (mode === 'tab') {
+  emit({ type: 'target', kind: 'window', app: 'Google Chrome', bundleId: 'com.google.Chrome', call: 'Google Meet', title: 'Meet - abc-defg-hij' });
+  setTimeout(() => emit({ type: 'waiting', message: 'The browser is showing another tab, so the video is paused until the call shows again.' }), 40);
+  setTimeout(() => emit({ type: 'target', kind: 'window', app: 'Google Chrome', bundleId: 'com.google.Chrome', call: 'the call' }), 60);
+} else emit({ type: 'target', kind: 'window', app: 'zoom.us', bundleId: 'us.zoom.xos', width: 1920, height: 1080 });
 if (mode === 'no-frames') {
   process.on('SIGINT', () => { emit({ type: 'error', code: 'no-frames', message: 'No screen frames arrived.' }); process.exit(3); });
 } else {
@@ -80,6 +84,7 @@ function run(mode: string, options: { stopAfterMs?: number; stopTimeoutMs?: numb
   const root = temporary();
   const firstFrames: number[] = [];
   const warnings: string[] = [];
+  const events: string[] = [];
   const ready = () => {
     if (options.stopAfterMs !== undefined) setTimeout(() => handle.stop(), options.stopAfterMs);
   };
@@ -91,9 +96,11 @@ function run(mode: string, options: { stopAfterMs?: number; stopTimeoutMs?: numb
     command: fakeHelper(root, mode),
     onFirstFrame: (info) => firstFrames.push(info.firstFrameUnixMs),
     onWarning: (message) => { if (message === 'fake ready') ready(); else warnings.push(message); },
+    onTarget: (filming) => events.push(`${filming.kind}: ${filming.name}`),
+    onWaiting: (message) => events.push(`waiting: ${message}`),
     ...(options.stopTimeoutMs === undefined ? {} : { stopTimeoutMs: options.stopTimeoutMs }),
   });
-  return { root, handle, firstFrames, warnings };
+  return { root, handle, firstFrames, warnings, events };
 }
 
 test('helper arguments carry the window, the session clock and the settings', () => {
@@ -104,6 +111,9 @@ test('helper arguments carry the window, the session clock and the settings', ()
     outputPath: 'o', sidecarPath: 's', sessionStartedAtUnixMs: 1 }).slice(6)).toEqual(['--fps', '5', '--quality', 'low', '--display', '2']);
   expect(screenCaptureArguments({ request: { target: { kind: 'window', appName: 'Keynote', callWindowOnly: true }, fps: 2, quality: 'high' },
     outputPath: 'o', sidecarPath: 's', sessionStartedAtUnixMs: 1 }).slice(10)).toEqual(['--app-name', 'Keynote', '--call-window-only']);
+  expect(screenCaptureArguments({ request: { target: { kind: 'window', bundleIds: ['com.google.Chrome'], browserBundleIds: ['com.google.Chrome', 'com.apple.Safari'],
+    callTitle: ' Weekly sync ' }, fps: 2, quality: 'high' }, outputPath: 'o', sidecarPath: 's', sessionStartedAtUnixMs: 1 }).slice(10))
+    .toEqual(['--bundle-id', 'com.google.Chrome', '--browser-bundle-id', 'com.google.Chrome', '--browser-bundle-id', 'com.apple.Safari', '--call-title', 'Weekly sync']);
 });
 
 test('a stopped recording reports its first frame, then the finished movie from its sidecar', async () => {
@@ -139,12 +149,24 @@ test('a helper that will not stop is killed after its deadline, keeping its frag
   expect(result).toMatchObject({ saved: true, requestedStop: true, segment: { finished: false } });
 });
 
-test('falling back to the display is announced, and no frames means no movie', async () => {
-  const fallback = run('fallback', { stopAfterMs: 50 });
-  await fallback.handle.done;
-  expect(fallback.warnings).toEqual(['No window of that app fits, so the main display is recorded.']);
+test('with no call window the helper says so and films nothing; no frames means no movie', async () => {
+  const none = run('no-window');
+  const result = await none.handle.done;
+  expect(result.saved === false && [result.reason, result.message]).toEqual(['no-window', 'No call window is open, so nothing is filmed; the audio is recording.']);
+  expect([none.events, existsSync(join(none.root, '000001.mp4'))]).toEqual([[], false]);
   const empty = run('no-frames', { stopAfterMs: 0 });
   expect(await empty.handle.done).toMatchObject({ saved: false, reason: 'no-frames' });
+});
+
+test('what is filmed is named by the call, never the tab\'s title; another tab pauses it', async () => {
+  const zoom = run('normal', { stopAfterMs: 50 });
+  await zoom.handle.done;
+  expect(zoom.events).toEqual(['window: the Zoom window']);
+  const browser = run('tab', { stopAfterMs: 100 });
+  await browser.handle.done;
+  expect(browser.events).toEqual(['window: the Google Meet window',
+    'waiting: The browser is showing another tab, so the video is paused until the call shows again.', 'window: the call window']);
+  expect(browser.events.join(' ')).not.toContain('abc-defg-hij');
 });
 
 test('a missing helper resolves instead of throwing', async () => {
@@ -237,6 +259,30 @@ test('a video track gives up after a few restarts and never retries a permission
     onSegment: () => {}, onWarning: (message) => deniedWarnings.push(message) }).done;
   expect(denied.started).toHaveLength(1);
   expect(deniedWarnings).toEqual(['Turn on Screen Recording.']);
+});
+
+test('a video track with no call window records audio alone and looks again, never filming the display', async () => {
+  const root = temporary();
+  const noWindow: VideoCaptureResult = { saved: false, reason: 'no-window', message: 'No call window is open, so nothing is filmed; the audio is recording.', requestedStop: false };
+  const later: VideoCaptureResult = { saved: true, requestedStop: true, segment: { firstFrameUnixMs: 1_000_400, durationMs: 5_000, bytes: 9, finished: true } };
+  const { starter, started } = scriptedStarter([noWindow, noWindow, noWindow, noWindow, later]);
+  const states: VideoState[] = [];
+  const warnings: string[] = [];
+  const requests: VideoCaptureRequest[] = [];
+  const track = startVideoTrack({
+    request, sessionStartedAtUnixMs: 1_000_000, nextSegment: slots(root), windowRetryMs: 5, maxRestarts: 1,
+    starter: (options) => { requests.push(options.request); return starter(options); },
+    onSegment: () => {}, onState: (state) => { if (states.at(-1) !== state) states.push(state); }, onWarning: (message) => warnings.push(message),
+  });
+  const deadline = Date.now() + 5_000;
+  while (started.length < 5 && Date.now() < deadline) await Bun.sleep(5);
+  track.stop();
+  await track.done;
+  // Looking again is not a restart: four misses never use up the one restart allowed.
+  expect(started).toHaveLength(5);
+  expect(requests.every((value) => value.target.kind === 'window')).toBe(true);
+  expect(warnings).toEqual(['No call window is open, so nothing is filmed; the audio is recording. Seashell looks for the call window again every 30 seconds.']);
+  expect(states).toEqual(['starting', 'waiting', 'recording', 'stopped']);
 });
 
 test('a video track that cannot list its movie still records, and warns', async () => {

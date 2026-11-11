@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import { dirname, join } from 'path';
 import type { SpeakerVoice } from './diarize.ts';
@@ -11,11 +11,13 @@ import type { Speaker, TranscriptRecord } from './transcript-types.ts';
  *
  * Every separated speaker gets a voice embedding from native/bin/seashell-speakers
  * (community-1's embedding model, up to a minute of their clean speech). Each
- * meeting's unnamed voices are kept under Voices/meetings so that, when Tyler
- * names a speaker, that voice becomes part of the person's voiceprint under
- * Voices/people. Later meetings compare their remote voices with the prints and
- * suggest a name only for a close, unambiguous match. Nothing here is uploaded,
- * exported, or written into transcripts; forgetting a person deletes their print.
+ * meeting's unnamed voices are kept under Voices/meetings for 90 days so that,
+ * when Tyler names a speaker, that voice becomes part of the person's
+ * voiceprint under Voices/people. Later meetings compare their remote voices
+ * with the prints and suggest a name only for a close, unambiguous match.
+ * Nothing here is uploaded, exported, or written into transcripts. A private
+ * meeting keeps no voices, a meeting moved to the Trash loses its own, and
+ * forgetting a person deletes their print and their voice in every meeting.
  */
 
 export interface VoiceMatch {
@@ -61,6 +63,8 @@ export const VOICE_MATCH_MARGIN = 0.1;
 export const MIN_VOICE_SECONDS = 10;
 /** A print keeps the voices of this many meetings, the most recent first. */
 const SAMPLES_PER_PERSON = 20;
+/** A meeting's voices wait this long to be named; then they go, and only prints keep a voice. */
+export const MEETING_VOICES_DAYS = 90;
 
 export function voicesDirectory(env: NodeJS.ProcessEnv = process.env): string {
   if (env.SEASHELL_VOICES_DIR) return env.SEASHELL_VOICES_DIR;
@@ -72,6 +76,11 @@ export function voicesDirectory(env: NodeJS.ProcessEnv = process.env): string {
 
 function normalizedName(name: string): string {
   return name.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLocaleLowerCase('en-US');
+}
+
+/** Whether two names are the same person's, as voiceprints are looked up. */
+export function sameVoiceName(left: string, right: string): boolean {
+  return normalizedName(left) === normalizedName(right);
 }
 
 function personPath(directory: string, name: string): string {
@@ -161,6 +170,54 @@ export function saveMeetingVoices(
   writePrivate(meetingPath(voicesDirectory(env), transcriptId), file);
 }
 
+/** Take some speakers' voices out of a meeting's file, deleting it once none are left. */
+function dropMeetingVoices(directory: string, transcriptId: string, speakerIds: ReadonlySet<string>): void {
+  const file = readMeetingVoices(directory, transcriptId);
+  if (!file) return;
+  const voices = Object.fromEntries(Object.entries(file.voices).filter(([speakerId]) => !speakerIds.has(speakerId)));
+  if (Object.keys(voices).length === Object.keys(file.voices).length) return;
+  if (Object.keys(voices).length) writePrivate(meetingPath(directory, transcriptId), { ...file, voices });
+  else rmSync(meetingPath(directory, transcriptId), { force: true });
+}
+
+/** Take a meeting's voices out of every print, deleting a print left with none. */
+function dropFromPrints(directory: string, keep: (sample: VoiceSample) => boolean): void {
+  for (const { path, person } of people(directory)) {
+    const kept = person.samples.filter(keep);
+    if (kept.length === person.samples.length) continue;
+    if (kept.length) writePrivate(path, { ...person, samples: kept });
+    else rmSync(path, { force: true });
+  }
+}
+
+/**
+ * Forget the voices a meeting gave: its file of voices and, unless only the
+ * file should go (a meeting moved to the Trash), its voice in every print. A
+ * private meeting keeps none.
+ */
+export function forgetMeetingVoices(transcriptId: string, options: { fromPrints?: boolean } = {}, env: NodeJS.ProcessEnv = process.env): void {
+  const directory = voicesDirectory(env);
+  rmSync(meetingPath(directory, transcriptId), { force: true });
+  if (options.fromPrints !== false) dropFromPrints(directory, (sample) => sample.transcriptId !== transcriptId);
+}
+
+/** Delete meetings' voices older than MEETING_VOICES_DAYS. Run as each meeting is finalized. */
+export function forgetExpiredMeetingVoices(env: NodeJS.ProcessEnv = process.env, nowUnixMs = Date.now()): string[] {
+  const folder = join(voicesDirectory(env), 'meetings');
+  if (!existsSync(folder)) return [];
+  const oldest = nowUnixMs - MEETING_VOICES_DAYS * 86_400_000;
+  return readdirSync(folder).filter((name) => name.endsWith('.json')).flatMap((name) => {
+    const path = join(folder, name);
+    let saved: number;
+    try { saved = Date.parse((JSON.parse(readFileSync(path, 'utf8')) as MeetingVoicesFile).savedAt); } catch { saved = Number.NaN; }
+    // A file without a readable date is aged by when it was written.
+    if (!Number.isFinite(saved)) { try { saved = statSync(path).mtimeMs; } catch { return []; } }
+    if (saved >= oldest) return [];
+    rmSync(path, { force: true });
+    return [name.slice(0, -'.json'.length)];
+  });
+}
+
 function readMeetingVoices(directory: string, transcriptId: string): MeetingVoicesFile | undefined {
   try {
     const raw = JSON.parse(readFileSync(meetingPath(directory, transcriptId), 'utf8')) as MeetingVoicesFile;
@@ -197,12 +254,7 @@ export function rememberVoice(
 ): boolean {
   try {
     const directory = voicesDirectory(env);
-    for (const { path, person } of people(directory)) {
-      const kept = person.samples.filter((sample) => !(sample.transcriptId === record.id && sample.speakerId === speakerId));
-      if (kept.length === person.samples.length) continue;
-      if (kept.length) writePrivate(path, { ...person, samples: kept });
-      else rmSync(path, { force: true });
-    }
+    dropFromPrints(directory, (sample) => !(sample.transcriptId === record.id && sample.speakerId === speakerId));
     if (anonymousSpeakerLabel({ id: speakerId, label: name })) return false;
     const voice = readMeetingVoices(directory, record.id)?.voices[speakerId];
     if (!voice || !validEmbedding(voice.embedding) || voice.seconds < MIN_VOICE_SECONDS || !sameVoice(record, speakerId, voice)) return false;
@@ -279,10 +331,24 @@ export function listVoiceprints(env: NodeJS.ProcessEnv = process.env): Array<{ n
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Delete a person's voiceprint. Their name stays in past transcripts; their voice is forgotten. */
-export function forgetVoiceprint(name: string, env: NodeJS.ProcessEnv = process.env): boolean {
+/**
+ * Delete a person's voiceprint and their voice in each meeting it came from,
+ * plus `speakers`, the meetings' speakers that bear their name, so naming
+ * someone again can't bring the voice back. Use forgetPersonVoice, which also
+ * finds those speakers and undoes the names suggested from the print.
+ */
+export function forgetVoiceprint(
+  name: string, env: NodeJS.ProcessEnv = process.env, speakers: ReadonlyArray<{ transcriptId: string; speakerId: string }> = [],
+): boolean {
   const directory = voicesDirectory(env);
   const match = people(directory).find(({ person }) => normalizedName(person.name) === normalizedName(name));
+  const theirs = new Map<string, Set<string>>();
+  for (const { transcriptId, speakerId } of [...match?.person.samples ?? [], ...speakers]) {
+    theirs.set(transcriptId, (theirs.get(transcriptId) ?? new Set()).add(speakerId));
+  }
+  for (const [transcriptId, speakerIds] of theirs) {
+    try { dropMeetingVoices(directory, transcriptId, speakerIds); } catch { /* An unsafe ID never named a file. */ }
+  }
   if (!match) return false;
   rmSync(match.path, { force: true });
   return true;
