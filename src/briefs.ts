@@ -323,7 +323,7 @@ export async function makeBrief(libraryDir: string, upcoming: UpcomingMeeting, o
     },
     meetings,
     ...(instructions ? { instructions } : {}),
-    route: humainRouteRequest(options.route),
+    ...humainRouteRequest(options.route),
   };
   const idempotencyKey = stableKey(['brief', key, request]);
   const storeDir = join(briefsDirectory(libraryDir, env), '.humain');

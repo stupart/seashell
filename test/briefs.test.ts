@@ -112,7 +112,9 @@ test('a brief is asked for with the contract\'s shape, saved as Markdown with ci
     summary: 'Acme discovery call notes.', claims: [expect.objectContaining({ id: 'c1', evidenceSegmentIds: ['s000002'] })],
     // Only the lines the notes cite are sent.
     segments: [expect.objectContaining({ id: 's000002', text: 'Yes, by Friday.' })] }]);
-  expect(request.route).toEqual({ backend: 'codex', model: 'fixture' });
+  // Route fields sit at the top level, as on every meeting request.
+  expect(request).toMatchObject({ backend: 'codex', model: 'fixture' });
+  expect(request.route).toBeUndefined();
   expect(brief.path).toBe(join(env.SEASHELL_BRIEFS_DIR!, `${new Date(next.startsAt).getFullYear()}-11-20 ${String(new Date(next.startsAt).getHours()).padStart(2, '0')}00 Acme pilot kickoff.md`));
   const markdown = readFileSync(brief.path, 'utf8');
   expect(markdown).toContain('# Brief: Acme pilot kickoff');
