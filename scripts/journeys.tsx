@@ -484,9 +484,11 @@ function setupActions(mac: Mac): SettingsActions {
     // A pass is remembered beside the pretend settings, as the real check does.
     checkComputerAudio: async () => {
       (await import('../src/audio-checks.ts')).rememberAudioCheck('computer');
-      return { heard: true, refused: false, detail: 'Heard your Mac through Seashell System Audio. Meetings use it from the next call.' };
+      return { heard: true, refused: false, detail: 'Heard your Mac. Meetings use it from the next call.' };
     },
     openTemplates: () => {}, openFolder: () => {}, openFile: () => {},
+    // Trying an automation again never posts anywhere.
+    retryAutomation: async () => [],
   };
 }
 

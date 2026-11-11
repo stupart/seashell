@@ -92,7 +92,7 @@ test('a check the guided setup passed still counts after a restart, until someth
   const after = await byId({ lastMeeting: () => silent, audioChecks: () => earlier });
   expect(after['computer-audio']).toMatchObject({ state: 'attention', summary: 'Silent in last meeting' });
   expect(after['computer-audio']).toMatchObject({ action: 'check-computer-audio' });
-  expect(after['computer-audio']!.fix).toBe('Press Enter so Seashell hears computer audio directly.');
+  expect(after['computer-audio']!.fix).toBe('Enter plays a test sound to check it.');
   expect(after.microphone).toMatchObject({ state: 'attention', summary: 'Allowed · last meeting silent' });
   // With no meeting yet, a passed check is all the proof there is.
   const fresh = await byId({ lastMeeting: () => undefined, audioChecks: () => ({ computer: later.computer }) });
@@ -110,7 +110,8 @@ test('meetings heard with the inherited permission still count, and the check to
   const old = await byId({ lastMeeting: () => meeting(), systemAudioRecorderSince: since });
   expect(old['computer-audio']).toMatchObject({ state: 'ok', summary: 'Heard in last meeting', action: 'check-computer-audio',
     command: 'seashell meeting computer-audio setup' });
-  expect(old['computer-audio']!.fix).toBe('Press Enter so Seashell hears computer audio directly.');
+  // Recording works either way, so this is how to finish setup, not a warning.
+  expect(old['computer-audio']!.fix).toBe('Enter plays a test sound to finish setup.');
   // Confirmed at the Mac: nothing left to check.
   const tested = await byId({ lastMeeting: () => meeting(), systemAudioRecorderSince: since,
     audioChecks: () => ({ computer: '2026-02-02T09:00:00.000Z' }) });
@@ -139,7 +140,8 @@ test('passed checks are kept beside the settings file and read back', async () =
 test('a stopped recorder and missing optional setup each name their one next step', async () => {
   const statuses = await byId({ launchAtLogin: () => ({ enabled: false, loaded: false, label: '', plistPath: '', command: [] }), aiEngineInstalled: () => false });
   expect(statuses.recorder).toMatchObject({ state: 'broken', action: 'enable-recorder', command: 'seashell meeting autostart enable' });
-  expect(statuses['ai-notes']).toMatchObject({ state: 'off', summary: 'Not installed' });
+  // With no AI chosen, choosing one is the next step, not an engine nobody asked about.
+  expect(statuses['ai-notes']).toMatchObject({ state: 'off', summary: 'Not chosen', action: 'open-ai' });
   expect(statuses['speaker-separation']).toMatchObject({ state: 'off', command: 'seashell setup --speakers --login' });
   expect(statuses.calendar).toMatchObject({ state: 'off', action: 'allow-calendar', command: 'seashell meeting calendar setup' });
 });

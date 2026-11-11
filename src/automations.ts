@@ -369,6 +369,27 @@ export interface AutomationRun {
   detail?: string;
 }
 
+/** Who a web address belongs to, in the automation's own words: "Post to the CRM" posts to "The CRM". */
+function webhookName(automation: string, url: string): string {
+  const named = /^(?:post|send|push)(?:\s+\w+)?\s+to\s+(.+)$/iu.exec(automation.trim())?.[1];
+  if (named) return named.charAt(0).toUpperCase() + named.slice(1);
+  try { return `The server at ${new URL(url).hostname}`; } catch { return 'The server'; }
+}
+
+/**
+ * Why a run failed, in plain words, and whether trying again could help: a server that did not
+ * answer may next time, while one that refused it, or a broken command, needs its file fixed.
+ */
+export function runFailure(run: AutomationRun): { text: string; retry: boolean } | undefined {
+  if (run.status !== 'failed') return undefined;
+  const failed = run.actions.find((action) => action.status === 'failed');
+  const detail = run.detail ?? failed?.detail ?? 'It failed.';
+  if (failed?.kind !== 'webhook') return { text: detail, retry: false };
+  const who = webhookName(run.automation, failed.target);
+  const refused = /refused it \((\d+)\)/u.exec(detail);
+  return refused ? { text: `${who} refused it (${refused[1]}).`, retry: false } : { text: `${who} didn't answer.`, retry: true };
+}
+
 export function automationRunsPath(libraryDir: string): string {
   return join(libraryDir, 'automation-runs.jsonl');
 }

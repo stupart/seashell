@@ -238,6 +238,8 @@ export default function App(props: {
   const [returnTo, setReturnTo] = useState<'settings' | 'guide'>();
   const [guideFromSettings, setGuideFromSettings] = useState(false);
   const [attention, setAttention] = useState<FeatureStatus[]>([]);
+  /** Everything Settings checks, read once more whenever Settings or the guide closes. Speaker setup reads it too. */
+  const [featureStatuses, setFeatureStatuses] = useState<FeatureStatus[]>();
   const [setupNeeded, setSetupNeeded] = useState(false);
   const [aiSetupIntent, setAiSetupIntent] = useState<'notes' | 'chat' | null>(null);
   const libraryRoot = useMemo(
@@ -2245,6 +2247,7 @@ export default function App(props: {
     void readFeatureStatuses({ config, libraryDir: libraryRoot, signal: controller.signal })
       .then(statuses => {
         if (controller.signal.aborted) return;
+        setFeatureStatuses(statuses);
         setAttention(statuses.filter(status => !status.optional && (status.state === 'broken' ||
           (status.state === 'attention' && (status.id === 'microphone' && !heard?.microphone || status.id === 'computer-audio' && !heard?.computer)))));
         setSetupNeeded(statuses.some(status => (status.id === 'recorder' || status.id === 'microphone') && status.state !== 'ok' && Boolean(status.action)));
@@ -2317,8 +2320,10 @@ export default function App(props: {
     fromSettings={guideFromSettings}
     onClose={() => { setGuideOpen(false); if (guideFromSettings) setSettingsOpen(true); }} />;
 
+  const separation = featureStatuses?.find((status) => status.id === 'speaker-separation');
   if (speakerSetupOpen) return <SpeakerSettings columns={terminal.columns} rows={terminal.rows}
     modelSize={speakerModelSize(speakerEngine())}
+    {...(separation ? { ready: separation.state === 'ok' } : {})}
     recording={Boolean(activeBackgroundEntry) || (!paused && !listenerDisabled)}
     browser={config.meeting?.speakerBrowser ?? 'off'}
     meetStatus={meetSpeakerStatus}

@@ -22,7 +22,8 @@ import { join } from 'path';
 import { ensureTemplatesDirectory, PROFILE_FILE } from './meeting-templates.ts';
 import { ensurePromptsDirectory, listPrompts, resetPrompt, type PromptSummary } from './prompts.ts';
 import { ensureExtractorsDirectory, loadExtractors, type ExtractorWhen } from './extractors.ts';
-import { ensureAutomationsDirectory, loadAutomations, readAutomationRuns, type AutomationRun } from './automations.ts';
+import { askAutomationApprovalWithDialog, ensureAutomationsDirectory, loadAutomations, readAutomationRuns, runAutomations, runFailure,
+  type AutomationRun } from './automations.ts';
 import { forgetVoiceprint, listVoiceprints } from './voiceprints.ts';
 import { screenCapturePermission } from './video-capture.ts';
 import { checkComputerAudio, type ComputerAudioCheck } from './audio-levels.ts';
@@ -63,6 +64,8 @@ export interface SettingsActions {
   openFolder?: (directory: string) => void;
   /** A prompt, in the person's text editor. */
   openFile?: (path: string) => void;
+  /** Runs one automation again for the meeting whose run failed. */
+  retryAutomation?: (automation: string, meetingId: string, signal: AbortSignal) => Promise<AutomationRun[]>;
 }
 
 /** Opens a folder in Finder. */
@@ -223,8 +226,21 @@ export function useSetupActions(props: SetupActionProps & { onFinished?: () => v
     }
     return finished && !controller.signal.aborted;
   };
+  /** Work that is not one of the fixes above, with the same busy row, Esc to cancel, and message after. */
+  const task = async (text: string, work: (signal: AbortSignal) => Promise<SetupMessage>): Promise<void> => {
+    const controller = new AbortController(); request.current = controller;
+    setBusy(true); progress(text);
+    try {
+      const result = await work(controller.signal);
+      if (!controller.signal.aborted) setMessage(result);
+    } catch (cause) {
+      if (!controller.signal.aborted) failure(cause);
+    } finally {
+      if (!controller.signal.aborted) { setBusy(false); props.onFinished?.(); }
+    }
+  };
   const cancel = () => { request.current?.abort(); setBusy(false); };
-  return { run, busy, message, setMessage, done, failure, cancel };
+  return { run, task, busy, message, setMessage, done, failure, cancel };
 }
 
 // MARK: - Recording
@@ -414,9 +430,12 @@ export default function SettingsScreen(props: SetupActionProps & {
   const list = selected?.kind === 'recording' ? 'recording' as const
     : selected?.kind === 'status' && (selected.status.id === 'prompts' || selected.status.id === 'voices') ? selected.status.id : undefined;
   const listLength = list === 'recording' ? rows.length : list === 'prompts' ? files.prompts.length : list === 'voices' ? files.voices.length : 0;
+  // The latest run, when it failed only because a server did not answer: r tries it again.
+  const retryRun = selected?.kind === 'status' && selected.status.id === 'automations' && (!compact || inDetail)
+    && files.runs[0] && runFailure(files.runs[0])?.retry ? files.runs[0] : undefined;
   // Ink paints a frame before it swaps in the new input handler; read the latest state.
-  const latest = useRef({ selected, itemCount: items.length, rows, inDetail, rowIndex, config, list, listLength, files, confirm });
-  latest.current = { selected, itemCount: items.length, rows, inDetail, rowIndex, config, list, listLength, files, confirm };
+  const latest = useRef({ selected, itemCount: items.length, rows, inDetail, rowIndex, config, list, listLength, files, confirm, retryRun });
+  latest.current = { selected, itemCount: items.length, rows, inDetail, rowIndex, config, list, listLength, files, confirm, retryRun };
 
   const changeRow = (step: number) => {
     const { rows, rowIndex, config } = latest.current;
@@ -438,6 +457,14 @@ export default function SettingsScreen(props: SetupActionProps & {
     catch (cause) { setup.failure(cause); }
     setRefresh(value => value + 1);
   };
+  /** Runs a failed automation again for its meeting; the run it adds says how it went. */
+  const retry = (run: AutomationRun) => void setup.task(`Trying ${run.automation} again…`, async (signal) => {
+    const again = props.actions?.retryAutomation ?? ((automation: string, meetingId: string, abort: AbortSignal) =>
+      runAutomations(props.libraryDir, meetingId, { trigger: 'manual', only: automation, ask: askAutomationApprovalWithDialog, signal: abort }));
+    const [result] = await again(run.automation, run.meetingId, signal);
+    return !result || result.status === 'ok' ? { tone: 'done', text: `${run.automation} worked.` }
+      : { tone: 'failed', text: result.status === 'skipped' ? `${run.automation} did not run.` : `${run.automation} failed again.` };
+  });
   // Video is one switch: Enter turns it on, and asks macOS for Screen Recording if it must; Enter again turns it off.
   const switchVideo = (on: boolean) => {
     try {
@@ -450,7 +477,7 @@ export default function SettingsScreen(props: SetupActionProps & {
   };
 
   useInput((input, key) => {
-    const { selected, itemCount, rows, inDetail, list, listLength, rowIndex, files, confirm } = latest.current;
+    const { selected, itemCount, rows, inDetail, list, listLength, rowIndex, files, confirm, retryRun } = latest.current;
     if (setup.busy) {
       if (key.escape) setup.cancel();
       return;
@@ -498,6 +525,7 @@ export default function SettingsScreen(props: SetupActionProps & {
       }
       return;
     }
+    if (input === 'r' && retryRun) { retry(retryRun); return; }
     if (input === 'r') { setup.setMessage(undefined); setStatuses(undefined); setRefresh(value => value + 1); return; }
     if (!inDetail || !compact) {
       if (key.upArrow || input === 'k') { setIndex(value => Math.max(0, value - 1)); setup.setMessage(undefined); return; }
@@ -593,11 +621,12 @@ export default function SettingsScreen(props: SetupActionProps & {
         <Text dimColor>  Last runs</Text>
         {files.runs.map((run, i) => {
           const [symbol, color] = RUN_SYMBOL[run.status];
-          const why = run.detail ?? run.actions.find(action => action.status === run.status && action.detail)?.detail;
+          const why = runFailure(run)?.text ?? run.detail ?? run.actions.find(action => action.status === run.status && action.detail)?.detail;
+          const again = run === retryRun ? ' r tries again.' : '';
           // What went wrong gets a line of its own, so it is never cut to make room for the meeting.
           return <Box key={`${run.at}-${i}`} flexDirection="column" flexShrink={0}>
             <Text wrap="truncate-end"><Text color={color}>{symbol}</Text> {run.automation}<Text dimColor> · {run.title} · {meetingWhen(run.at)}</Text></Text>
-            {run.status !== 'ok' && why ? <Box paddingLeft={2}><Paragraph width={width - 2} color={color} text={why} /></Box> : null}
+            {run.status !== 'ok' && why ? <Box paddingLeft={2}><Paragraph width={width - 2} color={color} text={`${why}${again}`} /></Box> : null}
           </Box>;
         })}
       </Box>}
@@ -629,8 +658,10 @@ export default function SettingsScreen(props: SetupActionProps & {
       <Text color={FEATURE_STATE_COLOR[selected.status.state]} wrap="truncate-end">{FEATURE_STATE_SYMBOL[selected.status.state]} {selected.status.summary}</Text>)}
     <Box flexDirection="column" flexShrink={1} overflow="hidden">
       <Box marginTop={1} flexShrink={0}><Paragraph width={width} text={selected.status.detail} /></Box>
-      {selected.status.fix && <Box marginTop={1} flexShrink={0}>
-        <Paragraph width={width} color="yellow" text={`Next: ${selected.status.fix}`} /></Box>}
+      {/* Yellow only when something needs doing; on a row that works, it is a note. */}
+      {selected.status.fix && <Box marginTop={1} flexShrink={0}>{selected.status.state === 'ok'
+        ? <Paragraph width={width} text={selected.status.fix} />
+        : <Paragraph width={width} color="yellow" text={`Next: ${selected.status.fix}`} />}</Box>}
       {!selected.status.action && selected.status.state !== 'ok' && selected.status.command
         ? <Paragraph width={width} text={`Run: ${selected.status.command}`} /> : null}
       {['prompts', 'voices', 'extractors', 'automations'].includes(selected.status.id) &&
@@ -651,7 +682,7 @@ export default function SettingsScreen(props: SetupActionProps & {
         : video ? [['Enter', video.state === 'off' ? 'turn on' : 'turn off'] as Hint]
         : list === 'prompts' ? [['Enter', 'choose a prompt'] as Hint] : list === 'voices' && listLength ? [['Enter', 'choose someone'] as Hint]
         : action ? [['Enter', lowerFirst(FEATURE_ACTION_LABEL[action])] as Hint] : selected && testable(selected) ? [['Enter', 'test it now'] as Hint] : []),
-      ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ['r', 'recheck'], ['Esc', 'back'],
+      ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ['r', retryRun ? 'try again' : 'recheck'], ['Esc', 'back'],
     ];
   const titleRoom = props.columns - 2 - 14;
   const failed = setup.message?.tone === 'failed' ? setup.message.text : undefined;

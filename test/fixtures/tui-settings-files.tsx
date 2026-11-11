@@ -59,7 +59,7 @@ const app = render(<SettingsScreen config={loadConfig()} libraryDir={library} co
   actions={{ openFile: (path) => { opened.push(path); }, openFolder: (path) => { folders.push(path); },
     allowScreenRecording: async () => { screenRequests++; screenAllowed = true; return { authorization: 'authorized', detail: 'Allowed.' }; },
     checkComputerAudio: async () => { computerChecks++;
-      return { heard: true, refused: false, detail: 'Heard your Mac through Seashell System Audio. Meetings use it from the next call.' }; } }}
+      return { heard: true, refused: false, detail: 'Heard your Mac. Meetings use it from the next call.' }; } }}
   onConnectMeet={() => {}} onEnableCalendar={() => {}} onOpenSpeakers={() => {}} onOpenAI={() => {}} onClose={() => {}} />,
 { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
 const frame = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('Settings') - 4));
@@ -119,7 +119,8 @@ try {
   await until(() => frame().includes('Enter check computer audio'), 'computer audio offers the check');
   // Wide, the detail wraps beside the menu's border; read the words only.
   const words = () => frame().split('\n').map((line) => line.split('│').at(-1)!.trim()).join(' ').replace(/\s+/gu, ' ');
-  assert.ok(words().includes('Next: Press Enter so Seashell hears computer audio directly.'), words());
+  // It works already, so finishing setup is a note, not a yellow "Next:".
+  assert.ok(words().includes('Enter plays a test sound to finish setup.') && !words().includes('Next:'), words());
   await type(ENTER);
   await until(() => computerChecks === 1 && words().includes('Meetings use it from the next call'), 'Enter runs the check and says what it found');
   for (const line of frame().split('\n')) assert.ok(Bun.stringWidth(line) <= columns, `fits ${columns} columns: ${line}`);

@@ -143,7 +143,7 @@ export function checkComputerAudio(options: {
     stop = (options.source ?? computerLevels)({
       onLevel: (level) => {
         if (level.rmsDbfs >= COMPUTER_PASS.dbfs && ++loud >= COMPUTER_PASS.windows) {
-          finish({ heard: true, refused: false, detail: 'Heard your Mac through Seashell System Audio. Meetings use it from the next call.' });
+          finish({ heard: true, refused: false, detail: 'Heard your Mac. Meetings use it from the next call.' });
         }
       },
       onProblem: (problem) => finish(problem.kind === 'permission'
