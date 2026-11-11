@@ -9,8 +9,10 @@ import {
   type HumainMeetingRoute,
   type MeetingEngineCheck,
 } from './humain-client.ts';
-import { MeetingAiOffError, meetingIsPrivateAt, readMeetingArtifact, type MeetingArtifact } from './meeting-artifact.ts';
+import { MeetingAiOffError, meetingIsPrivateAt, readMeetingArtifact, type MeetingArtifact, type OwnerNote } from './meeting-artifact.ts';
 import { claimsForHumain, engineCheck, meetingSegments, ownerInstructions, retryableRun, runSafeId, stableKey } from './meeting-enrichment.ts';
+import { profileName } from './meeting-templates.ts';
+import { meetingOwnerNotes } from './owner-notes.ts';
 import { findTranscriptRecord } from './transcript-library.ts';
 
 /**
@@ -37,6 +39,8 @@ export interface FollowUpDraft {
   moments: Record<string, number>;
   /** Addresses for the email's To line: everyone invited, except you. */
   to: string[];
+  /** Who it is for, by name, for the app to show above the subject. */
+  names: string[];
 }
 
 export interface DraftOptions {
@@ -52,6 +56,37 @@ export interface DraftOptions {
 
 const DRAFT_TIMEOUT_MS = 6 * 60_000;
 const ASK_LIMIT = 1_000;
+/** Humain's limit for `draft.ask`, which carries your extra ask and then your notes. */
+const DRAFT_ASK_LIMIT = 2_000;
+const MY_NOTES = 'My notes: ';
+
+/**
+ * What you asked for, then what you typed about the meeting. Humain's draft takes no owner notes of
+ * its own, so they travel in the ask as "My notes:", whole notes first, the last one cut to fit.
+ */
+export function draftAsk(ask: string | undefined, notes: readonly Pick<OwnerNote, 'text'>[]): string | undefined {
+  const typed = notes.map((note) => note.text.replace(/\s+/gu, ' ').trim()).filter(Boolean);
+  if (!typed.length) return ask || undefined;
+  const lead = ask ? `${ask} ` : '';
+  const room = DRAFT_ASK_LIMIT - lead.length - MY_NOTES.length;
+  let joined = '';
+  for (const text of typed) {
+    const next = joined ? `${joined}; ${text}` : text;
+    if (next.length <= room) { joined = next; continue; }
+    if (!joined) joined = `${text.slice(0, room - 1)}…`;
+    break;
+  }
+  return `${lead}${MY_NOTES}${joined}`;
+}
+
+/** A sign-off left waiting for a name: "Talk soon,". */
+const DANGLING_SIGN_OFF = /^[^.!?\n]{1,40},$/u;
+
+/** "Talk soon," is signed with your name from About me, or left off: a sign-off with no name dangles. */
+function signOff(paragraphs: DraftParagraph[], name: string | undefined): DraftParagraph[] {
+  return paragraphs.flatMap((paragraph) => paragraph.kind !== 'closing' || !DANGLING_SIGN_OFF.test(paragraph.text) ? [paragraph]
+    : name ? [{ ...paragraph, text: `${paragraph.text} ${name}` }] : []);
+}
 
 function parseDraftOutput(value: unknown, kind: DraftKind, validIds: ReadonlySet<string>): Pick<FollowUpDraft, 'subject' | 'paragraphs'> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Humain draft output must be an object');
@@ -99,8 +134,10 @@ export async function draftFollowUp(
   if (!artifact) throw new Error('Make it a meeting first: m in Seashell, or seashell meeting create <id>.');
   const segments = meetingSegments(record);
   if (!segments.length) throw new Error('This meeting has no transcript text to write from.');
-  const ask = options.ask?.replace(/\s+/gu, ' ').trim();
-  if (ask && ask.length > ASK_LIMIT) throw new Error(`Keep the extra ask under ${ASK_LIMIT.toLocaleString('en-US')} characters.`);
+  const typedAsk = options.ask?.replace(/\s+/gu, ' ').trim();
+  if (typedAsk && typedAsk.length > ASK_LIMIT) throw new Error(`Keep the extra ask under ${ASK_LIMIT.toLocaleString('en-US')} characters.`);
+  // What you typed about the meeting, during the call or after it, so the email says what you just noted.
+  const ask = draftAsk(typedAsk, meetingOwnerNotes(libraryDir, record.id, artifact));
   if (await olderThanRevision4(engineCheck(options))) throw new OlderEngineError('This AI engine cannot write follow-ups yet.');
   const people = recipients(libraryDir, artifact);
   const audience = options.audience?.trim() || (people.names.length ? people.names.join(', ') : undefined);
@@ -129,12 +166,14 @@ export async function draftFollowUp(
       const message = error instanceof Error ? error.message : String(error);
       throw olderHumainEngine(message) ? new OlderEngineError('This AI engine cannot write follow-ups yet.') : error;
     });
-  const output = parseDraftOutput(result.output, kind, new Set(segments.map((segment) => segment.id)));
+  const parsed = parseDraftOutput(result.output, kind, new Set(segments.map((segment) => segment.id)));
+  const output = { ...parsed, paragraphs: signOff(parsed.paragraphs, profileName(libraryDir)) };
   const cited = new Set(output.paragraphs.flatMap((paragraph) => paragraph.evidenceSegmentIds));
   return {
     kind, meetingId: record.id, title: artifact.title, ...output,
     moments: Object.fromEntries(segments.filter((segment) => cited.has(segment.id)).map((segment) => [segment.id, segment.start])),
     to: kind === 'email' ? people.to : [],
+    names: people.names,
   };
 }
 

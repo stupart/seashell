@@ -1914,6 +1914,8 @@ export default function App(props: {
   const draftLines = draft ? sheetLines(draft.error ? [{ text: draft.error, color: 'red' }]
     : !draft.result ? [{ text: draft.kind === 'email' ? '◐ Writing the email…' : '◐ Writing the message…', dim: true }]
     : [
+      // Who it is for, dim, as a mail app shows it above the subject.
+      ...(draft.result.kind === 'email' && draft.result.names.length ? [{ text: `To: ${draft.result.names.join(', ')}`, dim: true }] : []),
       ...(draft.result.subject ? [{ text: `Subject: ${draft.result.subject}`, bold: true }, '' as const] : []),
       ...draft.result.paragraphs.flatMap((paragraph, index) => {
         const times = paragraph.evidenceSegmentIds.flatMap((id) => draft.result!.moments[id] === undefined ? [] : [draft.result!.moments[id]!])

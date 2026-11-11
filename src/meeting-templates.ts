@@ -197,6 +197,19 @@ export function loadProfile(libraryDir: string, env: NodeJS.ProcessEnv = process
   return profile || undefined;
 }
 
+/**
+ * Your first name, when About me says it: a `name:` line at its top, or "Name: Tyler", "My name is
+ * Tyler", "I'm Tyler" in its text. A follow-up signs off with it.
+ */
+export function profileName(libraryDir: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const path = join(templatesDirectory(libraryDir, env), PROFILE_FILE);
+  if (!existsSync(path)) return undefined;
+  const { fields, body } = parseFrontmatter(readFileSync(path, 'utf8'));
+  const named = typeof fields.name === 'string' && fields.name.trim() ? fields.name.trim()
+    : /(?:^|[\n.!?]\s*)(?:[Nn]ame\s*:\s*|[Mm]y name is\s+|I['’]m\s+|I am\s+)(\p{Lu}[\p{L}'’-]*)/u.exec(meaningful(body))?.[1];
+  return named?.split(/\s+/u)[0] || undefined;
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }

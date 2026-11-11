@@ -422,7 +422,10 @@ async function seed(library: string): Promise<void> {
         microphone: source, systemAudio: source,
         coverage: { yourSideAudibleSeconds: 20, otherSideAudibleSeconds: 2400, yourSideAudibleShare: 0.008, yourSideMissing: true } }));
     }
-    const artifact = createMeetingArtifact(record);
+    // The Acme call came from a calendar invite: a follow-up is addressed to everyone on it but you.
+    const artifact = createMeetingArtifact(record, id === 'demo-acme' ? { calendar: { provider: 'macos-eventkit', eventId: 'demo-acme-call', title,
+      startAt: record.createdAt, endAt: record.createdAt, calendar: 'you@example.com', attendees: [{ name: 'You', email: 'you@example.com' },
+        { name: 'Dana Whitfield', email: 'dana@acme.example' }, { name: 'Priya', email: 'priya@acme.example' }] } } : {});
     const typed = (noteId: string, text: string, at: number) => ({ id: noteId, text, at, addedAt: record.createdAt });
     if (id === 'demo-acme') artifact.ownerNotes = [typed('n1', 'Ask about the Canada question before the kickoff', 20), typed('n2', 'Priya cares most about admin controls', 52)];
     // Written by an engine too old for them, so they are listed as written.
@@ -528,6 +531,9 @@ function cannedAnswer(action: string, request: Record<string, any>): unknown {
       { kind: 'greeting', text: 'Hi Dana and Priya,', evidenceSegmentIds: [] },
       { kind: 'body', text: 'Thanks for the time today. The per-seat price works for you, and the data stays on your own machines.', evidenceSegmentIds: cite('s000001', 's000003') },
       { kind: 'body', text: 'I will send the security summary by Friday. If it clears your review, we start the pilot with twelve people in November, with admin controls on from day one.', evidenceSegmentIds: cite('s000005', 's000006', 's000008') },
+      // The note typed after the call reaches the draft as "My notes:".
+      ...(String(request.draft?.ask ?? '').includes('admin guide')
+        ? [{ kind: 'body', text: 'I will also send Priya the admin guide.', evidenceSegmentIds: cite('s000007') }] : []),
       { kind: 'closing', text: 'Talk soon,', evidenceSegmentIds: [] },
     ],
   };

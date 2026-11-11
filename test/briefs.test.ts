@@ -16,7 +16,8 @@ import {
   writeNextMeeting,
   type UpcomingMeeting,
 } from '../src/briefs.ts';
-import { draftFollowUp, draftText, mailtoUrl } from '../src/drafts.ts';
+import { draftAsk, draftFollowUp, draftText, mailtoUrl } from '../src/drafts.ts';
+import { addMeetingNote } from '../src/owner-notes.ts';
 import { OlderEngineError, withNewerEngine, type runHumainMeeting } from '../src/humain-client.ts';
 import { createMeetingArtifact, MeetingAiOffError, saveMeetingArtifact, type MeetingAttendee } from '../src/meeting-artifact.ts';
 import { findTranscriptRecord, saveTranscriptRecord } from '../src/transcript-library.ts';
@@ -204,14 +205,36 @@ test('a follow-up is the chat request plus a draft, addressed to everyone but yo
   expect(request.segments).toHaveLength(2);
   expect(request.question).toBeUndefined();
   expect(draft.to).toEqual(['dana@acme.example']);
+  expect(draft.names).toEqual(['Dana Whitfield']);
   expect(draft.moments).toEqual({ s000002: 4 });
-  expect(draftText(draft)).toBe('Subject: Security summary\n\nHi Dana,\n\nI will send the security summary by Friday.\n\nThanks & talk soon,');
+  // About me gives no name, so a sign-off waiting for one is left off.
+  expect(draftText(draft)).toBe('Subject: Security summary\n\nHi Dana,\n\nI will send the security summary by Friday.');
   expect(mailtoUrl(draft)).toBe('mailto:dana@acme.example?subject=Security%20summary&body=' +
-    encodeURIComponent('Hi Dana,\r\n\r\nI will send the security summary by Friday.\r\n\r\nThanks & talk soon,'));
+    encodeURIComponent('Hi Dana,\r\n\r\nI will send the security summary by Friday.'));
   // Slack has no subject and no To line.
   const slack = await draftFollowUp(root, 'acme-call', 'slack', route, { runner: fakeDraft().runner, engine: rev4 });
   expect(slack.subject).toBeUndefined();
   expect(slack.to).toEqual([]);
+});
+
+test('a follow-up reads what you typed about the meeting, and signs off with your name from About me', async () => {
+  const { home, root, add } = library();
+  add('acme-call', 'Acme discovery call', 5, [you, dana]);
+  addMeetingNote(root, 'acme-call', 'Send Priya the admin guide', { at: 6 });
+  const humain = fakeDraft();
+  const draft = await draftFollowUp(root, 'acme-call', 'email', route, { ask: 'keep it short', runner: humain.runner, engine: rev4 });
+  // Humain's draft takes no owner notes of its own, so they travel in the ask.
+  expect(humain.requests[0].draft.ask).toBe('keep it short My notes: Send Priya the admin guide');
+  expect(humain.requests[0].ownerNotes).toBeUndefined();
+  expect(draft.paragraphs.map((paragraph) => paragraph.kind)).toEqual(['greeting', 'body']);
+  mkdirSync(join(home, 'Templates'), { recursive: true });
+  writeFileSync(join(home, 'Templates', 'About me.md'), "I'm Sam Owner. I run a two-person design studio.\n");
+  const signed = await draftFollowUp(root, 'acme-call', 'email', route, { runner: fakeDraft().runner, engine: rev4 });
+  expect(signed.paragraphs.at(-1)).toMatchObject({ kind: 'closing', text: 'Thanks & talk soon, Sam' });
+  // However much was typed, the ask stays within Humain's limit, whole notes first.
+  expect(draftAsk('a'.repeat(1_000), [{ text: 'b'.repeat(900) }, { text: 'c'.repeat(900) }])!.length).toBeLessThanOrEqual(2_000);
+  expect(draftAsk(undefined, [{ text: 'one' }, { text: 'two' }])).toBe('My notes: one; two');
+  expect(draftAsk('as is', [])).toBe('as is');
 });
 
 test('a follow-up from a private meeting, or with an older engine, sends nothing and says why', async () => {
