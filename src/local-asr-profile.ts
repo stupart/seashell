@@ -76,8 +76,7 @@ export function liveTranscriptionThreads(hardware = transcriptionHardware()): nu
 
 /**
  * whisper.cpp's Metal backend is built for Apple GPUs. Intel Macs transcribe
- * on the CPU, which is what their install check runs, rather than on a GPU
- * the backend may not support.
+ * on the CPU rather than on a GPU the backend may not support.
  */
 export function transcriptionUsesGpu(hardware = transcriptionHardware(), environment: NodeJS.ProcessEnv = process.env): boolean {
   return hardware.appleSilicon && environment.SEASHELL_DISABLE_GPU !== '1';
