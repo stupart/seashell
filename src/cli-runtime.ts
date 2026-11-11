@@ -107,6 +107,7 @@ import { ensureExtractorsDirectory, loadExtractors, runAutomaticExtractors, runE
 import {
   afterMeetingReady,
   askAutomationApprovalWithDialog,
+  automationApprovalNote,
   automationDecision,
   automationNeedsApproval,
   ensureAutomationsDirectory,
@@ -1404,6 +1405,7 @@ async function executeMeetingIntelligence(command: MeetingIntelligenceCommand): 
             `${last ? ` · last run ${last.status} ${last.at.slice(0, 10)}` : ''}`;
         }),
         ...problems.map((problem) => `  ✗ ${problem.path}: ${problem.message}`),
+        ...(automations.some((automation) => automationNeedsApproval(automation, libraryDir)) ? [automationApprovalNote()].flatMap((note) => note ?? []) : []),
         `Runs are logged in ${join(libraryDir, 'automation-runs.jsonl')}. Run them for one meeting: seashell automations run <meeting-id>`,
       ].join('\n'));
       return problems.length ? 1 : 0;

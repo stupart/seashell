@@ -856,7 +856,8 @@ of the meeting's title, so a calendar invite can't point it at another folder.
 link: when a file is already there, or you changed the one Seashell wrote, the
 notes go beside it as `… (2).md`. Only you can read the files it writes.
 `shell` runs a command with the meeting's JSON on stdin, and
-`SEASHELL_MEETING_ID` and `SEASHELL_MEETING_DIR` set. `webhook` posts the same
+`SEASHELL_MEETING_ID` and `SEASHELL_MEETING_DIR` set; of Seashell's own
+environment it gets only `PATH`, `HOME`, `LANG` and `TMPDIR`. `webhook` posts the same
 JSON to an `https` address, and only there: Seashell never follows a redirect,
 and never posts to this Mac or your local network unless the file names that
 address itself (`http://localhost:8080/hook` or `https://192.168.1.20/hook`).
@@ -866,14 +867,19 @@ Anything sent outside Seashell asks first. The first time a `shell` or
 `webhook` action would run, or a `write` to a folder outside the Sea Shell
 folder (the one that holds Transcripts and Automations), the background
 recorder shows a dialog naming the automation, the meeting and exactly what
-would run or where it would go. Your answer is remembered for that version of
-the file; any edit asks again.
+would run or where it would go, including the file a command's program is.
+Your answer is remembered for that version of the file and of that program;
+editing either asks again.
 
 An automation an agent adds or changes through the meetings server is saved
 off, marked `made-by: agent`. Read it, then change `enabled: false` to
 `enabled: true` to turn it on. Settings shows it as "Off: made by an agent".
 An agent can't turn one on.
-Approvals live beside Seashell's settings, not in the Automations folder.
+Approvals live beside Seashell's settings, not in the Automations folder, and
+each is signed with a key Seashell keeps in your login Keychain ("Seashell
+automation approvals"), so an approval written there by anything else counts
+for nothing. Without the Keychain the key is a private file beside the
+approvals, and `seashell automations` says so.
 Each automation runs once per meeting, private meetings never run, and every
 run is logged to `automation-runs.jsonl` in your library.
 

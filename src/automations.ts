@@ -4,8 +4,9 @@ import {
   appendFileSync, closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync,
   writeFileSync, writeSync,
 } from 'fs';
-import { homedir } from 'os';
+import { homedir, tmpdir } from 'os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
+import { approvalKey, signApproval, validApproval } from './approval-key.ts';
 import { defaultConfigPath } from './config.ts';
 import { runAutomaticExtractors, runExtractor } from './extractors.ts';
 import type { HumainMeetingRoute, runHumainMeeting } from './humain-client.ts';
@@ -283,24 +284,102 @@ export function automationApprovalsPath(env: NodeJS.ProcessEnv = process.env): s
 
 type Decision = 'allow' | 'deny';
 
-function readApprovals(env: NodeJS.ProcessEnv): Record<string, { name: string; decision: Decision; at: string }> {
+interface StoredApproval { name: string; decision: Decision; at: string; signature?: string }
+
+function readApprovals(env: NodeJS.ProcessEnv): Record<string, StoredApproval> {
   try {
     const value = JSON.parse(readFileSync(automationApprovalsPath(env), 'utf8'));
-    return value && typeof value.approvals === 'object' ? value.approvals : {};
+    return value?.schemaVersion === 2 && value.approvals && typeof value.approvals === 'object' ? value.approvals : {};
   } catch { return {}; }
 }
 
-export function automationDecision(automation: Automation, env: NodeJS.ProcessEnv = process.env): Decision | undefined {
-  return readApprovals(env)[automation.hash]?.decision;
+/** All a command gets of Seashell's own environment: where programs are, home, language and scratch space. */
+export function shellEnvironment(env: NodeJS.ProcessEnv = process.env): { PATH: string; HOME: string; LANG: string; TMPDIR: string } {
+  return {
+    PATH: env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin', HOME: env.HOME || homedir(),
+    LANG: env.LANG || 'en_US.UTF-8', TMPDIR: env.TMPDIR || tmpdir(),
+  };
 }
 
-export function rememberAutomationDecision(automation: Automation, decision: Decision, env: NodeJS.ProcessEnv = process.env): void {
+/** The program a command starts, as the shell would find it, or undefined when it can't be told before running. */
+export function commandProgram(command: string, cwd?: string, path = shellEnvironment().PATH): string | undefined {
+  let rest = command.trimStart();
+  for (;;) {
+    let word = '';
+    let index = 0;
+    for (; index < rest.length && !/[\s;&|<>()]/u.test(rest[index]!); index++) {
+      const character = rest[index]!;
+      if (character === '$' || character === '`') return undefined; // Expanded only when it runs.
+      if (character === '\\') { word += rest[++index] ?? ''; continue; }
+      if (character === "'" || character === '"') {
+        const end = rest.indexOf(character, index + 1);
+        if (end < 0) return undefined;
+        const quoted = rest.slice(index + 1, end);
+        if (character === '"' && /[$`\\]/u.test(quoted)) return undefined;
+        word += quoted;
+        index = end;
+        continue;
+      }
+      word += character;
+    }
+    // NAME=value before a command sets its environment; the program is the word after.
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(rest.slice(0, index)) && index < rest.length && /\s/u.test(rest[index]!)) {
+      rest = rest.slice(index).trimStart();
+      continue;
+    }
+    if (!word) return undefined;
+    const expanded = word === '~' ? homedir() : word.startsWith('~/') ? join(homedir(), word.slice(2)) : word;
+    const candidates = expanded.includes('/') ? isAbsolute(expanded) ? [expanded] : cwd ? [join(cwd, expanded)] : []
+      : path.split(':').filter(Boolean).map((folder) => join(folder, expanded));
+    for (const candidate of candidates) {
+      try {
+        const real = realpathSync(candidate);
+        if (lstatSync(real).isFile()) return real;
+      } catch { /* Not this one. */ }
+    }
+    return undefined;
+  }
+}
+
+/** Files macOS seals with the system: an update changes them, never another program. */
+const SYSTEM_FILES = /^\/(?:System|bin|sbin|usr\/(?!local\/)[^/]+)\//u;
+
+/**
+ * What an approval covers: this version of the automation's file and, for each
+ * command whose program is a file, that file's contents as they are now. An
+ * edited script asks again, as an edited automation does.
+ */
+function approvalId(automation: Automation, cwd?: string): string {
+  const programs = automation.actions.flatMap((action) => {
+    const program = action.kind === 'shell' ? commandProgram(action.command, cwd) : undefined;
+    if (!program || SYSTEM_FILES.test(program)) return [];
+    try { return [[program, sha256(readFileSync(program))]]; } catch { return [[program, 'unreadable']]; }
+  });
+  return sha256(JSON.stringify({ file: automation.hash, programs }));
+}
+
+/** The owner's answer for this version, if one was given here: a stored answer without Seashell's signature counts for nothing. */
+export function automationDecision(automation: Automation, env: NodeJS.ProcessEnv = process.env, cwd?: string): Decision | undefined {
+  const id = approvalId(automation, cwd);
+  const stored = readApprovals(env)[id];
+  if (!stored || (stored.decision !== 'allow' && stored.decision !== 'deny')) return undefined;
+  return validApproval(approvalKey(automationApprovalsPath(env), env).key, id, stored.decision, stored.signature) ? stored.decision : undefined;
+}
+
+export function rememberAutomationDecision(automation: Automation, decision: Decision, env: NodeJS.ProcessEnv = process.env, cwd?: string): void {
   const path = automationApprovalsPath(env);
-  const approvals = { ...readApprovals(env), [automation.hash]: { name: automation.name, decision, at: new Date().toISOString() } };
+  const id = approvalId(automation, cwd);
+  const signature = signApproval(approvalKey(path, env).key, id, decision);
+  const approvals = { ...readApprovals(env), [id]: { name: automation.name, decision, at: new Date().toISOString(), signature } };
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify({ schemaVersion: 1, approvals }, null, 2)}\n`, { mode: 0o600 });
+  writeFileSync(temporary, `${JSON.stringify({ schemaVersion: 2, approvals }, null, 2)}\n`, { mode: 0o600 });
   renameSync(temporary, path);
+}
+
+/** Said when the signing key had to go in a file because the Keychain was not there. */
+export function automationApprovalNote(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return approvalKey(automationApprovalsPath(env), env).note;
 }
 
 /** What the owner is asked to allow: everything this automation would send outside. */
@@ -347,8 +426,11 @@ function writesOutside(target: string, libraryDir: string): boolean {
 }
 
 /** What the owner is asked to allow for an action, or undefined when it needs no asking. */
-function approvalLabel(action: AutomationAction, libraryDir: string): string | undefined {
-  if (action.kind === 'shell') return `Run: ${action.command}`;
+function approvalLabel(action: AutomationAction, libraryDir: string, cwd?: string): string | undefined {
+  if (action.kind === 'shell') {
+    const program = commandProgram(action.command, cwd);
+    return `Run: ${action.command}${program ? ` (runs ${program})` : ''}`;
+  }
   if (action.kind === 'webhook') return `Send to: ${action.url}`;
   return action.kind === 'write' && writesOutside(action.target, libraryDir) ? `Save to: ${action.target}` : undefined;
 }
@@ -492,10 +574,11 @@ export function saveNotesFile(libraryDir: string, file: string, contents: string
 
 export interface ShellResult { code: number | null; detail?: string }
 
-/** Run one command with the meeting's JSON on stdin, bounded in time. Output is not kept. */
+/** Run one command with the meeting's JSON on stdin and a minimal environment, bounded in time. Output is not kept. */
 export function runShellAction(command: string, payload: string, env: Record<string, string>, cwd: string): Promise<ShellResult> {
   return new Promise((resolvePromise) => {
-    const child = spawn('/bin/sh', ['-c', command], { cwd, env: { ...process.env, ...env }, stdio: ['pipe', 'ignore', 'pipe'] });
+    // Nothing Seashell was started with beyond the basics: no tokens or keys from its own environment.
+    const child = spawn('/bin/sh', ['-c', command], { cwd, env: { ...shellEnvironment(), ...env }, stdio: ['pipe', 'ignore', 'pipe'] });
     let stderr = '';
     const timer = setTimeout(() => {
       child.kill('SIGTERM');
@@ -623,8 +706,8 @@ export async function runAutomations(libraryDir: string, transcriptId: string, o
     if (done.has(automation.name)) continue;
     options.onStatus?.(`Automation: ${automation.name}…`);
     const results: AutomationActionResult[] = [];
-    const outward = automation.actions.flatMap((action) => approvalLabel(action, libraryDir) ?? []);
-    let decision = outward.length ? automationDecision(automation, env) : 'allow';
+    const outward = automation.actions.flatMap((action) => approvalLabel(action, libraryDir, directory) ?? []);
+    let decision = outward.length ? automationDecision(automation, env, directory) : 'allow';
     let asked = false;
     for (const action of automation.actions) {
       const target = action.kind === 'extract' ? action.extractor : action.kind === 'write' ? action.target
@@ -645,7 +728,11 @@ export async function runAutomations(libraryDir: string, transcriptId: string, o
           if (decision === undefined && !asked && options.ask) {
             asked = true;
             decision = await options.ask({ automation: automation.name, meeting: artifact?.title ?? record.title, actions: outward }, options.signal);
-            if (decision) rememberAutomationDecision(automation, decision, env);
+            if (decision) {
+              rememberAutomationDecision(automation, decision, env, directory);
+              const note = automationApprovalNote(env);
+              if (note) options.onStatus?.(note);
+            }
           }
           if (decision === 'deny') { result('skipped', 'You chose not to allow this automation to send meetings outside Seashell.'); continue; }
           if (decision !== 'allow') {
