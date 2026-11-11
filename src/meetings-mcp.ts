@@ -360,7 +360,7 @@ export const MEETINGS_MCP_TOOLS: readonly Tool[] = [
       return editTranscriptSegment(libraryDir, record.id, text(args.segmentId, 'segmentId', true)!, text(args.text, 'text', true)!);
     } },
   { name: 'rename_speaker', title: 'Name a speaker', annotations: edits,
-    description: 'Give a speaker a name, by speaker ID or current label ("Remote speaker 1"). Notes keep their content; placeholders like "Remote speaker 1" in them take the name.',
+    description: 'Give a speaker a name, by speaker ID or current label ("Remote speaker 1"). The old transcript is kept in the meeting\'s history; the user can put it back with seashell meeting restore. Notes keep their content; placeholders like "Remote speaker 1" in them take the name. Renaming someone already named moves their actions, and their name where it is a whole word, to the new name, and marks the notes as possibly out of date. Seashell does not learn the voice from a name an agent gives.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['id', 'speaker', 'name'], properties: {
       id: string('Meeting ID'), speaker: string('Speaker ID or current label'), name: string('Their name') } },
     run: (libraryDir, args) => {

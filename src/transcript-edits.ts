@@ -1,15 +1,17 @@
 import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { readBackgroundMeetingState } from './background-meeting-status.ts';
 import { assembleCaptureTrack } from './capture-finalizer.ts';
 import { loadCaptureSession } from './capture-session.ts';
 import { transcriptSegmentId } from './meeting-artifact.ts';
+import { meetingEvidence } from './meeting-evidence.ts';
 import { detectSpeechRegions, isPhantomUnit, readMonoPcm, type SpeechRegion } from './speech-gate.ts';
 import {
   findTranscriptRecord,
   listTranscriptRecords,
+  loadTranscriptPath,
   renameTranscriptSpeaker,
   saveTranscriptRecord,
 } from './transcript-library.ts';
@@ -29,13 +31,85 @@ function assertNotCapturing(directory: string): void {
   }
 }
 
-/** history/transcripts/<time>-<why>.json: the transcript exactly as it was before a change. */
+/** Copies kept per meeting; older ones are removed as new ones are kept. */
+export const TRANSCRIPT_HISTORY_LIMIT = 20;
+
+function historyFolder(directory: string): string {
+  return join(directory, 'history', 'transcripts');
+}
+
+/** The kept copies, oldest first: each name starts with the time it was kept. */
+function historyFiles(folder: string): string[] {
+  return existsSync(folder) ? readdirSync(folder).filter((name) => name.endsWith('.json') && !name.startsWith('.')).sort() : [];
+}
+
+/**
+ * history/transcripts/<time>-<why>.json: the transcript exactly as it was
+ * before a change. The 20 most recent copies stay.
+ */
 export function keepTranscriptHistory(directory: string, record: TranscriptRecord, why: string): string {
-  const folder = join(directory, 'history', 'transcripts');
+  const folder = historyFolder(directory);
   mkdirSync(folder, { recursive: true, mode: 0o700 });
   const path = join(folder, `${new Date().toISOString().replace(/[:.]/gu, '-')}-${why}-${randomUUID().slice(0, 8)}.json`);
   writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+  const files = historyFiles(folder);
+  for (const old of files.slice(0, Math.max(0, files.length - TRANSCRIPT_HISTORY_LIMIT))) rmSync(join(folder, old), { force: true });
   return path;
+}
+
+export interface TranscriptHistoryCopy {
+  file: string;
+  /** When it was kept: just before the change named in `why`. */
+  savedAt: string;
+  why: string;
+  segments: number;
+}
+
+/** The copies kept of a meeting's transcript, newest first. */
+export function listTranscriptHistory(libraryDir: string, transcriptId: string): TranscriptHistoryCopy[] {
+  const folder = historyFolder(dirname(findTranscriptRecord(libraryDir, transcriptId).path));
+  return historyFiles(folder).reverse().flatMap((file) => {
+    let segments: number;
+    try { segments = loadTranscriptPath(join(folder, file)).transcript.length; } catch { return []; }
+    const named = /^(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3})Z-(.+)-[0-9a-f]{8}\.json$/u.exec(file);
+    return [{ file, segments,
+      savedAt: named ? `${named[1]}:${named[2]}:${named[3]}.${named[4]}Z` : statSync(join(folder, file)).mtime.toISOString(),
+      why: named?.[5] ?? 'unknown' }];
+  });
+}
+
+export const RESTORED_TRANSCRIPT = 'An earlier transcript was restored';
+
+/**
+ * Put back a copy from the meeting's history: its lines and speakers. The
+ * transcript as it is now is kept in history first, so a restore can be
+ * undone the same way. The notes stay, marked as possibly out of date, and
+ * cite again any line the copy brings back.
+ */
+export function restoreTranscript(
+  libraryDir: string, transcriptId: string, file: string,
+): { id: string; file: string; segments: number; restored: boolean } {
+  const { path, record } = findTranscriptRecord(libraryDir, transcriptId);
+  const directory = dirname(path);
+  assertNotCapturing(directory);
+  const folder = historyFolder(directory);
+  const wanted = file.endsWith('.json') ? file : `${file}.json`;
+  // Only a file the folder lists: never a path that leads out of it.
+  if (!historyFiles(folder).includes(wanted)) {
+    throw new Error(`No copy "${file}" in this meeting's history. See: seashell meeting restore ${record.id} --list`);
+  }
+  const copy = loadTranscriptPath(join(folder, wanted));
+  if (copy.id !== record.id) throw new Error(`${wanted} is a copy of another meeting's transcript.`);
+  const { speakerAnalysis: _current, ...kept } = record;
+  const restored: TranscriptRecord = { ...kept, transcript: copy.transcript, speakers: copy.speakers,
+    ...(copy.speakerAnalysis ? { speakerAnalysis: copy.speakerAnalysis } : {}), updatedAt: new Date().toISOString() };
+  if (meetingEvidence(restored).revision === meetingEvidence(record).revision &&
+      JSON.stringify(restored.speakers) === JSON.stringify(record.speakers)) {
+    return { id: record.id, file: wanted, segments: record.transcript.length, restored: false };
+  }
+  keepTranscriptHistory(directory, JSON.parse(readFileSync(path, 'utf8')) as TranscriptRecord, 'before-restore');
+  saveTranscriptRecord(libraryDir, restored, { keepNotes: RESTORED_TRANSCRIPT });
+  return { id: record.id, file: wanted, segments: restored.transcript.length, restored: true };
 }
 
 /**

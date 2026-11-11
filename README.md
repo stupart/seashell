@@ -616,6 +616,8 @@ seashell library open <id>
 seashell library trash <id> --confirm
 seashell library clean-phantoms --dry-run   # count lines heard in silence
 seashell library clean-phantoms [<id>...]   # remove them
+seashell meeting restore <id> --list        # earlier transcripts kept for a meeting
+seashell meeting restore <id> <file>        # put one back
 ```
 
 Trash is recoverable inside `<library>/_Trash`; Sea Shell does not permanently
@@ -629,6 +631,13 @@ for "Microphone", computer audio for everyone else). The dry run reports how
 many lines each meeting would lose. A real run keeps the old transcript in the
 meeting's `history/transcripts` folder first, and keeps the notes, marked as
 possibly out of date.
+
+Every change that keeps the notes (a corrected line, removed lines, a renamed
+speaker) keeps the transcript as it was in that folder first; the 20 most
+recent copies stay. `seashell meeting restore <id> --list` lists them, newest
+first, and `seashell meeting restore <id> <file>` puts one back: its lines and
+speaker names. The transcript it replaces is kept too, so a restore can be
+undone the same way, and the notes stay, marked as possibly out of date.
 
 ## Meeting mode
 
@@ -901,7 +910,8 @@ Tools that change your files, which the agent uses only when you ask:
 `update_template`, `create_extractor`, `update_extractor`, `delete_extractor`,
 `run_extractor`, `create_automation`, `update_automation` and
 `delete_automation`. A corrected line keeps the old transcript in the meeting's
-history and keeps the notes, marked as possibly out of date. Automations an
+history (`seashell meeting restore` puts it back) and keeps the notes, marked as
+possibly out of date. Automations an
 agent writes still ask you before sending anything outside. Every tool refuses
 private meetings.
 

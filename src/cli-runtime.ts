@@ -114,7 +114,7 @@ import {
   runAutomations,
 } from './automations.ts';
 import { queryNotes } from './meeting-memory.ts';
-import { cleanPhantoms } from './transcript-edits.ts';
+import { cleanPhantoms, listTranscriptHistory, restoreTranscript } from './transcript-edits.ts';
 import { claimOwnerAndDue, type MeetingAttendee } from './meeting-artifact.ts';
 import type { MeetingIntelligenceCommand } from './cli-args.ts';
 
@@ -588,6 +588,25 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       })), null, 2) : merged.length
         ? merged.map(result => `Merged ${result.trashed.length} pieces into ${result.record.id} (${result.record.transcript.length} segments): ${result.directory}`).join('\n')
         : 'No split meetings found.');
+      return 0;
+    }
+    case 'restore': {
+      const { id, file } = command.action;
+      const lines = (count: number) => `${count} line${count === 1 ? '' : 's'}`;
+      if (file !== undefined) {
+        const result = restoreTranscript(libraryDir, id, file);
+        print(command.json ? JSON.stringify(result, null, 2) : result.restored
+          ? `Restored ${result.file} (${lines(result.segments)}). The transcript it replaced is in history too; the notes stay, marked as possibly out of date.`
+          : `${result.file} is already the transcript. Nothing changed.`);
+        return 0;
+      }
+      const copies = listTranscriptHistory(libraryDir, id);
+      const time = (iso: string) => new Date(iso).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+      print(command.json ? JSON.stringify(copies, null, 2) : copies.length ? [
+        'Kept before each change, newest first:',
+        ...copies.map((copy) => `  ${time(copy.savedAt)}  ${copy.why.replace(/-/gu, ' ')}  ${lines(copy.segments)}  ${copy.file}`),
+        `Restore one: seashell meeting restore ${id} <file>`,
+      ].join('\n') : 'No earlier transcripts are kept for this meeting.');
       return 0;
     }
     case 'template':

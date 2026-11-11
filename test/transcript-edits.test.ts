@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test';
+import { afterEach, expect, setSystemTime, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
@@ -7,7 +7,10 @@ import { pcmS16leToWav } from '../src/live-system-audio.ts';
 import { createMeetingArtifact, loadMeetingArtifact, saveMeetingArtifact } from '../src/meeting-artifact.ts';
 import { meetingEvidence } from '../src/meeting-evidence.ts';
 import { meetingViewLines } from '../src/meeting-tui.ts';
-import { cleanPhantoms, editTranscriptSegment, renameMeetingSpeaker } from '../src/transcript-edits.ts';
+import { parseCliArgs } from '../src/cli-args.ts';
+import {
+  cleanPhantoms, editTranscriptSegment, keepTranscriptHistory, listTranscriptHistory, renameMeetingSpeaker, restoreTranscript,
+} from '../src/transcript-edits.ts';
 import { findTranscriptRecord, saveTranscriptRecord } from '../src/transcript-library.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 
@@ -117,4 +120,50 @@ test('clean-phantoms leaves meetings alone without saved audio or speech detecti
   expect((await cleanPhantoms(root, { detect: async () => undefined }))[0]?.skipped).toBe('speech detection is not available');
   expect(findTranscriptRecord(root, record.id).record.transcript).toHaveLength(4);
   await expect(cleanPhantoms(root, { ids: ['nope'] })).rejects.toThrow('Transcript not found: nope');
+});
+
+test('an earlier transcript can be put back from history; the notes stay, marked, and the restore can be undone', () => {
+  const { root, record, directory } = library();
+  editTranscriptSegment(root, record.id, 's000002', 'We ship on Monday.');
+  const [kept] = listTranscriptHistory(root, record.id);
+  expect(kept).toMatchObject({ why: 'corrected-line', segments: 4 });
+  expect(Date.parse(kept!.savedAt)).toBeGreaterThan(Date.parse('2026-01-01'));
+
+  expect(restoreTranscript(root, record.id, kept!.file.replace(/\.json$/u, ''))).toEqual({ id: record.id, file: kept!.file, segments: 4, restored: true });
+  const { record: restored } = findTranscriptRecord(root, record.id);
+  expect(restored.transcript[1]!.text).toBe('We ship on Fryday.');
+  expect(restored.title).toBe('Standup');
+  const artifact = loadMeetingArtifact(root, record.id)!;
+  expect(artifact.analysis?.claims[0]?.text).toBe('Ship on Friday.');
+  expect(artifact.notesOutdated?.reason).toBe('An earlier transcript was restored');
+  // The transcript it replaced is kept too, so the restore can be undone the same way.
+  expect(listTranscriptHistory(root, record.id).map((copy) => copy.why)).toEqual(['before-restore', 'corrected-line']);
+  expect(restoreTranscript(root, record.id, kept!.file).restored).toBe(false);
+
+  expect(() => restoreTranscript(root, record.id, '../transcript.json')).toThrow(`No copy "../transcript.json" in this meeting's history`);
+  expect(() => restoreTranscript(root, record.id, 'nope')).toThrow(`See: seashell meeting restore ${record.id} --list`);
+  writeFileSync(join(directory, 'history', 'transcripts', '2026-01-01T00-00-00-000Z-other-0000abcd.json'),
+    JSON.stringify({ ...restored, id: 'someone-else' }));
+  expect(() => restoreTranscript(root, record.id, '2026-01-01T00-00-00-000Z-other-0000abcd.json')).toThrow('a copy of another meeting');
+
+  expect(parseCliArgs(['meeting', 'restore', record.id, '--list'])).toMatchObject({ action: { kind: 'restore', id: record.id } });
+  expect(parseCliArgs(['meeting', 'restore', record.id, kept!.file, '--json'])).toMatchObject({ json: true, action: { kind: 'restore', id: record.id, file: kept!.file } });
+  expect(() => parseCliArgs(['meeting', 'restore', record.id, kept!.file, '--list'])).toThrow('Usage: seashell meeting restore');
+  expect(() => parseCliArgs(['meeting', 'note', record.id, '--list'])).toThrow('do not apply');
+});
+
+test('a meeting keeps its 20 most recent transcript copies', () => {
+  const { record, directory } = library();
+  try {
+    for (let minute = 0; minute < 25; minute += 1) {
+      setSystemTime(new Date(Date.UTC(2026, 9, 3, 9, minute)));
+      keepTranscriptHistory(directory, record, `change-${minute}`);
+    }
+  } finally {
+    setSystemTime();
+  }
+  const kept = readdirSync(join(directory, 'history', 'transcripts')).sort();
+  expect(kept).toHaveLength(20);
+  expect(kept[0]).toStartWith('2026-10-03T09-05-00-000Z-change-5-');
+  expect(kept.at(-1)).toStartWith('2026-10-03T09-24-00-000Z-change-24-');
 });
