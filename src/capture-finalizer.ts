@@ -23,6 +23,7 @@ import {
 import { diarizationStatus } from './diarization-environment.ts';
 import { remoteVoiceCeiling, type SpeakerVoice } from './diarize.ts';
 import { parseMeetingArtifact, type MeetingAttendee } from './meeting-artifact.ts';
+import { carryCaptureNotes } from './owner-notes.ts';
 import { isLikelySystemAudioLeak } from './live-echo.ts';
 import { meetSpeakerForSegment, nameRemoteSpeakers, readMeetSamples, type MeetSpeaker } from './meet-speakers.ts';
 import { amplifyPcm, hasAudiblePcmSignal, pcmS16leSignalLevel, pcmS16leToWav, quietAudioGain } from './live-system-audio.ts';
@@ -218,6 +219,8 @@ export async function saveFinalizedCapture(
     const saved = saveTranscriptRecord(libraryDir, record);
     store.setStatus('completed', reason);
     store.attachTo(saved.directory);
+    // Notes typed during the call move from the bundle into the meeting; enrichment carries any left behind.
+    try { carryCaptureNotes(libraryDir, record.id); } catch { /* They stay in the bundle, where the meeting still reads them. */ }
     return record;
   } catch (error) {
     store.setStatus('interrupted', 'finalization-failed');

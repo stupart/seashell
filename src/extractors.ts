@@ -10,9 +10,10 @@ import {
   type MeetingArtifact,
   type MeetingInsight,
 } from './meeting-artifact.ts';
-import { meetingSegments, ownerInstructions, retryableRun, runSafeId, stableKey } from './meeting-enrichment.ts';
+import { claimsForHumain, engineCheck, meetingSegments, ownerInstructions, retryableRun, runSafeId, stableKey } from './meeting-enrichment.ts';
 import { meaningful, parseFrontmatter, phraseMatches } from './meeting-templates.ts';
-import { humainRouteRequest, olderHumainEngine, runHumainMeeting, type HumainMeetingRoute } from './humain-client.ts';
+import { humainRouteRequest, NEWER_ENGINE, olderHumainEngine, olderThanRevision4, runHumainMeeting, type HumainMeetingRoute,
+  type MeetingEngineCheck } from './humain-client.ts';
 import { findTranscriptRecord } from './transcript-library.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 
@@ -273,6 +274,8 @@ export interface RunExtractorOptions {
   /** Deterministic seam for tests and embedded hosts. */
   runner?: typeof runHumainMeeting;
   env?: NodeJS.ProcessEnv;
+  /** What the installed engine can do; see engineCheck. */
+  engine?: MeetingEngineCheck;
 }
 
 /**
@@ -296,11 +299,13 @@ export async function runExtractor(
   if (artifact.ai?.off) throw new MeetingAiOffError();
   const segments = meetingSegments(record);
   if (segments.length === 0) throw new Error('This meeting has no transcript text to read');
-  const finalClaims = artifact.analysis?.claims ?? artifact.provisionalClaims;
+  const finalClaims = claimsForHumain(artifact.analysis?.claims ?? artifact.provisionalClaims);
   const context = { calendar: artifact.calendar ?? null, attendees: artifact.attendees };
-  // About me and the meeting's own note still apply; the template is for notes.
-  const { instructions: owner } = ownerInstructions(libraryDir, artifact, {});
-  const instructions = owner ? { ...(owner.profile ? { profile: owner.profile } : {}), ...(owner.note ? { note: owner.note } : {}) } : undefined;
+  // About me, the meeting's own note and the vocabulary still apply; the template is for notes.
+  const older = await olderThanRevision4(engineCheck(options));
+  const { instructions: owner } = ownerInstructions(libraryDir, artifact, {}, undefined, { vocabulary: !older });
+  const instructions = owner ? { ...(owner.profile ? { profile: owner.profile } : {}), ...(owner.note ? { note: owner.note } : {}),
+    ...(owner.vocabulary ? { vocabulary: owner.vocabulary } : {}) } : undefined;
   const request = { name: extractor.name, prompt: extractor.prompt, fields: extractor.fields };
   const storeDir = join(dirname(path), '.humain');
   const idempotencyKey = stableKey([record.id, 'extract', request, segments, finalClaims, options.route, context,
@@ -321,7 +326,7 @@ export async function runExtractor(
   const result = await run.catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     throw olderHumainEngine(message)
-      ? new Error('This Humain version cannot run extractors yet. Install a newer engine: seashell ai install <humain-package.tgz>')
+      ? new Error(`This AI engine cannot run extractors yet. ${NEWER_ENGINE}`)
       : error;
   });
   const insight: MeetingInsight = {

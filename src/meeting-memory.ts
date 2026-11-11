@@ -144,17 +144,21 @@ export function getMeeting(libraryDir: string, args: Arguments) {
         ...(claim.person ? { person: claim.person } : {}),
         ...(claim.due ? { due: claim.due } : {}),
         evidence: cite(claim.evidenceSegmentIds),
+        ...(claim.ownerNoteIds?.length ? { fromYourNotes: true } : {}),
       })),
       // The notes in the owner's template, section by section, each point cited.
       ...(artifact?.analysis?.notes ? {
         template: artifact.analysis.template,
         sections: artifact.analysis.notes.map(section => ({
           heading: section.heading,
-          items: section.items.map(item => ({ text: item.text, evidence: cite(item.evidenceSegmentIds) })),
+          items: section.items.map(item => ({ text: item.text, evidence: cite(item.evidenceSegmentIds),
+            ...(item.ownerNoteIds?.length ? { fromYourNotes: true } : {}) })),
         })),
       } : {}),
     },
     ...(artifact?.insights?.length ? { insights: artifact.insights.map(insight => insight.extractor) } : {}),
+    // What the user typed themselves; a note item from them says so.
+    ...(artifact?.ownerNotes?.length ? { yourNotes: artifact.ownerNotes.map(note => ({ text: note.text, ...(note.at === undefined ? {} : { at: clock(note.at) }) })) } : {}),
     transcriptSegments: record.transcript.length,
   };
 }

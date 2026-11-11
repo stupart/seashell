@@ -66,13 +66,33 @@ export interface MeetingClaim {
   person?: string;
   /** When an action or follow-up is due, as said: "by Friday". */
   due?: string;
+  /** The owner's notes this came from. It may cite no transcript at all when only a note says it. */
+  ownerNoteIds?: string[];
 }
 
 /** One point of templated notes, with the transcript segments it rests on. */
 export interface MeetingNoteItem {
   text: string;
   evidenceSegmentIds: string[];
+  /** The owner's notes it came from; with these, it may cite no transcript. */
+  ownerNoteIds?: string[];
 }
+
+/**
+ * Something the owner typed about the meeting, during the call or after it.
+ * `at` is seconds on the transcript's clock; a note added later about the
+ * meeting as a whole has none.
+ */
+export interface OwnerNote {
+  id: string;
+  text: string;
+  at?: number;
+  /** When it was written, for the record; never sent. */
+  addedAt: string;
+}
+
+/** Humain's limits for `ownerNotes`. */
+export const OWNER_NOTE_LIMITS = { notes: 200, text: 2_000 } as const;
 
 /** A template heading and what the meeting said under it; empty when it did not come up. */
 export interface MeetingNoteSection {
@@ -89,6 +109,8 @@ export interface MeetingAnalysis {
   /** The template the notes follow, when one was used. */
   template?: string;
   notes?: MeetingNoteSection[];
+  /** The owner wrote notes, and the engine that wrote these was too old to read them. */
+  ownerNotesUnread?: true;
 }
 
 /** The owner's choices for this meeting's AI, made before or after it ran. */
@@ -164,6 +186,8 @@ export interface MeetingArtifact {
   app?: string;
   /** Extractor results, also written to insights/<name>.json and .md. */
   insights?: MeetingInsight[];
+  /** What the owner typed, in the order it was written. Kept through every rewrite of the notes. */
+  ownerNotes?: OwnerNote[];
   /**
    * Words changed after the notes were written (a corrected line, a removed
    * phantom line) and the notes were kept rather than cleared. They may no
@@ -308,6 +332,37 @@ export function parseMeetingClaim(value: unknown, label = 'meeting claim'): Meet
     ...(optionalString(claim.due, `${label} due`) === undefined || (claim.type !== 'action_item' && claim.type !== 'follow_up')
       ? {}
       : { due: claim.due as string }),
+    ...ownerNoteIdsOf(claim.ownerNoteIds, label),
+  };
+}
+
+/** Which of the owner's notes something came from: present only when it names one. */
+function ownerNoteIdsOf(value: unknown, label: string): { ownerNoteIds?: string[] } {
+  if (value === undefined) return {};
+  if (!Array.isArray(value) || value.some((id) => typeof id !== 'string' || !id.trim())) {
+    throw new Error(`${label} ownerNoteIds must be strings`);
+  }
+  return value.length ? { ownerNoteIds: [...value] as string[] } : {};
+}
+
+/** A cited point rests on the transcript, the owner's notes, or both: never on nothing. */
+export function citesNothing(item: { evidenceSegmentIds: readonly string[]; ownerNoteIds?: readonly string[] }): boolean {
+  return item.evidenceSegmentIds.length === 0 && !item.ownerNoteIds?.length;
+}
+
+export function parseOwnerNote(value: unknown, label = 'owner note'): OwnerNote {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  const note = value as Record<string, unknown>;
+  const text = string(note.text, `${label} text`);
+  if (text.length > OWNER_NOTE_LIMITS.text) throw new Error(`${label} is longer than ${OWNER_NOTE_LIMITS.text.toLocaleString('en-US')} characters`);
+  if (note.at !== undefined && (typeof note.at !== 'number' || !Number.isFinite(note.at) || note.at < 0)) {
+    throw new Error(`${label} at must be seconds from the start`);
+  }
+  return {
+    id: string(note.id, `${label} id`),
+    text,
+    ...(note.at === undefined ? {} : { at: Math.round((note.at as number) * 1000) / 1000 }),
+    addedAt: string(note.addedAt, `${label} addedAt`),
   };
 }
 
@@ -355,6 +410,7 @@ function parseAnalysis(value: unknown): MeetingAnalysis | undefined {
       ? {}
       : { template: analysis.template as string }),
     ...(analysis.notes === undefined ? {} : { notes: parseMeetingNotes(analysis.notes) }),
+    ...(analysis.ownerNotesUnread === true ? { ownerNotesUnread: true as const } : {}),
   };
 }
 
@@ -366,13 +422,16 @@ export function parseMeetingNoteItems(value: unknown, label: string): MeetingNot
       throw new Error(`${label} item ${itemIndex} is invalid`);
     }
     const note = item as Record<string, unknown>;
-    if (!Array.isArray(note.evidenceSegmentIds) || note.evidenceSegmentIds.length === 0 ||
+    const fromNotes = ownerNoteIdsOf(note.ownerNoteIds, `${label} item ${itemIndex}`);
+    // A point from the owner's notes alone may cite no transcript; any other must cite some.
+    if (!Array.isArray(note.evidenceSegmentIds) || (note.evidenceSegmentIds.length === 0 && !fromNotes.ownerNoteIds) ||
         note.evidenceSegmentIds.some((id) => typeof id !== 'string' || !id.trim())) {
       throw new Error(`${label} item ${itemIndex} must cite transcript segments`);
     }
     return {
       text: string(note.text, `${label} item ${itemIndex} text`),
       evidenceSegmentIds: [...note.evidenceSegmentIds] as string[],
+      ...fromNotes,
     };
   });
 }
@@ -483,6 +542,8 @@ export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): Mee
   const transcriptEvidence = parseMeetingEvidence(artifact.transcriptEvidence);
   if (artifact.insights !== undefined && !Array.isArray(artifact.insights)) throw new Error(`${path} insights must be an array`);
   const insights = artifact.insights?.map((insight, index) => parseMeetingInsight(insight, `insight ${index}`));
+  if (artifact.ownerNotes !== undefined && !Array.isArray(artifact.ownerNotes)) throw new Error(`${path} ownerNotes must be an array`);
+  const ownerNotes = artifact.ownerNotes?.map((note, index) => parseOwnerNote(note, `owner note ${index}`));
   const outdated = artifact.notesOutdated as Record<string, unknown> | undefined;
   return {
     schemaVersion: 1,
@@ -514,6 +575,7 @@ export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): Mee
     ...(ai === undefined || Object.keys(ai).length === 0 ? {} : { ai }),
     ...(optionalString(artifact.app, 'meeting app') === undefined ? {} : { app: artifact.app as string }),
     ...(insights?.length ? { insights } : {}),
+    ...(ownerNotes?.length ? { ownerNotes } : {}),
     ...(outdated === undefined ? {} : { notesOutdated: {
       at: string(outdated?.at, 'notesOutdated at'), reason: string(outdated?.reason, 'notesOutdated reason'),
     } }),
@@ -571,13 +633,30 @@ export function claimOwnerAndDue(claim: Pick<MeetingClaim, 'person' | 'due'>): s
   return [claim.person, claim.due].filter(Boolean).join(' · ') || undefined;
 }
 
+/** What a point rests on, for the Markdown copies: its segments, and "your notes" when it came from them. */
+function sourcesOf(item: { evidenceSegmentIds: readonly string[]; ownerNoteIds?: readonly string[] }): string {
+  return [...item.evidenceSegmentIds, ...(item.ownerNoteIds?.length ? ['your notes'] : [])].join(', ');
+}
+
 function markdownList(claims: MeetingClaim[]): string {
   return claims.length > 0
     ? claims.map((claim) => {
       const owner = claim.type === 'action_item' || claim.type === 'follow_up' ? claimOwnerAndDue(claim) : undefined;
-      return `- ${claim.text}${owner ? ` (${owner})` : ''} _(${claim.evidenceSegmentIds.join(', ')})_`;
+      return `- ${claim.text}${owner ? ` (${owner})` : ''} _(${sourcesOf(claim)})_`;
     }).join('\n')
     : '- None captured.';
+}
+
+/** "12:04" or "1:02:04": where in the meeting a note was written. */
+function noteClock(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds));
+  const rest = `${String(Math.floor(whole % 3600 / 60)).padStart(2, '0')}:${String(whole % 60).padStart(2, '0')}`;
+  return whole >= 3600 ? `${Math.floor(whole / 3600)}:${rest}` : rest;
+}
+
+/** What the owner typed about the meeting, readable without Seashell. */
+export function ownerNotesMarkdown(title: string, notes: readonly OwnerNote[]): string {
+  return `# Your notes\n\n_${title}_\n\n${notes.map((note) => `- ${note.at === undefined ? '' : `${noteClock(note.at)} `}${note.text}`).join('\n')}\n`;
 }
 
 function documentFor(artifact: MeetingArtifact, type: MeetingClaimType, title: string): string {
@@ -590,7 +669,7 @@ function documentFor(artifact: MeetingArtifact, type: MeetingClaimType, title: s
 export function templatedNotesMarkdown(title: string, analysis: MeetingAnalysis): string {
   const sections = (analysis.notes ?? []).map((section) => `## ${section.heading}\n\n${
     section.items.length
-      ? section.items.map((item) => `- ${item.text} _(${item.evidenceSegmentIds.join(', ')})_`).join('\n')
+      ? section.items.map((item) => `- ${item.text} _(${sourcesOf(item)})_`).join('\n')
       : '- Not discussed.'
   }`);
   return `# ${title}\n\n${analysis.template ? `_${analysis.template} notes_\n\n` : ''}${analysis.summary}\n\n${sections.join('\n\n')}\n`;
@@ -649,6 +728,11 @@ function writeMeetingProjections(
   atomicWrite(join(directory, 'documents', 'open-questions.md'), documentFor(artifact, 'open_question', 'Open questions'));
   atomicWrite(join(directory, 'documents', 'follow-ups.md'), documentFor(artifact, 'follow_up', 'Follow-ups'));
   writeInsightProjections(directory, artifact);
+  if (artifact.ownerNotes?.length) {
+    atomicWrite(join(directory, 'documents', 'your-notes.md'), ownerNotesMarkdown(artifact.title, artifact.ownerNotes));
+  } else {
+    rmSync(join(directory, 'documents', 'your-notes.md'), { force: true });
+  }
   if (analysis?.notes) {
     atomicWrite(join(directory, 'documents', 'meeting-notes.md'), templatedNotesMarkdown(artifact.title, analysis));
   } else {
