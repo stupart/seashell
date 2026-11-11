@@ -204,7 +204,8 @@ test('a video track restarts a crashed recorder into a new movie and lists both 
     onState: (state) => states.push(state),
     onWarning: (message) => warnings.push(message),
   });
-  await Bun.sleep(50);
+  const deadline = Date.now() + 5_000;
+  while (started.length < 2 && Date.now() < deadline) await Bun.sleep(5);
   expect(started).toHaveLength(2);
   track.stop();
   await track.done;

@@ -274,7 +274,6 @@ test('video records beside audio: listed at its first frame, final at stop, on t
   roots.push(libraryDir);
   const startedAt = new Date(1_800_000_000_000);
   const statuses: DurableLiveCaptureStatus[] = [];
-  let listedAtFirstFrame: unknown;
   const handle = startDurableLiveCapture({
     libraryDir, sessionId: 'with-video', startedAt, systemAudio: false,
     microphoneStarter: microphoneWithOneChunk(libraryDir),
@@ -286,7 +285,6 @@ test('video records beside audio: listed at its first frame, final at stop, on t
       return {
         done: new Promise((resolve) => { finish = resolve; }),
         stop: () => {
-          listedAtFirstFrame = handle.store.manifest.video?.segments[0];
           finish({ saved: true, requestedStop: true, segment: { firstFrameUnixMs: startedAt.getTime() + 2_500,
             durationMs: 30_000, bytes: 32, codec: 'h264', finished: true } });
         },
@@ -294,9 +292,11 @@ test('video records beside audio: listed at its first frame, final at stop, on t
     } }),
     onStatus: (status) => statuses.push(status),
   });
-  await Bun.sleep(20);
+  // Listed while still recording, so a crash of Seashell itself would find it.
+  const deadline = Date.now() + 5_000;
+  while (!handle.store.manifest.video && Date.now() < deadline) await Bun.sleep(10);
+  expect(handle.store.manifest.video?.segments[0]).toMatchObject({ id: 'video.000001', firstFrameMs: 2_500, finished: false });
   const manifest = await handle.stop();
-  expect(listedAtFirstFrame).toMatchObject({ id: 'video.000001', firstFrameMs: 2_500, finished: false });
   expect(manifest.status).toBe('captured');
   expect(manifest.video?.segments).toEqual([expect.objectContaining({
     id: 'video.000001', relativePath: 'video/000001.mp4', firstFrameMs: 2_500, durationMs: 30_000,
