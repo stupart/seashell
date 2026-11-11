@@ -308,7 +308,8 @@ export const JOURNEYS: Journey[] = [
       { title: 'Your notes so far', press: ['1'], keys: '1', until: 'Your notes', note: 'In Notes, with the time it was written.' },
       { title: 'Asking', press: ['2', 'a'], keys: '2 A', until: 'what did I miss', note: 'Enter alone asks what you missed.' },
       { title: 'Reading the call', press: [ENTER], keys: 'Enter', until: 'Reading the call', note: 'Recording carries on; Esc stops waiting.' },
-      { title: 'What you missed', until: 'From the call', note: 'The answer, then the moments it rests on.' },
+      { title: 'Catch up', until: 'From the call', note: 'The answer, then the moments it rests on, under the same names.' },
+      { title: 'Saved as a note', press: ['+'], keys: '+', until: 'Noted at', note: 'The answer joins your notes, timed now.' },
       { title: 'Back to the call', press: [ESC], keys: 'Esc' },
       { title: 'A private meeting', press: ['a'], keys: 'A', until: 'AI is off',
         world: async ({ library }) => {
@@ -524,8 +525,10 @@ async function seedFiles(root: string, library: string): Promise<void> {
 function cannedAnswer(action: string, request: Record<string, any>): unknown {
   const ids = (request.segments ?? []).map((segment: { id: string }) => segment.id);
   const cite = (...wanted: string[]) => wanted.filter((id) => ids.includes(id));
+  // Named as the request names them, which is as the transcript shows them.
+  const asker = (request.segments ?? []).find((segment: { id: string }) => segment.id === 's000004')?.speakerLabel ?? 'They';
   if (action === 'chat' && request.partial) return {
-    answer: 'Priya asked for the security summary in writing, and you said you would send it by Friday. If it clears, they start the pilot with twelve people in November.',
+    answer: `${asker} asked for the security summary in writing, and you said you would send it by Friday. If it clears, they start the pilot with twelve people in November.`,
     evidenceSegmentIds: cite('s000004', 's000005', 's000006'),
   };
   if (action === 'draft') return {

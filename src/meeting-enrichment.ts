@@ -36,6 +36,7 @@ import { carryCaptureNotes, meetingOwnerNotes, ownerNotesForAi } from './owner-n
 import { loadVocabulary } from './vocabulary.ts';
 import { findTranscriptRecord } from './transcript-library.ts';
 import { speakerLabel } from './transcript-renderer.ts';
+import { speakerDisplayName } from './tui-state.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 
 /** A little longer than Humain's own per-role limits (3, 15 and 5 minutes), so
@@ -513,7 +514,10 @@ async function askHumain(
   if (artifact?.ai?.off) throw new MeetingAiOffError();
   const trimmed = question.trim();
   if (!trimmed) throw new Error('Meeting question cannot be empty');
-  const segments = meetingSegments(record);
+  // During the call the answer is shown beside the lines it quotes, under the names the transcript shows,
+  // so it is asked under those names: "You" and "Speaker 2", never "Microphone" and "Remote speaker 2".
+  const segments = options.partial ? meetingSegments(record).map((segment) => segment.speakerLabel === undefined ? segment
+    : { ...segment, speakerLabel: speakerDisplayName(segment.speakerId, segment.speakerLabel) }) : meetingSegments(record);
   if (options.partial && !segments.length) throw new Error('Nothing has been said yet.');
   const validIds = new Set(segments.map((segment) => segment.id));
   const approvedContext = {
@@ -648,8 +652,9 @@ export async function askDuringCall(
   const byId = new Map(meetingSegments(record).map((segment) => [segment.id, segment]));
   const moments = evidenceSegmentIds.flatMap((id) => {
     const segment = byId.get(id);
+    // Named as the answer names them.
     return segment ? [{ id, start: segment.start, text: segment.text, ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
-      ...(segment.speakerLabel ? { speaker: segment.speakerLabel } : {}) }] : [];
+      ...(segment.speakerLabel ? { speaker: speakerDisplayName(segment.speakerId, segment.speakerLabel) } : {}) }] : [];
   }).toSorted((left, right) => left.start - right.start);
   return { question: question.trim(), answer, moments };
 }

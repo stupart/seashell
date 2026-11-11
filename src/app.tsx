@@ -371,7 +371,8 @@ export default function App(props: {
   /** Bumped when a note is saved, so the notes read again. */
   const [notesVersion, setNotesVersion] = useState(0);
   /** [a] during a call: a question over what has been said so far, answered in a sheet. Esc stops waiting. */
-  const [liveAnswer, setLiveAnswer] = useState<{ shown: string; catchUp: boolean; answer?: LiveAnswer; error?: string; abort: AbortController; scroll: number } | null>(null);
+  /** `saved`: + kept the answer as one of your notes, so it is not offered twice. */
+  const [liveAnswer, setLiveAnswer] = useState<{ shown: string; catchUp: boolean; answer?: LiveAnswer; error?: string; saved?: boolean; abort: AbortController; scroll: number } | null>(null);
   /** When a key was last pressed here: "What did I miss?" covers at least the time since. */
   const lastLookedAt = useRef(Date.now());
   /** [u] A follow-up: its kind, then anything to add, at the key bar; the draft in a sheet. */
@@ -1821,9 +1822,9 @@ export default function App(props: {
   const nearest = briefable ? comingUp[0] : undefined;
   const failureText = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
 
-  /** A note, durable before it is confirmed: beside the recording's audio, or in the meeting. */
-  const saveNote = (note: NonNullable<typeof noteInput>) => {
-    if (!currentRecord && !recordingInView) return;
+  /** A note, durable before it is confirmed: beside the recording's audio, or in the meeting. Says whether it was kept. */
+  const saveNote = (note: NonNullable<typeof noteInput>): boolean => {
+    if (!currentRecord && !recordingInView) return false;
     try {
       let saved;
       if (recordingInView && note.typedAtUnixMs !== undefined) {
@@ -1838,7 +1839,8 @@ export default function App(props: {
       setNotesVersion((value) => value + 1);
       const where = saved.at === undefined ? 'Noted.' : `Noted at ${formatTuiClock(saved.at)}.`;
       setNotice(!recordingInView && currentMeeting?.analysis?.final && !currentMeeting.ai?.off ? `${where} Press g to rewrite the notes with it.` : where);
-    } catch (cause) { setError(failureText(cause)); }
+      return true;
+    } catch (cause) { setError(failureText(cause)); return false; }
   };
 
   /** "What did I miss?" or a question of your own, over the call so far. Recording carries on; Esc stops waiting. */
@@ -1849,7 +1851,7 @@ export default function App(props: {
     const catchUp = catchUpQuestion((Date.now() - recordingInView.startedAtUnixMs) / 1000, (lookedAtUnixMs - recordingInView.startedAtUnixMs) / 1000);
     const abort = new AbortController();
     setLiveAnswer({ abort, scroll: 0, catchUp: !typed,
-      shown: typed || (catchUp.from > 0 ? `What did I miss since ${formatTuiClock(catchUp.from)}?` : 'What have I missed so far?') });
+      shown: typed || (catchUp.from > 0 ? `What did I miss since ${formatTuiClock(catchUp.from)}?` : 'What did I miss?') });
     if (recordingInView.own) { try { saveTranscriptRecord(libraryRoot, liveRecordRef.current); } catch { /* The saved draft so far is asked about. */ } }
     void askDuringCall(libraryRoot, recordingInView.id, typed || catchUp.question, route, { signal: abort.signal })
       .then((answer) => setLiveAnswer((current) => current?.abort === abort ? { ...current, answer } : current))
@@ -2036,6 +2038,11 @@ export default function App(props: {
       const most = Math.max(0, scrolling.lines.length - sheetRowCount);
       const step = key.upArrow || input === 'k' ? -1 : key.downArrow || input === 'j' ? 1 : key.pageUp ? -sheetRowCount : key.pageDown ? sheetRowCount : 0;
       if (step) { scrolling.set(Math.min(most, Math.max(0, scrolling.scroll + step))); return; }
+      // + keeps the answer as one of your notes, timed now, as a note typed now would be.
+      if (liveAnswer?.answer && !liveAnswer.saved && input === '+') {
+        if (saveNote({ input: liveAnswer.answer.answer.slice(0, 2_000), typedAtUnixMs: Date.now() })) setLiveAnswer((current) => current && { ...current, saved: true });
+        return;
+      }
       if (draft?.result && input === 'c') {
         const copied = spawnSync('pbcopy', [], { input: draftText(draft.result), encoding: 'utf8' });
         if (copied.error || copied.status !== 0) setError('Copy failed');
@@ -2929,7 +2936,8 @@ export default function App(props: {
       : [...(notesSetup.row === 1 ? [['Enter', 'edit note'] as Hint] : [...write, ['←→', 'change'] as Hint]), ['↑↓', 'choose'], ['Esc', 'back']]
     : speakerPickerOpen ? suggested ? [['y', 'keep'], ['n', `not ${suggested.label}`], ['Enter', 'rename'], ['↑↓', 'choose'], ['Esc', 'back']]
       : [['Enter', 'name'], ['↑↓', 'choose'], ['Esc', 'back']]
-    : liveAnswer ? liveAnswer.answer || liveAnswer.error ? [...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']] : [['Esc', 'cancel']]
+    : liveAnswer ? liveAnswer.answer || liveAnswer.error ? [...(liveAnswer.answer && !liveAnswer.saved ? [['+', 'save as note'] as Hint] : []),
+      ...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']] : [['Esc', 'cancel']]
     : draft ? draft.result ? [['c', 'copy'], ...(draft.result.kind === 'email' ? [['o', 'open in Mail'] as Hint] : []), ['g', 'write again'],
       ['t', draft.sources ? 'hide times' : 'show times'], ...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']]
       : draft.error ? [['Enter', 'try again'], ['g', 'write again'], ['Esc', 'back']] : [['Esc', 'cancel']]
@@ -3043,7 +3051,7 @@ export default function App(props: {
   </Sheet> : null;
   const sheet = helpSheet ?? scrollSheet ?? audioSheet ?? notesSheet ?? speakerSheet ?? comingUpSheet;
   // A sheet's name takes the title line, as a screen's does; what is wrong stays in the status slot.
-  const sheetName = helpSheet ? 'Keys' : liveAnswer ? liveAnswer.catchUp ? 'What you missed' : 'Your question'
+  const sheetName = helpSheet ? 'Keys' : liveAnswer ? liveAnswer.catchUp ? 'Catch up' : 'Your question'
     : draft ? draft.kind === 'email' ? 'Follow-up email' : 'Slack message'
     : briefSheet ? `Brief · ${briefSheet.meeting.upcoming.title}`
     : comingUpSheet ? 'Coming up'

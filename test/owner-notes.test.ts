@@ -235,8 +235,10 @@ test('a question during the call reads the transcript so far, is marked partial,
   const answer = await askDuringCall(root, record.id, catchUp.question, route, { runner: humain.runner, engine: rev4 });
   expect(humain.requests[0]).toMatchObject({ action: 'chat', partial: true, question: catchUp.question });
   expect(humain.requests[0].segments).toHaveLength(2);
+  // Asked under the names the app shows beside the answer, so the answer and its quotes name people alike.
+  expect(humain.requests[0].segments.find((segment: { id: string }) => segment.id === 's000001').speakerLabel).toBe('Speaker 1');
   expect(answer).toEqual({ question: catchUp.question, answer: 'They want to start in November.',
-    moments: [{ id: 's000001', start: 0, speakerId: 'REMOTE_00', speaker: 'Remote speaker 1', text: 'We can start the pilot in November.' }] });
+    moments: [{ id: 's000001', start: 0, speakerId: 'REMOTE_00', speaker: 'Speaker 1', text: 'We can start the pilot in November.' }] });
   expect(loadMeetingArtifact(root, record.id)?.chat).toEqual([]);
   // Asked after the call, chat is not partial and is saved.
   const after = fake(() => ({ answer: 'November.', evidenceSegmentIds: [] }));
