@@ -73,7 +73,8 @@ try {
     signal!({ ...snapshot, capturedAtUnixMs: now - 3000 });
     signal!({ ...snapshot, capturedAtUnixMs: now });
     await settle();
-    input.write('m');
+    // A noticed call is a question: y records it.
+    input.write('y');
   } else input.write(' ');
   await until(() => starts.length === 2);
   // A pause after capture begins retains the original meeting clock.
