@@ -102,6 +102,26 @@ describe('timedUnitsFromWhisperJson', () => {
     ]);
   });
 
+  test('words keep their DTW timing when whisper.cpp ends a token before it starts', () => {
+    expect(timedUnitsFromWhisperJson({ transcription: [{ offsets: { from: 12460, to: 15000 }, text: ' Made up words.', tokens: [
+      { text: ' Made', offsets: { from: 12460, to: 11040 }, t_dtw: 1320 },
+      { text: ' up', offsets: { from: 12460, to: 11310 }, t_dtw: 1354 },
+      { text: ' words', offsets: { from: 13050, to: 13860 }, t_dtw: 1482 },
+      { text: '.', offsets: { from: 13860, to: 13500 }, t_dtw: 1500 },
+    ] }] })).toEqual([
+      { start: 12.9, end: 13.2, anchor: 13.2, text: 'Made' },
+      { start: 13.24, end: 13.54, anchor: 13.54, text: 'up' },
+      { start: 14.01, end: 14.82, anchor: 14.82, text: 'words.' },
+    ]);
+  });
+
+  test('a reversed word with no DTW timing falls back to its segment', () => {
+    expect(timedUnitsFromWhisperJson({ transcription: [{ offsets: { from: 12460, to: 15000 }, text: ' Made up.', tokens: [
+      { text: ' Made', offsets: { from: 12460, to: 11040 } },
+      { text: ' up.', offsets: { from: 13050, to: 13860 } },
+    ] }] })).toEqual([{ start: 12.46, end: 15, text: 'Made up.' }]);
+  });
+
   test('falls back to complete segment text rather than dropping an untimed token', () => {
     expect(timedUnitsFromWhisperJson({
       transcription: [
