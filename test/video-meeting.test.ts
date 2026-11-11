@@ -142,3 +142,140 @@ test('movie paths with spaces and symbols are URL-encoded relative to the page',
   expect(html).toContain('"src":"capture/video/000001.mp4"');
   expect(html).toContain('"src":"file:///Elsewhere/part%20two.mp4"');
 });
+
+/** Run the player's inline script against a small fake DOM: enough to drive its keys, clicks and seeks. */
+function playerHarness(html: string) {
+  type Listener = { fn: (event: FakeEvent) => void; once?: boolean };
+  type FakeEvent = { type: string; key?: string; target: unknown; defaultPrevented: boolean; preventDefault(): void; metaKey: boolean; ctrlKey: boolean; altKey: boolean };
+  const documentListeners: Record<string, Listener[]> = {};
+  const fire = (listeners: Record<string, Listener[]>, event: FakeEvent) => {
+    for (const listener of [...(listeners[event.type] ?? [])]) {
+      if (listener.once) listeners[event.type] = listeners[event.type]!.filter((entry) => entry !== listener);
+      listener.fn(event);
+    }
+  };
+  class El {
+    tagName: string; parent: El | null = null; children: (El | { nodeType: number; textContent: string })[] = [];
+    attributes: Record<string, string> = {}; listeners: Record<string, Listener[]> = {}; classes = new Set<string>();
+    tabIndex = -1; textContent = ''; style = { properties: {} as Record<string, string>, setProperty(name: string, value: string) { this.properties[name] = value; } };
+    constructor(tag: string) { this.tagName = tag.toUpperCase(); }
+    set className(value: string) { this.classes = new Set(value.split(' ').filter(Boolean)); }
+    get classList() { const classes = this.classes; return { add: (name: string) => classes.add(name), remove: (name: string) => classes.delete(name), contains: (name: string) => classes.has(name) }; }
+    append(...nodes: (El | { nodeType: number; textContent: string })[]) { for (const node of nodes) { if (node instanceof El) node.parent = this; this.children.push(node); } }
+    setAttribute(name: string, value: string) { this.attributes[name] = String(value); }
+    getAttribute(name: string) { return this.attributes[name] ?? null; }
+    removeAttribute(name: string) { delete this.attributes[name]; }
+    addEventListener(type: string, fn: (event: FakeEvent) => void, options?: { once?: boolean }) { (this.listeners[type] ??= []).push({ fn, once: options?.once }); }
+    closest(selector: string) { const tags = selector.split(',').map((tag) => tag.trim().toUpperCase()); for (let el: El | null = this; el; el = el.parent) if (tags.includes(el.tagName)) return el; return null; }
+    contains(node: unknown) { for (let el = node as El | null; el; el = el.parent) if (el === this) return true; return false; }
+    focus() { doc.activeElement = this; dispatch(this, 'focusin'); }
+    get offsetTop() { return (this.parent?.children.indexOf(this) ?? 0) * 40; }
+    get offsetHeight() { return 40; }
+  }
+  function dispatch(target: El, type: string, key?: string) {
+    const event: FakeEvent = { type, key, target, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, metaKey: false, ctrlKey: false, altKey: false };
+    for (let el: El | null = target; el; el = el.parent) fire(el.listeners, event);
+    fire(documentListeners, event);
+    return event;
+  }
+  const body = new El('body');
+  const list = Object.assign(new El('ol'), { clientHeight: 400, scrollTop: 0, scrollTo({ top }: { top: number }) { this.scrollTop = top; } });
+  const status = new El('p');
+  let source = '';
+  const video = Object.assign(new El('video'), {
+    currentTime: 0, paused: true, videoWidth: 1920, videoHeight: 1200,
+    play() { this.paused = false; return Promise.resolve(); }, pause() { this.paused = true; },
+  });
+  // Loading a movie reports its size at once.
+  Object.defineProperty(video, 'src', { get: () => source, set: (value: string) => { source = value; dispatch(video, 'loadedmetadata'); } });
+  body.append(video, status, list);
+  const json = /<script type="application\/json" id="meeting-data">(.*?)<\/script>/su.exec(html)![1]!;
+  const doc = {
+    body, activeElement: body as El,
+    getElementById: () => ({ textContent: json }),
+    querySelector: (selector: string) => ({ video, ol: list, '.status': status })[selector],
+    createElement: (tag: string) => new El(tag),
+    createTextNode: (text: string) => ({ nodeType: 3, textContent: text }),
+    addEventListener: (type: string, fn: (event: FakeEvent) => void) => { (documentListeners[type] ??= []).push({ fn }); },
+  };
+  const script = /<script>\n([\s\S]*?)<\/script>/u.exec(html)![1]!;
+  new Function('document', 'matchMedia', 'getSelection', 'location', 'Element', script)(
+    doc, () => ({ matches: true }), () => ({ isCollapsed: true }), { hash: '' }, El);
+  const items = list.children as El[];
+  return {
+    video, list, status, items, doc,
+    key: (key: string, target: El = doc.activeElement) => dispatch(target, 'keydown', key),
+    click: (item: El) => dispatch(item, 'click'),
+    current: () => items.findIndex((item) => item.classes.has('current')),
+    focused: () => items.indexOf(doc.activeElement),
+    stops: () => items.filter((item) => item.tabIndex === 0).map((item) => items.indexOf(item)),
+  };
+}
+
+const lines = Array.from({ length: 12 }, (_, index) => ({ start: index * 10, end: index * 10 + 8, text: `Line ${index}` }));
+const movie = (startOffsetSeconds: number, file = '/m/capture/video/000001.mp4') => ({ file, startOffsetSeconds });
+
+test('the player works by keyboard alone: Space plays or pauses, the arrows move between lines, Return seeks', () => {
+  const html = renderVideoPlayerPage('/m', createTranscriptRecord({ transcript: lines, speakers: [] }, { id: 'k', title: 'Keys' }),
+    { ...movie(-2), segments: [movie(-2)] }, 31);
+  const page = playerHarness(html);
+  // Opens at 0:31 with that line current, selected, and the transcript's only tab stop.
+  expect(page.current()).toBe(3);
+  expect(page.items[3]!.getAttribute('aria-selected')).toBe('true');
+  expect(page.stops()).toEqual([3]);
+  // From the page, Down goes into the transcript at the current line; then line by line, keeping one tab stop.
+  page.key('ArrowDown', page.doc.body);
+  expect(page.focused()).toBe(3);
+  page.key('ArrowDown'); page.key('ArrowDown'); page.key('ArrowUp');
+  expect(page.focused()).toBe(4);
+  expect(page.stops()).toEqual([4]);
+  page.key('End');
+  expect(page.focused()).toBe(11);
+  page.key('Home');
+  expect(page.focused()).toBe(0);
+  // Return seeks to the focused line (video time = transcript time + offset) and plays.
+  page.key('ArrowDown');
+  const enter = page.key('Enter');
+  expect(enter.defaultPrevented).toBe(true);
+  expect(page.video.currentTime).toBe(8);
+  expect(page.video.paused).toBe(false);
+  expect(page.current()).toBe(1);
+  // Space pauses and plays, from a line or from the page, and is left to the video's own controls there.
+  expect(page.key(' ').defaultPrevented).toBe(true);
+  expect(page.video.paused).toBe(true);
+  page.key(' ', page.doc.body);
+  expect(page.video.paused).toBe(false);
+  expect(page.key(' ', page.video).defaultPrevented).toBe(false);
+  expect(page.video.paused).toBe(false);
+  // A click seeks and plays the same way.
+  page.video.pause();
+  page.click(page.items[6]!);
+  expect([page.video.currentTime, page.video.paused, page.current()]).toEqual([58, false, 6]);
+});
+
+test('the player says when the video starts late and which part of a resumed call is showing', () => {
+  const record = createTranscriptRecord({ transcript: lines, speakers: [] }, { id: 's', title: 'Status' });
+  expect(playerHarness(renderVideoPlayerPage('/m', record, { ...movie(-1.5), segments: [movie(-1.5)] })).status.textContent).toBe('');
+  const late = playerHarness(renderVideoPlayerPage('/m', record, { ...movie(-45), segments: [movie(-45)] }));
+  expect(late.status.textContent).toBe('The video starts at 0:45; earlier lines have no picture.');
+  expect(late.items.filter((item) => item.classes.has('before')).length).toBe(4);
+  const resumed = playerHarness(renderVideoPlayerPage('/m', record,
+    { ...movie(-1), segments: [movie(-1), movie(-70, '/m/capture/video/000002.mp4')] }, 75));
+  expect(resumed.status.textContent).toBe('Part 2 of 2, from 1:10.');
+  expect((resumed.video as unknown as { src: string }).src).toBe('capture/video/000002.mp4');
+  expect(resumed.video.style.properties['--ratio']).toBe(String(1920 / 1200));
+});
+
+test('the player page is labelled, themed, offline and small', () => {
+  const html = renderVideoPlayerPage('/m', createTranscriptRecord({ transcript: lines, speakers: [] }, { id: 'p', title: 'Page' }),
+    { ...movie(-1), segments: [movie(-1)] });
+  expect(html).toContain('aria-label="Meeting video"');
+  expect(html).toContain('<ol role="listbox" aria-label="Transcript">');
+  expect(html).toContain('@media (prefers-color-scheme: dark)');
+  expect(html).toContain('li:focus-visible { outline: 2px solid var(--accent)');
+  expect(html).toContain('font-variant-numeric: tabular-nums');
+  expect(html).toContain('font: 15px/1.45 system-ui');
+  expect(html).not.toMatch(/<link|@import|@font-face|url\(/u);
+  const shell = html.replace(/<script type="application\/json" id="meeting-data">.*?<\/script>/su, '');
+  expect(shell.length).toBeLessThan(14_000);
+});

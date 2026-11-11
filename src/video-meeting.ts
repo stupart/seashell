@@ -91,8 +91,10 @@ function movieUrl(directory: string, file: string): string {
 
 /**
  * A page that plays the meeting's video beside its transcript. Clicking a line
- * seeks there; the line being said is highlighted. Everything is inline, so it
- * works offline, and every piece of meeting text is set as text, never HTML.
+ * (or Return on it) seeks there; the line being said is highlighted and kept in
+ * view. Space plays or pauses, and the arrow keys move between lines. Everything
+ * is inline, so it works offline, and every piece of meeting text is set as
+ * text, never HTML.
  */
 export function renderVideoPlayerPage(directory: string, record: TranscriptRecord, video: MeetingVideoMap, startAtSeconds?: number): string {
   const speakers = new Map(record.speakers.map((speaker) => [speaker.id, speaker.label]));
@@ -117,30 +119,43 @@ export function renderVideoPlayerPage(directory: string, record: TranscriptRecor
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title}</title>
 <style>
-:root { color-scheme: light dark; --bg: #f6f5f2; --panel: #ffffff; --text: #1d1d1f; --muted: #6e6e73;
-  --line: #e4e2dd; --accent: #0a66d8; --current: #fff3d1; }
-@media (prefers-color-scheme: dark) { :root { --bg: #161617; --panel: #1e1e20; --text: #f2f2f2; --muted: #9a9aa0;
-  --line: #2d2d30; --accent: #5aa2ff; --current: #3b3322; } }
+:root { color-scheme: light dark; --bg: #f6f5f2; --panel: #fff; --text: #1d1d1f; --muted: #6b6b70;
+  --line: #e4e2dd; --accent: #0a66d8; --hover: rgb(10 102 216 / 8%); --current: #fff3d1; --gutter: 20px; }
+@media (prefers-color-scheme: dark) { :root { --bg: #161617; --panel: #1e1e20; --text: #f2f2f2; --muted: #a1a1a6;
+  --line: #2d2d30; --accent: #5aa2ff; --hover: rgb(90 162 255 / 9%); --current: #3b3322; } }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body { display: grid; grid-template-rows: auto minmax(0, 1fr); background: var(--bg); color: var(--text);
-  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
-header { padding: 14px 20px; border-bottom: 1px solid var(--line); }
-h1 { margin: 0; font-size: 17px; font-weight: 600; }
+  font: 15px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; -webkit-text-size-adjust: 100%; }
+header { padding: 14px var(--gutter); border-bottom: 1px solid var(--line); }
+h1 { margin: 0; font-size: 17px; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; text-wrap: balance;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 main { display: grid; grid-template-columns: minmax(0, 3fr) minmax(320px, 2fr); min-height: 0; }
-.stage { display: flex; flex-direction: column; gap: 10px; padding: 20px; min-height: 0; }
-video { width: 100%; max-height: calc(100vh - 130px); background: #000; border-radius: 8px; }
+.stage { display: flex; flex-direction: column; gap: 10px; padding: var(--gutter); min-height: 0; container-type: size; }
+/* Only as wide as the picture fits, so the box never letterboxes whatever the movie's shape (--ratio is set once
+   it loads). The clip rounds WebKit's paused overlay too; the ring keeps a white slide's edge on a light page. */
+video { display: block; flex: none; width: 100%; height: auto; aspect-ratio: auto 16 / 10;
+  max-width: calc((100cqh - 2.5em) * var(--ratio, 1.6)); border-radius: 8px; box-shadow: 0 0 0 1px var(--line);
+  clip-path: inset(-1px round 9px); }
+video:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .status { margin: 0; color: var(--muted); font-size: 13px; }
-ol { margin: 0; padding: 8px 0; list-style: none; overflow-y: auto; background: var(--panel); border-left: 1px solid var(--line); }
-li { display: grid; grid-template-columns: 4.5em minmax(0, 1fr); gap: 10px; padding: 8px 16px; cursor: pointer; }
-li:hover, li:focus-visible { background: color-mix(in srgb, var(--accent) 9%, transparent); outline: none; }
+.status:empty { display: none; }
+ol { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 12px; align-content: start;
+  position: relative; margin: 0; padding: 8px 0; list-style: none; overflow-y: auto; overscroll-behavior: contain;
+  background: var(--panel); border-left: 1px solid var(--line); }
+li { grid-column: 1 / -1; display: grid; grid-template-columns: 4em minmax(0, 1fr); grid-template-columns: subgrid;
+  align-items: baseline; margin: 0 8px; padding: 8px 12px; border-radius: 8px; cursor: pointer; overflow-wrap: anywhere; }
+@media (hover: hover) { li:hover { background: var(--hover); } }
 li.current { background: var(--current); }
 li.before { color: var(--muted); }
-time { padding-top: 1px; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+li:focus { outline: none; }
+li:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+time { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .speaker { display: block; font-size: 13px; font-weight: 600; }
 @media (max-width: 860px) {
   main { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  video { max-height: 45vh; }
+  .stage { container-type: normal; }
+  video { max-width: calc(45vh * var(--ratio, 1.6)); }
   ol { border-left: 0; border-top: 1px solid var(--line); }
 }
 </style>
@@ -149,10 +164,10 @@ time { padding-top: 1px; color: var(--muted); font-size: 13px; font-variant-nume
 <header><h1>${title}</h1></header>
 <main>
   <section class="stage">
-    <video controls playsinline preload="metadata"></video>
-    <p class="status">Click a line to see that moment.</p>
+    <video controls playsinline preload="metadata" aria-label="Meeting video"></video>
+    <p class="status" role="status"></p>
   </section>
-  <ol aria-label="Transcript"></ol>
+  <ol role="listbox" aria-label="Transcript"></ol>
 </main>
 <script type="application/json" id="meeting-data">${scriptJson(data)}</script>
 <script>
@@ -161,8 +176,10 @@ const video = document.querySelector('video');
 const list = document.querySelector('ol');
 const status = document.querySelector('.status');
 const movies = data.movies;
+const motion = matchMedia('(prefers-reduced-motion: no-preference)');
 let movie = -1;
 let current = -1;
+let stop = null;
 let scrolledAt = 0;
 const clock = (seconds) => {
   const s = Math.max(0, Math.floor(seconds));
@@ -174,7 +191,8 @@ const movieAt = (t) => movies.reduce((found, entry, index) => (t + entry.offset 
 const firstPicture = -movies[0].offset;
 const items = data.lines.map((line) => {
   const item = document.createElement('li');
-  item.tabIndex = 0;
+  item.setAttribute('role', 'option');
+  item.tabIndex = -1;
   const time = document.createElement('time');
   time.textContent = clock(line.start);
   const body = document.createElement('div');
@@ -187,52 +205,123 @@ const items = data.lines.map((line) => {
   body.append(document.createTextNode(line.text));
   item.append(time, body);
   if (line.end < firstPicture) item.classList.add('before');
-  item.addEventListener('click', () => seek(line.start, true));
-  item.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); seek(line.start, true); }
-  });
   list.append(item);
   return item;
+});
+const lineOf = (node) => (node instanceof Element ? node.closest('li') : null);
+// One tab stop in the transcript: the line being said, or the one last moved to.
+function tabStop(item) {
+  if (!item || item === stop) return;
+  if (stop) stop.tabIndex = -1;
+  stop = item;
+  item.tabIndex = 0;
+}
+// Scroll the transcript, never the page. 'follow' moves only once the line nears
+// the bottom (or is above the top), and then brings it to a quarter of the way down.
+function reveal(item, how) {
+  const view = list.clientHeight, top = item.offsetTop, bottom = top + item.offsetHeight, at = list.scrollTop;
+  let target;
+  if (how === 'nearest') {
+    if (top < at + 8) target = top - 8;
+    else if (bottom > at + view - 8) target = bottom - view + 8;
+    else return;
+  } else {
+    if (how === 'follow' && top >= at + 8 && bottom <= at + view * 0.8) return;
+    target = top - Math.max(8, Math.min(view * 0.25, view - (bottom - top) - 8));
+  }
+  const smooth = how === 'follow' && motion.matches && Math.abs(target - at) < view * 2;
+  list.scrollTo({ top: Math.max(0, target), behavior: smooth ? 'smooth' : 'auto' });
+}
+video.addEventListener('loadedmetadata', () => {
+  if (video.videoHeight) video.style.setProperty('--ratio', String(video.videoWidth / video.videoHeight));
 });
 function load(index, then) {
   if (index === movie) { then(); return; }
   movie = index;
   video.addEventListener('loadedmetadata', then, { once: true });
   video.src = movies[index].src;
+  say();
 }
-function seek(t, play) {
+function seek(t, play, how) {
   const index = movieAt(t);
   load(index, () => {
     video.currentTime = Math.max(0, t + movies[index].offset);
     if (play) video.play().catch(() => {});
-    highlight();
+    highlight(how);
   });
 }
-function highlight() {
+function highlight(how = 'follow') {
   if (movie < 0) return;
   const t = video.currentTime - movies[movie].offset;
   let index = -1;
   while (index + 1 < data.lines.length && data.lines[index + 1].start <= t + 0.05) index++;
   if (index === current) return;
   items[current]?.classList.remove('current');
+  items[current]?.removeAttribute('aria-selected');
   current = index;
   const item = items[index];
   if (!item) return;
   item.classList.add('current');
-  if (Date.now() - scrolledAt > 4000) item.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  item.setAttribute('aria-selected', 'true');
+  if (!list.contains(document.activeElement)) tabStop(item);
+  if (how !== 'none' && Date.now() - scrolledAt > 4000) reveal(item, how);
 }
-for (const name of ['wheel', 'touchmove']) list.addEventListener(name, () => { scrolledAt = Date.now(); }, { passive: true });
-video.addEventListener('timeupdate', highlight);
-video.addEventListener('seeked', highlight);
+function say() {
+  const notes = [];
+  if (items.some((item) => item.classList.contains('before'))) notes.push('The video starts at ' + clock(firstPicture) + '; earlier lines have no picture.');
+  if (movies.length > 1) notes.push('Part ' + (movie + 1) + ' of ' + movies.length + ', from ' + clock(-movies[movie].offset) + '.');
+  status.textContent = notes.join(' ');
+}
+function choose(item) {
+  tabStop(item);
+  seek(data.lines[items.indexOf(item)].start, true, 'none');
+}
+function moveTo(item) {
+  if (!item) return;
+  tabStop(item);
+  item.focus({ preventScroll: true });
+  reveal(item, 'nearest');
+  scrolledAt = Date.now();
+}
+list.addEventListener('click', (event) => {
+  const item = lineOf(event.target);
+  if (item && getSelection().isCollapsed) choose(item);
+});
+list.addEventListener('focusin', (event) => tabStop(lineOf(event.target)));
+list.addEventListener('keydown', (event) => {
+  const item = lineOf(event.target);
+  if (!item || event.metaKey || event.ctrlKey || event.altKey) return;
+  const index = items.indexOf(item);
+  const to = { ArrowDown: index + 1, ArrowUp: index - 1, Home: 0, End: items.length - 1 }[event.key];
+  if (to !== undefined) { event.preventDefault(); moveTo(items[to]); }
+  else if (event.key === 'Enter') { event.preventDefault(); choose(item); }
+  else if (event.key !== ' ') scrolledAt = Date.now();
+});
+document.addEventListener('keydown', (event) => {
+  const target = event.target;
+  if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || target === video ||
+      (target instanceof Element && target.closest('a, button, input, select, textarea'))) return;
+  if (event.key === ' ') {
+    event.preventDefault();
+    if (video.paused) video.play().catch(() => {}); else video.pause();
+  } else if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && !lineOf(target)) {
+    event.preventDefault();
+    moveTo(stop ?? items[0]);
+  }
+});
+for (const name of ['wheel', 'touchmove', 'pointerdown']) list.addEventListener(name, () => { scrolledAt = Date.now(); }, { passive: true });
+video.addEventListener('seeking', () => { scrolledAt = 0; });
+video.addEventListener('timeupdate', () => highlight());
+video.addEventListener('seeked', () => highlight());
 video.addEventListener('ended', () => {
   if (movie + 1 < movies.length) load(movie + 1, () => { video.currentTime = 0; video.play().catch(() => {}); });
 });
 video.addEventListener('error', () => {
   status.textContent = 'This browser cannot play the video. Try Safari or Chrome, or open the movie from the meeting folder.';
 });
-if (firstPicture > 1) status.textContent = 'The video starts at ' + clock(firstPicture) + ' in the transcript. Click a line to see that moment.';
+tabStop(items[0]);
 const linked = /(?:^#|&)t=(\\d+(?:\\.\\d+)?)/.exec(location.hash);
-seek(linked ? Number(linked[1]) : data.startAt ?? Math.max(0, firstPicture), false);
+seek(linked ? Number(linked[1]) : data.startAt ?? Math.max(0, firstPicture), false, 'jump');
 </script>
 </body>
 </html>
