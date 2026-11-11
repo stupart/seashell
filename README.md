@@ -917,8 +917,10 @@ Tools that change your files, which the agent uses only when you ask:
 `edit_segment` (fix a line), `rename_speaker`, `update_prompt`,
 `update_template`, `create_extractor`, `update_extractor`, `delete_extractor`,
 `run_extractor`, `create_automation`, `update_automation` and
-`delete_automation`. A corrected line keeps the old transcript in the meeting's
-history and keeps the notes, marked as possibly out of date. An automation an
+`delete_automation`. A corrected line or a named speaker keeps the old
+transcript in the meeting's history and keeps the notes, marked as possibly out
+of date after a correction. A speaker an agent names doesn't teach Seashell
+their voice; only a name you give does. An automation an
 agent adds or changes stays off until you turn it on in its file, and still
 asks you before sending anything outside. Every tool refuses private meetings,
 and a meeting whose `meeting.json` can't be read counts as private.

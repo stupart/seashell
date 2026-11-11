@@ -8,8 +8,9 @@ import { createMeetingArtifact, loadMeetingArtifact, saveMeetingArtifact } from 
 import { meetingEvidence } from '../src/meeting-evidence.ts';
 import { meetingViewLines } from '../src/meeting-tui.ts';
 import { cleanPhantoms, editTranscriptSegment, renameMeetingSpeaker } from '../src/transcript-edits.ts';
-import { findTranscriptRecord, saveTranscriptRecord } from '../src/transcript-library.ts';
+import { findTranscriptRecord, renameTranscriptSpeaker, saveTranscriptRecord } from '../src/transcript-library.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
+import { listVoiceprints, saveMeetingVoices } from '../src/voiceprints.ts';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -117,4 +118,27 @@ test('clean-phantoms leaves meetings alone without saved audio or speech detecti
   expect((await cleanPhantoms(root, { detect: async () => undefined }))[0]?.skipped).toBe('speech detection is not available');
   expect(findTranscriptRecord(root, record.id).record.transcript).toHaveLength(4);
   await expect(cleanPhantoms(root, { ids: ['nope'] })).rejects.toThrow('Transcript not found: nope');
+});
+
+test('a speaker an agent names keeps the old transcript in history and teaches no voice', () => {
+  const { root, record, directory } = library();
+  const voices = mkdtempSync(join(tmpdir(), 'seashell-edit-voices-'));
+  roots.push(voices);
+  const original = process.env.SEASHELL_VOICES_DIR;
+  process.env.SEASHELL_VOICES_DIR = voices;
+  try {
+    // A long, clean voice for the speaker, as the finalizer keeps it: a name would normally teach it.
+    saveMeetingVoices(record.id, new Map([['REMOTE_SPEAKER_00', { embedding: [1, 0, 0, 0], seconds: 30, spans: [[0, 10]] }]]));
+    renameMeetingSpeaker(root, record.id, 'Remote speaker 1', 'Dana');
+    expect(listVoiceprints()).toEqual([]);
+    const history = readdirSync(join(directory, 'history', 'transcripts'));
+    expect(history).toEqual([expect.stringContaining('renamed-speaker')]);
+    expect(JSON.parse(readFileSync(join(directory, 'history', 'transcripts', history[0]!), 'utf8')).speakers[1].label).toBe('Remote speaker 1');
+    // The owner naming the same speaker does teach it.
+    renameTranscriptSpeaker(root, record.id, 'REMOTE_SPEAKER_00', 'Dana');
+    expect(listVoiceprints()).toEqual([{ name: 'Dana', meetings: 1 }]);
+  } finally {
+    if (original === undefined) delete process.env.SEASHELL_VOICES_DIR;
+    else process.env.SEASHELL_VOICES_DIR = original;
+  }
 });

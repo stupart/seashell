@@ -371,7 +371,7 @@ export const MEETINGS_MCP_TOOLS: readonly Tool[] = [
       return editTranscriptSegment(libraryDir, record.id, text(args.segmentId, 'segmentId', true)!, text(args.text, 'text', true)!);
     } },
   { name: 'rename_speaker', title: 'Name a speaker', annotations: edits,
-    description: 'Give a speaker a name, by speaker ID or current label ("Remote speaker 1"). Notes keep their content; placeholders like "Remote speaker 1" in them take the name.',
+    description: 'Give a speaker a name, by speaker ID or current label ("Remote speaker 1"). The old transcript is kept in the meeting\'s history. Notes keep their content; placeholders like "Remote speaker 1" in them take the name. Seashell does not learn the voice from a name an agent gives.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['id', 'speaker', 'name'], properties: {
       id: string('Meeting ID'), speaker: string('Speaker ID or current label'), name: string('Their name') } },
     run: (libraryDir, args) => {

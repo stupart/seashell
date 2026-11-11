@@ -69,11 +69,16 @@ export function editTranscriptSegment(
   return { id: record.id, segmentId, before, after };
 }
 
-/** Name a speaker by ID or by the label they have now ("Remote speaker 1"). */
+/**
+ * Name a speaker by ID or by the label they have now ("Remote speaker 1"), as
+ * an agent does through the meetings server. The transcript as it was is kept
+ * in history, and the name never teaches the voice library: an agent's name
+ * is a reading of the transcript, not the owner knowing the voice.
+ */
 export function renameMeetingSpeaker(
   libraryDir: string, transcriptId: string, speaker: string, name: string,
 ): { id: string; speakerId: string; from: string; to: string } {
-  const { record } = findTranscriptRecord(libraryDir, transcriptId);
+  const { path, record } = findTranscriptRecord(libraryDir, transcriptId);
   const wanted = speaker.trim().toLocaleLowerCase('en-US');
   const found = record.speakers.find((candidate) => candidate.id === speaker.trim())
     ?? record.speakers.find((candidate) => candidate.label.toLocaleLowerCase('en-US') === wanted);
@@ -81,7 +86,10 @@ export function renameMeetingSpeaker(
     throw new Error(`No speaker "${speaker}" in this meeting. Speakers: ${record.speakers.map((candidate) => `${candidate.label} (${candidate.id})`).join(', ') || 'none'}`);
   }
   const from = found.label;
-  renameTranscriptSpeaker(libraryDir, record.id, found.id, name);
+  if (!name.trim()) throw new Error('Speaker name cannot be empty');
+  assertNotCapturing(dirname(path));
+  keepTranscriptHistory(dirname(path), JSON.parse(readFileSync(path, 'utf8')) as TranscriptRecord, 'renamed-speaker');
+  renameTranscriptSpeaker(libraryDir, record.id, found.id, name, { learnVoice: false });
   return { id: record.id, speakerId: found.id, from, to: name.trim() };
 }
 

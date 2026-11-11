@@ -334,6 +334,8 @@ export function renameTranscriptSpeaker(
   transcriptId: string,
   speakerId: string,
   label: string,
+  /** learnVoice false: a name that must not teach the voice library, such as an agent's. */
+  options: { learnVoice?: boolean } = {},
 ): TranscriptRecord {
   const trimmed = label.trim();
   if (!trimmed) throw new Error('Speaker name cannot be empty');
@@ -351,7 +353,7 @@ export function renameTranscriptSpeaker(
   record.updatedAt = new Date().toISOString();
   saveTranscriptRecord(libraryDir, record, { namesOnly: { from: previous, to: trimmed } });
   // The name teaches the local voice library this voice (src/voiceprints.ts).
-  rememberVoice(record, speakerId, trimmed);
+  if (options.learnVoice !== false) rememberVoice(record, speakerId, trimmed);
   return record;
 }
 
