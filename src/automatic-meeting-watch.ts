@@ -29,6 +29,7 @@ import {
   MeetingSignalMonitor,
   MeetingAutomationController,
   resolveMeetingCandidate,
+  calendarEventIsThisCall,
   hasConfirmedMeetingEnd,
   isBrowserApplication,
   isVideoCallEvent,
@@ -632,9 +633,12 @@ export class AutomaticMeetingWatchService {
     const routing = this.#config.transcription ?? DEFAULT_TRANSCRIPTION_ROUTING;
     const canonical = selectCanonicalTranscriptionRoute(routing);
     const cloud = routing.cloud;
+    // Invitees cap how many voices there are, so only an event proven to be this
+    // call may: none (not meeting.json's nearest event) when it is not.
+    const proven = calendarEventIsThisCall(candidate, capture.store.manifest.startedAtUnixMs);
     let record: TranscriptRecord = await this.#dependencies.finalizeCapture(capture.manifestPath, {
       title: candidate.title,
-      ...(candidate.calendar ? { attendees: candidate.calendar.attendees } : {}),
+      attendees: proven ? candidate.calendar!.attendees : [],
       ...(canonical === 'cloud' && cloud?.uploadConsent ? {
         remoteRoute: {
           model: cloud.model,

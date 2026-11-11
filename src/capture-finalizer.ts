@@ -183,7 +183,8 @@ export interface FinalizeCaptureOptions {
   readonly strictSpeakers?: boolean;
   /** Test/provider seam; output timing must use the supplied track's clock. */
   readonly systemDiarizer?: (path: string, options: TranscribeMediaOptions) => Promise<StructuredTranscript>;
-  /** Calendar invitees, a ceiling on remote voices. Read from a saved meeting's meeting.json when omitted. */
+  /** Calendar invitees, a ceiling on remote voices. Read from a saved meeting's meeting.json when omitted;
+   * [] when the event is not proven to be this call (calendarEventIsThisCall). */
   readonly attendees?: readonly MeetingAttendee[];
   readonly localTranscriber?: typeof transcribeWithTimestamps;
   /** Explicit pinned remote canonical route. Omit to keep the final fully local. */
