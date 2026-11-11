@@ -1017,15 +1017,16 @@ seashell transcribe movie.mkv --audio-stream 3
 
 ## Speaker diarization
 
-Sea Shell separates voices with the
-[`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1)
-models, on your Mac. Diarization creates recording-local clusters; it does not
-inherently know human identities. Rename those clusters later through the TUI
-or library CLI.
+Sea Shell separates voices on your Mac with two engines: pyannote's
+[`speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1)
+and NVIDIA's Nemotron 3. Diarization creates recording-local clusters; it does
+not inherently know human identities. Rename those clusters later through the
+TUI or library CLI, and Sea Shell can [recognise those people by
+voice](#recognising-people-by-voice) in later meetings.
 
-By default they run natively: `native/bin/seashell-speakers` uses
-[FluidAudio](https://github.com/FluidInference/FluidAudio)'s Core ML conversion
-of community-1 on the Neural Engine. One-time setup downloads about 21 MB of
+Both run natively: `native/bin/seashell-speakers` uses
+[FluidAudio](https://github.com/FluidInference/FluidAudio)'s Core ML
+conversions on the Neural Engine. One-time setup downloads about 211 MB of
 models — no Python, no Hugging Face account:
 
 ```bash
@@ -1033,22 +1034,32 @@ seashell setup --speakers           # download the models once
 seashell setup --speakers --check   # offline: are they there?
 ```
 
-Measured on four AMI meetings (92 minutes, headset-mix audio, reference
-annotations, 0.25 s collar): 10.0% diarization error natively against 8.8% for
-pyannote in Python, in 22 seconds against 257, using about 400 MB of memory.
+### How the two engines are used
 
-### Trying Nemotron 3
+By default (`auto`) every recording goes through both. Nemotron 3 is the more
+precise: on 13 AMI meetings (6.8 hours, headset-mix audio) it put the wrong
+speaker on 0.55% of words outside crosstalk against 2.98% for community-1, and
+the same through video-call compression. But on real calls it sometimes hears
+two people as one, which no renaming can undo. So community-1 checks it: if
+one of Nemotron 3's voices holds two of community-1's voices that plainly
+sound like different people, or Nemotron 3 fills all eight of its slots, that
+recording uses community-1, with any two of its voices that are plainly one
+person put back together. On those AMI meetings `auto` scored 0.54%. On 16 real
+calls it kept Nemotron 3 for 14, and used community-1 for the 2 where
+Nemotron 3 had joined two clearly different voices.
 
-NVIDIA's Nemotron 3 is an optional second engine, run by the same helper: about
-190 MB, up to eight voices per channel. Past that it hands the channel back to
-community-1. On those four meetings it put the wrong name on 1.4% of words
-outside crosstalk against 4.7%, but they had four speakers each and no video-call
-audio, so check it on your own calls:
+When a meeting comes from your calendar, everyone invited who hasn't declined,
+less you, plus one spare seat, caps how many remote voices the separation may
+find. An invite with a meeting room sets no cap, and past eight people Nemotron 3
+is skipped.
+
+To use one engine only:
 
 ```bash
-seashell speakers compare --open        # your last 5 calls; --last <n> or meeting ids
-seashell speakers use nemotron3         # switch new meetings over
-seashell speakers use community-1       # switch back
+seashell speakers use community-1       # 21 MB; no cap on voices
+seashell speakers use nemotron3         # 190 MB; up to eight voices per channel
+seashell speakers use auto              # back to the default
+seashell speakers compare --open        # your last 5 calls with Nemotron 3 alone
 ```
 
 `compare` changes nothing. It builds a page in your library, in
@@ -1056,9 +1067,45 @@ seashell speakers use community-1       # switch back
 speaker and a short clip of each, so you can listen and pick. Private meetings
 are skipped, and the page and clips stay on your Mac.
 
+### Recognising people by voice
+
+When you name a remote speaker (**R** in a meeting, or
+`seashell library speakers <id> set <speaker> <name>`), Sea Shell keeps a
+voiceprint for that person: a short list of numbers describing their voice,
+taken from up to a minute of their clean speech. In later meetings, a remote
+voice that closely matches exactly one known person gets their name as a
+suggestion. Suggested names read like any other name, and the saved transcript
+records them as suggestions; rename the speaker to accept or correct one, or
+back to "Remote speaker N" to undo it. A speaker with under ten seconds of clean
+speech is never matched, two people too close to tell apart leave the voice
+unnamed, and where Google Meet's hints or the meeting's own introductions name
+someone else, the suggestion is dropped.
+
+Measured on AMI's recurring meeting series, naming each person once and
+matching their later meetings suggested 30 of 30 named people and never a wrong
+name; 44 voices of people never named stayed unnamed.
+
+Voiceprints never leave your Mac. They are not written into transcripts, notes,
+exports or anything sent to an AI provider, and they live outside your
+transcript library, in `~/Library/Application Support/Sea Shell/Voices`
+(`SEASHELL_VOICES_DIR` overrides it). That folder also keeps each meeting's
+unnamed voices, so a speaker you name later can be learned. Renaming a speaker
+moves their voice to the new name. Forgetting a person deletes their
+voiceprint:
+
+```bash
+seashell speakers voices                # who Sea Shell knows by voice
+seashell speakers voices forget "Ada"   # delete Ada's voiceprint
+```
+
+Deleting the Voices folder forgets everyone.
+
 ### The Python engine
 
-The Python engine is still available for anyone who wants that extra accuracy: set
+On four AMI meetings (92 minutes, reference annotations, 0.25 s collar)
+community-1 natively scored 10.0% diarization error against 8.8% for pyannote
+in Python, in 22 seconds against 257, using about 400 MB of memory. The Python
+engine is still available for anyone who wants that extra accuracy: set
 `"speakers": { "engine": "pyannote" }` in config.json (or
 `SEASHELL_SPEAKER_ENGINE=pyannote`).
 
@@ -1160,6 +1207,14 @@ screenshot pixels. First-name aliases are accepted only when unique in the
 roster. Conflicting evidence leaves the diarization ID unchanged, and an
 existing human label is never overwritten.
 
+In recorded meetings, Google Meet's hints often cover only part of a call:
+macOS Accessibility can't read Meet in full screen, on another desktop or in a
+background tab, and speaker names currently need Chrome. A line Meet saw keeps
+the name Meet showed. The rest of that voice takes the name only when Meet saw
+at least 15 seconds of it, 90% as one person, and saw that person mostly in
+this voice, and no [known voice](#recognising-people-by-voice) disagrees.
+Otherwise it stays "Remote speaker N".
+
 The default identity pass is local and deterministic. The `SpeakerLabeler`
 interface is the opt-in seam for a future local or hosted LLM. A safe LLM
 implementation should receive short timestamped context windows and the known
@@ -1256,6 +1311,10 @@ seashell ai test --json
 - Roster and active-speaker evidence stays local in the built-in identity pass.
 - Meeting video, when on, records only the call's window (or the main display
   when no window fits) and stays on this Mac.
+- Voiceprints of the people you name stay in
+  `~/Library/Application Support/Sea Shell/Voices`, outside the transcript
+  library, and are never uploaded or sent to an AI provider.
+  `seashell speakers voices forget <name>` deletes one.
 - Meeting enrichment sends only the selected transcript and explicitly supplied
   context to the configured Humain route. Codex/Claude Code subscription and
   OpenRouter routes are remote; use them when that data sharing is appropriate.
@@ -1314,7 +1373,8 @@ Meet names need macOS Accessibility permission, but no voice model; see
 Once the local model is verified, voices in
 computer audio are separated when the recording finishes. Live labels show
 Meet hints where a whole draft chunk has a consistent speaker, otherwise audio
-sources. Press **R** to name a speaker. Shared microphones
+sources. Press **R** to name a speaker; Sea Shell then suggests that name when
+the same voice is heard in a later meeting. Shared microphones
 and overlapping speech can still need correction.
 
 For an existing saved meeting, choose **Identify saved recording** in that

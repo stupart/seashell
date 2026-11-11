@@ -4,7 +4,7 @@ import { dirname, join } from 'path';
 import { randomUUID } from 'crypto';
 import { beginManagedProcessSession, trackChildProcess, terminateManagedChild } from './process-lifecycle.ts';
 import { DIARIZATION_ROOT, diarizationEnvironment, fileStamp, modelArtifacts } from './diarization-environment.ts';
-import { nativeSpeakerStatus, speakerEngine, speakerEngineArguments, speakersHelper, usesSpeakersHelper, type SpeakerEngine } from './speaker-engine.ts';
+import { nativeSpeakerStatus, speakerEngine, speakerEngineArguments, speakerModelSize, speakersHelper, usesSpeakersHelper, type SpeakerEngine } from './speaker-engine.ts';
 
 function shellQuote(value: string): string { return `'${value.replaceAll("'", "'\\''")}'`; }
 
@@ -67,16 +67,16 @@ export async function setupDiarization(options: { login: boolean; check: boolean
     const engine = options.engine ?? speakerEngine();
     if (usesSpeakersHelper(engine)) {
       // Core ML models from Hugging Face's public mirror: no Python, no account, no login.
-      const size = engine === 'nemotron3' ? '190' : '21';
+      const size = speakerModelSize(engine);
       if (!options.check) {
-        status(`Downloading speaker models · about ${size} MB, once…`);
+        status(`Downloading speaker models · about ${size}, once…`);
         await invoke(speakersHelper(), ['--prepare', ...speakerEngineArguments(engine)]).catch(() => {
           throw new Error('Could not download the speaker models. Check your connection, then run seashell setup --speakers again.');
         });
       }
       const native = nativeSpeakerStatus(process.env, engine);
       return { ready: native.ready, stage: native.ready ? 'ready' : 'models-missing', detail: native.detail, model: native.model,
-        ...(native.ready ? {} : { nextStep: `Run seashell setup --speakers to download the speaker models (about ${size} MB).` }) };
+        ...(native.ready ? {} : { nextStep: `Run seashell setup --speakers to download the speaker models (about ${size}).` }) };
     }
     rmSync(environment.verificationPath, { force: true });
     let uv = Bun.which('uv');
