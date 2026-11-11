@@ -24,7 +24,7 @@ import { diarizationStatus } from './diarization-environment.ts';
 import { remoteVoiceCeiling, type SpeakerVoice } from './diarize.ts';
 import { parseMeetingArtifact, type MeetingAttendee } from './meeting-artifact.ts';
 import { isLikelySystemAudioLeak } from './live-echo.ts';
-import { meetSpeakerForSegment, readMeetSamples } from './meet-speakers.ts';
+import { meetSpeakerForSegment, nameRemoteSpeakers, readMeetSamples, type MeetSpeaker } from './meet-speakers.ts';
 import { amplifyPcm, hasAudiblePcmSignal, pcmS16leSignalLevel, pcmS16leToWav, quietAudioGain } from './live-system-audio.ts';
 import { createTranscriptRecord } from './transcript-record.ts';
 import { saveTranscriptRecord } from './transcript-library.ts';
@@ -271,9 +271,10 @@ export async function finalizeCaptureTranscript(
     observedMeetLabels.set(sample.speaker.id, labels);
   }
   const meetSpeakers = new Map<string, { id: string; label: string }>();
-  const labelMeet = (segments: TranscriptSegment[]): TranscriptSegment[] => segments.map(segment => {
+  const labelMeet = (segments: TranscriptSegment[], found: Array<MeetSpeaker | undefined> =
+    segments.map(segment => meetSpeakerForSegment(meetSamples, segment))): TranscriptSegment[] => segments.map((segment, index) => {
     if (segment.speaker === 'LOCAL') return segment;
-    const speaker = meetSpeakerForSegment(meetSamples, segment);
+    const speaker = found[index];
     if (!speaker) return segment;
     const id = (observedMeetLabels.get(speaker.id)?.size ?? 0) > 1
       ? `${speaker.id}_LABEL_${createHash('sha256').update(speaker.label).digest('hex')}`
@@ -346,9 +347,11 @@ export async function finalizeCaptureTranscript(
           const remote = document.transcript.map(({ id: _id, ...segment }) => ({ ...segment,
             speaker: speakerIds.get(segment.speaker ?? '') ?? remoteSpeakerId('UNKNOWN'),
           }));
+          // Known voices and Meet's hints name only what they agree on.
           remoteVoices = new Map([...voices].flatMap(([id, voice]) => (speakerIds.has(id) ? [[speakerIds.get(id)!, voice] as const] : [])));
-          voiceNames = matchKnownVoices(remoteVoices);
-          segments.push(...labelMeet(remote));
+          const names = nameRemoteSpeakers(meetSamples, remote, matchKnownVoices(remoteVoices));
+          voiceNames = names.voices;
+          segments.push(...labelMeet(remote, names.meet));
           separated = true;
           speakerAnalysis = { status: 'complete', model: document.speakerAnalysis?.model ?? diarizationStatus().model,
             detail: 'Remote voices separated locally. Microphone is a separate source; names need confirmation.' };

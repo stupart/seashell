@@ -853,8 +853,8 @@ suggestion. Suggested names read like any other name, and the saved transcript
 records them as suggestions; rename the speaker to accept or correct one, or
 back to "Remote speaker N" to undo it. A speaker with under ten seconds of clean
 speech is never matched, two people too close to tell apart leave the voice
-unnamed, and where the meeting's own introductions name someone else, the
-suggestion is dropped.
+unnamed, and where Google Meet's hints or the meeting's own introductions name
+someone else, the suggestion is dropped.
 
 Measured on AMI's recurring meeting series, naming each person once and
 matching their later meetings suggested 30 of 30 named people and never a wrong
@@ -981,6 +981,14 @@ currently produce these observations; the built-in pass does not inspect raw
 screenshot pixels. First-name aliases are accepted only when unique in the
 roster. Conflicting evidence leaves the diarization ID unchanged, and an
 existing human label is never overwritten.
+
+In recorded meetings, Google Meet's hints often cover only part of a call:
+macOS Accessibility can't read Meet in full screen, on another desktop or in a
+background tab, and speaker names currently need Chrome. A line Meet saw keeps
+the name Meet showed. The rest of that voice takes the name only when Meet saw
+at least 15 seconds of it, 90% as one person, and saw that person mostly in
+this voice, and no [known voice](#recognising-people-by-voice) disagrees.
+Otherwise it stays "Remote speaker N".
 
 The default identity pass is local and deterministic. The `SpeakerLabeler`
 interface is the opt-in seam for a future local or hosted LLM. A safe LLM
