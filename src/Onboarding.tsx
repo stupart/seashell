@@ -267,7 +267,7 @@ export default function Onboarding(props: SetupActionProps & {
       {gap}
       {!meter.quiet ? <Text dimColor>Listening…</Text> : yours ? <>
         <Paragraph width={width} color="yellow" text={meter.zeros
-          ? 'Nothing heard. Your microphone is sending silence, not sound. That happens when it is muted or the wrong input is chosen.'
+          ? 'Nothing heard. Your mic may be muted or set to the wrong input.'
           : 'Nothing that sounds like speech yet.'} />
         <Text>1. Check your Mac, headset or call app is not muted.</Text>
         <Text>2. Check the input in Sound settings.</Text>
@@ -360,7 +360,7 @@ export default function Onboarding(props: SetupActionProps & {
       {setup.message && setup.message.tone !== 'done' && <Box marginTop={1} flexShrink={0}>
         <Paragraph width={width} color={setup.message.tone === 'failed' ? 'red' : 'yellow'} text={setup.message.text} /></Box>}
     </Box>
-    {setup.busy ? <Prompt text="◐ Working…" color="magenta" hints={[['Esc', 'cancel']]} columns={width} />
+    {setup.busy ? <Prompt text="◐ Working…" dimColor hints={[['Esc', 'cancel']]} columns={width} />
       : setup.message?.tone === 'done' ? <Toast text={setup.message.text} columns={width} />
       : <KeyBar hints={hints} columns={width} help={false} />}
   </Box>;

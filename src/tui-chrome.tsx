@@ -1,9 +1,9 @@
 import React from 'react';
 import { Box, Text, useStdout } from 'ink';
-import wrapAnsi from 'wrap-ansi';
+import { wrapWords } from './tui-state.ts';
 
 export type Hint = readonly [key: string, label: string];
-type Tone = 'red' | 'yellow' | 'green' | 'cyan' | 'magenta';
+type Tone = 'red' | 'yellow' | 'green' | 'cyan';
 
 const ALWAYS: readonly Hint[] = [[',', 'settings'], ['?', 'help']];
 const width = (text: string) => Bun.stringWidth(text);
@@ -81,6 +81,8 @@ export function Prompt(props: {
   hints?: readonly Hint[];
   columns: number;
   color?: Tone;
+  /** Work in progress ("◐ Working…") is dim: it is neither a question nor anyone's colour. */
+  dimColor?: boolean;
 }) {
   const hints = props.hints ?? [];
   const room = Math.max(4, props.columns - (hints.length ? hintsWidth(hints) + 2 : 0));
@@ -92,7 +94,7 @@ export function Prompt(props: {
     : props.short && width(props.short) <= room ? props.short
     : cutEnd(props.short ?? props.text, room);
   return <Text key={shapeOf(hints)} wrap="truncate-end">
-    <Text {...(props.color ? { color: props.color } : {})}>{text}</Text>
+    <Text {...(props.color ? { color: props.color } : {})} dimColor={props.dimColor ?? false}>{text}</Text>
     {typed !== undefined ? ` ${typed}` : ''}
     {hints.length ? <>{'  '}<Hints hints={hints} /></> : null}
   </Text>;
@@ -140,17 +142,20 @@ export function ScreenTitle(props: { name: string; color?: Tone; bold?: boolean;
   const { stdout } = useStdout();
   const columns = stdout?.columns ?? 80;
   const room = columns - 2;
+  // The name of the app is there on a wide window and never on a narrow one, so it does not come and go with the status.
+  const brand = columns >= 72;
+  const lead = 2 + (brand ? 9 : 0);
   const nameWidth = props.name ? 2 + width(props.name) : 0;
   // The status gives way to its short form, then to a short screen name: a long meeting title is cut before it.
-  const fits = (text?: string) => text !== undefined && 2 + nameWidth + 2 + width(text) <= room;
+  const fits = (text?: string) => text !== undefined && lead + nameWidth + 2 + width(text) <= room;
   // One more column for the … that ends a cut name.
-  const statusRoom = room - 2 - Math.min(nameWidth, 3 + (props.keep ?? width(props.name))) - 2;
+  const statusRoom = room - lead - Math.min(nameWidth, 3 + (props.keep ?? width(props.name))) - 2;
+  // A dim status with no fix only informs ("Watching for calls"): it shows whole or not at all, and never cuts the name.
+  const informs = !props.status?.color && !props.status?.fix;
   const statusText = !props.status ? undefined : fits(props.status.text) ? props.status.text : fits(props.status.short) ? props.status.short
-    : statusRoom >= 8 ? cutEnd(props.status.short ?? props.status.text, statusRoom) : undefined;
+    : !informs && statusRoom >= 8 ? cutEnd(props.status.short ?? props.status.text, statusRoom) : undefined;
   const statusWidth = statusText ? 2 + width(statusText) : 0;
-  // Narrow, the name of the app gives way first; it stays whenever there is room for it.
-  const brand = columns >= 72 || 2 + 9 + nameWidth + statusWidth <= room;
-  const detail = props.detail && 2 + (brand ? 9 : 0) + nameWidth + 2 + width(props.detail) + statusWidth <= room ? props.detail : undefined;
+  const detail = props.detail && lead + nameWidth + 2 + width(props.detail) + statusWidth <= room ? props.detail : undefined;
   return <Box flexDirection="column" flexShrink={0}>
     <Box justifyContent="space-between">
       {/* Keyed by its shape, as the key bar is, so a longer title is measured afresh. */}
@@ -166,11 +171,10 @@ export function ScreenTitle(props: { name: string; color?: Tone; bold?: boolean;
   </Box>;
 }
 
-/** Help, audio help, notes setup and speaker naming take the body instead of pushing it around. */
-export function Sheet(props: { title: string; children: React.ReactNode }) {
+/** Help, audio help, notes setup and speaker naming take the body instead of pushing it around.
+ * The sheet's name goes on the title line, as every screen's does. */
+export function Sheet(props: { children: React.ReactNode }) {
   return <Box flexDirection="column" flexGrow={1} overflow="hidden">
-    <Text bold color="cyan">{props.title}</Text>
-    <Box height={1} />
     {props.children}
   </Box>;
 }
@@ -185,12 +189,12 @@ export function HelpRow(props: { group: string; keys: string }) {
   </Box>;
 }
 
-/** Text wrapped at word breaks with no stray space starting a line, which Ink's own wrapping leaves. */
+/** Text wrapped at word breaks with no stray space starting a line, which Ink's own wrapping leaves,
+ * and no word alone on its last line. */
 export function Paragraph(props: { text: string; width: number; color?: Tone; dimColor?: boolean; bold?: boolean }) {
   const { text, width: columns, ...style } = props;
   return <Box flexDirection="column" flexShrink={0}>
-    {wrapAnsi(text, Math.max(8, columns), { hard: true, trim: true }).split('\n')
-      .map((line, index) => <Text key={index} {...style}>{line || ' '}</Text>)}
+    {wrapWords(text, Math.max(8, columns)).map((line, index) => <Text key={index} {...style}>{line || ' '}</Text>)}
   </Box>;
 }
 
@@ -198,8 +202,8 @@ export const HELP_ROWS: ReadonlyArray<readonly [string, string]> = [
   ['Go', 'Enter read · h meetings · / search · ↑↓ move · Esc back · q quit, recording carries on'],
   ['Meeting', '1 notes · 2 transcript · 3 chat · a ask · g write notes, with a template · r name speakers · w watch video · c copy · e export · o open folder · d move to Trash'],
   ['Transcript', 't show/hide times · s show/hide speakers · l latest words · n next match'],
-  ['When asked', 'm record · x ignore'],
+  ['When asked', 'y record · n ignore'],
   ['Recording', 'starts and stops with the call · space record or stop by hand · V record with video · i audio help'],
   ['Add', 'f import a file · F import and separate speakers'],
-  ['Setup', ', settings: speakers, AI and everything else'],
+  ['Setup', ', settings: speakers, AI and more'],
 ];

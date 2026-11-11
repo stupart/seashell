@@ -88,7 +88,7 @@ try {
   assert.equal(calls.microphone, 1);
 
   // Digital zeros, exactly what a muted or wrong input sends while macOS says "allowed".
-  await until(() => plain().includes('sending silence, not sound'), 'silence is explained', 8000);
+  await until(() => plain().includes('Your mic may be muted or set to the wrong input'), 'silence is explained', 8000);
   assert.ok(plain().includes('Check the input in Sound settings'));
   await type('o');
   assert.deepEqual(calls.panes, ['sound-input'], 'o opens Sound input');

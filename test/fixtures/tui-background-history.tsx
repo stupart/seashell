@@ -50,10 +50,10 @@ try {
   assert((screen().includes('Ready · watching for calls') || screen().includes("Can't record yet")) && !screen().includes('● Recording'),
     `detection failure cannot imply capture is active\n${screen()}`);
   writeBackgroundWatchStatus(library, { phase: 'awaiting-consent', candidate: { id: 'call', title: 'Design meeting', appName: 'Chrome' }, consentId: 'suggestion-1' });
-  await until(() => screen().includes('Record "Design meeting"?  m record  x ignore'), 'asks in the key bar before recording');
+  await until(() => screen().includes('Record "Design meeting"?  y record  n ignore'), 'asks in the key bar before recording');
   assert(screen().includes('Call noticed') && !screen().includes('● Recording'), 'a noticed call is not a recording');
   assert(!screen().includes('Meet detection unavailable'), 'recovered detection clears the warning');
-  await type('m');
+  await type('y');
   assert.equal(decisions.length, 1);
   assert.equal(decisions[0]![3], 'suggestion-1', 'approval is scoped to this exact suggestion');
   assert(screen().includes('Starting the recording'), 'request is not confirmation');

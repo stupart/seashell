@@ -45,7 +45,7 @@ export default function SpeakerSettings(props: {
   const entries: Array<[Action, string, string, string]> = [
     ['meet', 'Google Meet names', meetOn ? 'On' : 'Off', meetOn ? 'turn off' : 'turn on'],
     ['voices', 'Who said what', ready ? 'Ready' : `Not set up · ${props.modelSize ?? '21 MB'}`, ready ? 'check' : 'download'],
-    ...(props.canIdentify && ready ? [['redo', 'Redo speakers for this meeting', 'Keeps the old version', 'redo'] as [Action, string, string, string]] : []),
+    ...(props.canIdentify && ready ? [['redo', "Redo this meeting's speakers", 'Keeps the old version', 'redo'] as [Action, string, string, string]] : []),
   ];
   const action = entries[Math.min(index, entries.length - 1)]![0];
   const checkMeet = async (browser: MeetBrowserMode, connect = false) => {
@@ -115,8 +115,7 @@ export default function SpeakerSettings(props: {
     </Text>)}
     <Box flexDirection="column" flexGrow={1} marginTop={1} overflow="hidden">
       {selected[0] === 'meet' && <>
-        <Paragraph width={width} text="Reads who is talking from Google Meet in Chrome, using Accessibility. Names are hints." />
-        <Paragraph width={width} dimColor text="Keep Meet's People panel open if you are unmuted, and avoid other audio playing." />
+        <Paragraph width={width} text="Reads who is talking from Meet's People panel in Chrome. Keep it open." />
         {!message && props.meetStatus && meetOn && <Paragraph width={width} text={meetStatusMessage(props.meetStatus)} />}
       </>}
       {selected[0] === 'voices' && (ready ? <>
@@ -130,7 +129,7 @@ export default function SpeakerSettings(props: {
       {selected[0] === 'redo' && <Paragraph width={width} text="Separates voices again and saves a copy. This meeting and its notes stay as they are." />}
       {message && <Paragraph width={width} color="yellow" text={message} />}
     </Box>
-    {busy ? <Prompt text="◐ Working…" color="magenta" hints={[['Esc', 'cancel']]} columns={props.columns - 2} />
+    {busy ? <Prompt text="◐ Working…" dimColor hints={[['Esc', 'cancel']]} columns={props.columns - 2} />
       : toast ? <Toast text={toast} columns={props.columns - 2} />
       : <KeyBar hints={[['Enter', selected[3]], ['↑↓', 'choose'], ['Esc', 'back']]} columns={props.columns - 2} help={false} />}
   </Box>;

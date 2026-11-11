@@ -95,6 +95,8 @@ export interface SetupActionProps {
   onOpenAI: () => void;
   /** Starting the recorder on a first run also writes the first settings. */
   onConfigChange?: (config: SeashellConfig) => void;
+  /** What just worked on the way here, such as choosing an AI: green in the key bar until the next key. */
+  notice?: string;
 }
 
 /** Starts the recorder the way `seashell setup` does on a first run, and restarts it after that. */
@@ -118,7 +120,7 @@ export interface SetupMessage {
  */
 export function useSetupActions(props: SetupActionProps & { onFinished?: () => void }) {
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<SetupMessage>();
+  const [message, setMessage] = useState<SetupMessage | undefined>(props.notice ? { text: props.notice, tone: 'done' } : undefined);
   const request = useRef<AbortController | undefined>(undefined);
   useEffect(() => () => request.current?.abort(), []);
   const say = (tone: SetupMessage['tone']) => (text: string) => setMessage({ text, tone });
@@ -146,7 +148,8 @@ export function useSetupActions(props: SetupActionProps & { onFinished?: () => v
       try {
         const directory = action === 'open-extractors' ? ensureExtractorsDirectory(props.libraryDir) : ensureAutomationsDirectory(props.libraryDir);
         (props.actions?.openFolder ?? openFolder)(directory);
-        done(`Opened the ${action === 'open-extractors' ? 'Extractors' : 'Automations'} folder in Finder.`);
+        // The notes call them Insights; the folder on disk keeps its name, so the toast says both.
+        done(`Opened the ${action === 'open-extractors' ? 'Insights folder (Extractors)' : 'Automations folder'} in Finder.`);
         return true;
       } catch (cause) {
         failure(cause);
@@ -338,16 +341,18 @@ function whenWords(when: ExtractorWhen): string {
 }
 
 /**
- * A file that does not load, as a row beside the ones that do: its name, then what is wrong in a
- * few words. `"Risks" has no fields. Open it to add some.` is `Risks  ✗ Nothing to pull out yet`.
+ * A file that does not load, as a row beside the ones that do: its name, then that it will not load and
+ * why, in a few words. `"Risks" has no fields. Open it to add some.` is `Risks  ✗ Won't load: lists nothing to pull out`.
  */
 function problemParts(problem: { path: string; message: string }): [name: string, why: string] {
   const named = /^"([^"]*)"(?::)?\s*(.*)$/su.exec(problem.message);
   const name = named?.[1] || problem.path.split('/').at(-1)!.replace(/\.md$/u, '');
   const why = (named?.[2] ?? problem.message).trim();
-  const words = /^has no fields\b/u.test(why) ? 'Nothing to pull out yet' : /^has no actions\b/u.test(why) ? 'Nothing to do yet'
+  const words = /^has no fields\b/u.test(why) ? 'lists nothing to pull out' : /^has no actions\b/u.test(why) ? 'lists nothing to do'
     : why.replace(/\.$/u, '');
-  return [name, words.charAt(0).toUpperCase() + words.slice(1)];
+  // "when must be…" reads on after the colon; "URL" and "Use" keep their capitals.
+  const reason = /^\p{Lu}\p{Ll}/u.test(words) && !/^Use\b/u.test(words) ? words.charAt(0).toLowerCase() + words.slice(1) : words;
+  return [name, `Won't load: ${reason}`];
 }
 
 const RUN_SYMBOL: Record<AutomationRun['status'], [string, 'green' | 'red' | 'yellow']> = {
@@ -355,18 +360,15 @@ const RUN_SYMBOL: Record<AutomationRun['status'], [string, 'green' | 'red' | 'ye
 };
 
 /**
- * The title's status: whether recording works, counted from the same rows the list marks,
- * then how many optional rows to check. Never "extras", which is the name of one group.
- * Narrow, it says the same in fewer words.
+ * The title's status: the list's own marks, counted. ✗ is failing and ! is to check; the worst colours it.
+ * Only a list of ✓ and – reads "Everything works": – is a choice, not a problem.
  */
-export function settingsStatus(statuses: readonly FeatureStatus[], room: number): TitleStatus {
-  const fixes = statuses.filter(status => !status.optional && status.state !== 'ok').length;
-  const extras = statuses.filter(status => status.optional && (status.state === 'broken' || status.state === 'attention')).length;
-  const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
-  const check = extras ? [`${extras} to check`] : [];
-  const full = [fixes ? `Recording needs ${plural(fixes, 'fix', 'fixes')}` : 'Recording works', ...check].join(' · ');
-  const short = [fixes ? `${fixes} to fix` : 'Recording works', ...check].join(' · ');
-  return { text: Bun.stringWidth(full) <= room ? full : short, color: fixes || extras ? 'yellow' : 'green' };
+export function settingsStatus(statuses: readonly FeatureStatus[]): TitleStatus {
+  const failing = statuses.filter(status => status.state === 'broken').length;
+  const check = statuses.filter(status => status.state === 'attention').length;
+  if (!failing && !check) return { text: 'Everything works', color: 'green' };
+  const text = [failing ? `${failing} failing` : '', check ? `${check} to check` : ''].filter(Boolean).join(' · ');
+  return { text, color: failing ? 'red' : 'yellow' };
 }
 
 /** Everything Seashell can do, whether it works right now, and one key to fix it. */
@@ -632,10 +634,14 @@ export default function SettingsScreen(props: SetupActionProps & {
     return <Text key={key} inverse={chosen} wrap="truncate-end">{chosen ? '› ' : '  '}{label.slice(0, labelWidth - 1).padEnd(labelWidth)}
       <Text dimColor={!chosen}>{value}</Text></Text>;
   };
-  // In the same columns as the files that load, so the broken one reads as one of them.
+  // In the same columns as the files that load, so the broken one reads as one of them. Why it will not
+  // load wraps under its own words rather than being cut.
   const problemLines = (problems: readonly { path: string; message: string }[]) => problems.map(problem => {
     const [name, why] = problemParts(problem);
-    return <Text key={problem.path} wrap="truncate-end">{'  '}{name.slice(0, 21).padEnd(22)}<Text color="red">✗ {why}</Text></Text>;
+    return <Box key={problem.path} flexShrink={0}>
+      <Box width={26} flexShrink={0}><Text wrap="truncate-end">{'  '}{name.slice(0, 21).padEnd(22)}<Text color="red">✗ </Text></Text></Box>
+      <Paragraph width={width - 26} color="red" text={why} />
+    </Box>;
   });
   const filesBody = (id: FeatureId) => {
     if (id === 'prompts') return files.prompts.map((prompt, i) => listRow(prompt.name, i, prompt.title, PROMPT_STATE[prompt.state], 18));
@@ -657,11 +663,10 @@ export default function SettingsScreen(props: SetupActionProps & {
         {files.runs.map((run, i) => {
           const [symbol, color] = RUN_SYMBOL[run.status];
           const why = runFailure(run)?.text ?? run.detail ?? run.actions.find(action => action.status === run.status && action.detail)?.detail;
-          const again = run === retryRun ? ' r tries again.' : '';
           // What went wrong gets a line of its own, so it is never cut to make room for the meeting.
           return <Box key={`${run.at}-${i}`} flexDirection="column" flexShrink={0}>
             <Text wrap="truncate-end"><Text color={color}>{symbol}</Text> {run.automation}<Text dimColor> · {run.title} · {meetingWhen(run.at)}</Text></Text>
-            {run.status !== 'ok' && why ? <Box paddingLeft={2}><Paragraph width={width - 2} color={color} text={`${why}${again}`} /></Box> : null}
+            {run.status !== 'ok' && why ? <Box paddingLeft={2}><Paragraph width={width - 2} color={color} text={why} /></Box> : null}
           </Box>;
         })}
       </Box>}
@@ -669,7 +674,7 @@ export default function SettingsScreen(props: SetupActionProps & {
     return null;
   };
   const detail = !selected ? null : selected.kind === 'recording' ? <>
-    {heading('Which calls', <Text dimColor wrap="truncate-end">Which calls Seashell records, and when it asks first.</Text>)}
+    {heading('Which calls')}
     <Box flexDirection="column" flexShrink={1} overflow="hidden" marginTop={1}>
       {rows.map((row, i) => {
         const chosen = inDetail && i === rowIndex;
@@ -706,24 +711,25 @@ export default function SettingsScreen(props: SetupActionProps & {
 
   const action = selected?.kind === 'status' ? selected.status.action : undefined;
   const video = selected?.kind === 'status' && selected.status.id === 'video' ? selected.status : undefined;
-  // One order everywhere: what Enter does, then moving, then r, then Esc.
+  // One order everywhere: what Enter does, then moving, then r, then Esc. Trying a failed run again
+  // is the fix, so it leads; on that row r only ever tries again, and recheck gives way.
   const hints: Hint[] = compact && !inDetail ? [['Enter', 'open'], ['↑↓', 'choose'], ['r', 'recheck'], ['Esc', 'back']]
     : inDetail && list === 'recording' ? [['←→', 'change'], ['↑↓', 'choose'], ['Esc', 'back']]
     : inDetail && list === 'prompts' ? [['Enter', 'edit'], ...(files.prompts[rowIndex]?.state !== 'default' ? [['d', 'undo edits'] as Hint] : []),
       ['↑↓', 'choose'], ['Esc', 'back']]
     : inDetail && list === 'voices' && listLength ? [['Enter', 'forget'], ['↑↓', 'choose'], ['Esc', 'back']]
     : [
+      ...(retryRun ? [['r', 'try again'] as Hint] : []),
       ...(selected?.kind === 'recording' ? [['Enter', 'change'] as Hint] : selected?.kind === 'guide' ? [['Enter', 'start'] as Hint]
         : video ? [['Enter', video.state === 'off' ? 'turn on' : 'turn off'] as Hint]
         : list === 'prompts' ? [['Enter', 'choose a prompt'] as Hint] : list === 'voices' && listLength ? [['Enter', 'choose someone'] as Hint]
         : action ? [['Enter', lowerFirst(FEATURE_ACTION_LABEL[action])] as Hint] : selected && testable(selected) ? [['Enter', 'test it now'] as Hint] : []),
-      ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ['r', retryRun ? 'try again' : 'recheck'], ['Esc', 'back'],
+      ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ...(retryRun ? [] : [['r', 'recheck'] as Hint]), ['Esc', 'back'],
     ];
-  const titleRoom = props.columns - 2 - 14;
   const failed = setup.message?.tone === 'failed' ? setup.message.text : undefined;
 
   return <Box flexDirection="column" paddingX={1} {...(props.rows ? { height: props.rows } : {})} overflow="hidden">
-    <ScreenTitle name="Settings" status={statuses ? settingsStatus(statuses, titleRoom) : undefined} />
+    <ScreenTitle name="Settings" status={statuses ? settingsStatus(statuses) : undefined} />
     <Box flexDirection="row" flexGrow={1} overflow="hidden">
       {(!compact || !inDetail) && menu}
       {(!compact || inDetail) && <Box flexDirection="column" flexGrow={1} minWidth={0} overflow="hidden" {...(compact ? {} : { paddingLeft: 1 })}>
@@ -733,7 +739,7 @@ export default function SettingsScreen(props: SetupActionProps & {
         {failed && <Box marginTop={1} flexShrink={0}><Paragraph width={width} color="red" text={failed} /></Box>}
       </Box>}
     </Box>
-    {setup.busy ? <Prompt text="◐ Working…" color="magenta" hints={[['Esc', 'cancel']]} columns={props.columns - 2} />
+    {setup.busy ? <Prompt text="◐ Working…" dimColor hints={[['Esc', 'cancel']]} columns={props.columns - 2} />
       : confirm ? <Prompt text={confirm.text} {...(confirm.short ? { short: confirm.short } : {})} color="yellow"
         hints={[['y', confirm.yes], ['n', 'keep']]} columns={props.columns - 2} />
       : setup.message?.tone === 'done' ? <Toast text={setup.message.text} columns={props.columns - 2} />

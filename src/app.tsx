@@ -41,7 +41,7 @@ import { chatWithMeeting, enrichMeeting } from './meeting-enrichment.ts';
 import { Chalk } from 'chalk';
 import { HEADING, meetingViewLines, plainMeetingLines, SUBHEADING, type MeetingView } from './meeting-tui.ts';
 import { HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
-import { timedTranscriptRows, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
+import { lastTranscriptScroll, timedTranscriptRows, transcriptWindow, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
   renderText,
 } from './transcript-renderer.ts';
@@ -128,6 +128,8 @@ const PROJECT_ROOT = join(dirname(__filename), '..');
 const WHISPER_SERVER = join(PROJECT_ROOT, 'whisper.cpp/build/bin/whisper-server');
 const MODEL_PATH = join(PROJECT_ROOT, 'models', DEFAULT_WHISPER_MODEL_FILENAME);
 const HIGHLIGHT = new Chalk({ level: 1 }).black.bgYellow;
+/** Another match than the one n is on: in the same yellow, underlined rather than filled. */
+const SOFT_HIGHLIGHT = new Chalk({ level: 1 }).yellow.underline;
 
 type ListenerState = 'listening' | 'recording';
 type View = 'live' | 'record';
@@ -239,6 +241,8 @@ export default function App(props: {
   const guideOffered = useRef(Boolean(props.guide));
   // Speakers and AI return to whatever opened them; the guide returns to Settings when started there.
   const [returnTo, setReturnTo] = useState<'settings' | 'guide'>();
+  /** What just worked in speaker or AI setup, for Settings or the guide to say when it opens again. */
+  const [subNotice, setSubNotice] = useState<string>();
   const [guideFromSettings, setGuideFromSettings] = useState(false);
   const [attention, setAttention] = useState<FeatureStatus[]>([]);
   /** Everything Settings checks, read once more whenever Settings or the guide closes. Speaker setup reads it too. */
@@ -948,14 +952,7 @@ export default function App(props: {
     return videoLookups.current.get(key);
   }).map((entry) => entry.id)), [libraryEntries]);
   const showingLiveTranscript = meetingView === 'transcript' && (view === 'live' || currentEntry?.captureState === 'recording');
-  const latestTranscriptScroll = Math.max(0, displayRows.length - visibleRows);
-  const visibleTranscriptScroll = showingLiveTranscript && followLiveTranscript
-    ? latestTranscriptScroll
-    : Math.min(transcriptScroll, latestTranscriptScroll);
-  const visibleTranscriptRows = displayRows.slice(
-    visibleTranscriptScroll,
-    visibleTranscriptScroll + visibleRows,
-  );
+  const latestTranscriptScroll = lastTranscriptScroll(timedRows, visibleRows);
   // The first row of every line that says what was searched for, so a match opens with its whole line at the top.
   const matchRows = useMemo(() => {
     const needle = searchQuery.trim().toLocaleLowerCase();
@@ -983,10 +980,16 @@ export default function App(props: {
     });
     return [...lines.values()].filter((line) => line.text.replace(/\s+/gu, ' ').toLocaleLowerCase().includes(needle));
   }, [timedRows, searchQuery, searchPane]);
+  // The match n is on: its line starts at the top of the view, even near the end, where the view runs past the last row.
+  const currentMatch = searchHit !== null && matchRows.length ? matchRows[searchHit % matchRows.length]! : undefined;
+  const visibleTranscriptScroll = showingLiveTranscript && followLiveTranscript
+    ? latestTranscriptScroll
+    : Math.min(transcriptScroll, Math.max(latestTranscriptScroll, currentMatch ?? 0));
+  // A line cut at the top keeps its time and speaker in view.
+  const visibleTranscriptRows = transcriptWindow(timedRows, visibleTranscriptScroll, visibleRows);
   // The rows rewrap once the list closes, so the match is found again whenever they do.
   useEffect(() => {
-    if (searchHit === null || !matchRows.length) return;
-    setTranscriptScroll(matchRows[searchHit % matchRows.length]!);
+    if (currentMatch !== undefined) setTranscriptScroll(currentMatch);
   }, [searchHit, matchRows]);
   // Finished notes arrive by themselves; say so, and show them unless someone is reading.
   const notesStatus = useRef<{ id?: string; status?: string }>({});
@@ -1109,7 +1112,7 @@ export default function App(props: {
       .filter((handle): handle is MicrophoneCaptureHandle | SystemAudioCaptureHandle => Boolean(handle));
     if (wasListening) setListeningPaused(true);
     setError(null);
-    setProcessing({ label: finishLive ? 'Finishing capture…' : 'Preparing meeting enrichment…' });
+    setProcessing({ label: finishLive ? 'Finishing capture…' : 'Writing the notes…' });
     const onStatus = (label: string) => setProcessing({ label });
     // A meeting this window finished is ready, as one the background recorder finishes is:
     // extractors that fit it, then automations. Whatever fails is said; the notes stay.
@@ -1437,10 +1440,9 @@ export default function App(props: {
     : displayRows.length;
   const scrollVisibleRows = visibleRows;
   const scrollTranscriptBy = (delta: number) => {
-    const next = moveTranscriptScroll(
-      meetingView === 'transcript' ? visibleTranscriptScroll : transcriptScroll,
-      delta, scrollItemCount, scrollVisibleRows,
-    );
+    const next = currentMeeting && meetingView !== 'transcript'
+      ? moveTranscriptScroll(transcriptScroll, delta, scrollItemCount, scrollVisibleRows)
+      : Math.min(Math.max(latestTranscriptScroll, visibleTranscriptScroll), Math.max(0, visibleTranscriptScroll + delta));
     setTranscriptScroll(next);
     if (showingLiveTranscript) setFollowLiveTranscript(next >= latestTranscriptScroll);
   };
@@ -1717,9 +1719,8 @@ export default function App(props: {
   }, [view, selectedRecord?.id, currentRecordBusy, libraryRoot]);
   const watchVideo = () => {
     if (!selectedRecord) return;
-    // From the first line whose start is on screen, not the tail of one scrolled half away.
-    const first = timedRows.findIndex((row, index) => index >= visibleTranscriptScroll && (index === 0 || timedRows[index - 1]!.start !== row.start));
-    const at = meetingView === 'transcript' ? timedRows[first >= 0 ? first : visibleTranscriptScroll]?.start : undefined;
+    // From the line at the top: a line cut there keeps its time pinned in view, so that is where it plays from.
+    const at = meetingView === 'transcript' ? timedRows[visibleTranscriptScroll]?.start : undefined;
     try {
       openMeetingVideo(libraryRoot, selectedRecord.id, at === undefined ? {} : { atSeconds: at });
       setNotice(at === undefined ? 'Opened the video.' : `Opened the video at ${formatTuiClock(at)}.`);
@@ -2000,16 +2001,37 @@ export default function App(props: {
     }
     if (processing) return;
     if (input === 'i') { setAudioHelpOpen(true); return; }
-    if (watchOwnership === 'external' && (input === 'm' || input === 'x') && backgroundWatch?.phase === 'awaiting-consent') {
+    // A noticed call is a question like any other: y records it, n ignores it.
+    const answer = input.toLowerCase();
+    if (watchOwnership === 'external' && (answer === 'y' || answer === 'n') && backgroundWatch?.phase === 'awaiting-consent'
+        && backgroundApproval !== backgroundWatch.consentId) {
       const current = readBackgroundWatchStatus(libraryRoot);
       if (current?.phase !== 'awaiting-consent' || !current.consentId || current.consentId !== backgroundWatch.consentId) {
         refreshLibrary(); setCaution('The meeting request changed. Check its current status before recording.'); return;
       }
       try {
-        writeMeetingConsent(input === 'm' ? 'approve' : 'decline', undefined, Date.now(), current.consentId);
+        writeMeetingConsent(answer === 'y' ? 'approve' : 'decline', undefined, Date.now(), current.consentId);
         setBackgroundApproval(current.consentId);
-        setNotice(input === 'm' ? 'Start requested. Waiting for the recorder to confirm.' : 'Ignore requested.');
+        setNotice(answer === 'y' ? 'Start requested. Waiting for the recorder to confirm.' : 'Ignore requested.');
       } catch (cause) { setError(`Could not send the meeting decision: ${cause instanceof Error ? cause.message : String(cause)}`); }
+      return;
+    }
+    if (automaticCandidate && (answer === 'y' || answer === 'n')) {
+      if (answer === 'y') {
+        const approved = meetingAutomationController.current.approve();
+        setAutomationPhase(meetingAutomationController.current.state.phase);
+        setAutomaticCandidate(null);
+        if (approved) {
+          void beginAutomaticMeeting(approved).catch((automationError: unknown) => {
+            setError(automationError instanceof Error ? automationError.message : String(automationError));
+          });
+        }
+      } else {
+        meetingAutomationController.current.decline();
+        setAutomationPhase(meetingAutomationController.current.state.phase);
+        setAutomaticCandidate(null);
+        setNotice(`Ignored ${automaticCandidate.appName} for this detection window.`);
+      }
       return;
     }
     if (currentRecordBusy && ['r', 'd', 'g', 'a', 'e', 'm'].includes(input)) {
@@ -2056,25 +2078,7 @@ export default function App(props: {
       return;
     }
     if (input === 'm') {
-      if (automaticCandidate) {
-        const approved = meetingAutomationController.current.approve();
-        setAutomationPhase(meetingAutomationController.current.state.phase);
-        setAutomaticCandidate(null);
-        if (approved) {
-          void beginAutomaticMeeting(approved).catch((automationError: unknown) => {
-            setError(automationError instanceof Error ? automationError.message : String(automationError));
-          });
-        }
-      } else if (currentRecord?.transcript.length) {
-        markCurrentAsMeeting(view === 'live' ? calendarSuggestion ?? undefined : undefined);
-      }
-      return;
-    }
-    if (input === 'x' && automaticCandidate) {
-      meetingAutomationController.current.decline();
-      setAutomationPhase(meetingAutomationController.current.state.phase);
-      setAutomaticCandidate(null);
-      setNotice(`Ignored ${automaticCandidate.appName} for this detection window.`);
+      if (currentRecord?.transcript.length) markCurrentAsMeeting(view === 'live' ? calendarSuggestion ?? undefined : undefined);
       return;
     }
     // n only ever moves to the next match.
@@ -2298,6 +2302,8 @@ export default function App(props: {
   const openAI = (from: 'settings' | 'guide') => {
     setSettingsOpen(false); setGuideOpen(false); setReturnTo(from); setAiSetupIntent(null); setAiSetupOpen(true);
   };
+  // Choosing an AI from Settings or the guide says so there, once, when it opens again.
+  useEffect(() => { if (subNotice && (settingsOpen || guideOpen)) setSubNotice(undefined); }, [subNotice, settingsOpen, guideOpen]);
   const closeSubSettings = () => {
     if (returnTo === 'settings') setSettingsOpen(true);
     if (returnTo === 'guide') setGuideOpen(true);
@@ -2309,6 +2315,7 @@ export default function App(props: {
     onConnectMeet: connectMeetReader,
     onEnableCalendar: enableCalendarTitles,
     onConfigChange: setConfig,
+    ...(subNotice ? { notice: subNotice } : {}),
   };
 
   if (settingsOpen) return <SettingsScreen {...setupActionProps} config={config} columns={terminal.columns} rows={terminal.rows}
@@ -2365,11 +2372,13 @@ export default function App(props: {
       setConfig((current) => ({ ...current, meeting: { ...saved.meeting,
         calendar: current.meeting?.calendar, automation: current.meeting?.automation,
       } }));
+      const names = [...new Set(Object.values(patch.routes ?? {}).flatMap((route) => route ? [providerName(route.backend)] : []))];
+      const done = `Notes and chat use ${names.join(' and ')}.`;
+      // Said wherever the person lands: Settings, the guide, or the meeting.
+      if (returnTo) setSubNotice(done); else setNotice(done);
       setAiSetupOpen(false);
       closeSubSettings();
       setError(null);
-      const names = [...new Set(Object.values(patch.routes ?? {}).flatMap((route) => route ? [providerName(route.backend)] : []))];
-      setNotice(`AI ready · ${names.join(' + ')}`);
     }} />;
 
   const consentPending = (watchOwnership === 'external' && backgroundWatch?.phase === 'awaiting-consent') || Boolean(automaticCandidate);
@@ -2383,7 +2392,8 @@ export default function App(props: {
     : view === 'live' && !historyOpen ? [['space', paused ? 'record' : 'stop']] : [];
   const watch: Hint[] = videoAvailable ? [['w', 'watch video']] : [];
   const latest: Hint[] = followLiveTranscript ? [] : [['l', 'latest']];
-  const nextMatch: Hint[] = searchHit !== null && matchRows.length > 1 && meetingView === 'transcript' ? [['n', 'next match']] : [];
+  const nextMatch: Hint[] = searchHit !== null && matchRows.length > 1 && meetingView === 'transcript'
+    ? [['n', `next match · ${(searchHit % matchRows.length) + 1} of ${matchRows.length}`]] : [];
   // One order everywhere: what can be done here, then moving, then Esc. The way back to
   // the meetings comes early, so a narrow window keeps it.
   const hints: Hint[] = atHome && attention.length ? [['Enter', 'guided setup'], ...byHand, ['f', 'import']]
@@ -2434,6 +2444,10 @@ export default function App(props: {
 
   const readerTotal = currentMeeting && meetingView !== 'transcript' ? auxiliaryMeetingLines.length : displayRows.length;
   const readerScroll = currentMeeting && meetingView !== 'transcript' ? transcriptScroll : visibleTranscriptScroll;
+  // How much is out of view, as Settings says it: what is below, or once at the end, what is above.
+  // A time and speaker pinned at the top take a row of the view.
+  const readerShown = readerScroll + visibleRows - (currentMeeting && meetingView !== 'transcript' || timedRows[readerScroll]?.heading === undefined ? 0 : 1);
+  const readerMore = readerTotal - readerShown > 0 ? `↓ ${readerTotal - readerShown} more` : readerScroll > 0 ? `↑ ${readerScroll} more` : undefined;
   const searchHighlight = meetingView === 'transcript' ? searchQuery : '';
   // The title says whether Seashell can record; the body says what is missing, or what happens next.
   const homeMessage = attention.length ? <>
@@ -2475,7 +2489,7 @@ export default function App(props: {
               </React.Fragment>
             ))}
           </Text>
-          {readerTotal > visibleRows && <Text dimColor>{Math.min(readerTotal, readerScroll + visibleRows)}/{readerTotal} lines</Text>}
+          {readerMore && <Text dimColor>{readerMore}</Text>}
         </Box>
       )}
       <Box ref={transcriptPaneRef} flexGrow={1} minHeight={2} flexDirection="column" overflow="hidden" aria-label="Transcript reader">
@@ -2493,7 +2507,9 @@ export default function App(props: {
               : backgroundMessage ?? 'No transcript text'}</Text>
           )
         ) : visibleTranscriptRows.map((row, index) => <Box key={index} flexShrink={0} height={1}>
-          <Text wrap="truncate-end">{highlighted(row, searchHighlight) || ' '}</Text>
+          {/* The line n is on is marked in full; the other matches are only underlined. */}
+          <Text wrap="truncate-end">{highlighted(row.text, searchHighlight,
+            currentMatch !== undefined && row.start !== timedRows[currentMatch]?.start) || ' '}</Text>
         </Box>)}
       </Box>
     </Box>
@@ -2516,7 +2532,7 @@ export default function App(props: {
       ['Note', notesSetup.editing !== undefined ? `${notesSetup.editing}█` : currentMeeting.ai?.note ?? '— Enter to add, e.g. "Capture pricing"'],
       ['AI', currentMeeting.ai?.off ? '‹ Off › no notes or chat; agents are refused it' : '‹ On ›'],
     ];
-    return <Sheet title="Notes setup for this meeting">
+    return <Sheet>
       {rows.map(([label, value], index) => (
         <Text key={label} inverse={index === notesSetup.row} wrap="truncate-end">{index === notesSetup.row ? '› ' : '  '}{label.padEnd(10)}{value}</Text>
       ))}
@@ -2526,7 +2542,7 @@ export default function App(props: {
   const speakerName = (speaker: (typeof namedSpeakers)[number]) =>
     `${speakerDisplayName(speaker.id, speaker.label)}${speaker.suggestion ? ' · suggested' : ''}`;
   const speakerColumn = Math.min(32, Math.max(18, ...namedSpeakers.map((speaker) => speakerName(speaker).length))) + 2;
-  const speakerSheet = speakerPickerOpen && currentRecord ? <Sheet title="Name a speaker">
+  const speakerSheet = speakerPickerOpen && currentRecord ? <Sheet>
     {namedSpeakers.map((speaker, index) => {
       const said = currentRecord.transcript.find((segment) => segment.speaker === speaker.id)?.text ?? '';
       return <Text key={speaker.id} inverse={index === speakerSelection} wrap="truncate-end">
@@ -2538,7 +2554,7 @@ export default function App(props: {
       <Text dimColor wrap="wrap">Suggested names come from voices you named before.</Text>
     </Box>}
   </Sheet> : null;
-  const helpSheet = helpMode ? <Sheet title="Keys">
+  const helpSheet = helpMode ? <Sheet>
     {HELP_ROWS.map(([group, keys]) => <HelpRow key={group} group={group} keys={keys} />)}
   </Sheet> : null;
 
@@ -2554,7 +2570,7 @@ export default function App(props: {
     : confirmRewrite ? { text: 'Rewrite these notes? This replaces them.', short: 'Rewrite and replace these notes?', hints: [['y', 'rewrite'], ['n', 'keep']] }
     : confirmStop ? { text: 'Stop recording? Everything so far is kept.', short: 'Stop recording?', hints: [['y', 'stop'], ['n', 'keep recording']] }
     : consentPending && !approvalPending && consentTitle ? { text: `Record "${consentTitle}"?`, short: 'Record this call?',
-      hints: [['m', 'record'], ['x', 'ignore']] }
+      hints: [['y', 'record'], ['n', 'ignore']] }
     : undefined;
   const write: Hint[] = currentMeeting?.ai?.off ? [] : [['Enter', hasNotes ? 'rewrite notes' : 'write notes']];
   const sheetHints: Hint[] | undefined = notesSetup ? notesSetup.editing !== undefined ? [['Enter', 'save'], ['Esc', 'cancel']]
@@ -2614,7 +2630,7 @@ export default function App(props: {
     : recordHeading ? { ...recordHeading, keep: 24 } : { text: '' };
   // Says the recorder is on, so a quiet screen never reads as a stopped one.
   const standing = watchOwnership === 'external' && backgroundWatch?.phase === 'watching' && statusProps?.mode !== 'watching'
-    && !(summary && !quietlyDone) ? { text: 'Watching for calls', short: 'Watching' }
+    && !(summary && !quietlyDone) ? { text: 'Watching for calls' }
     : currentMeeting?.status === 'reconciling' || currentMeeting?.status === 'observing' ? { text: 'Writing notes…' } : undefined;
   // Warnings take the title's status slot, most urgent first; nothing adds a row under the title.
   // The slot says only what is wrong; the key that fixes it leads the key bar, and a fix in
@@ -2648,26 +2664,29 @@ export default function App(props: {
     <Box width={3} flexShrink={0}><Text>{number}.</Text></Box>
     <Paragraph text={text} width={sheetWidth - 3} />
   </Box>;
-  const audioSheet = audioHelpOpen ? <Sheet title={finding?.source === 'microphone' ? 'Mic help' : 'Audio help'}>
+  const audioSheet = audioHelpOpen ? <Sheet>
     {finding && <Box flexShrink={0} marginBottom={1}><Paragraph text={finding.text} width={sheetWidth} color={finding.color} /></Box>}
-    {step(1, 'Quiet can just mean you are muted or nobody is speaking.')}
-    {step(2, 'Check the right microphone is chosen and its level moves.')}
-    {step(3, 'Check Seashell Microphone is allowed in Privacy & Security.')}
+    {step(1, 'Check the right microphone is chosen and its level moves.')}
+    {step(2, 'Check Seashell Microphone is allowed in Privacy & Security.')}
   </Sheet> : null;
   const sheet = helpSheet ?? audioSheet ?? notesSheet ?? speakerSheet;
+  // A sheet's name takes the title line, as a screen's does; what is wrong stays in the status slot.
+  const sheetName = helpSheet ? 'Keys' : audioSheet ? finding?.source === 'microphone' ? 'Mic help' : 'Audio help'
+    : notesSheet ? 'Notes setup' : speakerSheet ? 'Name a speaker' : undefined;
 
   return (
     <Box flexDirection="column" paddingX={1} height={terminal.rows} overflow="hidden">
-      <ScreenTitle name={heading.text} bold={Boolean(heading.color)} {...(heading.color ? { color: heading.color } : {})}
-        {...(heading.keep ? { keep: heading.keep } : {})}
-        {...(summary?.detail && !quietlyDone ? { detail: summary.detail } : {})} status={slot} />
+      {sheetName ? <ScreenTitle name={sheetName} status={slot} />
+        : <ScreenTitle name={heading.text} bold={Boolean(heading.color)} {...(heading.color ? { color: heading.color } : {})}
+          {...(heading.keep ? { keep: heading.keep } : {})}
+          {...(summary?.detail && !quietlyDone ? { detail: summary.detail } : {})} status={slot} />}
       {sheet ?? <Box flexDirection="row" flexGrow={1} overflow="hidden">
         {historyOpen && list}
         {!drawerOnly && reader}
       </Box>}
       <Box flexShrink={0}>
         {prompt ? <Prompt {...prompt} color="yellow" columns={terminal.columns - 2} />
-          : processing ? <Text color="magenta" wrap="truncate-end">◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}</Text>
+          : processing ? <Text dimColor wrap="truncate-end">◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}</Text>
           : toast ? <Toast text={toast.text} color={toast.color} columns={terminal.columns - 2} />
           : sheetHints ? <KeyBar hints={sheetHints} columns={terminal.columns - 2} help={false} />
           : <KeyBar hints={withFix(hints, slot)} columns={terminal.columns - 2} />}
@@ -2678,10 +2697,10 @@ export default function App(props: {
 
 const searchPattern = (needle: string, flags: string) => new RegExp(needle.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), flags);
 
-/** Every place a row says what was searched for, in the transcript's yellow. */
-function highlighted(row: string, query: string): string {
+/** Every place a row says what was searched for, in the transcript's yellow: filled, or underlined when another match is current. */
+function highlighted(row: string, query: string, soft = false): string {
   const needle = query.trim();
-  return needle ? row.replace(searchPattern(needle, 'giu'), (match) => HIGHLIGHT(match)) : row;
+  return needle ? row.replace(searchPattern(needle, 'giu'), (match) => (soft ? SOFT_HIGHLIGHT : HIGHLIGHT)(match)) : row;
 }
 
 /** A dim line with what was searched for in the transcript's yellow, at full strength. */

@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test';
 import { stripVTControlCharacters } from 'util';
-import { timedTranscriptRows, transcriptRows, MouseScrollDecoder } from '../src/transcript-viewport.ts';
+import { lastTranscriptScroll, timedTranscriptRows, transcriptRows, transcriptWindow, MouseScrollDecoder } from '../src/transcript-viewport.ts';
 
 test('one long paragraph remains reachable row by row at narrow widths', () => {
   const words = Array.from({ length: 100 }, (_, i) => `word${i}`);
@@ -48,4 +48,20 @@ test('each transcript row knows when its line was said, wrapped rows included', 
   }
   // Words run together without lines: no row can say when.
   expect(timedTranscriptRows(timedRecord, 40, { timestamps: false, speakers: false }).every((row) => row.start === undefined)).toBe(true);
+});
+
+test('a line cut at the top of the view keeps its time and speaker', () => {
+  const options = { timestamps: true, speakers: true };
+  const plain = (rows: { text: string }[]) => rows.map((row) => stripVTControlCharacters(row.text));
+  // Stacked: the time and speaker sit on a row of their own above the words that are left.
+  const stacked = timedTranscriptRows(timedRecord, 40, options);
+  expect(plain(transcriptWindow(stacked, 1, 3))).toEqual(['00:00  You', 'A made-up opening line that is long', 'enough to wrap onto a second row here.']);
+  expect(plain(transcriptWindow(stacked, 2, 3))).toEqual(['00:00  You', 'enough to wrap onto a second row here.', '01:05  Speaker 1']);
+  // The last scroll leaves room for that row, so the last words are never pushed out of view.
+  const last = lastTranscriptScroll(stacked, 3);
+  expect(plain(transcriptWindow(stacked, last, 3)).at(-1)).toBe('A short reply.');
+  // In columns: the cut row takes its line's time and speaker beside it.
+  const columns = timedTranscriptRows(timedRecord, 64, options);
+  expect(plain(transcriptWindow(columns, 1, 2))[0]).toMatch(/^00:00  You {8}\S/u);
+  expect(lastTranscriptScroll(columns, 2)).toBe(columns.length - 2);
 });

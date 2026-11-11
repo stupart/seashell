@@ -119,8 +119,8 @@ try {
   await until(() => frame().includes('Enter check computer audio'), 'computer audio offers the check');
   // Wide, the detail wraps beside the menu's border; read the words only.
   const words = () => frame().split('\n').map((line) => line.split('│').at(-1)!.trim()).join(' ').replace(/\s+/gu, ' ');
-  // It works already, so finishing setup is a note, not a yellow "Next:".
-  assert.ok(words().includes('Enter plays a test sound to finish setup.') && !words().includes('Next:'), words());
+  // It works already, so the key bar offers the check and the ✓ row says nothing more: no "Next:", no note.
+  assert.ok(!words().includes('Enter plays a test sound') && !words().includes('Next:'), words());
   await type(ENTER);
   await until(() => computerChecks === 1 && words().includes('Meetings use it from the next call'), 'Enter runs the check and says what it found');
   for (const line of frame().split('\n')) assert.ok(Bun.stringWidth(line) <= columns, `fits ${columns} columns: ${line}`);

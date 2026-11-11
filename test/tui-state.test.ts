@@ -7,11 +7,20 @@ import {
   formatTuiClock,
   moveSelection,
   moveTranscriptScroll,
-  speakerColorIndex,
+  speakerColors,
   tuiLayout,
+  wrapWords,
 } from '../src/tui-state.ts';
 
 describe('TUI navigation state', () => {
+  test('wraps words without leaving one alone on the last line', () => {
+    const text = 'Until you allow it, background meetings record other people but not you.';
+    expect(wrapWords(text, 70)).toEqual(['Until you allow it, background meetings record other people but', 'not you.']);
+    // Already two words on the last line, or one word in all: left as it is.
+    expect(wrapWords('One two three four', 10)).toEqual(['One two', 'three four']);
+    expect(wrapWords('Word', 10)).toEqual(['Word']);
+  });
+
   test('clamps sidebar selection and transcript scrolling', () => {
     expect(moveSelection(0, -1, 4)).toBe(0);
     expect(moveSelection(2, 1, 4)).toBe(3);
@@ -37,10 +46,11 @@ describe('TUI navigation state', () => {
     expect(entries).toHaveLength(1);
   });
 
-  test('assigns stable speaker colors', () => {
-    expect(speakerColorIndex('SPEAKER_00')).toBe(speakerColorIndex('SPEAKER_00'));
-    expect(speakerColorIndex('SPEAKER_00')).toBeGreaterThanOrEqual(0);
-    expect(speakerColorIndex('SPEAKER_00')).toBeLessThan(6);
+  test('gives other speakers distinct hues in order, never red, yellow or green, and you none', () => {
+    const colors = speakerColors(['LOCAL', 'REMOTE_00', 'REMOTE_01', 'REMOTE_00', 'REMOTE_02']);
+    expect(colors.has('LOCAL')).toBe(false);
+    expect([...colors.values()]).toEqual(['cyan', 'magenta', 'blue']);
+    expect([...colors.values()].some((value) => /red|yellow|green/iu.test(value))).toBe(false);
   });
 
   test('formats a compact media-relative clock for the terminal', () => {
