@@ -83,6 +83,17 @@ export function transcriptionUsesGpu(hardware = transcriptionHardware(), environ
   return hardware.appleSilicon && environment.SEASHELL_DISABLE_GPU !== '1';
 }
 
+/** A final pass peaks near 1.3 GB for a 30-minute track; two at once need room beside a call. */
+const CONCURRENT_TRACKS_MIN_MEMORY_BYTES = 16 * 2 ** 30;
+
+/**
+ * Whether the final pass can transcribe the microphone and system audio at
+ * once. Only with the GPU: on the CPU two passes just split the same cores.
+ */
+export function concurrentTrackTranscription(hardware = transcriptionHardware(), environment: NodeJS.ProcessEnv = process.env): boolean {
+  return transcriptionUsesGpu(hardware, environment) && hardware.memoryBytes >= CONCURRENT_TRACKS_MIN_MEMORY_BYTES;
+}
+
 export interface StoredLocalAsrProfile {
   readonly schemaVersion: '0.1';
   readonly measuredAt: string;

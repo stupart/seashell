@@ -10,7 +10,7 @@ import {
 } from './process-lifecycle.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
 import { finalTranscriptionThreads, transcriptionHardware, transcriptionUsesGpu, type TranscriptionHardware } from './local-asr-profile.ts';
-import { dropPhantomUnits } from './speech-gate.ts';
+import { detectSpeechRegions, dropPhantomUnits } from './speech-gate.ts';
 import type { TimedTranscriptUnit } from './transcript-types.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -291,6 +291,9 @@ export async function transcribeWithTimestamps(
       });
     });
 
+    // Speech detection for the phantom-word check needs only the audio, so it
+    // runs on the CPU while Whisper works instead of adding seconds after it.
+    const speech = detectSpeechRegions(filePath);
     const forceCpu = !transcriptionUsesGpu(hardware);
     try {
       await runWhisper(forceCpu);
@@ -318,7 +321,7 @@ export async function transcribeWithTimestamps(
       throw new Error(`Could not parse whisper.cpp timestamp JSON: ${message}`);
     }
 
-    return await dropPhantomUnits(timedUnitsFromWhisperJson(parsed), filePath);
+    return await dropPhantomUnits(timedUnitsFromWhisperJson(parsed), filePath, () => speech);
   } finally {
     rmSync(tempDirectory, { recursive: true, force: true });
     stopTrackingTemp();
