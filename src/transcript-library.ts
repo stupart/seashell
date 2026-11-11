@@ -203,9 +203,25 @@ export function saveTranscriptRecord(
   return { directory, jsonPath, textPath, ...(meetingWarning ? { meetingWarning } : {}) };
 }
 
-function toEntry(path: string, record: TranscriptRecord): TranscriptLibraryEntry {
-  const directory = dirname(path);
-  const background = readBackgroundMeetingStatus(directory);
+type TranscriptSummary = Pick<TranscriptLibraryEntry,
+  'id' | 'title' | 'createdAt' | 'updatedAt' | 'duration' | 'sourceFilename' | 'speakerCount' | 'segmentCount'>;
+
+interface CachedTranscript {
+  /** Inode, size and modification time: an atomic save always changes it. */
+  readonly stamp: string;
+  /** Undefined when the file is not a readable transcript. */
+  readonly summary?: TranscriptSummary;
+  /** Lowercase title, source, speaker names and text, built on the first search. */
+  searchText?: string;
+}
+
+/**
+ * The TUI lists the library every second while the background recorder runs.
+ * Parse each transcript.json once per change instead of on every listing.
+ */
+const transcriptCache = new Map<string, Map<string, CachedTranscript>>();
+
+function summarize(record: TranscriptRecord): TranscriptSummary {
   return {
     id: record.id,
     title: record.title,
@@ -215,6 +231,52 @@ function toEntry(path: string, record: TranscriptRecord): TranscriptLibraryEntry
     sourceFilename: record.source.filename,
     speakerCount: record.speakers.length,
     segmentCount: record.transcript.length,
+  };
+}
+
+function searchText(record: TranscriptRecord): string {
+  return [
+    record.title,
+    record.source.filename,
+    ...record.speakers.map((speaker) => speaker.label),
+    renderText(record),
+  ].join('\n').toLocaleLowerCase();
+}
+
+/** Every transcript in the library, reparsing only files that changed since the last call. */
+function cachedTranscripts(libraryDir: string, options: { search?: boolean } = {}): Array<{ path: string; cached: CachedTranscript }> {
+  const previous = transcriptCache.get(libraryDir);
+  const current = new Map<string, CachedTranscript>();
+  const results: Array<{ path: string; cached: CachedTranscript }> = [];
+  for (const path of transcriptJsonPaths(libraryDir)) {
+    let stamp: string;
+    try {
+      const stats = statSync(path, { bigint: true });
+      stamp = `${stats.ino}:${stats.size}:${stats.mtimeNs}`;
+    } catch {
+      continue;
+    }
+    let cached = previous?.get(path);
+    if (cached?.stamp !== stamp || (options.search && cached.summary && cached.searchText === undefined)) {
+      try {
+        const record = loadTranscriptPath(path);
+        cached = { stamp, summary: summarize(record), ...(options.search ? { searchText: searchText(record) } : {}) };
+      } catch {
+        cached = { stamp };
+      }
+    }
+    current.set(path, cached);
+    results.push({ path, cached });
+  }
+  transcriptCache.set(libraryDir, current);
+  return results;
+}
+
+function toEntry(path: string, summary: TranscriptSummary): TranscriptLibraryEntry {
+  const directory = dirname(path);
+  const background = readBackgroundMeetingStatus(directory);
+  return {
+    ...summary,
     kind: existsSync(join(directory, 'meeting.json')) ? 'meeting' : 'transcript',
     directory,
     captureState: background?.state,
@@ -226,14 +288,8 @@ function toEntry(path: string, record: TranscriptRecord): TranscriptLibraryEntry
 
 /** The filesystem is authoritative; this derived listing can always be rebuilt. */
 export function listTranscriptRecords(libraryDir: string): TranscriptLibraryEntry[] {
-  return transcriptJsonPaths(libraryDir)
-    .flatMap((path) => {
-      try {
-        return [toEntry(path, loadTranscriptPath(path))];
-      } catch {
-        return [];
-      }
-    })
+  return cachedTranscripts(libraryDir)
+    .flatMap(({ path, cached }) => cached.summary ? [toEntry(path, cached.summary)] : [])
     .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
@@ -258,21 +314,9 @@ export function searchTranscriptRecords(
 ): TranscriptLibraryEntry[] {
   const normalized = query.trim().toLocaleLowerCase();
   if (!normalized) return listTranscriptRecords(libraryDir);
-  return transcriptJsonPaths(libraryDir)
-    .flatMap((path) => {
-      try {
-        const record = loadTranscriptPath(path);
-        const haystack = [
-          record.title,
-          record.source.filename,
-          ...record.speakers.map((speaker) => speaker.label),
-          renderText(record),
-        ].join('\n').toLocaleLowerCase();
-        return haystack.includes(normalized) ? [toEntry(path, record)] : [];
-      } catch {
-        return [];
-      }
-    })
+  return cachedTranscripts(libraryDir, { search: true })
+    .flatMap(({ path, cached }) => cached.summary && cached.searchText?.includes(normalized)
+      ? [toEntry(path, cached.summary)] : [])
     .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
