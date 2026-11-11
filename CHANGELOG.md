@@ -1,5 +1,95 @@
 # Changelog
 
+## Unreleased — watch a call back, and notes that do more
+
+**Video**
+
+- Calls now record their window beside the audio: the Meet tab, or the Zoom,
+  Teams or FaceTime window, with whatever anyone shares. It is on by default,
+  at 2 frames a second, about 60 MB an hour. macOS asks once for
+  **Seashell Screen Capture**; until then calls record audio only.
+- In a meeting, **W** plays its video beside the transcript, from the line you
+  are reading. `seashell meeting video <id> [--at 12:34]` does the same.
+- **Shift+V** records by hand with video. **Space** stays audio only.
+  `seashell record --video` does the same from a terminal.
+- Settings → **Video** turns it on or off and asks macOS for access.
+  `seashell meeting video on|off|setup` and `<app> on|off` work too.
+
+**Notes, extractors and automations**
+
+- Notes lead with decisions, actions (with who and by when), risks, open
+  questions and follow-ups, then your template.
+- Fixing a line or a speaker's name keeps the notes, marked as possibly out of
+  date.
+- **Prompts:** what the AI is told for live analysis, final notes and chat are
+  files you can edit in `~/Documents/Sea Shell/Prompts`. Settings → Prompts
+  opens one or puts it back as shipped.
+- **Extractors** pull the same things out of every meeting, each one cited, and
+  show under Insights in the notes. **Automations** save the notes to a
+  folder, run a command or post to a web address when a meeting is ready.
+  Anything sent outside Seashell asks you first. Settings lists both, and the
+  last automation runs.
+- A meeting this window finishes now runs extractors and automations too, as
+  the background recorder does. Rewriting notes with **G** runs the extractors
+  again.
+- **P** → **Test connection** sends one short fixed message through each AI in
+  use and says how fast it answered, or why it did not. `seashell ai test` does
+  the same.
+- `seashell query` finds decisions, actions, risks, questions and follow-ups
+  across meetings. `seashell library clean-phantoms` removes lines Whisper
+  heard in silence from saved meetings.
+- The meetings server for Claude Code and Codex can now search notes across
+  meetings, find the video moment for a line, and, when you ask, fix a line,
+  name a speaker, or edit prompts, templates, extractors and automations.
+
+**Who said what**
+
+- Voices are separated by two engines: Nemotron 3, checked by community-1. On
+  13 test meetings, wrong-speaker words fell from 3% to about 0.5%.
+- The calendar invite caps how many voices a meeting can have.
+- When you name a speaker, Seashell learns their voice, on this Mac only, and
+  suggests the name in later meetings. **R** marks a suggestion; **Y** keeps it
+  and **U** undoes it. Settings → **Saved voices** forgets anyone.
+- Google Meet's names now reach the parts of a call Meet could not see, when
+  the voice is clearly the same person.
+- A recording started from a calendar event in this window, or recovered with
+  `seashell capture finalize`, also uses its invitees.
+
+**Your side of the call**
+
+- Your microphone is recorded whatever input you use: a headset, an interface
+  or a dock, not just the built-in one. macOS asks for **Seashell Microphone**
+  once more.
+- During a call, Seashell tells you once if the others are talking and your
+  microphone has heard nothing for a minute.
+- After a call where your microphone heard almost nothing, the meeting says
+  "Your side wasn't recorded" in yellow, and Settings says to check it.
+- Computer audio survives any number of device changes, and restarts by itself
+  if it stalls.
+- Computer audio is now recorded by its own helper, **Seashell System Audio**.
+  The guided setup tests that same helper, so a pass means meetings hear the
+  others too, and Settings remembers the pass after a restart. macOS asks once
+  for this helper; the old Seashell Background permission no longer applies.
+
+**Setup and Settings**
+
+- A first run opens a guided setup. It starts the background recorder, hears
+  your microphone and your Mac's sound, then offers the extras.
+- Settings → **Recording** chooses which calls record by themselves, ask first
+  or never, per app.
+- Every screen uses one title, one rule, one key bar and one way to show the
+  chosen row. Dates in the meetings list line up, even beside an emoji or a
+  CJK title.
+
+**Faster and quieter**
+
+- The final transcript arrives sooner: on a 25-minute meeting, 34 s became
+  24 s.
+- whisper.cpp uses the right number of cores for your Mac.
+- The meetings list and search read each transcript once, not every second.
+- Meet is checked only when a call is possible, not every few seconds all day.
+- The watch log no longer fills with the same warning.
+
 ## Unreleased — your side of the call, and no more phantom words
 
 - The microphone recorded digital silence whenever the input was a built-in Mac
