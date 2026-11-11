@@ -3,7 +3,10 @@ import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'fs
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { checkComputerAudio, type LevelSource } from '../src/audio-levels.ts';
-import { computerAudioConfirmed } from '../src/audio-checks.ts';
+import {
+  computerAudioConfirmed, countSilentOwnStart, forgetAudioCheck, readAudioChecks, rememberAudioCheck,
+  rememberInheritedComputerAudio, resetSilentOwnStarts,
+} from '../src/audio-checks.ts';
 import {
   OWN_IDENTITY_WARNINGS,
   startSystemAudioCapture,
@@ -100,29 +103,126 @@ ${sound(8000)}`);
   } finally { capture.stop(); await capture.done; rmSync(root, { recursive: true, force: true }); }
 });
 
-test('when the own identity sends only silence, the recording switches to inherited and keeps every chunk', async () => {
+/** A made-up history of earlier recordings, as audio-checks.json keeps it. */
+function history(inheritedHeard = false) {
+  const value = { inheritedHeard, silentStarts: 0, inheritedNoted: 0,
+    noteInheritedHeard() { value.inheritedNoted++; },
+    noteOwnHeard() { value.silentStarts = 0; },
+    noteOwnSilent() { return ++value.silentStarts; } };
+  return value;
+}
+
+test('when the own identity hears only silence and the inherited one then hears the call, macOS refused it: the check goes, said once', async () => {
   const root = mkdtempSync(join(tmpdir(), 'seashell-identity-silent-'));
   const fake = fakeHelper(root, `if (own) {${sound(0)}} else {${sound(8000)}}`);
   const chunks: SystemAudioChunk[] = [];
   const gaps: number[] = [];
   const states: SystemAudioStateUpdate[] = [];
   const warnings: string[] = [];
+  const past = history();
   let refused = 0;
   const capture = startSystemAudioCapture({ helperPath: process.execPath, helperArgs: [fake.path], identity: 'own', ownSilenceMs: 400,
-    sessionStartedAtUnixMs: Date.now(), chunkMilliseconds: 200, minimumChunkMilliseconds: 20,
+    sessionStartedAtUnixMs: Date.now(), chunkMilliseconds: 200, minimumChunkMilliseconds: 20, identityHistory: past,
     onChunk: (chunk) => chunks.push(chunk), onState: (state) => states.push(state), onDiscontinuity: (gap) => gaps.push(gap.durationFrames),
     onWarning: (message) => warnings.push(message), onOwnIdentityRefused: () => { refused++; } });
   try {
-    await until(() => chunks.some((chunk) => chunk.audible));
+    await until(() => chunks.filter((chunk) => chunk.audible).length >= 3);
     expect(fake.launches().map((args) => args.includes('--no-disclaim'))).toEqual([false, true]);
-    expect(warnings).toEqual([OWN_IDENTITY_WARNINGS.silence]);
-    // Silence may only be a quiet start, so the confirmation is kept for the next call.
-    expect(refused).toBe(0);
+    // The call was audible all along: the next recording starts inherited.
+    expect(refused).toBe(1);
+    expect(warnings).toEqual([OWN_IDENTITY_WARNINGS.refused]);
+    expect(past.silentStarts).toBe(0);
+    expect(past.inheritedNoted).toBe(1);
     expect(chunks.filter((chunk) => !chunk.audible).length).toBeGreaterThanOrEqual(2);
     expect(states.some((state) => state.state === 'unavailable' || state.state === 'stopped')).toBe(false);
     expect(gaps).toHaveLength(1);
   } finally { capture.stop(); await capture.done; rmSync(root, { recursive: true, force: true }); }
   expect(states.at(-1)?.state).toBe('stopped');
+});
+
+test('a quiet start through both identities says nothing, and the second recording in a row like it sets the own identity aside', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-identity-lobby-'));
+  // A lobby: nobody talks, whoever's permission records it.
+  const fake = fakeHelper(root, sound(0));
+  const past = history();
+  const warnings: string[] = [];
+  let refused = 0;
+  for (const recording of [1, 2]) {
+    const chunks: SystemAudioChunk[] = [];
+    const capture = startSystemAudioCapture({ helperPath: process.execPath, helperArgs: [fake.path], identity: 'own',
+      ownSilenceMs: 400, inheritedVerdictMs: 400, identityHistory: past,
+      sessionStartedAtUnixMs: Date.now(), chunkMilliseconds: 200, minimumChunkMilliseconds: 20,
+      onChunk: (chunk) => chunks.push(chunk), onState() {},
+      onWarning: (message) => warnings.push(message), onOwnIdentityRefused: () => { refused++; } });
+    try {
+      await until(() => past.silentStarts === recording);
+      expect(fake.launches().slice(-2).map((args) => args.includes('--no-disclaim'))).toEqual([false, true]);
+      // No false "refused" or "silence" warning for a lobby.
+      expect(warnings).toEqual([]);
+      expect(refused).toBe(recording === 2 ? 1 : 0);
+    } finally { capture.stop(); await capture.done; }
+  }
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('sound through the own identity clears the silent starts before it', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-identity-heard-'));
+  const fake = fakeHelper(root, sound(8000));
+  const past = history();
+  past.silentStarts = 1;
+  const chunks: SystemAudioChunk[] = [];
+  const capture = startSystemAudioCapture({ helperPath: process.execPath, helperArgs: [fake.path], identity: 'own', identityHistory: past,
+    sessionStartedAtUnixMs: Date.now(), chunkMilliseconds: 200, minimumChunkMilliseconds: 20,
+    onChunk: (chunk) => chunks.push(chunk), onState() {} });
+  try {
+    await until(() => chunks.length >= 2);
+    expect(past.silentStarts).toBe(0);
+  } finally { capture.stop(); await capture.done; rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the own identity hands over after 20 s of silence, not a minute, once the inherited one is known to record', async () => {
+  for (const inheritedHeard of [false, true]) {
+    const root = mkdtempSync(join(tmpdir(), 'seashell-identity-window-'));
+    // A second of audio every 20 ms: a minute of call in about a second.
+    const fake = fakeHelper(root, `
+event({ type: 'first-buffer', capturedAtUnixMs: Date.now(), bufferStartUnixMs: Date.now() });
+const pcm = Buffer.alloc(32000); if (!own) for (let i = 0; i < 16000; i++) pcm.writeInt16LE(i % 2 ? 8000 : -8000, i * 2);
+setInterval(() => process.stdout.write(pcm), 20);`);
+    const chunks: SystemAudioChunk[] = [];
+    const capture = startSystemAudioCapture({ helperPath: process.execPath, helperArgs: [fake.path], identity: 'own',
+      identityHistory: history(inheritedHeard), sessionStartedAtUnixMs: Date.now(), chunkMilliseconds: 1_000,
+      onChunk: (chunk) => chunks.push(chunk), onState() {}, onWarning() {} });
+    try {
+      await until(() => chunks.some((chunk) => chunk.audible));
+      // Seconds of silence the own identity was given before handing over.
+      expect(chunks.findIndex((chunk) => chunk.audible)).toBe(inheritedHeard ? 20 : 60);
+    } finally { capture.stop(); await capture.done; rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test('the history of silent starts and inherited sound is kept beside the settings, and a new check starts it again', () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-identity-history-'));
+  const env = { SEASHELL_CONFIG: join(root, 'config.json') };
+  try {
+    expect(readAudioChecks(env)).toEqual({});
+    rememberAudioCheck('computer', new Date('2026-11-10T13:00:00Z'), env);
+    rememberInheritedComputerAudio('/made-up/Seashell Background:1:2', new Date('2026-11-10T14:00:00Z'), env);
+    expect(countSilentOwnStart(env)).toBe(1);
+    expect(countSilentOwnStart(env)).toBe(2);
+    rememberAudioCheck('microphone', new Date('2026-11-10T15:00:00Z'), env);
+    expect(readAudioChecks(env)).toEqual({ computer: '2026-11-10T13:00:00.000Z', microphone: '2026-11-10T15:00:00.000Z',
+      computerInherited: '2026-11-10T14:00:00.000Z', computerInheritedBy: '/made-up/Seashell Background:1:2', computerSilentStarts: 2 });
+    resetSilentOwnStarts(env);
+    expect(readAudioChecks(env).computerSilentStarts).toBeUndefined();
+    expect(countSilentOwnStart(env)).toBe(1);
+    // A fresh check, or forgetting one, starts the count again; the inherited sound is still known.
+    rememberAudioCheck('computer', new Date('2026-11-10T16:00:00Z'), env);
+    expect(readAudioChecks(env).computerSilentStarts).toBeUndefined();
+    countSilentOwnStart(env);
+    forgetAudioCheck('computer', env);
+    expect(readAudioChecks(env)).toEqual({ microphone: '2026-11-10T15:00:00.000Z', computerInherited: '2026-11-10T14:00:00.000Z',
+      computerInheritedBy: '/made-up/Seashell Background:1:2' });
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('the one-time check passes on hearing the sound it plays, and remembers it', async () => {

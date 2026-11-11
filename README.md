@@ -293,7 +293,9 @@ you allow **Seashell System Audio**, the helper's own, at your Mac: press **,**
 Seashell plays a short sound, macOS asks once, and from the next call meetings
 use it. No call waits on a question nobody is there to answer. If macOS later
 refuses it, or it sends only silence, the recording goes back to the background
-recorder's permission and says so. If you leave a call and rejoin within three
+recorder's permission. When the call is then heard, macOS had refused it: Seashell
+says so once and starts later calls with the background recorder's permission.
+A quiet lobby is not mistaken for that. If you leave a call and rejoin within three
 minutes, the recording continues in the same History entry. To name meetings
 after their calendar event, press **,** → Meeting titles from Calendar (or run
 `seashell meeting calendar setup`); **Seashell Calendar** asks macOS once. Use
