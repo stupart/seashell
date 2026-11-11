@@ -3,7 +3,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
 import { homedir } from 'os';
 import { dirname, isAbsolute, join } from 'path';
 import { fileURLToPath } from 'url';
-import { nativeSpeakerStatus, speakerEngine, usesSpeakersHelper, type SpeakerEngine } from './speaker-engine.ts';
+import { nativeSpeakerStatus, speakerEngine, speakerModelSize, usesSpeakersHelper, type SpeakerEngine } from './speaker-engine.ts';
 
 export const DIARIZATION_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const DEFAULT_DIARIZATION_MODEL = 'pyannote/speaker-diarization-community-1';
@@ -48,7 +48,7 @@ export function diarizationStatus(): { ready: boolean; python: string; model: st
   if (usesSpeakersHelper(engine)) {
     const native = nativeSpeakerStatus(process.env, engine);
     return { ready: native.ready, python: '', model: native.model, engine,
-      nextStep: native.ready ? undefined : `Identify speakers: run ${SPEAKER_SETUP_COMMAND} (a ${engine === 'nemotron3' ? '190' : '21'} MB download). Recording works without it.` };
+      nextStep: native.ready ? undefined : `Identify speakers: run ${SPEAKER_SETUP_COMMAND} (a ${speakerModelSize(engine)} download). Recording works without it.` };
   }
   const environment = diarizationEnvironment();
   const python = Bun.which(environment.python) || environment.python;

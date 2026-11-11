@@ -86,14 +86,14 @@ function parseRoute(value: unknown, label: string): HumainMeetingRoute | undefin
   };
 }
 
-export type SpeakerEngineName = 'native' | 'nemotron3' | 'pyannote';
+export type SpeakerEngineName = 'auto' | 'native' | 'nemotron3' | 'pyannote';
 
 export interface SeashellConfig {
   libraryDir?: string;
   saveByDefault?: boolean;
   meeting?: SeashellMeetingConfig;
   transcription?: TranscriptionRoutingConfig;
-  /** Local speaker separation: native (Core ML, the default), nemotron3 (NVIDIA, Core ML) or pyannote (Python). */
+  /** Local speaker separation: auto (both Core ML engines, the default), native (community-1), nemotron3 (NVIDIA) or pyannote (Python). */
   speakers?: { engine?: SpeakerEngineName };
 }
 
@@ -390,8 +390,8 @@ export function loadConfig(path = defaultConfigPath()): SeashellConfig {
   }
   const speakers = candidate.speakers as Record<string, unknown> | undefined;
   if (speakers !== undefined && (!speakers || typeof speakers !== 'object' || Array.isArray(speakers) ||
-      (speakers.engine !== undefined && speakers.engine !== 'native' && speakers.engine !== 'nemotron3' && speakers.engine !== 'pyannote'))) {
-    throw new Error('Sea Shell config speakers.engine must be native, nemotron3 or pyannote');
+      (speakers.engine !== undefined && !['auto', 'native', 'nemotron3', 'pyannote'].includes(speakers.engine as string)))) {
+    throw new Error('Sea Shell config speakers.engine must be auto, native, nemotron3 or pyannote');
   }
   return {
     ...(typeof candidate.libraryDir === 'string' ? { libraryDir: candidate.libraryDir } : {}),

@@ -4,19 +4,23 @@ import Foundation
 
 // seashell-speakers: local speaker separation on the Neural Engine, no Python.
 //
-//   seashell-speakers <audio> [--engine community-1|nemotron3]
+//   seashell-speakers <audio> [--engine auto|community-1|nemotron3]
 //                     [--channel-roles local,remote]
 //                     [--num-speakers N | --min-speakers N --max-speakers N]
 //   seashell-speakers --status [--engine …]    models present? (never touches the network)
-//   seashell-speakers --prepare [--engine …]   download once (21 MB, or 190 MB for Nemotron 3)
+//   seashell-speakers --prepare [--engine …]   download once (211 MB; 21 MB for community-1
+//                                              alone, 190 MB for Nemotron 3 alone)
 //
 // Output is the JSON scripts/diarize.py prints, so src/diarize.ts reads either:
-// { model, device, channels, turns: [{ start, end, speaker, role? }], speakers: [{ id, label }] }.
-// Measured on four AMI meetings: diarization error 10.0% against 8.8% for the
-// Python pipeline, about 5x faster, 21 MB of models instead of a 1 GB install.
-// NVIDIA's Nemotron 3 is the optional second engine: on the same meetings it put
-// the wrong name on 1.4% of words outside crosstalk against 4.7%, about 5x faster
-// again, for 190 MB of models and a cap of eight voices per channel.
+// { model, device, channels, turns: [{ start, end, speaker, role? }], speakers: [{ id, label }] },
+// plus voices: { <speaker id>: { embedding, seconds } } for recognising people across
+// meetings (src/voiceprints.ts). Embeddings stay on this Mac like everything else.
+//
+// Two engines: pyannote's community-1 (offline VBx, no cap on voices; diarization
+// error 10.0% on four AMI meetings against 8.8% for the Python pipeline, about 5x
+// faster) and NVIDIA's Nemotron 3 (eight voices per channel, about 5x faster
+// again). The default, auto, runs both and lets community-1 check Nemotron 3:
+// see `choose` for why and the numbers.
 
 let modelName = "fluidaudio/speaker-diarization-coreml (pyannote community-1)"
 let requiredFiles = [
@@ -239,48 +243,58 @@ func round3(_ value: Double) -> Double { (value * 1000).rounded() / 1000 }
 var arguments = Array(CommandLine.arguments.dropFirst())
 let root = modelsRoot()
 
+/// Which model separates the voices. `auto`, the default, runs both and checks
+/// one against the other: see `choose`.
+enum Engine { case auto, community1, nemotron3 }
+
 // `--engine` picks the model everywhere, including --status and --prepare.
-var useNemotron = false
+var engine = Engine.auto
 if let index = arguments.firstIndex(of: "--engine") {
     guard index + 1 < arguments.count else { fail("--engine needs a value") }
     switch arguments[index + 1] {
-    case "community-1": break
-    case "nemotron3": useNemotron = true
-    default: fail("--engine must be community-1 or nemotron3")
+    case "auto": engine = .auto
+    case "community-1": engine = .community1
+    case "nemotron3": engine = .nemotron3
+    default: fail("--engine must be auto, community-1 or nemotron3")
     }
     arguments.removeSubrange(index...(index + 1))
 }
 
 if arguments == ["--version"] {
-    print("seashell-speakers 2 (FluidAudio 0.18.0)")
+    print("seashell-speakers 3 (FluidAudio 0.18.0)")
     exit(0)
 }
 if arguments == ["--status"] {
-    emit(useNemotron ? nemotronStatus(root) : status(root))
+    switch engine {
+    case .community1: emit(status(root))
+    case .nemotron3: emit(nemotronStatus(root))
+    // community-1 alone is enough to separate voices; Nemotron 3 makes it better.
+    case .auto: emit(status(root).merging(["nemotron": nemotronReady(root)]) { $1 })
+    }
     exit(0)
 }
 if arguments == ["--prepare"] {
-    note("Downloading speaker models (about \(useNemotron ? 190 : 21) MB)…")
+    note("Downloading speaker models (about \(engine == .community1 ? 21 : engine == .nemotron3 ? 190 : 211) MB)…")
     do {
-        if useNemotron {
+        if engine != .nemotron3 { _ = try await OfflineDiarizerModels.load(from: root) }
+        if engine != .community1 {
             _ = try await Nemotron3Models.loadFromHuggingFace(config: nemotronConfig, cacheDirectory: root)
-        } else {
-            _ = try await OfflineDiarizerModels.load(from: root)
         }
     } catch {
         fail("Could not download the speaker models: \(error.localizedDescription)")
     }
-    emit(useNemotron ? nemotronStatus(root) : status(root))
-    exit((useNemotron ? nemotronReady(root) : modelsReady(root)) ? 0 : 1)
+    let ready = (engine == .nemotron3 || modelsReady(root)) && (engine == .community1 || nemotronReady(root))
+    emit(engine == .nemotron3 ? nemotronStatus(root) : status(root))
+    exit(ready ? 0 : 1)
 }
 
 let options = parse(arguments)
 guard let path = options.audio else {
-    fail("Usage: seashell-speakers <audio> [--engine community-1|nemotron3] [--channel-roles local,remote] [--num-speakers N | --min-speakers N --max-speakers N]")
+    fail("Usage: seashell-speakers <audio> [--engine auto|community-1|nemotron3] [--channel-roles local,remote] [--num-speakers N | --min-speakers N --max-speakers N]")
 }
 guard FileManager.default.fileExists(atPath: path) else { fail("Audio file not found: \(path)") }
 // Separation runs after meetings, possibly offline: never download here.
-if useNemotron {
+if engine == .nemotron3 {
     guard nemotronReady(root) else { fail("Nemotron 3 is not downloaded. Run: seashell speakers use nemotron3", code: 2) }
 } else {
     guard modelsReady(root) else { fail("Speaker models are not downloaded. Run: seashell setup --speakers", code: 2) }
@@ -307,18 +321,31 @@ if let exactly = options.numSpeakers {
     }
     config = config.withSpeakers(min: low, max: options.maxSpeakers.map { $0 - fixed })
 }
-// Nemotron 3 finds the count itself and takes no hint, so a stated count goes to community-1.
-if useNemotron && constrained {
-    note("Nemotron 3 takes no speaker count; using community-1 for this file.")
-    useNemotron = false
-    guard modelsReady(root) else { fail("Speaker models are not downloaded. Run: seashell setup --speakers", code: 2) }
+/// At most this many voices on the model-processed channel, when the caller knows.
+let voiceLimit = options.maxSpeakers.map { $0 - fixed }
+// Nemotron 3 finds the count itself and takes no hint, so a stated count goes to
+// community-1. A ceiling is the exception in auto: a call that may have more
+// people than its eight slots skips it, and an answer over the ceiling is refused.
+var useNemotron: Bool
+switch engine {
+case .community1: useNemotron = false
+case .nemotron3:
+    useNemotron = !constrained
+    if constrained { note("Nemotron 3 takes no speaker count; using community-1 for this file.") }
+case .auto:
+    useNemotron = nemotronReady(root) && options.numSpeakers == nil && options.minSpeakers == nil &&
+        (voiceLimit ?? 0) <= nemotronConfig.numSpeakers
+}
+if !useNemotron && !modelsReady(root) {
+    fail("Speaker models are not downloaded. Run: seashell setup --speakers", code: 2)
 }
 
 note("Loading speaker models…")
 let manager = OfflineDiarizerManager(config: config)
 var nemotron: Nemotron3Diarizer?
 do {
-    // community-1 is also the fallback when Nemotron 3 fills all eight slots.
+    // community-1 is also the fallback when Nemotron 3 fills all eight slots,
+    // and its embedding model gives every engine's voices their voiceprints.
     if modelsReady(root) { manager.initialize(models: try await OfflineDiarizerModels.load(from: root)) }
     if useNemotron {
         nemotron = Nemotron3Diarizer(config: nemotronConfig,
@@ -341,12 +368,18 @@ if let roles = options.roles, roles.count != audio.count {
 note("Separating speakers…")
 var turns: [Turn] = []
 var speakers: [String: String] = [:]
-var usedModel = useNemotron ? nemotronModelName : modelName
+var voices: [String: [String: Any]] = [:]
+var usedModels: [String] = []
 
 struct Span {
     var start: Double
     var end: Double
     var speaker: String
+}
+
+struct Voice {
+    var embedding: [Float]
+    var seconds: Double
 }
 
 func community1(_ samples: [Float]) async throws -> [Span] {
@@ -359,23 +392,177 @@ func community1(_ samples: [Float]) async throws -> [Span] {
     }
 }
 
-func separate(_ samples: [Float], role: String?) async throws {
-    var spans: [Span]
-    if let nemotron {
-        let (probabilities, frames) = try nemotron.processComplete(samples)
-        spans = Nemotron3Diarizer.segments(probabilities: probabilities, frameCount: frames).map {
-            Span(start: Double($0.startSeconds), end: Double($0.endSeconds), speaker: String($0.speakerIndex))
+func nemotron3(_ samples: [Float], _ nemotron: Nemotron3Diarizer) throws -> [Span] {
+    let (probabilities, frames) = try nemotron.processComplete(samples)
+    return Nemotron3Diarizer.segments(probabilities: probabilities, frameCount: frames).map {
+        Span(start: Double($0.startSeconds), end: Double($0.endSeconds), speaker: String($0.speakerIndex))
+    }
+}
+
+func speech(_ spans: [Span], of speaker: String) -> Double {
+    spans.filter { $0.speaker == speaker }.reduce(0) { $0 + $1.end - $1.start }
+}
+
+// MARK: - Voices
+
+/// Pieces of one speaker's turns where nobody else is talking, longest first.
+func cleanPieces(_ own: [Span], others: [Span]) -> [Range<Double>] {
+    var pieces: [Range<Double>] = []
+    for span in own {
+        var remaining = [span.start..<max(span.start, span.end)]
+        for other in others where other.start < span.end && other.end > span.start {
+            remaining = remaining.flatMap { piece -> [Range<Double>] in
+                guard other.start < piece.upperBound && other.end > piece.lowerBound else { return [piece] }
+                return [piece.lowerBound..<max(piece.lowerBound, other.start), min(piece.upperBound, other.end)..<piece.upperBound]
+                    .filter { !$0.isEmpty }
+            }
         }
+        pieces.append(contentsOf: remaining)
+    }
+    return pieces.sorted { ($0.upperBound - $0.lowerBound) > ($1.upperBound - $1.lowerBound) }
+}
+
+/// One voice embedding per speaker: up to a minute of their longest stretches
+/// with nobody else talking, each at least a second, embedded with community-1's
+/// embedding model and averaged. The same model judges both engines' speakers,
+/// so a voice named in one meeting can be recognised in the next.
+func embedVoices(_ samples: [Float], _ spans: [Span]) async -> [String: Voice] {
+    guard modelsReady(root) else { return [:] }
+    var chosen: [(speaker: String, range: Range<Double>)] = []
+    for speaker in Set(spans.map(\.speaker)) {
+        var total = 0.0
+        for piece in cleanPieces(spans.filter { $0.speaker == speaker }, others: spans.filter { $0.speaker != speaker }) {
+            let length = piece.upperBound - piece.lowerBound
+            if length < 1 || total >= 60 { break }
+            // Long turns are cut to ten seconds, one model window, so one turn can't dominate.
+            let middle = (piece.lowerBound + piece.upperBound) / 2
+            let range = length > 10 ? (middle - 5)..<(middle + 5) : piece
+            chosen.append((speaker, range))
+            total += range.upperBound - range.lowerBound
+        }
+    }
+    guard !chosen.isEmpty,
+          let embeddings = try? await manager.embedSpans(audioSource: ArrayAudioSampleSource(samples: samples), spans: chosen.map(\.range)),
+          embeddings.count == chosen.count
+    else { return [:] }
+    var sums: [String: Voice] = [:]
+    for (piece, embedding) in zip(chosen, embeddings) {
+        let norm = sqrt(embedding.reduce(0) { $0 + $1 * $1 })
+        guard norm > 0, norm.isFinite else { continue }
+        var sum = sums[piece.speaker] ?? Voice(embedding: [Float](repeating: 0, count: embedding.count), seconds: 0)
+        for index in embedding.indices { sum.embedding[index] += embedding[index] / norm }
+        sum.seconds += piece.range.upperBound - piece.range.lowerBound
+        sums[piece.speaker] = sum
+    }
+    return sums.compactMapValues { sum in
+        let norm = sqrt(sum.embedding.reduce(0) { $0 + $1 * $1 })
+        return norm > 0 ? Voice(embedding: sum.embedding.map { $0 / norm }, seconds: sum.seconds) : nil
+    }
+}
+
+func similarity(_ left: Voice, _ right: Voice) -> Float {
+    zip(left.embedding, right.embedding).reduce(0) { $0 + $1.0 * $1.1 }
+}
+
+// Measured on 13 AMI meetings (6.8 hours, 16 people, with and without 16 kbit/s
+// Opus like a video call), comparing voices that had at least 10 seconds of clean
+// speech: the same person in two meetings was never below 0.71, and two
+// different people were never above 0.50, in one meeting or across them.
+/// Below this, two voices are different people.
+let differentPeople: Float = 0.5
+/// At or above this, two voices are one person.
+let samePerson: Float = 0.75
+/// Voices with less clean speech than this are not compared.
+let comparableSeconds = 10.0
+
+/// community-1 sometimes splits one person in two. Put back together the
+/// speakers whose voices are plainly one person.
+func mergeSameVoices(_ spans: [Span], _ voices: [String: Voice]) -> [Span] {
+    let comparable = voices.filter { $0.value.seconds >= comparableSeconds }.keys.sorted { speech(spans, of: $0) > speech(spans, of: $1) }
+    var into: [String: String] = [:]
+    for (index, speaker) in comparable.enumerated() {
+        // The speaker with the most speech keeps its identity.
+        if let larger = comparable[..<index].first(where: { into[$0] == nil && similarity(voices[$0]!, voices[speaker]!) >= samePerson }) {
+            into[speaker] = larger
+        }
+    }
+    return spans.map { Span(start: $0.start, end: $0.end, speaker: into[$0.speaker] ?? $0.speaker) }
+}
+
+/// Whether one Nemotron 3 voice holds two community-1 voices that are plainly
+/// different people: Nemotron 3 merged them.
+func mergesDifferentPeople(_ nemotron: [Span], _ checked: [Span], _ voices: [String: Voice]) -> Bool {
+    var home: [String: String] = [:]
+    for speaker in Set(checked.map(\.speaker)) {
+        let own = checked.filter { $0.speaker == speaker }
+        var shared: [String: Double] = [:]
+        for span in own {
+            for other in nemotron where other.start < span.end && other.end > span.start {
+                shared[other.speaker, default: 0] += min(span.end, other.end) - max(span.start, other.start)
+            }
+        }
+        home[speaker] = shared.max { $0.value < $1.value }?.key
+    }
+    // A few seconds of speech can be a cough or a crossed line, not a person.
+    let people = voices.filter { $0.value.seconds >= comparableSeconds && speech(checked, of: $0.key) >= 20 }.keys.sorted()
+    for (index, left) in people.enumerated() {
+        for right in people[(index + 1)...] where home[left] != nil && home[left] == home[right] {
+            if similarity(voices[left]!, voices[right]!) < differentPeople { return true }
+        }
+    }
+    return false
+}
+
+/// One channel's speakers and the model that found them.
+///
+/// auto runs both. On those AMI meetings Nemotron 3 put the wrong speaker on
+/// 0.55% of words outside crosstalk against 2.98% for community-1 (0.56% and
+/// 2.96% through Opus). On Tyler's calls, though, it twice heard two people as
+/// one where community-1 kept them apart, and their voices were plainly
+/// different (similarity 0.18 and 0.36). A merge can't be fixed by naming, so
+/// community-1, its speakers' voices compared, has the last word: Nemotron 3's
+/// answer is kept unless it put two plainly different voices together, filled
+/// every slot, or found more voices than the caller's ceiling.
+func choose(_ samples: [Float]) async throws -> (spans: [Span], model: String) {
+    switch engine {
+    case .community1:
+        return (try await community1(samples), modelName)
+    case .nemotron3:
+        guard let nemotron else { return (try await community1(samples), modelName) }
+        let spans = try nemotron3(samples, nemotron)
         // Every slot taken means the call may have more people than the model
         // can hold, and they would be merged. community-1 has no cap.
         if Set(spans.map(\.speaker)).count >= nemotronConfig.numSpeakers, modelsReady(root) {
             note("All eight speaker slots are in use; using community-1 for this channel.")
-            usedModel = modelName
-            spans = try await community1(samples)
+            return (try await community1(samples), modelName)
         }
-    } else {
-        spans = try await community1(samples)
+        return (spans, nemotronModelName)
+    case .auto:
+        let checked = try await community1(samples)
+        let checkedVoices = await embedVoices(samples, checked)
+        let fallback = (mergeSameVoices(checked, checkedVoices), modelName)
+        guard let nemotron else { return fallback }
+        let spans = try nemotron3(samples, nemotron)
+        let found = Set(spans.map(\.speaker)).count
+        if found >= nemotronConfig.numSpeakers {
+            note("All eight speaker slots are in use; using community-1 for this channel.")
+            return fallback
+        }
+        if let voiceLimit, found > voiceLimit {
+            note("Nemotron 3 heard more voices than the meeting has people; using community-1 for this channel.")
+            return fallback
+        }
+        if mergesDifferentPeople(spans, checked, checkedVoices) {
+            note("Nemotron 3 heard two different voices as one; using community-1 for this channel.")
+            return fallback
+        }
+        return (spans, nemotronModelName)
     }
+}
+
+func separate(_ samples: [Float], role: String?) async throws {
+    let (spans, model) = try await choose(samples)
+    if !usedModels.contains(model) { usedModels.append(model) }
     var identities: [String: String] = [:]
     for span in spans.sorted(by: { $0.start < $1.start }) {
         let id: String
@@ -396,6 +583,10 @@ func separate(_ samples: [Float], role: String?) async throws {
         let start = max(0, span.start)
         turns.append(Turn(start: round3(start), end: round3(max(start, span.end)), speaker: id, role: role))
         speakers[id] = label
+    }
+    for (speaker, voice) in await embedVoices(samples, spans) {
+        guard let id = identities[speaker] else { continue }
+        voices[id] = ["embedding": voice.embedding.map { (Double($0) * 10_000).rounded() / 10_000 }, "seconds": round3(voice.seconds)]
     }
 }
 
@@ -422,7 +613,7 @@ do {
 }
 
 emit([
-    "model": usedModel,
+    "model": usedModels.isEmpty ? (useNemotron ? nemotronModelName : modelName) : usedModels.joined(separator: " and "),
     "device": "ane",
     "channels": audio.count,
     "turns": coalesce(turns).map { turn -> [String: Any] in
@@ -431,4 +622,5 @@ emit([
         return value
     },
     "speakers": speakers.keys.sorted().map { ["id": $0, "label": speakers[$0]!] },
+    "voices": voices,
 ])

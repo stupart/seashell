@@ -1,6 +1,6 @@
 import { spawn } from 'child_process';
 import { diarizationStatus, resolveDiarizationPython } from './diarization-environment.ts';
-import { speakerEngine, speakerEngineArguments, speakersHelper, usesSpeakersHelper, type SpeakerEngine } from './speaker-engine.ts';
+import { helperModelLabel, speakerEngine, speakerEngineArguments, speakersHelper, usesSpeakersHelper, type SpeakerEngine } from './speaker-engine.ts';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { prepareMedia, type PreparedMedia } from './media-preparation.ts';
@@ -37,9 +37,23 @@ interface ProcessResult {
   stderr: string;
 }
 
+/** One separated speaker's voice: src/voiceprints.ts recognises people with it. */
+export interface SpeakerVoice {
+  /** L2-normalised voice embedding. */
+  embedding: number[];
+  /** Seconds of clean speech it was taken from. */
+  seconds: number;
+  /** The speaker's turns, so a later rename can check it names the same voice. */
+  spans: Array<[number, number]>;
+}
+
 interface PythonDiarization {
   turns: DiarizationTurn[];
   speakers: Speaker[];
+  /** Which model the helper used: auto picks one per channel. */
+  model?: string;
+  /** One voice embedding per speaker, from the native helper only. */
+  voices?: Map<string, SpeakerVoice>;
 }
 
 export interface DiarizeFileOptions {
@@ -63,6 +77,8 @@ export interface DiarizeFileOptions {
   onWhisperFallback?: (message: string) => void;
   onDiarizationMessage?: (message: string) => void;
   onMediaStatus?: (message: string) => void;
+  /** Each separated speaker's voice and turns, keyed by diarization speaker ID, for src/voiceprints.ts. */
+  onVoices?: (voices: ReadonlyMap<string, SpeakerVoice>) => void;
 }
 
 async function runProcess(
@@ -233,7 +249,22 @@ function parsePythonDiarization(value: unknown): PythonDiarization {
     return { id: speaker.id, label: speaker.label };
   });
 
-  return { turns, speakers };
+  // Voices are optional: an older helper or the Python script has none, and a
+  // malformed one is dropped rather than failing the meeting.
+  const voices = new Map<string, SpeakerVoice>();
+  const rawVoices = (value as { voices?: unknown }).voices;
+  if (rawVoices && typeof rawVoices === 'object' && !Array.isArray(rawVoices)) {
+    for (const [id, raw] of Object.entries(rawVoices as Record<string, unknown>)) {
+      const voice = raw as { embedding?: unknown; seconds?: unknown } | null;
+      if (!voice || !Array.isArray(voice.embedding) || voice.embedding.length === 0 ||
+          !voice.embedding.every((x) => typeof x === 'number' && Number.isFinite(x)) ||
+          typeof voice.seconds !== 'number' || !Number.isFinite(voice.seconds)) continue;
+      const spans = turns.filter((turn) => turn.speaker === id).map((turn): [number, number] => [turn.start, turn.end]);
+      voices.set(id, { embedding: voice.embedding as number[], seconds: voice.seconds, spans });
+    }
+  }
+  const model = (value as { model?: unknown }).model;
+  return { turns, speakers, ...(typeof model === 'string' && model ? { model } : {}), ...(voices.size ? { voices } : {}) };
 }
 
 /**
@@ -254,7 +285,8 @@ export async function runSpeakerSeparation(
   positiveIntegerArgument(args, '--max-speakers', options.maxSpeakers);
   const result = await runProcess(speakersHelper(), args, options.onDiarizationMessage);
   try {
-    return parsePythonDiarization(JSON.parse(result.stdout));
+    const diarization = parsePythonDiarization(JSON.parse(result.stdout));
+    return diarization.model ? { ...diarization, model: helperModelLabel(diarization.model) } : diarization;
   } catch (error) {
     if (error instanceof SyntaxError) throw new Error('The speaker helper wrote malformed JSON');
     throw error;
@@ -320,6 +352,7 @@ export async function diarizePreparedMedia(
     // Fail fast on missing Python dependencies, gated model access, or invalid
     // channel routing before spending time on one or more Whisper passes.
     const diarization = await runSpeakerSeparation(audio.path, options);
+    if (diarization.voices) options.onVoices?.(diarization.voices);
     const transcriptUnits = await transcribePreparedAudio(audio, options);
     const roleSpeakers = Object.fromEntries(
       (options.channelRoles ?? [])
@@ -336,7 +369,7 @@ export async function diarizePreparedMedia(
     const identities = new Map(diarization.speakers.map((speaker, index) => [speaker.id,
       speaker.label === speaker.id ? `Speaker ${index + 1}` : speaker.label]));
     let document: StructuredTranscript = {
-      speakerAnalysis: { status: 'complete', model: options.model ?? diarizationStatus().model,
+      speakerAnalysis: { status: 'complete', model: options.model ?? diarization.model ?? diarizationStatus().model,
         detail: 'Voices separated locally. Speaker numbers apply to this recording; names need confirmation.' },
       transcript,
       speakers: completeSpeakerList(diarization.speakers.map((s) => ({ ...s, label: identities.get(s.id)! })), transcript),
