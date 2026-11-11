@@ -659,6 +659,7 @@ export default function App(props: {
         if (generation !== liveSessionGeneration.current || healthTracker !== liveHealthTracker.current) return;
         if (healthTracker) setLiveHealth(healthTracker.pcm('systemAudio', level));
       },
+      onWarning: (message) => setNotice(message),
       onState: (update) => {
         if (generation !== liveSessionGeneration.current || healthTracker !== liveHealthTracker.current) return;
         if (healthTracker) setLiveHealth(healthTracker.state('systemAudio', update));

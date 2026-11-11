@@ -47,3 +47,30 @@ export function rememberAudioCheck(source: AudioCheckSource, at = new Date(), en
     throw error;
   }
 }
+
+/** Forget a check, when macOS later refused the helper it confirmed. */
+export function forgetAudioCheck(source: AudioCheckSource, env: NodeJS.ProcessEnv = process.env): void {
+  const checks = readAudioChecks(env);
+  if (!checks[source]) return;
+  const path = audioChecksPath(env);
+  const rest = Object.fromEntries(Object.entries(checks).filter(([key]) => key !== source));
+  const temporary = `${path}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify({ schemaVersion: 1, ...rest }, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+}
+
+/**
+ * When a check heard the Mac through Seashell System Audio's own identity, made
+ * with the helper copy installed now. A replaced copy is a new identity to
+ * macOS, which may need asking again, so an older check does not count.
+ */
+export function computerAudioConfirmed(checks: AudioChecks, helperInstalledAtMs: number | undefined): string | undefined {
+  const at = checks.computer;
+  if (!at || helperInstalledAtMs === undefined) return undefined;
+  return Date.parse(at) >= helperInstalledAtMs ? at : undefined;
+}
