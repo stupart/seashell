@@ -2433,6 +2433,10 @@ export default function App(props: {
 
   const readerTotal = currentMeeting && meetingView !== 'transcript' ? auxiliaryMeetingLines.length : displayRows.length;
   const readerScroll = currentMeeting && meetingView !== 'transcript' ? transcriptScroll : visibleTranscriptScroll;
+  // How much is out of view, as Settings says it: what is below, or once at the end, what is above.
+  // A time and speaker pinned at the top take a row of the view.
+  const readerShown = readerScroll + visibleRows - (currentMeeting && meetingView !== 'transcript' || timedRows[readerScroll]?.heading === undefined ? 0 : 1);
+  const readerMore = readerTotal - readerShown > 0 ? `↓ ${readerTotal - readerShown} more` : readerScroll > 0 ? `↑ ${readerScroll} more` : undefined;
   const searchHighlight = meetingView === 'transcript' ? searchQuery : '';
   // The title says whether Seashell can record; the body says what is missing, or what happens next.
   const homeMessage = attention.length ? <>
@@ -2474,7 +2478,7 @@ export default function App(props: {
               </React.Fragment>
             ))}
           </Text>
-          {readerTotal > visibleRows && <Text dimColor>{Math.min(readerTotal, readerScroll + visibleRows)}/{readerTotal} lines</Text>}
+          {readerMore && <Text dimColor>{readerMore}</Text>}
         </Box>
       )}
       <Box ref={transcriptPaneRef} flexGrow={1} minHeight={2} flexDirection="column" overflow="hidden" aria-label="Transcript reader">
@@ -2515,7 +2519,7 @@ export default function App(props: {
       ['Note', notesSetup.editing !== undefined ? `${notesSetup.editing}█` : currentMeeting.ai?.note ?? '— Enter to add, e.g. "Capture pricing"'],
       ['AI', currentMeeting.ai?.off ? '‹ Off › no notes or chat; agents are refused it' : '‹ On ›'],
     ];
-    return <Sheet title="Notes setup for this meeting">
+    return <Sheet>
       {rows.map(([label, value], index) => (
         <Text key={label} inverse={index === notesSetup.row} wrap="truncate-end">{index === notesSetup.row ? '› ' : '  '}{label.padEnd(10)}{value}</Text>
       ))}
@@ -2525,7 +2529,7 @@ export default function App(props: {
   const speakerName = (speaker: (typeof namedSpeakers)[number]) =>
     `${speakerDisplayName(speaker.id, speaker.label)}${speaker.suggestion ? ' · suggested' : ''}`;
   const speakerColumn = Math.min(32, Math.max(18, ...namedSpeakers.map((speaker) => speakerName(speaker).length))) + 2;
-  const speakerSheet = speakerPickerOpen && currentRecord ? <Sheet title="Name a speaker">
+  const speakerSheet = speakerPickerOpen && currentRecord ? <Sheet>
     {namedSpeakers.map((speaker, index) => {
       const said = currentRecord.transcript.find((segment) => segment.speaker === speaker.id)?.text ?? '';
       return <Text key={speaker.id} inverse={index === speakerSelection} wrap="truncate-end">
@@ -2537,7 +2541,7 @@ export default function App(props: {
       <Text dimColor wrap="wrap">Suggested names come from voices you named before.</Text>
     </Box>}
   </Sheet> : null;
-  const helpSheet = helpMode ? <Sheet title="Keys">
+  const helpSheet = helpMode ? <Sheet>
     {HELP_ROWS.map(([group, keys]) => <HelpRow key={group} group={group} keys={keys} />)}
   </Sheet> : null;
 
@@ -2613,7 +2617,7 @@ export default function App(props: {
     : recordHeading ? { ...recordHeading, keep: 24 } : { text: '' };
   // Says the recorder is on, so a quiet screen never reads as a stopped one.
   const standing = watchOwnership === 'external' && backgroundWatch?.phase === 'watching' && statusProps?.mode !== 'watching'
-    && !(summary && !quietlyDone) ? { text: 'Watching for calls', short: 'Watching' }
+    && !(summary && !quietlyDone) ? { text: 'Watching for calls' }
     : currentMeeting?.status === 'reconciling' || currentMeeting?.status === 'observing' ? { text: 'Writing notes…' } : undefined;
   // Warnings take the title's status slot, most urgent first; nothing adds a row under the title.
   // The slot says only what is wrong; the key that fixes it leads the key bar, and a fix in
@@ -2647,19 +2651,23 @@ export default function App(props: {
     <Box width={3} flexShrink={0}><Text>{number}.</Text></Box>
     <Paragraph text={text} width={sheetWidth - 3} />
   </Box>;
-  const audioSheet = audioHelpOpen ? <Sheet title={finding?.source === 'microphone' ? 'Mic help' : 'Audio help'}>
+  const audioSheet = audioHelpOpen ? <Sheet>
     {finding && <Box flexShrink={0} marginBottom={1}><Paragraph text={finding.text} width={sheetWidth} color={finding.color} /></Box>}
     {step(1, 'Quiet can just mean you are muted or nobody is speaking.')}
     {step(2, 'Check the right microphone is chosen and its level moves.')}
     {step(3, 'Check Seashell Microphone is allowed in Privacy & Security.')}
   </Sheet> : null;
   const sheet = helpSheet ?? audioSheet ?? notesSheet ?? speakerSheet;
+  // A sheet's name takes the title line, as a screen's does; what is wrong stays in the status slot.
+  const sheetName = helpSheet ? 'Keys' : audioSheet ? finding?.source === 'microphone' ? 'Mic help' : 'Audio help'
+    : notesSheet ? 'Notes setup' : speakerSheet ? 'Name a speaker' : undefined;
 
   return (
     <Box flexDirection="column" paddingX={1} height={terminal.rows} overflow="hidden">
-      <ScreenTitle name={heading.text} bold={Boolean(heading.color)} {...(heading.color ? { color: heading.color } : {})}
-        {...(heading.keep ? { keep: heading.keep } : {})}
-        {...(summary?.detail && !quietlyDone ? { detail: summary.detail } : {})} status={slot} />
+      {sheetName ? <ScreenTitle name={sheetName} status={slot} />
+        : <ScreenTitle name={heading.text} bold={Boolean(heading.color)} {...(heading.color ? { color: heading.color } : {})}
+          {...(heading.keep ? { keep: heading.keep } : {})}
+          {...(summary?.detail && !quietlyDone ? { detail: summary.detail } : {})} status={slot} />}
       {sheet ?? <Box flexDirection="row" flexGrow={1} overflow="hidden">
         {historyOpen && list}
         {!drawerOnly && reader}

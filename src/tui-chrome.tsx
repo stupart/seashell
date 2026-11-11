@@ -140,17 +140,20 @@ export function ScreenTitle(props: { name: string; color?: Tone; bold?: boolean;
   const { stdout } = useStdout();
   const columns = stdout?.columns ?? 80;
   const room = columns - 2;
+  // The name of the app is there on a wide window and never on a narrow one, so it does not come and go with the status.
+  const brand = columns >= 72;
+  const lead = 2 + (brand ? 9 : 0);
   const nameWidth = props.name ? 2 + width(props.name) : 0;
   // The status gives way to its short form, then to a short screen name: a long meeting title is cut before it.
-  const fits = (text?: string) => text !== undefined && 2 + nameWidth + 2 + width(text) <= room;
+  const fits = (text?: string) => text !== undefined && lead + nameWidth + 2 + width(text) <= room;
   // One more column for the … that ends a cut name.
-  const statusRoom = room - 2 - Math.min(nameWidth, 3 + (props.keep ?? width(props.name))) - 2;
+  const statusRoom = room - lead - Math.min(nameWidth, 3 + (props.keep ?? width(props.name))) - 2;
+  // A dim status with no fix only informs ("Watching for calls"): it shows whole or not at all, and never cuts the name.
+  const informs = !props.status?.color && !props.status?.fix;
   const statusText = !props.status ? undefined : fits(props.status.text) ? props.status.text : fits(props.status.short) ? props.status.short
-    : statusRoom >= 8 ? cutEnd(props.status.short ?? props.status.text, statusRoom) : undefined;
+    : !informs && statusRoom >= 8 ? cutEnd(props.status.short ?? props.status.text, statusRoom) : undefined;
   const statusWidth = statusText ? 2 + width(statusText) : 0;
-  // Narrow, the name of the app gives way first; it stays whenever there is room for it.
-  const brand = columns >= 72 || 2 + 9 + nameWidth + statusWidth <= room;
-  const detail = props.detail && 2 + (brand ? 9 : 0) + nameWidth + 2 + width(props.detail) + statusWidth <= room ? props.detail : undefined;
+  const detail = props.detail && lead + nameWidth + 2 + width(props.detail) + statusWidth <= room ? props.detail : undefined;
   return <Box flexDirection="column" flexShrink={0}>
     <Box justifyContent="space-between">
       {/* Keyed by its shape, as the key bar is, so a longer title is measured afresh. */}
@@ -166,11 +169,10 @@ export function ScreenTitle(props: { name: string; color?: Tone; bold?: boolean;
   </Box>;
 }
 
-/** Help, audio help, notes setup and speaker naming take the body instead of pushing it around. */
-export function Sheet(props: { title: string; children: React.ReactNode }) {
+/** Help, audio help, notes setup and speaker naming take the body instead of pushing it around.
+ * The sheet's name goes on the title line, as every screen's does. */
+export function Sheet(props: { children: React.ReactNode }) {
   return <Box flexDirection="column" flexGrow={1} overflow="hidden">
-    <Text bold color="cyan">{props.title}</Text>
-    <Box height={1} />
     {props.children}
   </Box>;
 }
