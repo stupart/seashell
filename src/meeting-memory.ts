@@ -223,7 +223,8 @@ export function listActionItems(libraryDir: string, args: Arguments = {}) {
       if (claim.type !== 'action_item') continue;
       items.push({ meetingId: entry.id, title: entry.title, startedAt: entry.createdAt, text: claim.text,
         ...(claim.person ? { person: claim.person } : {}), ...(claim.due ? { due: claim.due } : {}),
-        evidence: claim.evidenceSegmentIds, final: Boolean(artifact?.analysis?.final) });
+        evidence: claim.evidenceSegmentIds, final: Boolean(artifact?.analysis?.final),
+        ...(artifact?.notesOutdated ? { possiblyOutOfDate: artifact.notesOutdated.reason } : {}) });
       if (items.length >= limit) return { items };
     }
   }
@@ -290,7 +291,8 @@ export function queryNotes(libraryDir: string, args: Arguments = {}) {
         ...(claim.person ? { person: claim.person } : {}), ...(claim.due ? { due: claim.due } : {}),
         evidence: cite(claim),
         ...(quote ? { quote: quote.length > 200 ? `${quote.slice(0, 199)}…` : quote } : {}),
-        final: Boolean(artifact?.analysis?.final) });
+        final: Boolean(artifact?.analysis?.final),
+        ...(artifact?.notesOutdated ? { possiblyOutOfDate: artifact.notesOutdated.reason } : {}) });
       if (items.length >= limit) return { items, truncated: true };
     }
   }
@@ -306,6 +308,8 @@ export function getInsights(libraryDir: string, args: Arguments) {
     .filter(insight => !wanted || insight.extractor.toLocaleLowerCase() === wanted)
     .map(insight => ({
       extractor: insight.extractor, createdAt: insight.createdAt,
+      // Each insight is stale or not on its own: rewriting the notes does not run every extractor.
+      ...(insight.outdated ? { possiblyOutOfDate: insight.outdated.reason } : {}),
       ...(insight.summary ? { summary: insight.summary } : {}),
       fields: insight.fields.map(field => ({
         name: field.name,
@@ -313,8 +317,7 @@ export function getInsights(libraryDir: string, args: Arguments) {
       })),
     }));
   if (wanted && !insights.length) throw new Error(`No insights from "${String(args.extractor)}" for this meeting yet. Run it with run_extractor.`);
-  return { id: record.id, title: record.title, insights,
-    ...(artifact?.notesOutdated && insights.length ? { possiblyOutOfDate: artifact.notesOutdated.reason } : {}) };
+  return { id: record.id, title: record.title, insights };
 }
 
 /**

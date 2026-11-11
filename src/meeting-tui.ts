@@ -217,7 +217,9 @@ export function meetingViewLines(
   // already say is left out, and so is an empty field. A field's name is left off when
   // it is the only one left, or when the extractor's name already says it ("Customer pains" over "Pains").
   const insights = (artifact.insights ?? []).flatMap((insight) => {
-    if (!insight.fields.some((field) => field.items.length)) return [`${insight.extractor}: nothing found.`];
+    // Rewriting the notes does not run an extractor that only runs by hand, so each says when it may be stale.
+    const name = insight.outdated ? `${insight.extractor} (may be out of date)` : insight.extractor;
+    if (!insight.fields.some((field) => field.items.length)) return [`${name}: nothing found.`];
     const fields = insight.fields.map((field) => ({ field, items: field.items
       .filter((item) => !shown.some((other) => echoes(saying(item.text, item.evidenceSegmentIds), other))) }))
       .filter(({ items }) => items.length);
@@ -226,7 +228,7 @@ export function meetingViewLines(
       const label = fields.length > 1 && ![...wordsOf(field.name)].every((word) => named.has(word));
       return items.map((item) => bullet({ text: label ? `${field.name}: ${item.text}` : item.text, ids: item.evidenceSegmentIds, removed: sourceLineRemoved(item) }));
     });
-    return lines.length ? [`${SUBHEADING}${insight.extractor}`, ...lines] : [];
+    return lines.length ? [`${SUBHEADING}${name}`, ...lines] : [];
   });
   return [
     summary,

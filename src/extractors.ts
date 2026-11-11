@@ -13,6 +13,7 @@ import {
 import { claimsForHumain, meetingSegments, ownerInstructions, retryableRun, runSafeId, stableKey } from './meeting-enrichment.ts';
 import { meaningful, parseFrontmatter, phraseMatches } from './meeting-templates.ts';
 import { humainRouteRequest, olderHumainEngine, runHumainMeeting, type HumainMeetingRoute } from './humain-client.ts';
+import { meetingEvidence } from './meeting-evidence.ts';
 import { findTranscriptRecord } from './transcript-library.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 
@@ -292,6 +293,8 @@ export async function runExtractor(
     throw new Error(`No extractor named "${String(extractorName)}" in ${extractorsDirectory(libraryDir, options.env)}. See: seashell extractors`);
   }
   const { record, path } = findTranscriptRecord(libraryDir, transcriptId);
+  // The transcript this run reads: what it finds is saved only if that is still the transcript.
+  const revision = meetingEvidence(record).revision;
   const artifact = loadMeetingArtifact(libraryDir, record.id) ?? createMeetingArtifact(record);
   if (artifact.ai?.off) throw new MeetingAiOffError();
   const segments = meetingSegments(record);
@@ -333,6 +336,9 @@ export async function runExtractor(
   };
   // Re-read: notes or chat may have been saved while this ran.
   const current = loadMeetingArtifact(libraryDir, record.id) ?? artifact;
+  if (current.transcriptEvidence?.revision !== revision) {
+    throw new Error(`The transcript changed while ${extractor.name} ran, so what it found was not saved. Run it again.`);
+  }
   saveMeetingArtifact(libraryDir, {
     ...current,
     insights: [...(current.insights ?? []).filter((saved) => saved.extractor !== extractor.name), insight],

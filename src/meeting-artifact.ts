@@ -120,6 +120,12 @@ export interface MeetingInsight {
   runId: string;
   summary?: string;
   fields: { name: string; items: MeetingNoteItem[] }[];
+  /**
+   * The transcript changed after this was found (see notesOutdated). Each
+   * insight keeps its own mark until it runs again: rewriting the notes does
+   * not run an extractor that only runs by hand.
+   */
+  outdated?: { at: string; reason: string };
 }
 
 export interface MeetingProvisionalOverlay {
@@ -410,16 +416,24 @@ export function parseMeetingNotes(value: unknown, label = 'meeting notes'): Meet
   });
 }
 
+function parseOutdated(value: unknown, label: string): { at: string; reason: string } | undefined {
+  if (value === undefined) return undefined;
+  const outdated = value as Record<string, unknown> | null;
+  return { at: string(outdated?.at, `${label} at`), reason: string(outdated?.reason, `${label} reason`) };
+}
+
 export function parseMeetingInsight(value: unknown, label = 'meeting insight'): MeetingInsight {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`);
   const insight = value as Record<string, unknown>;
   if (!Array.isArray(insight.fields)) throw new Error(`${label} fields must be an array`);
   const summary = typeof insight.summary === 'string' && insight.summary.trim() ? insight.summary.trim() : undefined;
+  const outdated = parseOutdated(insight.outdated, `${label} outdated`);
   return {
     extractor: string(insight.extractor, `${label} extractor`),
     createdAt: string(insight.createdAt, `${label} createdAt`),
     runId: string(insight.runId, `${label} runId`),
     ...(summary ? { summary } : {}),
+    ...(outdated ? { outdated } : {}),
     fields: insight.fields.map((raw, index) => {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`${label} field ${index} is invalid`);
       const field = raw as Record<string, unknown>;
@@ -503,8 +517,10 @@ export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): Mee
   const ai = parseAiSettings(artifact.ai);
   const transcriptEvidence = parseMeetingEvidence(artifact.transcriptEvidence);
   if (artifact.insights !== undefined && !Array.isArray(artifact.insights)) throw new Error(`${path} insights must be an array`);
-  const insights = artifact.insights?.map((insight, index) => parseMeetingInsight(insight, `insight ${index}`));
-  const outdated = artifact.notesOutdated as Record<string, unknown> | undefined;
+  const outdated = parseOutdated(artifact.notesOutdated, 'notesOutdated');
+  // Insights saved before each kept its own mark share the meeting's, if they are older than it.
+  const insights = artifact.insights?.map((insight, index) => parseMeetingInsight(insight, `insight ${index}`))
+    .map((insight) => outdated && !insight.outdated && Date.parse(insight.createdAt) <= Date.parse(outdated.at) ? { ...insight, outdated } : insight);
   return {
     schemaVersion: 1,
     meetingId: string(artifact.meetingId, 'meetingId'),
@@ -535,9 +551,7 @@ export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): Mee
     ...(ai === undefined || Object.keys(ai).length === 0 ? {} : { ai }),
     ...(optionalString(artifact.app, 'meeting app') === undefined ? {} : { app: artifact.app as string }),
     ...(insights?.length ? { insights } : {}),
-    ...(outdated === undefined ? {} : { notesOutdated: {
-      at: string(outdated?.at, 'notesOutdated at'), reason: string(outdated?.reason, 'notesOutdated reason'),
-    } }),
+    ...(outdated === undefined ? {} : { notesOutdated: outdated }),
     chat: artifact.chat.map((raw, index) => {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
         throw new Error(`chat message ${index} is invalid`);
@@ -679,7 +693,8 @@ export function insightMarkdown(title: string, insight: MeetingInsight): string 
   const fields = insight.fields.map((field) => `## ${field.name}\n\n${field.items.length
     ? field.items.map((item) => `- ${item.text} _(${citationText(item)})_`).join('\n')
     : '- Not covered.'}`);
-  return `# ${insight.extractor}\n\n_${title}_\n\n${insight.summary ? `${insight.summary}\n\n` : ''}${fields.join('\n\n')}\n`;
+  const outdated = insight.outdated ? `_${insight.outdated.reason} after this was found, so it may be out of date._\n\n` : '';
+  return `# ${insight.extractor}\n\n_${title}_\n\n${outdated}${insight.summary ? `${insight.summary}\n\n` : ''}${fields.join('\n\n')}\n`;
 }
 
 /** insights/ mirrors meeting.json: one JSON and one Markdown file per extractor, nothing stale. */
@@ -782,7 +797,17 @@ function retainMeetingRevision(directory: string, artifact: MeetingArtifact, tra
   if (!existsSync(path)) atomicWrite(path, content);
 }
 
-/** Also repairs interruption between transcript replacement and projection refresh. */
+/**
+ * Notes, chat and every insight marked as possibly out of date, when the
+ * meeting has any. Each insight keeps its mark until it runs again.
+ */
+function markedOutdated(artifact: MeetingArtifact, reason: string): MeetingArtifact {
+  if (!artifact.analysis && !artifact.provisionalClaims.length && !artifact.chat.length && !artifact.insights?.length) return artifact;
+  const outdated = { at: new Date().toISOString(), reason };
+  return { ...artifact, notesOutdated: outdated,
+    ...(artifact.insights ? { insights: artifact.insights.map((insight) => insight.outdated ? insight : { ...insight, outdated }) } : {}) };
+}
+
 /** The same name, or one a fuller form of the other: "Dana" and "Dana Lee". */
 function sameName(left: string, right: string): boolean {
   const words = (name: string): string[] => name.toLocaleLowerCase('en-US').match(/[\p{L}\p{N}]+/gu) ?? [];
@@ -843,6 +868,7 @@ function renamedInNotes(
   };
 }
 
+/** Also repairs interruption between transcript replacement and projection refresh. */
 export function synchronizeMeetingTranscript(
   directory: string,
   record: TranscriptRecord,
@@ -859,9 +885,8 @@ export function synchronizeMeetingTranscript(
   // caller says so rather than the hash changing.
   if (options.namesOnly) {
     const renamed = renamedInNotes(artifact, options.namesOnly, record.speakers);
-    const updated: MeetingArtifact = { ...renamed.artifact, transcriptEvidence: evidence, updatedAt: new Date().toISOString(),
-      ...(renamed.outdated && (artifact.analysis || artifact.provisionalClaims.length || artifact.chat.length || artifact.insights?.length)
-        ? { notesOutdated: { at: new Date().toISOString(), reason: renamed.outdated } } : {}) };
+    const named: MeetingArtifact = { ...renamed.artifact, transcriptEvidence: evidence, updatedAt: new Date().toISOString() };
+    const updated = renamed.outdated ? markedOutdated(named, renamed.outdated) : named;
     atomicWrite(path, `${JSON.stringify(updated, null, 2)}\n`);
     writeMeetingProjections(directory, updated, record);
     return updated;
@@ -871,9 +896,8 @@ export function synchronizeMeetingTranscript(
   // IDs do not move, so every citation still points at the same moment, and
   // a citation of a removed line moves aside, marked (withCurrentCitations).
   if (options.keepNotes) {
-    const updated: MeetingArtifact = withCurrentCitations({ ...artifact, transcriptEvidence: evidence, updatedAt: new Date().toISOString(),
-      ...(artifact.analysis || artifact.provisionalClaims.length || artifact.chat.length || artifact.insights?.length
-        ? { notesOutdated: { at: new Date().toISOString(), reason: options.keepNotes } } : {}) }, record);
+    const updated = withCurrentCitations(markedOutdated({ ...artifact, transcriptEvidence: evidence,
+      updatedAt: new Date().toISOString() }, options.keepNotes), record);
     atomicWrite(path, `${JSON.stringify(updated, null, 2)}\n`);
     writeMeetingProjections(directory, updated, record);
     return updated;

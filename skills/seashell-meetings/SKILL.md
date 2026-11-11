@@ -21,7 +21,8 @@ content somewhere, so only do that when the user asks.
   for the layout of a summary or follow-up, and keep their citations.
 - `possiblyOutOfDate` means words or a name changed after the notes were
   written (a corrected line, removed silence, "Dana was renamed to Remote
-  speaker 1"). Check the transcript before relying on them.
+  speaker 1"). Check the transcript before relying on them. Notes, each item
+  from `query_notes` and `list_action_items`, and each insight carry their own.
 - A meeting listed as `private` has AI turned off by the user. Tell them it is
   private rather than reading its files directly. Every tool refuses it.
 
