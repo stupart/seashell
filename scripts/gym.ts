@@ -116,7 +116,8 @@ try {
   await check('typecheck', async () => { await command('typecheck', [process.execPath, 'run', 'typecheck']); });
   for (let round = 1; round <= rounds; round++) {
     await check(`tests-${round}`, async () => {
-      await command(`tests-${round}`, [process.execPath, 'run', 'test'], 120_000, {
+      // The full suite takes over two minutes now; the limit catches a hang, not a slow Mac.
+      await command(`tests-${round}`, [process.execPath, 'run', 'test'], 360_000, {
         SEASHELL_CONFIG: undefined, SEASHELL_LIBRARY_DIR: undefined,
       });
     });

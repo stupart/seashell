@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { startDurableLiveCapture } from '../src/durable-live-capture.ts';
-import { startSystemAudioCapture, type SystemAudioStateUpdate } from '../src/live-system-audio.ts';
+import { startSystemAudioCapture, systemAudioCanRecover, type SystemAudioStateUpdate } from '../src/live-system-audio.ts';
 
 async function until(check: () => boolean) {
   const deadline = Date.now() + 3000;
@@ -107,4 +107,99 @@ setInterval(()=>{},1000);
     expect(states.at(-1)?.state).toBe('active');
     expect(fake.count()).toBe(1);
   } finally { capture.stop(); await capture.done; rmSync(root, { recursive: true, force: true }); }
+});
+
+test('switching output devices any number of times keeps computer audio for the whole call', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-route-many-'));
+  // AirPods in, AirPods out, back in: each attempt hears audio, then the route changes.
+  const fake = helper(root, `
+event({type:'first-buffer',capturedAtUnixMs:Date.now(),bufferStartUnixMs:Date.now()});
+process.stdout.write(Buffer.alloc(3200,attempt));
+await Bun.sleep(60);
+if(attempt<4){event({type:'error',code:'device_changed',message:'Output route changed'});process.exit(1);}
+setInterval(()=>{},1000);
+`);
+  const states: SystemAudioStateUpdate[] = [];
+  let chunks = 0;
+  const capture = startSystemAudioCapture({ helperPath: process.execPath, helperArgs: [fake.path], sessionStartedAtUnixMs: Date.now(),
+    chunkMilliseconds: 100, minimumChunkMilliseconds: 20, restartDelayMs: 10,
+    onState: state => states.push(state), onChunk: chunk => { chunks++; rmSync(chunk.path); } });
+  try {
+    await until(() => chunks === 4);
+    expect(fake.count()).toBe(4);
+    expect(states.filter(state => state.code === 'system_audio_reconnecting')).toHaveLength(3);
+    expect(states.some(state => state.state === 'unavailable')).toBe(false);
+  } finally { capture.stop(); await capture.done; rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a helper that stops sending audio without exiting is restarted, and the gap is kept on the timeline', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-route-stall-'));
+  // The first attempt's device stops after one buffer and never says so.
+  const fake = helper(root, `
+event({type:'first-buffer',capturedAtUnixMs:Date.now(),bufferStartUnixMs:Date.now()});
+process.stdout.write(Buffer.alloc(3200,attempt));
+if(attempt>1)setInterval(()=>process.stdout.write(Buffer.alloc(320,attempt)),20);
+else setInterval(()=>{},1000);
+`);
+  const states: SystemAudioStateUpdate[] = [];
+  const capture = startDurableLiveCapture({ libraryDir: root, sessionId: 'route-stall', microphone: false, chunkMilliseconds: 100,
+    systemAudioStarter: options => startSystemAudioCapture({ ...options, helperPath: process.execPath, helperArgs: [fake.path],
+      minimumChunkMilliseconds: 20, restartDelayMs: 10, stalledTimeoutMs: 200,
+      onState: state => { states.push(state); options.onState(state); } }),
+  });
+  try {
+    await until(() => capture.store.manifest.chunks.length >= 3);
+    const manifest = await capture.stop();
+    expect(fake.count()).toBe(2);
+    expect(states.find(state => state.code === 'system_audio_reconnecting')?.message).toBe('Computer audio stopped arriving · reconnecting…');
+    const [first, second] = manifest.chunks;
+    expect(manifest.discontinuities[0]).toMatchObject({ trackId: 'system-audio', reason: 'device-reset',
+      atMs: first!.endMs, durationMs: second!.startMs - first!.endMs });
+    expect(manifest.discontinuities[0]!.durationMs).toBeGreaterThanOrEqual(150);
+  } finally { await capture.stop(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a reconnect that never sends audio is retried, while a first start may wait for permission', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-route-silent-reopen-'));
+  // Attempt 1 works then the route changes; attempt 2 opens but its new device never starts.
+  const fake = helper(root, `
+if(attempt===2){setInterval(()=>{},1000);}
+else {
+  event({type:'first-buffer',capturedAtUnixMs:Date.now(),bufferStartUnixMs:Date.now()});
+  process.stdout.write(Buffer.alloc(3200,attempt));
+  if(attempt===1){await Bun.sleep(60);event({type:'error',code:'device_changed',message:'Route changed'});process.exit(1);}
+  setInterval(()=>process.stdout.write(Buffer.alloc(320,attempt)),20);
+}
+`);
+  const states: SystemAudioStateUpdate[] = [];
+  const capture = startSystemAudioCapture({ helperPath: process.execPath, helperArgs: [fake.path], sessionStartedAtUnixMs: Date.now(),
+    chunkMilliseconds: 100, minimumChunkMilliseconds: 20, restartDelayMs: 10, stalledTimeoutMs: 200,
+    onState: state => states.push(state), onChunk: chunk => rmSync(chunk.path) });
+  try {
+    await until(() => fake.count() === 3 && states.at(-1)?.state === 'active');
+    expect(states.filter(state => state.code === 'system_audio_reconnecting').map(state => state.message)).toEqual([
+      'Computer audio device changed · reconnecting…', 'Computer audio stopped arriving · reconnecting…']);
+  } finally { capture.stop(); await capture.done; rmSync(root, { recursive: true, force: true }); }
+  // A first start sends nothing while macOS asks for access; it is not a stall.
+  const waiting = mkdtempSync(join(tmpdir(), 'seashell-route-first-wait-'));
+  const prompt = helper(waiting, 'setInterval(()=>{},1000);');
+  const first = startSystemAudioCapture({ helperPath: process.execPath, helperArgs: [prompt.path], sessionStartedAtUnixMs: Date.now(),
+    stalledTimeoutMs: 50, onState() {}, onChunk() {} });
+  try {
+    await Bun.sleep(300);
+    expect(prompt.count()).toBe(1);
+    expect(first.process?.exitCode).toBeNull();
+  } finally { first.stop(); await first.done; rmSync(waiting, { recursive: true, force: true }); }
+});
+
+test('once computer audio has worked, a failed reopen is retried; permission and missing helpers never are', () => {
+  expect(systemAudioCanRecover('device_changed', false)).toBe(true);
+  expect(systemAudioCanRecover('system_audio_stalled', false)).toBe(true);
+  // The new output device was not ready yet.
+  expect(systemAudioCanRecover('get_clock_device', true)).toBe(true);
+  expect(systemAudioCanRecover('capture_stopped', true)).toBe(true);
+  expect(systemAudioCanRecover('get_clock_device', false)).toBe(false);
+  for (const code of ['permission_denied', 'unsupported_os', 'helper_missing', 'spawn_failed', 'protocol_error']) {
+    expect(systemAudioCanRecover(code, true)).toBe(false);
+  }
 });

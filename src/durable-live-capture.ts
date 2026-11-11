@@ -19,6 +19,7 @@ import {
   type SystemAudioCaptureHandle,
   type SystemAudioCaptureState,
 } from './live-system-audio.ts';
+import { startVideoTrack, type VideoCaptureRequest, type VideoState, type VideoTrackHandle } from './video-capture.ts';
 
 export interface DurableLiveCaptureStatus {
   readonly microphone: SystemAudioCaptureState;
@@ -28,6 +29,8 @@ export interface DurableLiveCaptureStatus {
   readonly durableChunks: number;
   readonly health?: CaptureHealthSnapshot;
   readonly audioSavedThroughMs?: number;
+  /** Only when video was asked for. */
+  readonly video?: VideoState;
 }
 
 export interface DurableLiveCaptureHandle {
@@ -53,6 +56,9 @@ export interface StartDurableLiveCaptureOptions {
   readonly onError?: (error: Error) => void;
   readonly microphoneStarter?: typeof startMicrophoneCapture;
   readonly systemAudioStarter?: typeof startSystemAudioCapture;
+  /** Also record the call's window or a display. Video never holds up or fails audio: its problems are warnings. */
+  readonly video?: VideoCaptureRequest;
+  readonly videoStarter?: typeof startVideoTrack;
 }
 
 function sessionId(now: Date): string {
@@ -76,6 +82,8 @@ export function startDurableLiveCapture(
   let systemAudioLevel: PcmSignalLevel | undefined;
   let microphone: MicrophoneCaptureHandle | undefined;
   let systemAudio: SystemAudioCaptureHandle | undefined;
+  let video: VideoTrackHandle | undefined;
+  let videoState: VideoState | undefined = options.video ? 'starting' : undefined;
   let stopping: Promise<CaptureSessionManifest> | undefined;
   let captureFailure: Error | undefined;
   let audioSavedThroughMs = 0;
@@ -97,6 +105,7 @@ export function startDurableLiveCapture(
       durableChunks: store.manifest.chunks.length,
       audioSavedThroughMs,
       health: health.snapshot,
+      ...(videoState === undefined ? {} : { video: videoState }),
     }));
   };
   const fail = (error: unknown) => {
@@ -173,6 +182,8 @@ export function startDurableLiveCapture(
           }).catch(fail);
         },
         onLevel: (level) => { systemAudioLevel = level; health.pcm('systemAudio', level); status(); },
+        // Said, never fatal: the audio carries on under the other permission.
+        onWarning: (message) => options.onError?.(new Error(message)),
         onState: (update) => {
           systemAudioState = update.state;
           health.state('systemAudio', update);
@@ -188,6 +199,23 @@ export function startDurableLiveCapture(
       health.state('systemAudio', { state: 'unavailable', code: 'system_audio_start_failed',
         message: error instanceof Error ? error.message : String(error) });
       fail(error);
+    }
+  }
+  if (options.video) {
+    // A warning, not fail(): a missing video must never mark the audio as failed.
+    const warn = (message: string) => options.onError?.(new Error(message));
+    try {
+      video = (options.videoStarter ?? startVideoTrack)({
+        request: options.video,
+        sessionStartedAtUnixMs: store.manifest.startedAtUnixMs,
+        nextSegment: () => store.nextVideoSegment(),
+        onSegment: (segment) => store.recordVideoSegmentAsync(segment),
+        onState: (state) => { videoState = state; status(); },
+        onWarning: warn,
+      });
+    } catch (error) {
+      videoState = 'unavailable';
+      warn(`Video was not recorded: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   status();
@@ -206,7 +234,9 @@ export function startDurableLiveCapture(
       meetReader?.stop();
       microphone?.stop();
       systemAudio?.stop();
-      stopping = Promise.all([microphone?.done, systemAudio?.done]).then(async () => {
+      video?.stop();
+      // Video settles on its own deadline and never rejects.
+      stopping = Promise.all([microphone?.done, systemAudio?.done, video?.done]).then(async () => {
         await store.drainCommits();
         if (captureFailure && store.manifest.chunks.length === 0) {
           store.setStatus('interrupted', 'capture-source-failed');
@@ -214,7 +244,8 @@ export function startDurableLiveCapture(
         }
         return store.setStatus('captured', reason);
       }).finally(() => {
-        health.stop();
+        // The whole meeting's chunks, including any part before a pause.
+        health.stop(Date.now(), store.manifest.chunks);
         status(true);
       });
       return stopping;

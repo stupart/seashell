@@ -127,48 +127,83 @@ private func printStatus(_ status: AVAuthorizationStatus) {
 
 private let permissionHelp = "Microphone access is off for Seashell Microphone. Allow it in System Settings → Privacy & Security → Microphone, or run: seashell meeting microphone setup"
 
-/// Mono at the capture rate. AVAudioConverter's downmix needs a spatial channel
-/// layout, and a built-in microphone array reports a discrete one, for which it
-/// silently outputs zeros. So average the channels first and only resample here.
+/// Mono at the capture rate, from any PCM input: 16- or 32-bit integer or
+/// float, interleaved or not, any channel count or layout, any sample rate.
+///
+/// AVAudioConverter's downmix needs a spatial channel layout. A built-in
+/// microphone array reports a discrete one, for which it silently outputs
+/// zeros. So nothing here asks it to mix: the input is unpacked to Float32,
+/// one buffer per channel, keeping its channels and layout; the channels are
+/// averaged here; and only that mono signal is resampled.
 final class MonoConverter {
-    private let mono: AVAudioFormat?
-    private let converter: AVAudioConverter
+    let input: AVAudioFormat
+    private let planar: AVAudioFormat
+    /// Nil when the input is already Float32 with one buffer per channel.
+    private let unpacker: AVAudioConverter?
+    private let mono: AVAudioFormat
+    private let resampler: AVAudioConverter
     private let target: AVAudioFormat
-    private let sourceRate: Double
 
     init?(from input: AVAudioFormat, to target: AVAudioFormat) {
-        let canMix = input.commonFormat == .pcmFormatFloat32 && !input.isInterleaved
-        let mono = canMix ? AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: input.sampleRate, channels: 1, interleaved: false) : nil
-        guard let converter = AVAudioConverter(from: mono ?? input, to: target) else { return nil }
-        converter.downmix = true
+        let channels = input.channelCount
+        guard channels > 0, input.sampleRate > 0 else { return nil }
+        // Formats with more than two channels need a layout; a discrete one
+        // keeps every channel where it is.
+        let layout = input.channelLayout
+            ?? (channels > 2 ? AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | channels) : nil)
+        let planar = layout.map { AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: input.sampleRate, interleaved: false, channelLayout: $0) }
+            ?? AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: input.sampleRate, channels: channels, interleaved: false)
+        guard let planar,
+              let mono = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: input.sampleRate, channels: 1, interleaved: false),
+              let resampler = AVAudioConverter(from: mono, to: target) else { return nil }
+        // The default quality loses about 2 dB of speech when decimating 192 kHz.
+        resampler.sampleRateConverterQuality = AVAudioQuality.max.rawValue
+        let unpacked = input.commonFormat == .pcmFormatFloat32 && !input.isInterleaved
+        let unpacker = unpacked ? nil : AVAudioConverter(from: input, to: planar)
+        guard unpacked || unpacker != nil else { return nil }
+        self.input = input
+        self.planar = planar
+        self.unpacker = unpacker
         self.mono = mono
-        self.converter = converter
+        self.resampler = resampler
         self.target = target
-        self.sourceRate = input.sampleRate
     }
 
     private func mixed(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        guard let mono else { return buffer }
-        guard let source = buffer.floatChannelData,
-              let output = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: buffer.frameLength),
+        var source = buffer
+        if let unpacker {
+            guard let unpacked = AVAudioPCMBuffer(pcmFormat: planar, frameCapacity: buffer.frameLength),
+                  (try? unpacker.convert(to: unpacked, from: buffer)) != nil else { return nil }
+            source = unpacked
+        }
+        guard let channels = source.floatChannelData,
+              let output = AVAudioPCMBuffer(pcmFormat: mono, frameCapacity: source.frameLength),
               let destination = output.floatChannelData?[0] else { return nil }
-        output.frameLength = buffer.frameLength
-        let channels = Int(buffer.format.channelCount)
-        for frame in 0..<Int(buffer.frameLength) {
+        let frames = Int(source.frameLength)
+        output.frameLength = source.frameLength
+        // Average only channels that carry something. The spare channels of an
+        // aggregate device or audio interface are digital silence, and counting
+        // them would make you quieter.
+        let live = (0..<Int(source.format.channelCount)).filter { channel in
+            (0..<frames).contains { channels[channel][$0] != 0 }
+        }
+        for frame in 0..<frames {
             var sum: Float = 0
-            for channel in 0..<channels { sum += source[channel][frame] }
-            destination[frame] = sum / Float(channels)
+            for channel in live { sum += channels[channel][frame] }
+            destination[frame] = live.isEmpty ? 0 : sum / Float(live.count)
         }
         return output
     }
 
     func convert(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        guard let input = mixed(buffer) else { return nil }
-        let capacity = AVAudioFrameCount((Double(buffer.frameLength) * target.sampleRate / sourceRate).rounded(.up)) + 1
+        guard buffer.frameLength > 0, let input = mixed(buffer) else { return nil }
+        // Room for twice the expected output: the resampler works in blocks of
+        // up to 4,096 frames and catches up on what it held back last time.
+        let capacity = AVAudioFrameCount((Double(input.frameLength) * target.sampleRate / mono.sampleRate * 2).rounded(.up)) + 32
         guard let converted = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return nil }
         var supplied = false
         var error: NSError?
-        let status = converter.convert(to: converted, error: &error) { _, inputStatus in
+        let status = resampler.convert(to: converted, error: &error) { _, inputStatus in
             if supplied { inputStatus.pointee = .noDataNow; return nil }
             supplied = true
             inputStatus.pointee = .haveData
@@ -178,26 +213,78 @@ final class MonoConverter {
     }
 }
 
-// Runs the real conversion on a tone shaped like a built-in microphone: three
-// discrete channels. No microphone is opened and nothing is recorded.
-if arguments.contains("--mix-check") {
-    guard let layout = AVAudioChannelLayout(layoutTag: kAudioChannelLayoutTag_DiscreteInOrder | 3),
-          let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true) else { exit(1) }
-    let input = AVAudioFormat(standardFormatWithSampleRate: 48_000, channelLayout: layout)
-    guard let tone = AVAudioPCMBuffer(pcmFormat: input, frameCapacity: 48_000),
-          let channels = tone.floatChannelData, let mono = MonoConverter(from: input, to: target) else { exit(1) }
-    tone.frameLength = 48_000
-    for frame in 0..<48_000 {
-        let sample = Float(0.25 * sin(2 * Double.pi * 440 * Double(frame) / 48_000))
-        for channel in 0..<3 { channels[channel][frame] = sample }
+/// Every input shape the conversion has to survive: sample formats, interleaving,
+/// channel layouts from mono to aggregate devices, and Bluetooth to studio rates.
+private func mixCheck() -> Bool {
+    struct Shape { let name: String; let channels: UInt32; let tag: AudioChannelLayoutTag?; let live: [Int] }
+    let shapes = [
+        Shape(name: "mono", channels: 1, tag: nil, live: [0]),
+        Shape(name: "stereo", channels: 2, tag: kAudioChannelLayoutTag_Stereo, live: [0, 1]),
+        Shape(name: "built-in mic, 3 discrete", channels: 3, tag: kAudioChannelLayoutTag_DiscreteInOrder | 3, live: [0, 1, 2]),
+        Shape(name: "4 discrete", channels: 4, tag: kAudioChannelLayoutTag_DiscreteInOrder | 4, live: [0, 1, 2, 3]),
+        Shape(name: "quadraphonic", channels: 4, tag: kAudioChannelLayoutTag_Quadraphonic, live: [0, 1, 2, 3]),
+        Shape(name: "interface, 8 discrete, input 1 only", channels: 8, tag: kAudioChannelLayoutTag_DiscreteInOrder | 8, live: [0]),
+        Shape(name: "aggregate, 5 discrete, 2 live", channels: 5, tag: kAudioChannelLayoutTag_DiscreteInOrder | 5, live: [1, 3]),
+    ]
+    let formats: [(String, AVAudioCommonFormat)] = [("int16", .pcmFormatInt16), ("int32", .pcmFormatInt32), ("float32", .pcmFormatFloat32)]
+    let rates: [Double] = [8_000, 16_000, 22_050, 24_000, 44_100, 48_000, 96_000, 192_000]
+    guard let target = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true) else { return false }
+    var cases = 0
+    var lowest = Int32.max
+    var failures: [[String: Any]] = []
+    for shape in shapes { for (formatName, common) in formats { for interleaved in [true, false] { for rate in rates {
+        let name = "\(formatName) \(interleaved ? "interleaved" : "planar") · \(shape.name) · \(Int(rate)) Hz"
+        let layout = shape.tag.flatMap { AVAudioChannelLayout(layoutTag: $0) }
+        let format = layout.map { AVAudioFormat(commonFormat: common, sampleRate: rate, interleaved: interleaved, channelLayout: $0) }
+            ?? AVAudioFormat(commonFormat: common, sampleRate: rate, channels: shape.channels, interleaved: interleaved)
+        cases += 1
+        guard let format, let converter = MonoConverter(from: format, to: target) else {
+            failures.append(["case": name, "error": "no converter"]); continue
+        }
+        // Two seconds of a 440 Hz tone at a quarter of full scale, delivered in
+        // tap-sized buffers the way the engine hands them over.
+        let total = Int(rate * 2), block = 4_096
+        var peak: Int32 = 0, frames = 0, written = 0
+        while written < total {
+            let count = min(block, total - written)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)) else { break }
+            buffer.frameLength = AVAudioFrameCount(count)
+            let stride = Int(buffer.stride)
+            for frame in 0..<count {
+                let value = 0.25 * sin(2 * Double.pi * 440 * Double(written + frame) / rate)
+                for channel in 0..<Int(shape.channels) {
+                    let sample = shape.live.contains(channel) ? value : 0
+                    let (pointer, offset) = interleaved ? (0, frame * stride + channel) : (channel, frame)
+                    switch common {
+                    case .pcmFormatInt16: buffer.int16ChannelData![pointer][offset] = Int16(sample * 32_767)
+                    case .pcmFormatInt32: buffer.int32ChannelData![pointer][offset] = Int32(sample * 2_147_483_647)
+                    default: buffer.floatChannelData![pointer][offset] = Float(sample)
+                    }
+                }
+            }
+            written += count
+            guard let output = converter.convert(buffer), let samples = output.int16ChannelData?[0] else { continue }
+            for frame in 0..<Int(output.frameLength) { peak = max(peak, abs(Int32(samples[frame]))) }
+            frames += Int(output.frameLength)
+        }
+        lowest = min(lowest, peak)
+        // A quarter of full scale is 8191. The resampler may hold back one block
+        // (a quarter second at most), but must not lose or invent audio.
+        if peak < 7_000 || frames < 32_000 - 4_160 || frames > 32_000 + 64 {
+            failures.append(["case": name, "peak": Int(peak), "frames": frames])
+        }
+    } } } }
+    let report: [String: Any] = ["cases": cases, "peak": Int(lowest == .max ? 0 : lowest), "failures": failures]
+    if let data = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys]) {
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data([10]))
     }
-    var peak: Int32 = 0
-    if let output = mono.convert(tone), let samples = output.int16ChannelData?[0] {
-        for frame in 0..<Int(output.frameLength) { peak = max(peak, abs(Int32(samples[frame]))) }
-    }
-    print("{\"peak\":\(peak)}")
-    exit(0)
+    return failures.isEmpty
 }
+
+// Runs the real conversion on tones shaped like every kind of input. No
+// microphone is opened and nothing is recorded.
+if arguments.contains("--mix-check") { exit(mixCheck() ? 0 : 1) }
 
 if arguments.contains("--status") {
     printStatus(AVCaptureDevice.authorizationStatus(for: .audio))
@@ -331,14 +418,28 @@ private final class MicrophoneRecorder {
                 NSLocalizedDescriptionKey: "No microphone input is available. Check Sound → Input.",
             ])
         }
-        guard let converter = MonoConverter(from: inputFormat, to: format) else {
+        guard var converter = MonoConverter(from: inputFormat, to: format) else {
             throw NSError(domain: "SeashellMicrophone", code: 2, userInfo: [
                 NSLocalizedDescriptionKey: "Cannot convert microphone audio from \(inputFormat).",
             ])
         }
-        let output = self.output
-        input.installTap(onBus: 0, bufferSize: 4_096, format: inputFormat) { [weak self] buffer, _ in
+        let output = self.output, target = self.format
+        var unsupported: AVAudioFormat?
+        // No tap format: the engine delivers whatever the device now sends. A
+        // route change can switch formats before the engine reports it, and a
+        // fixed tap format that no longer matches the hardware raises.
+        input.installTap(onBus: 0, bufferSize: 4_096, format: nil) { [weak self] buffer, _ in
             self?.lastBufferAt = ProcessInfo.processInfo.systemUptime
+            if buffer.format != converter.input {
+                guard let next = MonoConverter(from: buffer.format, to: target) else {
+                    if unsupported != buffer.format {
+                        unsupported = buffer.format
+                        FileHandle.standardError.write(Data("Cannot convert microphone audio from \(buffer.format).\n".utf8))
+                    }
+                    return
+                }
+                converter = next
+            }
             guard let converted = converter.convert(buffer), let samples = converted.int16ChannelData?[0] else { return }
             output.write(samples, frames: Int(converted.frameLength))
         }

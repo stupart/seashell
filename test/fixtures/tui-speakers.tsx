@@ -49,33 +49,38 @@ const speakerFrames: string[] = [];
 const output = Object.assign(new Writable({ write(chunk, _enc, cb) {
   rendered += chunk.toString();
   const frame = stripVTControlCharacters(chunk.toString());
-  if (frame.includes('Speaker names') && frame.includes('↑↓ choose')) speakerFrames.push(frame);
+  if (frame.includes('Speaker setup') && frame.includes('↑↓ choose')) speakerFrames.push(frame);
   cb();
 } }), { columns, rows: 24 });
 const app = render(<App />, { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
 const plain = () => stripVTControlCharacters(rendered).replace(/\s+/g, ' ');
-const until = async (check: () => boolean) => { const end = Date.now() + 3000; while (!check() && Date.now() < end) await Bun.sleep(10); assert.ok(check(), 'UI condition timed out'); };
+const until = async (check: () => boolean) => { const end = Date.now() + 10_000; while (!check() && Date.now() < end) await Bun.sleep(10); assert.ok(check(), 'UI condition timed out'); };
 const type = async (text: string) => { input.write(text); await Bun.sleep(80); };
 try {
   await until(() => starts === 1);
-  await type('v'); await until(() => plain().includes('Not set up'));
+  // Speaker setup is a row in Settings: Who said what, the eighth row; narrow, Enter opens the row first.
+  await type(','); await until(() => plain().includes('Who said what'));
+  for (let n = 0; n < 20; n++) await type('\x1b[A');
+  for (let n = 0; n < 7; n++) await type('\x1b[B');
+  await type('\r'); if (columns < 72) await type('\r');
+  await until(() => plain().includes('Speaker setup') && plain().lastIndexOf('Not set up') > plain().lastIndexOf('Speaker setup'));
   assert.equal(permissionRequests, 0, 'Opening settings does not request permission');
   await type('\r'); await until(() => plain().includes('Privacy & Security'));
   assert.ok(plain().includes('Background access missing'));
   assert.ok(plain().includes('Terminal access alone is not enough'));
-  assert.ok(plain().includes('People panel open'));
+  assert.ok(plain().includes("Meet's People panel in Chrome. Keep it open."));
   assert.equal(permissionRequests, 1, 'Only explicit Connect requests Accessibility');
   assert.equal(JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.speakerBrowser, 'auto');
   assert.equal(starts, 1, 'Connecting Meet preserves the running microphone');
-  await type('\r');
+  // Enter only switches the row; while macOS asks, it checks again by itself.
   await until(() => plain().includes('This window needs access'));
-  await type('\r');
   await until(() => plain().includes('Accessibility enabled'));
   assert.equal(permissionRequests, 1, 'Checking permission never requests it again');
   for (let n = 0; n < 2; n++) await type('\x1b[B');
   await type('\r'); assert.equal(setups, 0, 'Do not install while recording');
   assert.equal(stops, 0, 'Opening speaker settings preserves capture');
-  await type('\x1b'); await type(' '); await until(() => stops === 1);
+  // Back to Settings, which opened it, then back to the app.
+  await type('\x1b'); await type('\x1b'); await type(' '); await until(() => stops === 1);
   await type('F'); await until(() => plain().lastIndexOf('Not set up') > plain().lastIndexOf('? help'));
   for (let n = 0; n < 2; n++) await type('\x1b[B');
   await until(() => plain().includes('contact sharing'));

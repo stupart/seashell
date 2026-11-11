@@ -84,8 +84,8 @@ interface AppPattern {
 }
 
 /** The apps Seashell recognises, by the id used in settings. */
-export function meetingApps(): ReadonlyArray<{ id: string; name: string }> {
-  return APP_PATTERNS.map(({ id, name }) => ({ id, name }));
+export function meetingApps(): ReadonlyArray<{ id: string; name: string; bundleIds: readonly string[] }> {
+  return APP_PATTERNS.map(({ id, name, bundleIds }) => ({ id, name, bundleIds }));
 }
 
 const APP_PATTERNS: readonly AppPattern[] = Object.freeze([
@@ -405,6 +405,11 @@ function patternFor(bundleId: string): AppPattern | undefined {
   return APP_PATTERNS.find((pattern) => (
     pattern.bundleIds.some((candidate) => bundleMatches(bundleId, candidate))
   ));
+}
+
+/** A browser a web call can run in, or one of its helper processes. */
+export function isBrowserApplication(bundleId: string): boolean {
+  return patternFor(bundleId)?.kind === 'browser';
 }
 
 /** Browsers capture audio in helper processes: Safari's microphone belongs to

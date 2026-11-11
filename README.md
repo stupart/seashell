@@ -7,12 +7,14 @@ To see what works, what is off, and how to fix each item, press **,** in
 Seashell for Settings or run `seashell status`.
 
 To use your meetings from Claude Code or Codex, run `seashell mcp install` once.
-It adds a local, read-only meetings server and a skill, so you can ask things
-like "what did we decide in my last call with Dana?" or "draft a follow-up from
-today's sync". Answers cite transcript segments, and nothing is sent anywhere
-unless you approve it.
+It adds a local meetings server and a skill, so you can ask things like "what
+did we decide in my last call with Dana?", "what has Dana committed to since
+October?" or "draft a follow-up from today's sync". Answers cite transcript
+segments, and nothing is sent anywhere unless you approve it. When you ask, the
+agent can also fix a misheard line, name a speaker, or edit your prompts,
+templates, extractors and automations; see [Meetings in Claude Code and Codex](#meetings-in-claude-code-and-codex).
 
-For optional summaries and meeting chat, press **P** in Seashell or run
+For optional summaries and meeting chat, press **,** in Seashell and choose **AI notes**, or run
 `seashell ai setup` to choose models and supported effort levels for live analysis,
 final notes and chat. Each role can use Claude Code, Codex, a local model, or OpenRouter.
 See [Humain setup](docs/humain-setup.md) for engine installation and provider details.
@@ -284,7 +286,14 @@ Background meetings record your microphone through a small native helper,
 **Seashell Microphone**, which holds its own macOS Microphone permission (the
 background runtime itself cannot be granted one). Run
 `seashell meeting microphone setup` once and choose **Allow**; check it any time
-with `seashell meeting microphone`. If you leave a call and rejoin within three
+with `seashell meeting microphone`. Other people in a call are recorded from your
+Mac's sound. Meetings keep the background recorder's permission for this until
+you allow **Seashell System Audio**, the helper's own, at your Mac: press **,**
+→ Computer audio → **Enter**, or run `seashell meeting computer-audio setup`.
+Seashell plays a short sound, macOS asks once, and from the next call meetings
+use it. No call waits on a question nobody is there to answer. If macOS later
+refuses it, or it sends only silence, the recording goes back to the background
+recorder's permission and says so. If you leave a call and rejoin within three
 minutes, the recording continues in the same History entry. To name meetings
 after their calendar event, press **,** → Meeting titles from Calendar (or run
 `seashell meeting calendar setup`); **Seashell Calendar** asks macOS once. Use
@@ -312,11 +321,11 @@ With laptop speakers, playback can also reach the microphone. Seashell reduces
 strong transcript duplicates, but this is not acoustic echo cancellation; review
 attribution when echo or people sharing a room make sources ambiguous.
 
-Detected output-device changes trigger bounded reconnection while keeping the
-same meeting and preserving saved audio and timing gaps. Physical unplug/replug
-and speakerphone quality still need device acceptance. If changing an input
-device leaves the old microphone connected, pause and resume to select the new
-default input.
+Output-device changes, and computer audio that stops arriving, reconnect as
+often as needed. The meeting stays one recording, with its saved audio and
+timing gaps. The microphone follows default-input changes the same way, in
+whatever format the new device uses. Physical unplug/replug and speakerphone
+quality still need device acceptance.
 
 Before the meeting, prove both inputs with a disposable five-second check while
 speaking and playing computer audio:
@@ -410,6 +419,88 @@ Seashell cannot read the Meet page, which happens whenever Meet is full screen,
 on another desktop or in a background tab. When a call does need a yes, Seashell
 asks with a dialog, so it is answered even with no Seashell window open.
 
+### Meeting video
+
+While it records a call, Seashell also records the call's window: the browser
+window with the Meet in it, or the Zoom, Teams or FaceTime window. Whatever
+anyone shares in the call shows in that window, so it is in the video. The
+window is recorded even on another desktop or under other windows. When no
+window of the call's app fits, Seashell records the main display instead and
+says so.
+
+Video needs macOS Screen Recording access, once, for the helper named
+**Seashell Screen Capture**:
+
+```bash
+seashell meeting video setup      # macOS asks; turn on Seashell Screen Capture
+seashell meeting video --status   # check, without asking
+```
+
+Until then, calls still record their audio and Seashell warns that video was
+skipped. In Seashell, press **,** and choose **Video**: Enter asks macOS for
+Screen Recording, and Space turns video on or off.
+
+A recording you start yourself has video only when you ask for it. In Seashell,
+**Shift+V** records with video and **Space** records audio only. From a terminal:
+
+```bash
+seashell record --video                 # the call's window if one is open, otherwise the main display
+seashell record --video --window zoom   # one app's window, by id or name
+seashell record --video --display 2     # a whole display; 1 is the main display
+```
+
+Watch a meeting's video beside its transcript:
+
+```bash
+seashell meeting video <id>              # opens video.html from the meeting folder
+seashell meeting video <id> --at 12:34   # opens at that moment
+```
+
+In Seashell, press **W** in a meeting that has video. It opens at the
+transcript line at the top of the screen, or at the start from Notes or Chat.
+Click a line to see that moment; the line being said is highlighted. The page
+works offline. The video has no sound of its own: the transcript carries the
+words.
+
+Turn video off, or off for one app:
+
+```bash
+seashell meeting video off
+seashell meeting video facetime off      # on or off, per app
+```
+
+In `config.json`, `meeting.video` holds `enabled`, `apps` (per app, by the ids
+of `seashell meeting apps`, `true` or `false`), `fps` (1 to 30, default 2) and
+`quality` (`low` 1280 px, `medium` 1920 px, the default, or `high` 2560 px):
+
+```json
+{ "meeting": { "video": { "enabled": true, "apps": { "facetime": false }, "fps": 2, "quality": "medium" } } }
+```
+
+**Where it lives.** Each meeting folder keeps its movies in `capture/video/`
+(`000001.mp4`, with a `.json` sidecar), and `video.json` beside the transcript
+points at them: video time = transcript time + `startOffsetSeconds`. A call
+that pauses and resumes, or a recorder that had to restart, adds a second movie,
+listed under `segments`. Movies are H.264, encoded in hardware and written in
+4-second fragments, so a crash loses only the last few seconds.
+
+**How big.** Measured on a synthetic screen share (slides changing every 30
+seconds, a moving pointer and a talking-head tile), per hour of meeting:
+
+| Setting | MB per hour |
+| --- | --- |
+| low, 2 fps | 44 |
+| medium, 2 fps (default) | 60 |
+| high, 2 fps | 73 |
+| medium, 5 fps | 73 |
+| medium, 15 fps | 106 |
+| medium, 30 fps | 156 |
+
+A still slide costs almost nothing. A screen that moves all the time, such as a
+shared video, costs up to the encoder's target: about 135 MB an hour at the
+default. For comparison, a meeting's own audio (two 16 kHz tracks) is about
+230 MB an hour.
+
 ## Terminal UI
 
 Sea Shell opens on the same simple, transcript-first screen used for live
@@ -432,26 +523,53 @@ until it is closed.
 | `/` | Search titles, speakers and transcripts. `Enter` on a result opens it at the match |
 | `L` | Jump to the latest words of a live transcript |
 | `Space` | Record by hand, or stop the recording (it asks first). In a window that captures by itself, pause or resume |
+| `Shift+V` | Record by hand with video: the call's window if one is open, otherwise the main display |
+| `W` | Watch the meeting's video beside its transcript, from the line at the top. Shown only when there is video |
 | `F` | Import audio or video |
 | `Shift+F` | Import and run speaker diarization |
-| `V` | Speaker setup, offline readiness, or identify a saved recording |
 | `M` | Approve a call Seashell asks about; make a saved transcript a meeting |
 | `1`–`3` | Open meeting Notes, Transcript, or Chat |
-| `G` | Write notes, or finish a meeting this window is capturing. Rewriting asks first |
+| `G` | Notes setup for this meeting (template, a note, AI on or off); `Enter` there writes the notes. Rewriting asks first |
 | `A` | Ask an evidence-cited question about the current meeting |
 | `T` | Toggle timestamp presentation |
 | `S` | Toggle speaker presentation |
-| `R` | Choose a speaker and name them. Notes and chat stay, with the new name |
+| `R` | Choose a speaker and name them. Notes and chat stay, with the new name. A name suggested from a known voice says "suggested": `Y` keeps it, `N` says it is not them |
 | `E` | Export as SRT, WebVTT, text, or JSON |
 | `C` | Copy the tab you are reading |
 | `O` | Open the transcript folder in Finder |
 | `D` | Move a saved transcript to recoverable `_Trash` after confirmation |
 | `Delete` | Start a fresh live transcript |
+| `,` | Settings: what works, and how to fix what does not, including speaker setup and the AI for notes and chat |
 | `?` | Show contextual keyboard help |
 | `Q` | Quit from any normal view |
 
 The main shortcut row stays intentionally small; press `?` for the complete key
 map.
+
+A finished call where your microphone heard almost nothing says so in a yellow
+line at the top of the meeting: "Your side wasn't recorded." Check that you
+were not muted, and that the right microphone is chosen.
+
+When this window finishes a meeting it captured itself, it does what the
+background recorder does: it runs the extractors that fit the meeting, then
+your automations. Rewriting notes with `G` runs the extractors again.
+
+### Settings
+
+Press `,` for Settings. Each row says how it stands: ✓ works, ! needs you,
+– is off, ✗ is broken. Wide, the detail sits beside the list; narrow, Enter
+opens it. Besides recording, the microphone, computer audio and AI, Settings
+holds:
+
+- **Saved voices:** everyone Seashell knows by voice. Enter, then Enter on a
+  person, forgets them after you say yes.
+- **Prompts:** what the AI is told for live analysis, final notes and chat.
+  Enter on one opens it in your text editor. `D` puts an edited one back as
+  shipped, after you say yes.
+- **Insights** (the files in the Extractors folder) and **Automations:** what
+  each folder holds, any file that does not load, and the last automation runs.
+  Enter opens the folder.
+- **Video:** on or off, and whether macOS lets Seashell record the screen.
 
 Drag-and-drop also accepts absolute audio or video paths. Live microphone and
 system capture pause while an import runs and resume afterward.
@@ -496,10 +614,21 @@ seashell library speakers <id> set SPEAKER_00 "Tyler"
 seashell library speakers <id> identify  # separate review copy
 seashell library open <id>
 seashell library trash <id> --confirm
+seashell library clean-phantoms --dry-run   # count lines heard in silence
+seashell library clean-phantoms [<id>...]   # remove them
 ```
 
 Trash is recoverable inside `<library>/_Trash`; Sea Shell does not permanently
 delete records from its TUI or CLI.
+
+Whisper sometimes writes "Thank you" or "Okay" over silence. New recordings
+drop those lines; `library clean-phantoms` does the same for meetings saved
+before, using each meeting's saved audio. A line goes only when there is no
+speech under it and no sound above a whisper on its own source (the microphone
+for "Microphone", computer audio for everyone else). The dry run reports how
+many lines each meeting would lose. A real run keeps the old transcript in the
+meeting's `history/transcripts` folder first, and keeps the notes, marked as
+possibly out of date.
 
 ## Meeting mode
 
@@ -614,9 +743,9 @@ Numbers mentioned, with their period.
 What we asked for, and what they offered.
 ```
 
-In the app, press **N** in any meeting for its notes setup: ←→ changes the
-template, Enter writes a note for that meeting, and the last row turns AI off
-for it. A meeting with AI off is sent to no model — no live analysis, notes or
+In the app, press **G** in any meeting for its notes setup: ←→ changes the
+template, Enter on the note row writes a note for that meeting, the last row turns AI off
+for it, and Enter elsewhere writes the notes with those choices. A meeting with AI off is sent to no model — no live analysis, notes or
 chat — and the meetings MCP server lists it as private without its content
 (`seashell meeting ai <id> off` does the same from a script). Choices made
 while a background meeting is still recording carry into its final notes.
@@ -627,6 +756,148 @@ meeting note shape focus and wording only; they cannot loosen the rule that
 every point needs transcript evidence. Until you run `seashell templates`, the
 built-in templates are used as shipped. Templated notes need a Humain engine
 with owner instructions; an older engine still writes the summary and claims.
+
+Notes lead with what the meeting settled and left open: decisions, actions
+(with the owner and due date when someone said them), risks, open questions
+and follow-ups. Your template's sections come next, then dates, facts and the
+rest. Risks, open questions, follow-ups and due dates need Humain prompt
+revision 3 or later.
+
+### Prompts
+
+What each meeting AI role is told sits in `~/Documents/Sea Shell/Prompts`, next
+to Templates: `live.md` (live analysis), `notes.md` (final notes) and `chat.md`
+(meeting chat). Each is sent to its role after "About me". Comments in a file
+are notes to you and are never sent; an empty file sends nothing. Prompts
+steer focus and style. What the notes cover, their shape and the citation
+rules are fixed in Humain.
+
+```sh
+seashell prompts                 # create and list the files
+seashell prompts reset notes     # put one back the way it shipped
+```
+
+In Seashell, press **,** and choose **Prompts** to open or reset one.
+
+### Asking across meetings
+
+```sh
+seashell query actions --person Dana            # what Dana owns, newest first
+seashell query decisions --about pricing --since 2026-10-01
+seashell query questions --meeting "hiring sync"
+```
+
+Kinds are decisions, actions, risks, questions and follow-ups (all five when
+left out). Each line names its meeting and the transcript moment it came from;
+`--json` adds a quote. Seashell does not track whether an action was done.
+Private meetings never appear.
+
+### Insight extractors
+
+An extractor pulls the same few things out of a meeting every time, each one
+cited: objections, pricing signals, hiring needs. Each is a Markdown file in
+`~/Documents/Sea Shell/Extractors`:
+
+```markdown
+---
+name: Customer pains
+when: always
+fields:
+  Pains: What is hard or slow for them today, in their words
+  Budget: Any budget, price or spend they mentioned
+---
+Look for what the customer says about their own work, not what we pitched.
+```
+
+`when: always` runs it after every meeting's final notes; `when: manual` (the
+default) only when asked; or list words, any of which runs it:
+
+```markdown
+when:
+  title: [discovery, demo]
+  attendee: [acme.com]
+  app: [Zoom]
+```
+
+```sh
+seashell extractors                              # create and list the folder
+seashell extract <id> "Customer pains"           # run one now
+```
+
+Results show under **Insights** in the meeting's notes and are saved beside it
+as `insights/<name>.json` and `.md`. Private meetings are never sent.
+Extractors need Humain prompt revision 3 or later. In Seashell, **,** →
+**Insights** lists them and opens the folder, and rewriting a meeting's
+notes with **G** runs the extractors that fit it again.
+
+### Automations
+
+An automation runs when a meeting is ready. Each is a Markdown file in
+`~/Documents/Sea Shell/Automations`:
+
+```markdown
+---
+name: File customer calls
+when: meeting ready
+title: [discovery, demo]
+---
+- extract: Customer pains
+- write: ~/Documents/Customer calls
+- shell: ~/bin/file-call.sh
+- webhook: https://hooks.example.com/meetings
+```
+
+`title`, `attendee`, `app` and `calendar` narrow which meetings it runs for;
+every one you list must match. `write` saves the notes and transcript as
+Markdown in a folder (or at a `.md` path using `{date}`, `{title}` and `{id}`).
+`shell` runs a command with the meeting's JSON on stdin, and
+`SEASHELL_MEETING_ID` and `SEASHELL_MEETING_DIR` set. `webhook` posts the same
+JSON.
+
+Anything sent outside Seashell asks first. The first time a `shell` or
+`webhook` action would run, the background recorder shows a dialog naming the
+automation, the meeting and exactly what would run or where it would go. Your
+answer is remembered for that version of the file; any edit asks again.
+Approvals live beside Seashell's settings, not in the Automations folder.
+Each automation runs once per meeting, private meetings never run, and every
+run is logged to `automation-runs.jsonl` in your library.
+
+```sh
+seashell automations                             # create and list, with last runs
+seashell automations run <id> ["<name>"]         # run now for one meeting
+```
+
+In Seashell, **,** → **Automations** lists them with their last runs, and a
+failed run says why.
+
+### Checking the AI connection
+
+```sh
+seashell ai test
+```
+
+Sends one short, fixed message (never meeting text) through each AI route in
+use and reports how long it took, or why it failed in plain words: the engine
+is not installed, the provider is not signed in, the model is not offered, or
+it timed out. In Seashell, press **,**, choose **AI notes**, then **Test connection**; Esc
+stops a test.
+
+### Meetings in Claude Code and Codex
+
+`seashell mcp install` adds the meetings server and its skill. Reading tools:
+`list_meetings`, `get_meeting`, `get_transcript`, `search_transcripts`,
+`list_action_items`, `query_notes`, `get_insights`, `get_video_moment` (the
+screen recording and offset for a transcript moment, when there is one),
+`list_extractors`, `list_automations`, `list_prompts` and `list_templates`.
+
+Tools that change your files, which the agent uses only when you ask:
+`edit_segment` (fix a line), `rename_speaker`, `update_prompt`,
+`update_template`, `create_extractor`, `update_extractor`, `delete_extractor`,
+`run_extractor`, `create_automation`, `update_automation` and
+`delete_automation`. A corrected line keeps the old transcript in the meeting's
+history and keeps the notes, marked as possibly out of date. Automations an
+agent writes still ask you before sending anything outside. Every tool refuses
+private meetings.
 
 ### Google Meet status
 
@@ -792,15 +1063,16 @@ seashell transcribe movie.mkv --audio-stream 3
 
 ## Speaker diarization
 
-Sea Shell separates voices with the
-[`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1)
-models, on your Mac. Diarization creates recording-local clusters; it does not
-inherently know human identities. Rename those clusters later through the TUI
-or library CLI.
+Sea Shell separates voices on your Mac with two engines: pyannote's
+[`speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1)
+and NVIDIA's Nemotron 3. Diarization creates recording-local clusters; it does
+not inherently know human identities. Rename those clusters later through the
+TUI or library CLI, and Sea Shell can [recognise those people by
+voice](#recognising-people-by-voice) in later meetings.
 
-By default they run natively: `native/bin/seashell-speakers` uses
-[FluidAudio](https://github.com/FluidInference/FluidAudio)'s Core ML conversion
-of community-1 on the Neural Engine. One-time setup downloads about 21 MB of
+Both run natively: `native/bin/seashell-speakers` uses
+[FluidAudio](https://github.com/FluidInference/FluidAudio)'s Core ML
+conversions on the Neural Engine. One-time setup downloads about 211 MB of
 models — no Python, no Hugging Face account:
 
 ```bash
@@ -808,22 +1080,32 @@ seashell setup --speakers           # download the models once
 seashell setup --speakers --check   # offline: are they there?
 ```
 
-Measured on four AMI meetings (92 minutes, headset-mix audio, reference
-annotations, 0.25 s collar): 10.0% diarization error natively against 8.8% for
-pyannote in Python, in 22 seconds against 257, using about 400 MB of memory.
+### How the two engines are used
 
-### Trying Nemotron 3
+By default (`auto`) every recording goes through both. Nemotron 3 is the more
+precise: on 13 AMI meetings (6.8 hours, headset-mix audio) it put the wrong
+speaker on 0.55% of words outside crosstalk against 2.98% for community-1, and
+the same through video-call compression. But on real calls it sometimes hears
+two people as one, which no renaming can undo. So community-1 checks it: if
+one of Nemotron 3's voices holds two of community-1's voices that plainly
+sound like different people, or Nemotron 3 fills all eight of its slots, that
+recording uses community-1, with any two of its voices that are plainly one
+person put back together. On those AMI meetings `auto` scored 0.54%. On 16 real
+calls it kept Nemotron 3 for 14, and used community-1 for the 2 where
+Nemotron 3 had joined two clearly different voices.
 
-NVIDIA's Nemotron 3 is an optional second engine, run by the same helper: about
-190 MB, up to eight voices per channel. Past that it hands the channel back to
-community-1. On those four meetings it put the wrong name on 1.4% of words
-outside crosstalk against 4.7%, but they had four speakers each and no video-call
-audio, so check it on your own calls:
+When a meeting comes from your calendar, everyone invited who hasn't declined,
+less you, plus one spare seat, caps how many remote voices the separation may
+find. An invite with a meeting room sets no cap, and past eight people Nemotron 3
+is skipped.
+
+To use one engine only:
 
 ```bash
-seashell speakers compare --open        # your last 5 calls; --last <n> or meeting ids
-seashell speakers use nemotron3         # switch new meetings over
-seashell speakers use community-1       # switch back
+seashell speakers use community-1       # 21 MB; no cap on voices
+seashell speakers use nemotron3         # 190 MB; up to eight voices per channel
+seashell speakers use auto              # back to the default
+seashell speakers compare --open        # your last 5 calls with Nemotron 3 alone
 ```
 
 `compare` changes nothing. It builds a page in your library, in
@@ -831,9 +1113,48 @@ seashell speakers use community-1       # switch back
 speaker and a short clip of each, so you can listen and pick. Private meetings
 are skipped, and the page and clips stay on your Mac.
 
+### Recognising people by voice
+
+When you name a remote speaker (**R** in a meeting, or
+`seashell library speakers <id> set <speaker> <name>`), Sea Shell keeps a
+voiceprint for that person: a short list of numbers describing their voice,
+taken from up to a minute of their clean speech. In later meetings, a remote
+voice that closely matches exactly one known person gets their name as a
+suggestion. Suggested names read like any other name, and the saved transcript
+records them as suggestions. In a meeting, **R** lists the speakers and marks
+each suggestion: **Y** keeps it, **N** says it is not them, and Enter gives another name. A speaker with under ten seconds of clean
+speech is never matched, two people too close to tell apart leave the voice
+unnamed, and where Google Meet's hints or the meeting's own introductions name
+someone else, the suggestion is dropped.
+
+Measured on AMI's recurring meeting series, naming each person once and
+matching their later meetings suggested 30 of 30 named people and never a wrong
+name; 44 voices of people never named stayed unnamed.
+
+Voiceprints never leave your Mac. They are not written into transcripts, notes,
+exports or anything sent to an AI provider, and they live outside your
+transcript library, in `~/Library/Application Support/Sea Shell/Voices`
+(`SEASHELL_VOICES_DIR` overrides it). That folder also keeps each meeting's
+unnamed voices, so a speaker you name later can be learned. Renaming a speaker
+moves their voice to the new name. Forgetting a person deletes their
+voiceprint:
+
+```bash
+seashell speakers voices                # who Sea Shell knows by voice
+seashell speakers voices forget "Ada"   # delete Ada's voiceprint
+```
+
+In Seashell, **,** → **Saved voices** lists everyone and forgets one after you
+say yes.
+
+Deleting the Voices folder forgets everyone.
+
 ### The Python engine
 
-The Python engine is still available for anyone who wants that extra accuracy: set
+On four AMI meetings (92 minutes, reference annotations, 0.25 s collar)
+community-1 natively scored 10.0% diarization error against 8.8% for pyannote
+in Python, in 22 seconds against 257, using about 400 MB of memory. The Python
+engine is still available for anyone who wants that extra accuracy: set
 `"speakers": { "engine": "pyannote" }` in config.json (or
 `SEASHELL_SPEAKER_ENGINE=pyannote`).
 
@@ -935,6 +1256,14 @@ screenshot pixels. First-name aliases are accepted only when unique in the
 roster. Conflicting evidence leaves the diarization ID unchanged, and an
 existing human label is never overwritten.
 
+In recorded meetings, Google Meet's hints often cover only part of a call:
+macOS Accessibility can't read Meet in full screen, on another desktop or in a
+background tab, and speaker names currently need Chrome. A line Meet saw keeps
+the name Meet showed. The rest of that voice takes the name only when Meet saw
+at least 15 seconds of it, 90% as one person, and saw that person mostly in
+this voice, and no [known voice](#recognising-people-by-voice) disagrees.
+Otherwise it stays "Remote speaker N".
+
 The default identity pass is local and deterministic. The `SpeakerLabeler`
 interface is the opt-in seam for a future local or hosted LLM. A safe LLM
 implementation should receive short timestamped context windows and the known
@@ -1020,6 +1349,8 @@ seashell transcribe input.mp4 --format json --no-save --quiet > transcript.json
 seashell library list --json
 seashell library show <id> --format json
 seashell meeting show <id> --json
+seashell query actions --person Dana --json
+seashell ai test --json
 ```
 
 ## Privacy
@@ -1027,6 +1358,12 @@ seashell meeting show <id> --json
 - Default capture, transcription, durable chunks, and speaker inference stay
   local. Explicitly consented cloud transcription uploads the selected audio.
 - Roster and active-speaker evidence stays local in the built-in identity pass.
+- Meeting video, when on, records only the call's window (or the main display
+  when no window fits) and stays on this Mac.
+- Voiceprints of the people you name stay in
+  `~/Library/Application Support/Sea Shell/Voices`, outside the transcript
+  library, and are never uploaded or sent to an AI provider.
+  `seashell speakers voices forget <name>` deletes one.
 - Meeting enrichment sends only the selected transcript and explicitly supplied
   context to the configured Humain route. Codex/Claude Code subscription and
   OpenRouter routes are remote; use them when that data sharing is appropriate.
@@ -1065,9 +1402,10 @@ seashell doctor
   packages, accept the model terms, and provide `HF_TOKEN` for the first run.
 - **Aggregate channel mismatch:** verify the channel count and physical routing
   before using `--channel-roles`.
-- **System audio unavailable:** run `seashell doctor`; allow your terminal or
-  Sea Shell in System Settings → Privacy & Security → Screen & System Audio
-  Recording, then fully reopen the app. Set `SEASHELL_DISABLE_SYSTEM_AUDIO=1`
+- **System audio unavailable:** run `seashell doctor`. To record with
+  **Seashell System Audio**, run `seashell meeting computer-audio setup` at your
+  Mac and choose Allow, or turn it on in System Settings → Privacy & Security →
+  Screen & System Audio Recording. Set `SEASHELL_DISABLE_SYSTEM_AUDIO=1`
   for an explicit microphone-only session.
 - **Doctor says the helper started but no buffer was observed:** CoreAudio taps
   may stay idle when nothing is playing. Run `seashell capture test --seconds 5`
@@ -1079,13 +1417,14 @@ seashell doctor
 
 ## Speaker separation in meetings
 
-Press **V** to connect Google Meet names or set up local voice separation.
+In Seashell, press **,** and choose **Who said what** to connect Google Meet names or set up local voice separation.
 Meet names need macOS Accessibility permission, but no voice model; see
 [setup and limitations](docs/meet-speakers.md).
 Once the local model is verified, voices in
 computer audio are separated when the recording finishes. Live labels show
 Meet hints where a whole draft chunk has a consistent speaker, otherwise audio
-sources. Press **R** to name a speaker. Shared microphones
+sources. Press **R** to name a speaker; Sea Shell then suggests that name when
+the same voice is heard in a later meeting. Shared microphones
 and overlapping speech can still need correction.
 
 For an existing saved meeting, choose **Identify saved recording** in that

@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { CaptureSessionStore } from '../src/capture-session.ts';
-import { meetBrowserMatchesApp, meetSpeakerForSegment, parseMeetSnapshot, probeMeetSpeakers, readMeetSamples, startMeetSpeakerReader, type MeetProbe, type MeetSample, type MeetSnapshot } from '../src/meet-speakers.ts';
+import { meetBrowserMatchesApp, meetSpeakerForSegment, nameRemoteSpeakers, parseMeetSnapshot, probeMeetSpeakers, readMeetSamples, startMeetSpeakerReader, type MeetProbe, type MeetSample, type MeetSnapshot } from '../src/meet-speakers.ts';
 import { finalizeCaptureTranscript, saveFinalizedCapture } from '../src/capture-finalizer.ts';
 import { pcmS16leToWav } from '../src/live-system-audio.ts';
 import { parseCliArgs } from '../src/cli-args.ts';
@@ -239,4 +239,47 @@ test('foreign or truncated optional evidence is ignored, and named remote audio 
     expect(reconcileLiveEcho([mic], remote)).toEqual([remote]);
     expect(reconcileLiveEcho([remote], mic)).toEqual([remote]);
   } finally { cleanup(root); }
+});
+
+/** Meet readable from `from` to `to`, showing one speaker, sampled twice a second. */
+const seen = (from: number, to: number, speaker = alice): MeetSample[] =>
+  Array.from({ length: Math.round((to - from) * 2) + 1 }, (_, index) => sample(from + index / 2, speaker));
+const line = (start: number, end: number, speaker: string) => ({ start, end, speaker });
+
+test('a voice Meet saw long enough as one person takes that name where Meet could not be read', () => {
+  // Meet readable for the first 30 s only (then full screen); Alice's voice talks throughout.
+  const samples = [...seen(0, 30), { at: 30.5, meeting: '' }];
+  const segments = [line(1, 9, 'REMOTE_00'), line(11, 19, 'REMOTE_00'), line(21, 29, 'REMOTE_00'),
+    line(40, 48, 'REMOTE_00'), line(50, 55, 'REMOTE_01'), line(60, 68, 'SYSTEM')];
+  const names = nameRemoteSpeakers(samples, segments);
+  expect(names.meet.map((speaker) => speaker?.label)).toEqual(['Alice', 'Alice', 'Alice', 'Alice', undefined, undefined]);
+});
+
+test('Meet\'s partial hints abstain when thin, mixed, or split across voices', () => {
+  // Only 8 s seen: too little to name the rest of the voice.
+  expect(nameRemoteSpeakers(seen(0, 10), [line(1, 9, 'REMOTE_00'), line(40, 48, 'REMOTE_00')]).meet[1]).toBeUndefined();
+  // The voice was Alice for 16 s and Bob for 8 s: not one person.
+  const mixed = [...seen(0, 18), ...seen(18.5, 28, bob)];
+  expect(nameRemoteSpeakers(mixed, [line(1, 17, 'REMOTE_00'), line(19, 27, 'REMOTE_00'), line(40, 48, 'REMOTE_00')]).meet[2]).toBeUndefined();
+  // Alice seen in two voices, 16 s each: the rest of neither is hers.
+  const split = nameRemoteSpeakers(seen(0, 40), [line(1, 17, 'REMOTE_00'), line(20, 36, 'REMOTE_01'), line(50, 58, 'REMOTE_00'), line(60, 68, 'REMOTE_01')]);
+  expect(split.meet.map((speaker) => speaker?.label)).toEqual(['Alice', 'Alice', undefined, undefined]);
+});
+
+test('Meet and known voices name only what they agree on', () => {
+  const segments = [line(1, 19, 'REMOTE_00'), line(40, 48, 'REMOTE_00'), line(50, 58, 'REMOTE_01')];
+  const samples = seen(0, 20);
+  // The voice library says the voice Meet saw as Alice is Grace: neither name spreads.
+  const conflict = nameRemoteSpeakers(samples, segments, new Map([['REMOTE_00', { name: 'Grace', similarity: 0.8 }]]));
+  expect(conflict.meet.map((speaker) => speaker?.label)).toEqual(['Alice', undefined, undefined]);
+  expect(conflict.voices.size).toBe(0);
+  // Tyler's "Alice" and Meet's "Alice Example" are the same person.
+  const agree = nameRemoteSpeakers(seen(0, 20, { ...alice, label: 'Alice Example' }), segments, new Map([['REMOTE_00', { name: 'Alice', similarity: 0.8 }]]));
+  expect(agree.meet.map((speaker) => speaker?.label)).toEqual(['Alice Example', 'Alice Example', undefined]);
+  expect([...agree.voices.keys()]).toEqual(['REMOTE_00']);
+  // A known voice can't be the person Meet found in another voice.
+  const elsewhere = nameRemoteSpeakers(samples, segments, new Map([['REMOTE_01', { name: 'Alice', similarity: 0.8 }]]));
+  expect(elsewhere.voices.size).toBe(0);
+  // Where Meet saw nothing, the known voice stands.
+  expect([...nameRemoteSpeakers([], segments, new Map([['REMOTE_01', { name: 'Grace', similarity: 0.8 }]])).voices.keys()]).toEqual(['REMOTE_01']);
 });

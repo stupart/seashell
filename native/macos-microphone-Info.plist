@@ -9,7 +9,7 @@
   <!-- Bump only when the PCM/exit-code contract changes: a new protocol replaces
        the installed copy, and macOS then asks for Microphone access again. -->
   <key>SeashellHelperProtocol</key>
-  <string>2</string>
+  <string>3</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Seashell records your side of the meetings it captures. Audio stays on this Mac.</string>
 </dict>

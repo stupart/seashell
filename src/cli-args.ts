@@ -7,6 +7,7 @@ import type {
   BrowserMeetingPolicy,
   MeetingAutomationMode,
 } from './meeting-automation.ts';
+import type { VideoChoice } from './video-recording.ts';
 
 export interface TranscribeCommandOptions extends DiarizeFileOptions {
   format: TranscriptFormat;
@@ -58,6 +59,7 @@ export type MeetingCommand = {
     | { kind: 'calendar'; operation?: 'setup' | 'check' }
     | { kind: 'speakers'; browser: 'setup' | 'auto' | 'chrome' | 'safari' | 'off' | 'check' }
     | { kind: 'microphone'; operation: 'setup' | 'check' }
+    | { kind: 'computer-audio'; operation: 'setup' | 'check' }
     | { kind: 'merge'; ids: string[]; auto: boolean; dryRun: boolean; maxGapMinutes?: number }
     | { kind: 'template'; id: string; template?: string }
     | { kind: 'note'; id: string; note?: string }
@@ -65,10 +67,17 @@ export type MeetingCommand = {
     | { kind: 'watch'; once: boolean }
     | { kind: 'consent'; decision: 'approve' | 'decline' }
     | { kind: 'apps'; app?: string; policy?: 'off' | 'ask' | 'automatic' }
-    | { kind: 'autostart'; operation: 'enable' | 'disable' | 'status' };
+    | { kind: 'autostart'; operation: 'enable' | 'disable' | 'status' }
+    | MeetingVideoAction;
   libraryDir?: string;
   json: boolean;
 };
+
+/** `seashell meeting video …`: permission, settings, or one meeting's player page. */
+export type MeetingVideoAction =
+  | { kind: 'video'; operation: 'status' | 'setup' }
+  | { kind: 'video'; operation: 'on' | 'off'; app?: string }
+  | { kind: 'video'; operation: 'open'; id: string; atSeconds?: number };
 
 export type LibraryAction =
   | { kind: 'list' }
@@ -78,7 +87,8 @@ export type LibraryAction =
   | { kind: 'speakers-identify'; id: string }
   | { kind: 'speakers-set'; id: string; speakerId: string; label: string }
   | { kind: 'open'; id?: string }
-  | { kind: 'trash'; id: string; confirmed: boolean };
+  | { kind: 'trash'; id: string; confirmed: boolean }
+  | { kind: 'clean-phantoms'; ids: string[]; dryRun: boolean };
 
 export interface LibraryCommand {
   kind: 'library';
@@ -103,9 +113,30 @@ export interface CaptureCommand {
   json: boolean;
 }
 
+/** Prompts, extractors, automations and cross-meeting queries: how the meeting AI is steered and asked. */
+export type MeetingIntelligenceCommand =
+  | { kind: 'prompts'; action: 'list'; json: boolean }
+  | { kind: 'prompts'; action: 'reset'; name: string; json: boolean }
+  | { kind: 'extractors'; json: boolean }
+  | { kind: 'extract'; id: string; extractor: string; json: boolean }
+  | { kind: 'automations'; action: 'list'; json: boolean }
+  | { kind: 'automations'; action: 'run'; id: string; name?: string; json: boolean }
+  | {
+      kind: 'query';
+      noteKind?: string;
+      person?: string;
+      about?: string;
+      meeting?: string;
+      since?: string;
+      until?: string;
+      limit?: number;
+      json: boolean;
+    };
+
 export type CliCommand =
   | { kind: 'ai'; action: 'install'; tarball: string; json: boolean }
-  | { kind: 'ai'; action: 'status' | 'providers'; json: boolean }
+  | { kind: 'ai'; action: 'status' | 'providers' | 'test'; json: boolean }
+  | MeetingIntelligenceCommand
   | { kind: 'ai-setup' }
   | { kind: 'help' }
   | { kind: 'tui'; libraryDir?: string }
@@ -114,9 +145,10 @@ export type CliCommand =
   | { kind: 'status'; json: boolean }
   | { kind: 'mcp'; action: 'serve' | 'install'; json: boolean }
   | { kind: 'templates'; json: boolean }
-  | { kind: 'record'; command: 'start' | 'stop'; json: boolean }
+  | { kind: 'record'; command: 'start' | 'stop'; json: boolean; video?: VideoChoice }
   | { kind: 'speaker-compare'; ids: string[]; last?: number; open: boolean; json: boolean }
-  | { kind: 'speaker-use'; engine: 'native' | 'nemotron3'; json: boolean }
+  | { kind: 'speaker-use'; engine: 'auto' | 'native' | 'nemotron3'; json: boolean }
+  | { kind: 'speaker-voices'; forget?: string; json: boolean }
   | { kind: 'setup'; autostart: boolean; json: boolean }
   | { kind: 'speaker-setup'; login: boolean; check: boolean; json: boolean }
   | { kind: 'update'; check: boolean; json: boolean }
@@ -291,6 +323,7 @@ function parseLibrary(args: string[]): LibraryCommand {
   let speakers = false;
   let libraryDir: string | undefined;
   let confirmed = false;
+  let dryRun = false;
 
   for (let index = 2; index < args.length; index += 1) {
     const arg = args[index]!;
@@ -307,6 +340,7 @@ function parseLibrary(args: string[]): LibraryCommand {
       case '--speakers': speakers = true; break;
       case '--library-dir': libraryDir = next(); break;
       case '--confirm': confirmed = true; break;
+      case '--dry-run': dryRun = true; break;
       default:
         if (arg.startsWith('-')) throw new Error(`Unknown library option: ${arg}`);
         positional.push(arg);
@@ -352,9 +386,13 @@ function parseLibrary(args: string[]): LibraryCommand {
       if (!positional[0]) throw new Error('library trash requires a transcript ID');
       action = { kind: 'trash', id: positional[0], confirmed };
       break;
+    case 'clean-phantoms':
+      action = { kind: 'clean-phantoms', ids: positional, dryRun };
+      break;
     default:
       throw new Error(`Unknown library action: ${actionName}`);
   }
+  if (dryRun && action.kind !== 'clean-phantoms') throw new Error('--dry-run only applies to library clean-phantoms');
 
   return {
     kind: 'library',
@@ -381,7 +419,7 @@ function meetingBackend(value: string): HumainBackend {
 function parseMeeting(args: string[]): MeetingCommand {
   const actionName = args[1];
   if (!actionName) {
-    throw new Error('Meeting command requires setup, create, enrich, show, chat, calendar, watch, consent, autostart, speakers, microphone, or merge');
+    throw new Error('Meeting command requires setup, create, enrich, show, chat, calendar, watch, consent, autostart, speakers, microphone, computer-audio, or merge');
   }
   const positional: string[] = [];
   let libraryDir: string | undefined;
@@ -517,6 +555,14 @@ function parseMeeting(args: string[]): MeetingCommand {
         throw new Error('Usage: seashell meeting microphone [setup|check]');
       }
       action = { kind: 'microphone', operation: operation as 'setup' | 'check' };
+      break;
+    }
+    case 'computer-audio': {
+      const operation = positional[0] ?? 'check';
+      if (positional.length > 1 || !['setup', 'check'].includes(operation)) {
+        throw new Error('Usage: seashell meeting computer-audio [setup|check]');
+      }
+      action = { kind: 'computer-audio', operation: operation as 'setup' | 'check' };
       break;
     }
     case 'speakers': {
@@ -676,6 +722,51 @@ function parseMeeting(args: string[]): MeetingCommand {
   return { kind: 'meeting', action, ...(libraryDir ? { libraryDir } : {}), json };
 }
 
+/** `90`, `1:30` or `1:02:03`, in seconds. */
+export function clockSeconds(flag: string, raw: string): number {
+  const parts = raw.trim().split(':');
+  if (parts.length > 3 || parts.some((part) => !/^\d+(\.\d+)?$/u.test(part))) {
+    throw new Error(`${flag} takes a time like 12:34 or 1:02:03`);
+  }
+  return parts.reduce((total, part) => total * 60 + Number(part), 0);
+}
+
+function parseMeetingVideo(args: string[]): MeetingCommand {
+  const usage = 'Usage: seashell meeting video [setup | --status | on | off | <app> on|off | <id> [--at 12:34]] [--json]';
+  const positional: string[] = [];
+  let libraryDir: string | undefined;
+  let atSeconds: number | undefined;
+  let status = false;
+  let json = false;
+  for (let index = 2; index < args.length; index += 1) {
+    const arg = args[index]!;
+    const next = () => {
+      const [value, consumedIndex] = takeValue(args, index, arg);
+      index = consumedIndex;
+      return value;
+    };
+    if (arg === '--json') json = true;
+    else if (arg === '--status') status = true;
+    else if (arg === '--library-dir') libraryDir = next();
+    else if (arg === '--at') atSeconds = clockSeconds(arg, next());
+    else if (arg.startsWith('-')) throw new Error(`Unknown meeting video option: ${arg}`);
+    else positional.push(arg);
+  }
+  const [first, second] = positional;
+  let action: MeetingVideoAction;
+  if (positional.length === 0 || (positional.length === 1 && (first === 'check' || first === 'status'))) {
+    action = { kind: 'video', operation: 'status' };
+  } else if (positional.length === 1 && (first === 'setup' || first === 'on' || first === 'off')) {
+    action = { kind: 'video', operation: first };
+  } else if (positional.length === 2 && (second === 'on' || second === 'off')) {
+    action = { kind: 'video', operation: second, app: first!.toLocaleLowerCase() };
+  } else if (positional.length === 1) {
+    action = { kind: 'video', operation: 'open', id: first!, ...(atSeconds === undefined ? {} : { atSeconds }) };
+  } else throw new Error(usage);
+  if ((status && action.operation !== 'status') || (atSeconds !== undefined && action.operation !== 'open')) throw new Error(usage);
+  return { kind: 'meeting', action, ...(libraryDir ? { libraryDir } : {}), json };
+}
+
 function parseCapture(args: string[]): CaptureCommand {
   const actionName = args[1] ?? 'list';
   const positional: string[] = [];
@@ -739,6 +830,53 @@ function parseCapture(args: string[]): CaptureCommand {
   };
 }
 
+function parseMeetingIntelligence(args: string[]): MeetingIntelligenceCommand {
+  const json = args.includes('--json');
+  const rest = args.slice(1).filter((arg) => arg !== '--json');
+  switch (args[0]) {
+    case 'prompts':
+      if (rest.length === 0) return { kind: 'prompts', action: 'list', json };
+      if (rest[0] === 'reset' && rest.length === 2) return { kind: 'prompts', action: 'reset', name: rest[1]!, json };
+      throw new Error('Usage: seashell prompts [reset <live|notes|chat>] [--json]');
+    case 'extractors':
+      if (rest.length) throw new Error('Usage: seashell extractors [--json]');
+      return { kind: 'extractors', json };
+    case 'extract':
+      if (rest.length < 2 || rest.some((arg) => arg.startsWith('-'))) throw new Error('Usage: seashell extract <meeting-id> <extractor> [--json]');
+      return { kind: 'extract', id: rest[0]!, extractor: rest.slice(1).join(' '), json };
+    case 'automations':
+      if (rest.length === 0) return { kind: 'automations', action: 'list', json };
+      if (rest[0] === 'run' && rest[1] && !rest.slice(1).some((arg) => arg.startsWith('-'))) {
+        return { kind: 'automations', action: 'run', id: rest[1], ...(rest.length > 2 ? { name: rest.slice(2).join(' ') } : {}), json };
+      }
+      throw new Error('Usage: seashell automations [run <meeting-id> [<name>]] [--json]');
+    default: {
+      const usage = 'Usage: seashell query [decisions|actions|risks|questions|follow-ups] [--person <name>] [--about <words>] [--meeting <title words>] [--since <date>] [--until <date>] [--limit <n>] [--json]';
+      const command: Extract<MeetingIntelligenceCommand, { kind: 'query' }> = { kind: 'query', json };
+      for (let index = 0; index < rest.length; index += 1) {
+        const arg = rest[index]!;
+        const next = () => {
+          const [value, consumedIndex] = takeValue(rest, index, arg);
+          index = consumedIndex;
+          return value;
+        };
+        switch (arg) {
+          case '--person': command.person = next(); break;
+          case '--about': command.about = next(); break;
+          case '--meeting': command.meeting = next(); break;
+          case '--since': command.since = next(); break;
+          case '--until': command.until = next(); break;
+          case '--limit': command.limit = positiveInteger(arg, next()); break;
+          default:
+            if (arg.startsWith('-') || command.noteKind) throw new Error(usage);
+            if (arg !== 'all') command.noteKind = arg;
+        }
+      }
+      return command;
+    }
+  }
+}
+
 export function parseCliArgs(args: string[]): CliCommand {
   if (args.length === 0) return { kind: 'tui' };
   if (args.includes('--help') || args.includes('-h') || args[0] === 'help') {
@@ -754,11 +892,11 @@ export function parseCliArgs(args: string[]): CliCommand {
   if (args[0] === 'ai') {
     const rest = args.slice(1).filter((arg) => arg !== '--json');
     if (rest[0] === 'setup' && rest.length === 1 && !args.includes('--json')) return { kind: 'ai-setup' };
-    if ((rest[0] === 'status' || rest[0] === 'providers') && rest.length === 1) return { kind: 'ai', action: rest[0], json: args.includes('--json') };
+    if ((rest[0] === 'status' || rest[0] === 'providers' || rest[0] === 'test') && rest.length === 1) return { kind: 'ai', action: rest[0], json: args.includes('--json') };
     if (rest[0] === 'install' && rest.length === 2 && !rest[1]!.startsWith('-')) {
       return { kind: 'ai', action: 'install', tarball: rest[1]!, json: args.includes('--json') };
     }
-    throw new Error('Usage: seashell ai install <trusted-package.tgz> | seashell ai setup | status | providers [--json]');
+    throw new Error('Usage: seashell ai install <trusted-package.tgz> | seashell ai setup | status | providers | test [--json]');
   }
   if (args[0] === 'mcp') {
     const rest = args.slice(1).filter((arg) => arg !== '--json');
@@ -771,19 +909,46 @@ export function parseCliArgs(args: string[]): CliCommand {
     return { kind: 'templates', json: args.includes('--json') };
   }
   if (args[0] === 'record') {
-    const rest = args.slice(1).filter((arg) => arg !== '--json');
-    if (rest.length > 1 || (rest[0] !== undefined && rest[0] !== 'stop' && rest[0] !== 'start')) {
-      throw new Error('Usage: seashell record [stop] [--json]');
+    const usage = 'Usage: seashell record [stop] [--json] | seashell record --video [--window <app name> | --display <n>] [--json]';
+    const rest: string[] = [];
+    let video = false;
+    let window: string | undefined;
+    let display: number | undefined;
+    for (let index = 1; index < args.length; index += 1) {
+      const arg = args[index]!;
+      if (arg === '--json') continue;
+      if (arg === '--video') video = true;
+      else if (arg === '--window') [window, index] = takeValue(args, index, arg);
+      else if (arg === '--display') {
+        const [value, consumedIndex] = takeValue(args, index, arg);
+        display = positiveInteger(arg, value);
+        index = consumedIndex;
+      } else rest.push(arg);
     }
-    return { kind: 'record', command: rest[0] === 'stop' ? 'stop' : 'start', json: args.includes('--json') };
+    // Naming a window or a display asks for video too.
+    video ||= window !== undefined || display !== undefined;
+    if (rest.length > 1 || (rest[0] !== undefined && rest[0] !== 'stop' && rest[0] !== 'start') ||
+        (window !== undefined && display !== undefined) || (video && rest[0] === 'stop')) {
+      throw new Error(usage);
+    }
+    return {
+      kind: 'record', command: rest[0] === 'stop' ? 'stop' : 'start', json: args.includes('--json'),
+      ...(video ? { video: { ...(window === undefined ? {} : { window }), ...(display === undefined ? {} : { display }) } } : {}),
+    };
   }
   if (args[0] === 'speakers') {
-    const usage = 'Usage: seashell speakers compare [<id> ...] [--last <n>] [--open] [--json] | seashell speakers use <nemotron3|community-1> [--json]';
+    const usage = 'Usage: seashell speakers compare [<id> ...] [--last <n>] [--open] [--json] | seashell speakers use <auto|nemotron3|community-1> [--json] | seashell speakers voices [forget <name>] [--json]';
     const json = args.includes('--json');
     const rest = args.slice(1).filter((arg) => arg !== '--json');
     if (rest[0] === 'use' && rest.length === 2) {
+      if (rest[1] === 'auto') return { kind: 'speaker-use', engine: 'auto', json };
       if (rest[1] === 'nemotron3') return { kind: 'speaker-use', engine: 'nemotron3', json };
       if (rest[1] === 'community-1') return { kind: 'speaker-use', engine: 'native', json };
+      throw new Error(usage);
+    }
+    if (rest[0] === 'voices') {
+      if (rest.length === 1) return { kind: 'speaker-voices', json };
+      if (rest[1] === 'forget' && rest.length > 2) return { kind: 'speaker-voices', forget: rest.slice(2).join(' '), json };
       throw new Error(usage);
     }
     if (rest[0] !== 'compare') throw new Error(usage);
@@ -838,7 +1003,9 @@ export function parseCliArgs(args: string[]): CliCommand {
     if (unknown.length) throw new Error(`Unknown update option: ${unknown[0]}`);
     return { kind: 'update', check: args.includes('--check'), json: args.includes('--json') };
   }
+  if (['prompts', 'extractors', 'extract', 'automations', 'query'].includes(args[0]!)) return parseMeetingIntelligence(args);
   if (args[0] === 'capture') return parseCapture(args);
+  if (args[0] === 'meeting' && args[1] === 'video') return parseMeetingVideo(args);
   if (args[0] === 'meeting') return parseMeeting(args);
   if (args[0] === 'library') return parseLibrary(args);
   return parseTranscribe(args, args[0] === 'transcribe');
@@ -857,18 +1024,32 @@ Usage:
   seashell ai status [--json]             Check engine and Node readiness
   seashell ai setup                       Choose meeting AI interactively
   seashell ai providers [--json]          Discover providers and login/setup steps
-  seashell setup [--no-autostart] [--json]  Apply safe defaults on a true first install
+  seashell ai test [--json]               Send one tiny fixed prompt through each AI route in use
+  seashell setup [--no-autostart] [--json]  Safe defaults on a first install, then a guided setup
+                                            that hears your mic (in a terminal)
   seashell library speakers <id> identify   Separate saved voices into a review copy
   seashell setup --speakers [--login]       Set up optional local speaker identification
   seashell setup --speakers --check [--json] Verify the cached speaker model offline
   seashell status [--json]                  What works, what is off, and the next step for each
-  seashell mcp                              Read-only meetings server for Claude Code/Codex (stdio)
+  seashell mcp                              Meetings server for Claude Code/Codex (stdio)
   seashell mcp install [--json]             Add that server and its skill to Claude Code and Codex
   seashell templates [--json]               Your notes templates and "About me", in an editable folder
+  seashell prompts [--json]                 What each meeting AI role is told, as files you can edit
+  seashell prompts reset <live|notes|chat>  Put one prompt back the way it shipped
+  seashell query [decisions|actions|risks|questions|follow-ups] [--person <name>] [--about <words>] [--since <date>]
+                                            Notes across all meetings, each with its source
+  seashell extractors [--json]              Your insight extractors, in an editable folder
+  seashell extract <id> <extractor>         Run one extractor on one meeting
+  seashell automations [--json]             What runs when a meeting is ready, and its recent runs
+  seashell automations run <id> [<name>]    Run automations for one meeting now
   seashell record [stop]                    Record now, by hand, or stop the recording
+  seashell record --video [--window <app> | --display <n>]  Record by hand with video of a call, app or screen
+  seashell meeting video <id> [--at 12:34]  Watch a meeting's video beside its transcript
+  seashell meeting video on|off             Record the call's window with each call (or: <app> on|off)
   seashell meeting apps [<app> on|off|ask]  Which apps record by themselves, ask first, or never
   seashell speakers compare [--last <n>]    Try Nemotron 3 on past calls and listen where the engines disagree
-  seashell speakers use <engine>            Separate voices with nemotron3 or community-1
+  seashell speakers use <engine>            Separate voices with auto (both), nemotron3 or community-1
+  seashell speakers voices [forget <name>]  People Sea Shell knows by voice, or forget one
   seashell doctor [--json]                  Check dependencies and models
   seashell capabilities [--json]            Describe optional engine capabilities
   seashell update [--check] [--json]        Update Sea Shell or show package-manager guidance
@@ -902,6 +1083,7 @@ Library actions:
   library speakers <id> set <speaker-id> <name> [--json]
   library open [id]
   library trash <id> --confirm
+  library clean-phantoms [<id>...] [--dry-run] [--json]  Remove lines Whisper heard in silence
 
 Capture actions:
   capture test [--seconds 5] [--json]       Prove mic + system signal, then discard test audio
@@ -924,6 +1106,10 @@ Meeting actions:
   meeting speakers [auto|chrome|safari|off|check] [--json]  Configure/check without permission prompts
   meeting microphone setup [--json]         Ask macOS once for background microphone access
   meeting microphone [check] [--json]       Check background microphone access without a prompt
+  meeting computer-audio setup [--json]     At your Mac: play a sound and allow computer audio for Seashell System Audio
+  meeting computer-audio [check] [--json]   Which permission meetings record computer audio with, without a prompt
+  meeting video setup [--json]              Ask macOS once for Screen Recording, for meeting video
+  meeting video [--status] [--json]         Check Screen Recording access and video settings without a prompt
   meeting merge <id> <id>... [--json]       Join pieces of one meeting into one entry (pieces go to _Trash)
   meeting merge --auto [--dry-run] [--max-gap-minutes 15]  Find and join split meetings
   meeting template <id> [<name>|none|auto]  Choose the notes template for one meeting (auto: from its title)

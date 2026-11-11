@@ -1,5 +1,11 @@
 // Adapted from OpenWhispr's MIT-licensed macos-audio-tap.swift.
 // Copyright (c) 2024 OpenWhispr Team. See THIRD_PARTY_NOTICES.md.
+//
+// Seashell's computer-audio recorder. Like seashell-microphone, it relaunches
+// itself as its own responsible process, so macOS asks once for, and
+// remembers, this executable's System Audio Recording permission. The
+// background recorder and the guided setup's test in a terminal then use one
+// identity: a test that passes means meetings hear the others too.
 
 import AVFoundation
 import AudioToolbox
@@ -610,6 +616,71 @@ func captureError(
     return NSError(domain: "SeaShellSystemAudio", code: Int(status ?? -1), userInfo: details)
 }
 
+// MARK: - Responsibility
+
+private let disclaimedEnvironment = "SEASHELL_SYSTEM_AUDIO_RESPONSIBLE"
+private let launchArguments = Array(CommandLine.arguments.dropFirst())
+
+private typealias DisclaimFunction = @convention(c) (UnsafeMutablePointer<posix_spawnattr_t?>, Int32) -> Int32
+
+private func executablePath() -> String? {
+    var size: UInt32 = 0
+    _ = _NSGetExecutablePath(nil, &size)
+    var buffer = [CChar](repeating: 0, count: Int(size) + 1)
+    guard _NSGetExecutablePath(&buffer, &size) == 0 else { return nil }
+    return URL(fileURLWithPath: String(cString: buffer)).resolvingSymlinksInPath().path
+}
+
+/// Relaunch as a process responsible for itself, proxying termination signals
+/// and the exit status. Returns only when that is unavailable. Audio and events
+/// reach the launcher directly: the relaunched helper inherits its pipes.
+private func relaunchResponsibleForItself() {
+    guard getenv(disclaimedEnvironment) == nil, !launchArguments.contains("--no-disclaim"),
+          // RTLD_DEFAULT; the symbol is private but stable since macOS 10.14.
+          let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "responsibility_spawnattrs_setdisclaim"),
+          let path = executablePath() else { return }
+    let disclaim = unsafeBitCast(symbol, to: DisclaimFunction.self)
+    var attributes: posix_spawnattr_t?
+    guard posix_spawnattr_init(&attributes) == 0 else { return }
+    defer { posix_spawnattr_destroy(&attributes) }
+    guard disclaim(&attributes, 1) == 0 else { return }
+    setenv(disclaimedEnvironment, "1", 1)
+    let argv: [UnsafeMutablePointer<CChar>?] = ([path] + launchArguments).map { strdup($0) } + [nil]
+    defer { argv.forEach { free($0) } }
+    var child: pid_t = 0
+    let status = posix_spawn(&child, path, nil, &attributes, argv, environ)
+    unsetenv(disclaimedEnvironment)
+    guard status == 0 else { return }
+    var sources: [DispatchSourceSignal] = []
+    for value in [SIGINT, SIGTERM, SIGHUP] {
+        signal(value, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: value, queue: .global())
+        source.setEventHandler { kill(child, value) }
+        source.resume()
+        sources.append(source)
+    }
+    var result: Int32 = 0
+    while waitpid(child, &result, 0) == -1 && errno == EINTR {}
+    sources.forEach { $0.cancel() }
+    let terminatingSignal = result & 0x7f
+    exit(terminatingSignal == 0 ? (result >> 8) & 0xff : 128 + terminatingSignal)
+}
+
+relaunchResponsibleForItself()
+
+/// Which identity macOS judges, without opening a tap or asking for anything.
+if launchArguments.contains("--identity") {
+    let report: [String: Any] = [
+        "responsibleForItself": getenv(disclaimedEnvironment) != nil,
+        "executable": executablePath() ?? CommandLine.arguments[0],
+    ]
+    if let data = try? JSONSerialization.data(withJSONObject: report, options: [.sortedKeys, .withoutEscapingSlashes]) {
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data([10]))
+    }
+    exit(0)
+}
+
 if #available(macOS 14.2, *) {
     let config = parseConfig()
     let capture = SystemAudioCapture(config: config)
@@ -620,6 +691,13 @@ if #available(macOS 14.2, *) {
         exit(code)
     }
     capture.onDeviceChanged = { stopAndExit(1) }
+
+    // A proxy killed with SIGKILL cannot forward a stop. Never outlive it.
+    let launchParent = getppid()
+    let parentWatch = DispatchSource.makeTimerSource(queue: .main)
+    parentWatch.schedule(deadline: .now() + 0.5, repeating: 0.5)
+    parentWatch.setEventHandler { if getppid() != launchParent { stopAndExit(0) } }
+    parentWatch.resume()
 
     signal(SIGINT, SIG_IGN)
     signal(SIGTERM, SIG_IGN)

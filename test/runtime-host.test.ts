@@ -3,7 +3,7 @@ import type { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { embeddedHelperProtocol, inspectMeetingRuntimeHost, meetingRuntimeHostPath, prepareMeetingRuntimeHost, prepareMicrophoneRuntimeHelper, type RuntimeHostOptions } from '../src/runtime-host.ts';
+import { embeddedHelperProtocol, inspectMeetingRuntimeHost, meetingRuntimeHostPath, prepareMeetingRuntimeHost, prepareMicrophoneRuntimeHelper, prepareRuntimeHelper, SCREEN_CAPTURE_RUNTIME_HELPER, type RuntimeHostOptions } from '../src/runtime-host.ts';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -167,5 +167,40 @@ test('a file that is not the microphone helper is replaced, never trusted', () =
     expect(embeddedHelperProtocol(installed, 'com.humain.seashell.microphone')).toBeUndefined();
     prepareMicrophoneRuntimeHelper(helperBinary(root, 'real', helperPlist(1), 'real'), options);
     expect(readFileSync(installed, 'latin1')).toContain('real');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the screen recorder keeps its own stable copy, named for Privacy & Security', () => {
+  const h = fixture();
+  const helper = join(h.root, 'seashell-screen-capture');
+  writeFileSync(helper, '<plist><string>com.humain.seashell.screen-capture</string><key>SeashellHelperProtocol</key><string>1</string></plist>', { mode: 0o700 });
+  const path = prepareRuntimeHelper(helper, SCREEN_CAPTURE_RUNTIME_HELPER, h.options);
+  expect(path).toBe(join(h.options.hostDirectory!, 'Seashell Screen Capture'));
+  expect(embeddedHelperProtocol(path, SCREEN_CAPTURE_RUNTIME_HELPER.identifier)).toBe(1);
+  // Rebuilt bytes with the same protocol keep the copy macOS already allowed.
+  writeFileSync(helper, '<plist><string>com.humain.seashell.screen-capture</string><key>SeashellHelperProtocol</key><string>1</string></plist> rebuilt');
+  prepareRuntimeHelper(helper, SCREEN_CAPTURE_RUNTIME_HELPER, h.options);
+  expect(readFileSync(path, 'utf8')).not.toContain('rebuilt');
+});
+
+test('every launcher of computer audio runs one stable copy that answers for its own permission', async () => {
+  const { defaultSystemAudioHelper } = await import('../src/live-system-audio.ts');
+  const { SYSTEM_AUDIO_RUNTIME_HELPER } = await import('../src/runtime-host.ts');
+  const root = mkdtempSync(join(tmpdir(), 'seashell-system-audio-host-'));
+  try {
+    const runtimeHost = { hostDirectory: join(root, 'Runtime'), platform: 'darwin' as const };
+    const plist = readFileSync(join(import.meta.dir, '..', 'native', 'macos-system-audio-Info.plist'), 'utf8');
+    expect(plist).toContain(`<string>${SYSTEM_AUDIO_RUNTIME_HELPER.identifier}</string>`);
+    expect(plist).toContain('NSAudioCaptureUsageDescription');
+    const bundled = helperBinary(root, 'seashell-system-audio', plist, 'sdk-27');
+    const path = defaultSystemAudioHelper({ bundled, runtimeHost });
+    expect(path).toBe(join(root, 'Runtime', 'Seashell System Audio'));
+    expect(embeddedHelperProtocol(path, SYSTEM_AUDIO_RUNTIME_HELPER.identifier)).toBe(1);
+    // Rebuilt with the same protocol: the copy macOS already allowed stays.
+    expect(defaultSystemAudioHelper({ bundled: helperBinary(root, 'rebuilt', plist, 'sdk-26.5'), runtimeHost })).toBe(path);
+    expect(readFileSync(path, 'latin1')).toContain('sdk-27');
+    // Nothing packaged: report the missing helper rather than inventing one.
+    const missing = join(root, 'missing');
+    expect(defaultSystemAudioHelper({ bundled: missing, runtimeHost })).toBe(missing);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

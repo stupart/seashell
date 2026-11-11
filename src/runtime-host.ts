@@ -40,6 +40,10 @@ export interface StableRuntimeHelper {
 }
 export const MICROPHONE_RUNTIME_HELPER: StableRuntimeHelper = { name: 'Seashell Microphone', identifier: 'com.humain.seashell.microphone' };
 export const CALENDAR_RUNTIME_HELPER: StableRuntimeHelper = { name: 'Seashell Calendar', identifier: 'com.humain.seashell.calendar' };
+/** macOS lists this name under Privacy & Security → Screen & System Audio Recording. */
+export const SCREEN_CAPTURE_RUNTIME_HELPER: StableRuntimeHelper = { name: 'Seashell Screen Capture', identifier: 'com.humain.seashell.screen-capture' };
+/** macOS lists this name under Privacy & Security → Screen & System Audio Recording → System Audio Recording Only. */
+export const SYSTEM_AUDIO_RUNTIME_HELPER: StableRuntimeHelper = { name: 'Seashell System Audio', identifier: 'com.humain.seashell.system-audio' };
 
 export function runtimeHelperPath(helper: StableRuntimeHelper, options: RuntimeHostOptions = {}): string {
   return join(runtimeDirectory(options), helper.name);
@@ -48,6 +52,10 @@ export function runtimeHelperPath(helper: StableRuntimeHelper, options: RuntimeH
 /** macOS lists this name under Privacy & Security → Microphone. */
 export function microphoneRuntimeHelperPath(options: RuntimeHostOptions = {}): string {
   return runtimeHelperPath(MICROPHONE_RUNTIME_HELPER, options);
+}
+
+export function systemAudioRuntimeHelperPath(options: RuntimeHostOptions = {}): string {
+  return runtimeHelperPath(SYSTEM_AUDIO_RUNTIME_HELPER, options);
 }
 
 function existing(path: string) {

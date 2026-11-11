@@ -11,13 +11,19 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 SYSTEM_AUDIO_BINARY=native/bin/seashell-system-audio
 if [ ! -x "$SYSTEM_AUDIO_BINARY" ] || \
    [ native/macos-system-audio.swift -nt "$SYSTEM_AUDIO_BINARY" ] || \
+   [ native/macos-system-audio-Info.plist -nt "$SYSTEM_AUDIO_BINARY" ] || \
    [ native/seashell-atomic.c -nt "$SYSTEM_AUDIO_BINARY" ] || \
    [ native/seashell-atomic.h -nt "$SYSTEM_AUDIO_BINARY" ]; then
+    # Same pattern as the microphone helper: its own System Audio Recording
+    # permission, the same whether the background recorder or a terminal starts it.
     xcrun clang -std=c11 -O2 -c native/seashell-atomic.c -o "$BUILD_DIR/atomic.o"
-    xcrun swiftc native/macos-system-audio.swift "$BUILD_DIR/atomic.o" -O \
+    xcrun swiftc native/macos-system-audio.swift "$BUILD_DIR/atomic.o" -O -module-name SeashellSystemAudio \
         -import-objc-header native/seashell-atomic.h \
         -framework AVFoundation -framework AudioToolbox -framework CoreAudio \
+        -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+        -Xlinker native/macos-system-audio-Info.plist \
         -o "$BUILD_DIR/seashell-system-audio"
+    codesign --force --sign - --identifier com.humain.seashell.system-audio "$BUILD_DIR/seashell-system-audio" 2>/dev/null
     mv -f "$BUILD_DIR/seashell-system-audio" "$SYSTEM_AUDIO_BINARY"
 fi
 MEETING_SIGNALS_BINARY=native/bin/seashell-meeting-signals
@@ -63,6 +69,25 @@ if [ ! -x "$CALENDAR_BINARY" ] || \
         -o "$BUILD_DIR/seashell-calendar"
     codesign --force --sign - --identifier com.humain.seashell.calendar "$BUILD_DIR/seashell-calendar" 2>/dev/null
     mv -f "$BUILD_DIR/seashell-calendar" "$CALENDAR_BINARY"
+fi
+SCREEN_CAPTURE_BINARY=native/bin/seashell-screen-capture
+if [ ! -x "$SCREEN_CAPTURE_BINARY" ] || \
+   [ native/macos-screen-capture.swift -nt "$SCREEN_CAPTURE_BINARY" ] || \
+   [ native/macos-screen-capture-Info.plist -nt "$SCREEN_CAPTURE_BINARY" ]; then
+    # Same pattern as the microphone helper: its own Screen Recording
+    # permission. Optional: without it, meetings record audio only.
+    if xcrun swiftc native/macos-screen-capture.swift -O -module-name SeashellScreenCapture \
+        -framework ScreenCaptureKit -framework AVFoundation -framework CoreMedia \
+        -framework CoreVideo -framework VideoToolbox -framework CoreGraphics -framework CoreText \
+        -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
+        -Xlinker native/macos-screen-capture-Info.plist \
+        -o "$BUILD_DIR/seashell-screen-capture" >"$BUILD_DIR/screen-capture.log" 2>&1; then
+        codesign --force --sign - --identifier com.humain.seashell.screen-capture "$BUILD_DIR/seashell-screen-capture" 2>/dev/null
+        mv -f "$BUILD_DIR/seashell-screen-capture" "$SCREEN_CAPTURE_BINARY"
+    else
+        echo "Meeting video was not built (ScreenCaptureKit needs macOS 12.3+):" >&2
+        tail -5 "$BUILD_DIR/screen-capture.log" >&2
+    fi
 fi
 SPEAKERS_BINARY=native/bin/seashell-speakers
 if [ ! -x "$SPEAKERS_BINARY" ] || \

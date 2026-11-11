@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { CaptureHealthTracker } from '../src/capture-health.ts';
-import { captureRecordingMode, recordingNeedsAttention } from '../src/RecordingStatus.tsx';
+import { captureRecordingMode, recordingNeedsAttention, recordingSummary } from '../src/RecordingStatus.tsx';
 
 test('record intent and helper readiness cannot claim capture before PCM arrives', () => {
   expect(captureRecordingMode()).toBe('starting');
@@ -59,4 +59,50 @@ test('a claimed active source without PCM eventually needs attention; disabled s
   const disabled = new CaptureHealthTracker({ microphone: false, systemAudio: false, nowUnixMs: 1 }).snapshot;
   expect(recordingNeedsAttention(disabled, false, 90_000)).toBe(false);
   expect(recordingNeedsAttention(undefined, false, 90_000)).toBe(false);
+});
+
+test('a one-sided call names the likely cause live, and a saved meeting says your side was not recorded', () => {
+  const health = new CaptureHealthTracker({ nowUnixMs: 0 });
+  for (let time = 500; time <= 61_000; time += 500) {
+    health.pcm('microphone', { peak: 1, rms: 1, rmsDbfs: -90 }, undefined, time);
+    health.pcm('systemAudio', { peak: 1000, rms: 100, rmsDbfs: -45 }, undefined, time);
+  }
+  const live = recordingSummary({ mode: 'recording', health: health.snapshot, nowUnixMs: 61_000 });
+  expect(live.problems[0]).toBe('Microphone: silent — muted or wrong mic? · i audio help');
+  // Two audible chunks of 681: something was heard, but not your side of the call.
+  const chunk = (trackId: 'microphone' | 'system-audio', index: number, audible: boolean) =>
+    ({ trackId, audible, startMs: index * 10_000, endMs: (index + 1) * 10_000 });
+  health.stop(62_000, [
+    ...Array.from({ length: 681 }, (_, index) => chunk('microphone', index, index < 2)),
+    ...Array.from({ length: 680 }, (_, index) => chunk('system-audio', index, index < 425)),
+  ]);
+  expect(recordingNeedsAttention(health.snapshot, true, 62_000)).toBe(true);
+  const saved = recordingSummary({ mode: 'ready', health: health.snapshot, nowUnixMs: 62_000 });
+  expect(saved.headline).toBe('Saved · audio needs review');
+  expect(saved.problems).toEqual(['Microphone: your side wasn’t recorded']);
+});
+
+test('the title slot gets the most urgent problem in a few words, its key apart: red only while a source fails', () => {
+  const health = new CaptureHealthTracker({ nowUnixMs: 0 });
+  health.state('microphone', { state: 'unavailable', code: 'microphone_stopped', message: 'The microphone stopped.' }, 1);
+  health.pcm('systemAudio', { peak: 1000, rms: 500, rmsDbfs: -30 }, true, 2);
+  const failing = recordingSummary({ mode: 'recording', health: health.snapshot, nowUnixMs: 3 });
+  expect(failing.alert).toEqual({ text: 'Mic silent', color: 'red', fix: ['i', 'mic help'] });
+  // What is happening keeps the title's own colour: only the alert says something is wrong.
+  expect(failing.headline).toStartWith('● Recording');
+  expect(failing).not.toHaveProperty('color');
+  // One-sided is attention, not failure.
+  const quiet = new CaptureHealthTracker({ nowUnixMs: 0 });
+  for (let time = 500; time <= 61_000; time += 500) {
+    quiet.pcm('microphone', { peak: 1, rms: 1, rmsDbfs: -90 }, undefined, time);
+    quiet.pcm('systemAudio', { peak: 1000, rms: 100, rmsDbfs: -45 }, undefined, time);
+  }
+  expect(recordingSummary({ mode: 'recording', health: quiet.snapshot, nowUnixMs: 61_000 }).alert)
+    .toMatchObject({ text: 'Mic silent', color: 'yellow', fix: ['i', 'mic help'] });
+  // A recorder warning is said whole when short, by its first sentence when narrow.
+  expect(recordingSummary({ mode: 'watching', warning: 'Meet detection unavailable. Check Speakers.' }))
+    .toMatchObject({ headline: 'Ready · watching for calls', alert: { text: 'Meet detection unavailable. Check Speakers', short: 'Meet detection unavailable' } });
+  // After the call: audio is safe and the notes are coming, not how far the audio got.
+  expect(recordingSummary({ mode: 'processing', title: 'Design review', savedThroughSeconds: 110 }))
+    .toMatchObject({ headline: 'Call ended · Design review', detail: 'Audio saved · writing notes' });
 });

@@ -1,3 +1,5 @@
+import wrapAnsi from 'wrap-ansi';
+import { stripVTControlCharacters } from 'util';
 import type { TranscriptLibraryEntry } from './transcript-library.ts';
 
 export interface TuiLayout {
@@ -29,9 +31,12 @@ export function sameDay(left: string, right: string): boolean {
 }
 
 const clockTime = (date: Date) => date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-  .replace(/\s?([ap])\.?m\.?/iu, (_, half: string) => half.toLowerCase());
+  .replace(/\s?([ap])\.?\s?m\.?/iu, (_, half: string) => ` ${half.toLowerCase()}m`);
 
-/** When a meeting happened, short enough to sit beside its title. */
+/**
+ * When something happened, in local time, the one way Seashell writes it:
+ * "6:44 pm" today, "Nov 7 2:30 pm" before. Without the time, an older day is just "Nov 7".
+ */
 export function meetingWhen(createdAt: string, now = new Date(), withTime = true): string {
   const created = new Date(createdAt);
   if (created.toDateString() === now.toDateString()) return clockTime(created);
@@ -39,16 +44,68 @@ export function meetingWhen(createdAt: string, now = new Date(), withTime = true
   return withTime ? `${day} ${clockTime(created)}` : day;
 }
 
-/** List row: the title first, its date against the right edge. The time appears
- * when it tells two meetings of the same day apart, and the date never truncates. */
-export function meetingEntryRow(entry: TranscriptLibraryEntry, width: number, now = new Date(), withTime = true): string {
+/** The list's date column: the time for today's meetings, the day for older ones. */
+export function listWhen(createdAt: string, now = new Date()): string {
+  return meetingWhen(createdAt, now, false);
+}
+
+/** Marks a list row for a meeting kept with its video; the app draws it dim. */
+export const VIDEO_MARK = '▶';
+
+/** List row: the title first, its date right-aligned in a column as wide as the
+ * widest date in view, so the titles keep the rest of the row. A meeting with video
+ * has ▶ beside its date. */
+export function meetingEntryRow(entry: TranscriptLibraryEntry, width: number, now = new Date(), column = 0, video = false): string {
   const marker = entry.captureState === 'recording' ? '● ' : entry.captureState === 'processing' ? '◐ ' : '';
-  const when = meetingWhen(entry.createdAt, now, withTime);
+  const when = `${video ? `${VIDEO_MARK} ` : ''}${listWhen(entry.createdAt, now).padStart(column)}`;
   const room = Math.max(4, width - when.length - 1 - marker.length);
   // Old live recordings are titled by their own date, which the row already shows.
   const name = /^Live \d/u.test(entry.title) ? 'Live recording' : entry.title;
-  const title = name.length > room ? `${name.slice(0, room - 1)}…` : name.padEnd(room);
-  return `${marker}${title} ${when}`;
+  return `${marker}${fitColumns(name, room)} ${when}`;
+}
+
+/** A line cut to this many columns around the first place it says the needle, with … where it was cut. */
+export function snippetAround(text: string, needle: string, columns: number): string {
+  const room = Math.max(8, columns);
+  if (Bun.stringWidth(text) <= room) return text;
+  const at = Math.max(0, text.toLocaleLowerCase().indexOf(needle.toLocaleLowerCase()));
+  // Start a word or two before the match, so it reads as part of a sentence.
+  let start = Math.max(0, Math.min(at - Math.floor(room / 3), text.length - room + 1));
+  if (start > 0) {
+    const space = text.indexOf(' ', start);
+    start = space >= 0 && space < at ? space + 1 : start;
+  }
+  return fitColumns(start > 0 ? `…${text.slice(start)}` : text, room).trimEnd();
+}
+
+/** Text cut or padded to exactly this many terminal columns. An emoji or a CJK
+ * character takes two, so counting characters would push the date out of line. */
+export function fitColumns(text: string, columns: number): string {
+  const width = (value: string) => Bun.stringWidth(value);
+  if (width(text) <= columns) return text + ' '.repeat(columns - width(text));
+  let cut = '';
+  for (const character of text) {
+    if (width(cut + character) > columns - 1) break;
+    cut += character;
+  }
+  return `${cut}…${' '.repeat(Math.max(0, columns - 1 - width(cut)))}`;
+}
+
+/**
+ * Text wrapped at word breaks, with no stray space starting a line and no word alone on the
+ * last line: the line above gives up its last word when the two fit together.
+ */
+export function wrapWords(text: string, columns: number): string[] {
+  const width = Math.max(1, Math.floor(columns));
+  const lines = wrapAnsi(text, width, { hard: true, trim: true }).split('\n');
+  const last = lines.at(-1)!;
+  const above = lines.at(-2);
+  if (above === undefined || !last.trim() || /\s/u.test(stripVTControlCharacters(last).trim())) return lines;
+  const cut = above.lastIndexOf(' ');
+  if (cut <= 0) return lines;
+  const moved = `${above.slice(cut + 1)} ${last}`;
+  if (Bun.stringWidth(stripVTControlCharacters(moved)) > width) return lines;
+  return [...lines.slice(0, -2), above.slice(0, cut).trimEnd(), moved];
 }
 
 export function moveSelection(current: number, delta: number, count: number): number {
@@ -79,18 +136,36 @@ export function filterLibraryEntries(
   ].some((value) => value.toLocaleLowerCase().includes(normalized)));
 }
 
-/** Yellow and red are left out: they mean attention and failure everywhere else. */
+/** Speakers other than you, each in a hue of their own. Yellow, red and green are left out: they mean
+ * attention, failure and confirmation everywhere else. */
 export const SPEAKER_COLORS = [
   'cyan',
   'magenta',
-  'green',
   'blue',
+  'cyanBright',
+  'magentaBright',
+  'blueBright',
 ] as const;
 
-export function speakerColorIndex(speakerId: string): number {
-  let hash = 0;
-  for (const character of speakerId) hash = ((hash * 31) + character.codePointAt(0)!) >>> 0;
-  return hash % SPEAKER_COLORS.length;
+/** Your own microphone: your name is plain bold, in no speaker's colour. */
+export const YOUR_SPEAKER_ID = 'LOCAL';
+
+/** Each other speaker's colour, in the order they are listed, so no two of the first three share a hue. */
+export function speakerColors(ids: Iterable<string>): Map<string, (typeof SPEAKER_COLORS)[number]> {
+  const colors = new Map<string, (typeof SPEAKER_COLORS)[number]>();
+  for (const id of ids) {
+    if (id !== YOUR_SPEAKER_ID && !colors.has(id)) colors.set(id, SPEAKER_COLORS[colors.size % SPEAKER_COLORS.length]!);
+  }
+  return colors;
+}
+
+/**
+ * A speaker as the screen names them: "You" for your own microphone, "Speaker 1" for a voice
+ * Seashell numbered. The saved label, which agents and exports read, is left as it is.
+ */
+export function speakerDisplayName(id: string | undefined, label: string): string {
+  if (id === 'LOCAL' && label === 'Microphone') return 'You';
+  return label.replace(/^Remote speaker (\d+)$/u, 'Speaker $1');
 }
 
 /** Compact media-relative clock for the TUI; exports retain millisecond detail. */

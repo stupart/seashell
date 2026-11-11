@@ -5,6 +5,7 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readFileSync,
   renameSync,
   rmSync,
   writeSync,
@@ -20,8 +21,10 @@ import {
   type CaptureTrackId,
 } from './capture-session.ts';
 import { diarizationStatus } from './diarization-environment.ts';
+import { remoteVoiceCeiling, type SpeakerVoice } from './diarize.ts';
+import { parseMeetingArtifact, type MeetingAttendee } from './meeting-artifact.ts';
 import { isLikelySystemAudioLeak } from './live-echo.ts';
-import { meetSpeakerForSegment, readMeetSamples } from './meet-speakers.ts';
+import { meetSpeakerForSegment, nameRemoteSpeakers, readMeetSamples, type MeetSpeaker } from './meet-speakers.ts';
 import { amplifyPcm, hasAudiblePcmSignal, pcmS16leSignalLevel, pcmS16leToWav, quietAudioGain } from './live-system-audio.ts';
 import { createTranscriptRecord } from './transcript-record.ts';
 import { saveTranscriptRecord } from './transcript-library.ts';
@@ -31,8 +34,10 @@ import type {
   TranscriptRecord,
   TranscriptSegment,
 } from './transcript-types.ts';
-import { transcribeMedia } from './transcription-service.ts';
+import { transcribeMedia, type TranscribeMediaOptions } from './transcription-service.ts';
+import { applyVoiceSuggestions, matchKnownVoices, saveMeetingVoices, type VoiceMatch } from './voiceprints.ts';
 import { transcribeWithTimestamps } from './whisper-timestamps.ts';
+import { concurrentTrackTranscription } from './local-asr-profile.ts';
 import {
   runHumainTranscription,
   type HumainTranscriptionRoute,
@@ -177,12 +182,25 @@ export interface FinalizeCaptureOptions {
   /** Explicit retry should report a failure; automatic finalization keeps source text. */
   readonly strictSpeakers?: boolean;
   /** Test/provider seam; output timing must use the supplied track's clock. */
-  readonly systemDiarizer?: (path: string) => Promise<StructuredTranscript>;
+  readonly systemDiarizer?: (path: string, options: TranscribeMediaOptions) => Promise<StructuredTranscript>;
+  /** Calendar invitees, a ceiling on remote voices. Read from a saved meeting's meeting.json when omitted. */
+  readonly attendees?: readonly MeetingAttendee[];
   readonly localTranscriber?: typeof transcribeWithTimestamps;
   /** Explicit pinned remote canonical route. Omit to keep the final fully local. */
   readonly remoteRoute?: HumainTranscriptionRoute;
   /** Test/provider seam. Production defaults to the Humain CLI boundary. */
   readonly remoteTranscriber?: typeof runHumainTranscription;
+  /** Transcribe both tracks at once. Defaults to whether this Mac has room; see concurrentTrackTranscription. */
+  readonly concurrentTracks?: boolean;
+}
+
+/** The invitees of a meeting already saved beside its capture, as when separating it again. */
+function savedAttendees(manifestPath: string): readonly MeetingAttendee[] {
+  try {
+    return parseMeetingArtifact(JSON.parse(readFileSync(join(dirname(dirname(manifestPath)), 'meeting.json'), 'utf8'))).calendar?.attendees ?? [];
+  } catch {
+    return [];
+  }
 }
 
 /** A stopped draft queue is not a complete transcript. Publish only a canonical
@@ -256,9 +274,10 @@ export async function finalizeCaptureTranscript(
     observedMeetLabels.set(sample.speaker.id, labels);
   }
   const meetSpeakers = new Map<string, { id: string; label: string }>();
-  const labelMeet = (segments: TranscriptSegment[]): TranscriptSegment[] => segments.map(segment => {
+  const labelMeet = (segments: TranscriptSegment[], found: Array<MeetSpeaker | undefined> =
+    segments.map(segment => meetSpeakerForSegment(meetSamples, segment))): TranscriptSegment[] => segments.map((segment, index) => {
     if (segment.speaker === 'LOCAL') return segment;
-    const speaker = meetSpeakerForSegment(meetSamples, segment);
+    const speaker = found[index];
     if (!speaker) return segment;
     const id = (observedMeetLabels.get(speaker.id)?.size ?? 0) > 1
       ? `${speaker.id}_LABEL_${createHash('sha256').update(speaker.label).digest('hex')}`
@@ -297,59 +316,85 @@ export async function finalizeCaptureTranscript(
       if (system) temporaryTracks.push(system);
     }
 
-    const segments: TranscriptSegment[] = [];
+    const microphoneSegments: TranscriptSegment[] = [];
+    const systemSegments: TranscriptSegment[] = [];
     let speakerAnalysis: NonNullable<StructuredTranscript['speakerAnalysis']> = {
       status: 'source-only', detail: 'Labels identify audio sources, not individual people.',
     };
-    if (audibleMicrophone) {
-      if (options.remoteRoute) {
-        segments.push(...await remoteTrackSegments(
-          absoluteManifest, manifest, 'microphone', 'LOCAL', options.remoteRoute,
-          options.remoteTranscriber ?? runHumainTranscription, options.onStatus,
-        ));
-      } else if (microphone) {
-        options.onStatus?.('Final microphone transcription…');
-        segments.push(...trackSegments(await (options.localTranscriber ?? transcribeWithTimestamps)(microphone), 'LOCAL'));
-      }
-    }
-    if (audibleSystem) {
-      const useDiarization = options.remoteRoute === undefined &&
-        (options.diarizeSystemAudio ?? diarizationStatus().ready);
-      let separated = false;
-      if (useDiarization && system) {
-        options.onStatus?.('Separating remote speakers…');
-        try {
-          const document = options.systemDiarizer
-            ? await options.systemDiarizer(system)
-            : await transcribeMedia(system, { speakers: true, title: options.title, onStatus: options.onStatus });
-          const speakerIds = new Map(document.speakers.map((speaker) => [speaker.id, remoteSpeakerId(speaker.id)]));
-          // The final combined timeline needs fresh evidence IDs. Per-track IDs can collide.
-          segments.push(...labelMeet(document.transcript.map(({ id: _id, ...segment }) => ({ ...segment,
-            speaker: speakerIds.get(segment.speaker ?? '') ?? remoteSpeakerId('UNKNOWN'),
-          }))));
-          separated = true;
-          speakerAnalysis = { status: 'complete', model: diarizationStatus().model,
-            detail: 'Remote voices separated locally. Microphone is a separate source; names need confirmation.' };
-        } catch (error) {
-          if (options.strictSpeakers) throw error;
-          speakerAnalysis = { status: 'failed', detail: 'Speaker separation failed. Transcript kept with source labels. Press V to check setup or retry.' };
-          options.onStatus?.(speakerAnalysis.detail);
-        }
-      } else if (!options.remoteRoute && options.diarizeSystemAudio !== false) {
-        speakerAnalysis = { status: 'unavailable', detail: 'Source labels only. Press V to set up local speaker separation.' };
-      }
-      if (!separated) {
+    let remoteVoices = new Map<string, SpeakerVoice>();
+    let voiceNames = new Map<string, VoiceMatch>();
+    const transcribeMicrophone = async () => {
+      if (audibleMicrophone) {
         if (options.remoteRoute) {
-          segments.push(...await remoteTrackSegments(
-            absoluteManifest, manifest, 'system-audio', 'SYSTEM', options.remoteRoute,
-            options.remoteTranscriber ?? runHumainTranscription, options.onStatus, labelMeet,
+          microphoneSegments.push(...await remoteTrackSegments(
+            absoluteManifest, manifest, 'microphone', 'LOCAL', options.remoteRoute,
+            options.remoteTranscriber ?? runHumainTranscription, options.onStatus,
           ));
-        } else if (system) {
-          options.onStatus?.('Final system-audio transcription…');
-          segments.push(...trackSegments(await (options.localTranscriber ?? transcribeWithTimestamps)(system), 'SYSTEM', labelMeet));
+        } else if (microphone) {
+          options.onStatus?.('Final microphone transcription…');
+          microphoneSegments.push(...trackSegments(await (options.localTranscriber ?? transcribeWithTimestamps)(microphone), 'LOCAL'));
         }
       }
+    };
+    const transcribeSystem = async () => {
+      if (audibleSystem) {
+        const useDiarization = options.remoteRoute === undefined &&
+          (options.diarizeSystemAudio ?? diarizationStatus().ready);
+        let separated = false;
+        if (useDiarization && system) {
+          options.onStatus?.('Separating remote speakers…');
+          try {
+            const ceiling = remoteVoiceCeiling(options.attendees ?? savedAttendees(absoluteManifest));
+            let voices: ReadonlyMap<string, SpeakerVoice> = new Map();
+            const separation: TranscribeMediaOptions = { speakers: true, title: options.title, onStatus: options.onStatus,
+              ...(ceiling === undefined ? {} : { maxSpeakers: ceiling }), onVoices: (found) => { voices = found; } };
+            const document = await (options.systemDiarizer ?? transcribeMedia)(system, separation);
+            const speakerIds = new Map(document.speakers.map((speaker) => [speaker.id, remoteSpeakerId(speaker.id)]));
+            // The final combined timeline needs fresh evidence IDs. Per-track IDs can collide.
+            const remote = document.transcript.map(({ id: _id, ...segment }) => ({ ...segment,
+              speaker: speakerIds.get(segment.speaker ?? '') ?? remoteSpeakerId('UNKNOWN'),
+            }));
+            // Known voices and Meet's hints name only what they agree on.
+            remoteVoices = new Map([...voices].flatMap(([id, voice]) => (speakerIds.has(id) ? [[speakerIds.get(id)!, voice] as const] : [])));
+            const names = nameRemoteSpeakers(meetSamples, remote, matchKnownVoices(remoteVoices));
+            voiceNames = names.voices;
+            systemSegments.push(...labelMeet(remote, names.meet));
+            separated = true;
+            speakerAnalysis = { status: 'complete', model: document.speakerAnalysis?.model ?? diarizationStatus().model,
+              detail: 'Remote voices separated locally. Microphone is a separate source; names need confirmation.' };
+          } catch (error) {
+            if (options.strictSpeakers) throw error;
+            speakerAnalysis = { status: 'failed', detail: 'Speaker separation failed. Transcript kept with source labels. Press V to check setup or retry.' };
+            options.onStatus?.(speakerAnalysis.detail);
+          }
+        } else if (!options.remoteRoute && options.diarizeSystemAudio !== false) {
+          speakerAnalysis = { status: 'unavailable', detail: 'Source labels only. Press V to set up local speaker separation.' };
+        }
+        if (!separated) {
+          if (options.remoteRoute) {
+            systemSegments.push(...await remoteTrackSegments(
+              absoluteManifest, manifest, 'system-audio', 'SYSTEM', options.remoteRoute,
+              options.remoteTranscriber ?? runHumainTranscription, options.onStatus, labelMeet,
+            ));
+          } else if (system) {
+            options.onStatus?.('Final system-audio transcription…');
+            systemSegments.push(...trackSegments(await (options.localTranscriber ?? transcribeWithTimestamps)(system), 'SYSTEM', labelMeet));
+          }
+        }
+      }
+    };
+    // Local Whisper keeps the GPU busy while speaker separation and speech
+    // detection use the CPU and Neural Engine. With memory for both, the
+    // microphone pass runs beside system audio instead of before it.
+    if (!options.remoteRoute && (options.concurrentTracks ?? concurrentTrackTranscription())) {
+      // Both finish before temporary tracks are removed, even if one fails.
+      const results = await Promise.allSettled([transcribeMicrophone(), transcribeSystem()]);
+      for (const result of results) if (result.status === 'rejected') throw result.reason;
+    } else {
+      await transcribeMicrophone();
+      await transcribeSystem();
     }
+    const segments = [...microphoneSegments, ...systemSegments];
     const reconciled = segments.toSorted((left, right) => left.start - right.start)
       .reduce<readonly TranscriptSegment[]>((current, segment) => (
         reconcileCaptureEcho(current, segment)
@@ -360,7 +405,7 @@ export async function finalizeCaptureTranscript(
     const duration = Math.max(0, ...manifest.chunks.map((chunk) => chunk.endMs)) / 1_000;
     if (meetSpeakers.size > 0) speakerAnalysis = { status: 'platform-hints',
       detail: 'Names suggested by Google Meet speaking indicators. Review overlap and speaker changes; other computer audio may be misattributed.' };
-    return createTranscriptRecord({
+    const record = createTranscriptRecord({
       speakerAnalysis,
       transcript: [...reconciled],
       speakers: [
@@ -378,6 +423,9 @@ export async function finalizeCaptureTranscript(
       title: options.title ?? `Recovered live capture ${new Date(manifest.createdAt).toLocaleString()}`,
       source: { filename: 'Live capture session', duration, format: 'capture-session/0.1' },
     });
+    // The voices go to the local voice library, never into the transcript.
+    try { saveMeetingVoices(record.id, remoteVoices); } catch { /* Naming a speaker later just won't learn the voice. */ }
+    return applyVoiceSuggestions(record, voiceNames);
   } finally {
     for (const path of temporaryTracks) {
       if (existsSync(path)) rmSync(path, { force: true });

@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url';
 import { probeBackgroundMeetingAccessibility } from './meeting-accessibility-permission.ts';
 import { meetingHostRegistrationWarning } from './meeting-host-registration.ts';
 import type { CaptureSessionStore, CaptureSessionManifest } from './capture-session.ts';
+import { namesAgree } from './speaker-labeling.ts';
 import type { Speaker, TranscriptSegment } from './transcript-types.ts';
+import type { VoiceMatch } from './voiceprints.ts';
 
 export type MeetBrowser = 'chrome' | 'safari';
 export type MeetBrowserMode = MeetBrowser | 'auto';
@@ -218,6 +220,80 @@ export function meetSpeakerForSegment(samples: readonly MeetSample[], segment: P
     matched = a.source ? { ...a.speaker, source: a.source } : a.speaker; coverage += overlap;
   }
   return coverage / (segment.end - segment.start) >= 0.9 ? matched : undefined;
+}
+
+/** Meet must have seen this much of a voice before the rest of it takes the name. */
+const CLUSTER_EVIDENCE_SECONDS = 15;
+
+export interface RemoteNames {
+  /** Meet's speaker for each segment, from what Meet saw then or, failing that, from its voice. */
+  meet: Array<MeetSpeaker | undefined>;
+  /** The voice matches that Meet doesn't contradict. */
+  voices: Map<string, VoiceMatch>;
+}
+
+/**
+ * Join Meet's hints, which cover only the stretches when Meet could be read
+ * (not full screen, another desktop or a background tab), with the voice
+ * clusters and known voices. Wrong names are worse than none, so:
+ *
+ * - A segment Meet saw keeps exactly what Meet saw (meetSpeakerForSegment).
+ * - A segment Meet didn't see takes the name of its voice when Meet saw at
+ *   least 15 s of that voice, 90% of it as one person, and saw that person
+ *   80% of the time in this voice, and no known voice says otherwise.
+ * - A known voice's name is dropped where Meet saw that voice as someone else
+ *   for more than a tenth of the time it saw it, or gave the name to another voice.
+ *
+ * Only diarized remote voices (REMOTE_*) are clusters; plain computer audio
+ * mixes everyone and takes names segment by segment, as before.
+ *
+ * Simulated on 13 AMI meetings (each person a Meet tile, the indicator 0.3 s
+ * behind the audio), with Meet readable for only the first 30% of each call:
+ * names on 17% of words from Meet alone, 68% with voices joined, 0.25% of them
+ * wrong (the separation's own mistakes). Readable one 2-minute stretch in
+ * three: 14% and 84%, 0.21% wrong.
+ */
+export function nameRemoteSpeakers(
+  samples: readonly MeetSample[],
+  segments: readonly Pick<TranscriptSegment, 'start' | 'end' | 'speaker'>[],
+  voiceMatches: ReadonlyMap<string, VoiceMatch> = new Map(),
+): RemoteNames {
+  const meet = segments.map((segment) => (segment.speaker === 'LOCAL' ? undefined : meetSpeakerForSegment(samples, segment)));
+  const cluster = (speaker?: string) => Boolean(speaker?.startsWith('REMOTE_') && !speaker.endsWith('UNKNOWN'));
+  const seen = new Map<string, Map<string, { speaker: MeetSpeaker; seconds: number }>>();
+  const seenPerson = new Map<string, number>();
+  for (const [index, segment] of segments.entries()) {
+    const speaker = meet[index];
+    if (!speaker || !cluster(segment.speaker)) continue;
+    const voices = seen.get(segment.speaker!) ?? new Map();
+    const entry = voices.get(speaker.id) ?? { speaker, seconds: 0 };
+    entry.seconds += segment.end - segment.start;
+    voices.set(speaker.id, entry);
+    seen.set(segment.speaker!, voices);
+    seenPerson.set(speaker.id, (seenPerson.get(speaker.id) ?? 0) + segment.end - segment.start);
+  }
+  const voices = new Map(voiceMatches);
+  const clusterNames = new Map<string, MeetSpeaker>();
+  for (const [id, people] of seen) {
+    const total = [...people.values()].reduce((sum, entry) => sum + entry.seconds, 0);
+    const [top] = [...people.values()].sort((a, b) => b.seconds - a.seconds);
+    const match = voices.get(id);
+    if (match && [...people.values()].some((entry) => !namesAgree(entry.speaker.label, match.name) && entry.seconds > 0.1 * total)) {
+      voices.delete(id);
+    }
+    if (!top || top.seconds < CLUSTER_EVIDENCE_SECONDS || top.seconds < 0.9 * total ||
+        top.seconds < 0.8 * (seenPerson.get(top.speaker.id) ?? Infinity)) continue;
+    if (match && !namesAgree(top.speaker.label, match.name)) continue;
+    clusterNames.set(id, top.speaker);
+  }
+  // One person, one voice: a known voice can't be someone Meet found in another voice.
+  for (const [id, match] of voices) {
+    if ([...clusterNames].some(([other, speaker]) => other !== id && namesAgree(speaker.label, match.name))) voices.delete(id);
+  }
+  return {
+    meet: meet.map((speaker, index) => speaker ?? clusterNames.get(segments[index]!.speaker ?? '')),
+    voices,
+  };
 }
 
 export function readMeetSamples(manifestPath: string, manifest: CaptureSessionManifest): MeetSample[] {

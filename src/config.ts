@@ -13,6 +13,8 @@ import type { MeetingCapturePolicy } from './calendar.ts';
 import { meetingApps, type MeetingAutomationConfig } from './meeting-automation.ts';
 import { MODEL_EFFORTS, type ModelEffort, type HumainBackend, type HumainMeetingRoute } from './humain-client.ts';
 import type { MeetingEnrichmentMode } from './meeting-artifact.ts';
+import { VIDEO_QUALITIES, type VideoQuality } from './video-capture.ts';
+import type { MeetingVideoConfig } from './video-recording.ts';
 import {
   DEFAULT_TRANSCRIPTION_ROUTING,
   type TranscriptionMode,
@@ -48,6 +50,8 @@ export interface SeashellMeetingConfig {
     leadMinutes?: number;
   };
   automation?: MeetingAutomationConfig;
+  /** Record the call's window alongside its audio. */
+  video?: MeetingVideoConfig;
 }
 
 export type MeetingRouteRole = 'observer' | 'reconciliation' | 'chat';
@@ -86,14 +90,14 @@ function parseRoute(value: unknown, label: string): HumainMeetingRoute | undefin
   };
 }
 
-export type SpeakerEngineName = 'native' | 'nemotron3' | 'pyannote';
+export type SpeakerEngineName = 'auto' | 'native' | 'nemotron3' | 'pyannote';
 
 export interface SeashellConfig {
   libraryDir?: string;
   saveByDefault?: boolean;
   meeting?: SeashellMeetingConfig;
   transcription?: TranscriptionRoutingConfig;
-  /** Local speaker separation: native (Core ML, the default), nemotron3 (NVIDIA, Core ML) or pyannote (Python). */
+  /** Local speaker separation: auto (both Core ML engines, the default), native (community-1), nemotron3 (NVIDIA) or pyannote (Python). */
   speakers?: { engine?: SpeakerEngineName };
 }
 
@@ -111,6 +115,39 @@ function optionalNonNegativeInteger(value: unknown, label: string): number | und
     throw new Error(`Sea Shell config ${label} must be a non-negative integer`);
   }
   return Number(value);
+}
+
+function parseMeetingVideoConfig(value: unknown): MeetingVideoConfig | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Sea Shell config meeting.video must be an object');
+  }
+  const candidate = value as Record<string, unknown>;
+  const unknown = Object.keys(candidate).find((key) => !['enabled', 'apps', 'fps', 'quality'].includes(key));
+  if (unknown) throw new Error(`Sea Shell config meeting.video.${unknown} is not supported`);
+  if (candidate.enabled !== undefined && typeof candidate.enabled !== 'boolean') {
+    throw new Error('Sea Shell config meeting.video.enabled must be a boolean');
+  }
+  if (candidate.fps !== undefined && (!Number.isSafeInteger(candidate.fps) || Number(candidate.fps) < 1 || Number(candidate.fps) > 30)) {
+    throw new Error('Sea Shell config meeting.video.fps must be a whole number from 1 to 30');
+  }
+  if (candidate.quality !== undefined && !VIDEO_QUALITIES.includes(candidate.quality as VideoQuality)) {
+    throw new Error(`Sea Shell config meeting.video.quality must be ${VIDEO_QUALITIES.join(', ')}`);
+  }
+  if (candidate.apps !== undefined) {
+    const apps = candidate.apps as Record<string, unknown>;
+    const known = new Set(meetingApps().map((app) => app.id));
+    if (!apps || typeof apps !== 'object' || Array.isArray(apps) ||
+        Object.entries(apps).some(([id, enabled]) => !known.has(id) || typeof enabled !== 'boolean')) {
+      throw new Error(`Sea Shell config meeting.video.apps maps ${[...known].join(', ')} to true or false`);
+    }
+  }
+  return {
+    ...(candidate.enabled === undefined ? {} : { enabled: candidate.enabled }),
+    ...(candidate.apps === undefined ? {} : { apps: { ...(candidate.apps as Record<string, boolean>) } }),
+    ...(candidate.fps === undefined ? {} : { fps: candidate.fps as number }),
+    ...(candidate.quality === undefined ? {} : { quality: candidate.quality as VideoQuality }),
+  };
 }
 
 function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
@@ -298,6 +335,7 @@ function parseMeetingConfig(value: unknown): SeashellMeetingConfig | undefined {
     ...(calendar === undefined ? {} : { calendar }),
     ...(automation === undefined ? {} : { automation }),
     ...(routes === undefined ? {} : { routes }),
+    ...(meeting.video === undefined ? {} : { video: parseMeetingVideoConfig(meeting.video) }),
   };
 }
 
@@ -390,8 +428,8 @@ export function loadConfig(path = defaultConfigPath()): SeashellConfig {
   }
   const speakers = candidate.speakers as Record<string, unknown> | undefined;
   if (speakers !== undefined && (!speakers || typeof speakers !== 'object' || Array.isArray(speakers) ||
-      (speakers.engine !== undefined && speakers.engine !== 'native' && speakers.engine !== 'nemotron3' && speakers.engine !== 'pyannote'))) {
-    throw new Error('Sea Shell config speakers.engine must be native, nemotron3 or pyannote');
+      (speakers.engine !== undefined && !['auto', 'native', 'nemotron3', 'pyannote'].includes(speakers.engine as string)))) {
+    throw new Error('Sea Shell config speakers.engine must be auto, native, nemotron3 or pyannote');
   }
   return {
     ...(typeof candidate.libraryDir === 'string' ? { libraryDir: candidate.libraryDir } : {}),
@@ -506,6 +544,16 @@ export function updateMeetingConfig(
                 ? currentMeeting.automation as Record<string, unknown>
                 : {}),
               ...patch.automation,
+            },
+          }),
+      ...(patch.video === undefined
+        ? {}
+        : {
+            video: {
+              ...(currentMeeting.video && typeof currentMeeting.video === 'object'
+                ? currentMeeting.video as Record<string, unknown>
+                : {}),
+              ...patch.video,
             },
           }),
     },

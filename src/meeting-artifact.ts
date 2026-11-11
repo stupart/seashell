@@ -5,6 +5,7 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -27,6 +28,9 @@ export const MEETING_CLAIM_TYPES = [
   'note',
   'resource',
   'highlight',
+  'risk',
+  'open_question',
+  'follow_up',
 ] as const;
 
 export type MeetingClaimType = typeof MEETING_CLAIM_TYPES[number];
@@ -58,7 +62,10 @@ export interface MeetingClaim {
   evidenceSegmentIds: string[];
   confidence: number;
   speakerId?: string;
+  /** Who owns an action or follow-up, as said. */
   person?: string;
+  /** When an action or follow-up is due, as said: "by Friday". */
+  due?: string;
 }
 
 /** One point of templated notes, with the transcript segments it rests on. */
@@ -100,6 +107,15 @@ export class MeetingAiOffError extends Error {
     super('AI is off for this meeting. Turn it on with [N] in the meeting, or: seashell meeting ai <id> on');
     this.name = 'MeetingAiOffError';
   }
+}
+
+/** What one extractor found in a meeting: its fields in order, every item cited. */
+export interface MeetingInsight {
+  extractor: string;
+  createdAt: string;
+  runId: string;
+  summary?: string;
+  fields: { name: string; items: MeetingNoteItem[] }[];
 }
 
 export interface MeetingProvisionalOverlay {
@@ -144,6 +160,16 @@ export interface MeetingArtifact {
   provisionalClaims: MeetingClaim[];
   analysis?: MeetingAnalysis;
   ai?: MeetingAiSettings;
+  /** The app the call ran in, when the background recorder saw it: "Zoom". */
+  app?: string;
+  /** Extractor results, also written to insights/<name>.json and .md. */
+  insights?: MeetingInsight[];
+  /**
+   * Words changed after the notes were written (a corrected line, a removed
+   * phantom line) and the notes were kept rather than cleared. They may no
+   * longer match the transcript until notes run again.
+   */
+  notesOutdated?: { at: string; reason: string };
   chat: MeetingChatMessage[];
   failure?: string;
   /** Content binding, independent of positional segment IDs and modified times. */
@@ -278,6 +304,10 @@ export function parseMeetingClaim(value: unknown, label = 'meeting claim'): Meet
     ...(optionalString(claim.person, `${label} person`) === undefined
       ? {}
       : { person: claim.person as string }),
+    // Humain allows a due date only on actions and follow-ups, including on claims sent back to it.
+    ...(optionalString(claim.due, `${label} due`) === undefined || (claim.type !== 'action_item' && claim.type !== 'follow_up')
+      ? {}
+      : { due: claim.due as string }),
   };
 }
 
@@ -328,30 +358,56 @@ function parseAnalysis(value: unknown): MeetingAnalysis | undefined {
   };
 }
 
+/** A cited point: notes, insights. Every one must rest on at least one segment. */
+export function parseMeetingNoteItems(value: unknown, label: string): MeetingNoteItem[] {
+  if (!Array.isArray(value)) throw new Error(`${label} items must be an array`);
+  return value.map((item, itemIndex) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error(`${label} item ${itemIndex} is invalid`);
+    }
+    const note = item as Record<string, unknown>;
+    if (!Array.isArray(note.evidenceSegmentIds) || note.evidenceSegmentIds.length === 0 ||
+        note.evidenceSegmentIds.some((id) => typeof id !== 'string' || !id.trim())) {
+      throw new Error(`${label} item ${itemIndex} must cite transcript segments`);
+    }
+    return {
+      text: string(note.text, `${label} item ${itemIndex} text`),
+      evidenceSegmentIds: [...note.evidenceSegmentIds] as string[],
+    };
+  });
+}
+
 export function parseMeetingNotes(value: unknown, label = 'meeting notes'): MeetingNoteSection[] {
   if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
   return value.map((raw, index) => {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`${label} section ${index} is invalid`);
     const section = raw as Record<string, unknown>;
-    if (!Array.isArray(section.items)) throw new Error(`${label} section ${index} items must be an array`);
     return {
       heading: string(section.heading, `${label} section ${index} heading`),
-      items: section.items.map((item, itemIndex) => {
-        if (!item || typeof item !== 'object' || Array.isArray(item)) {
-          throw new Error(`${label} section ${index} item ${itemIndex} is invalid`);
-        }
-        const note = item as Record<string, unknown>;
-        if (!Array.isArray(note.evidenceSegmentIds) || note.evidenceSegmentIds.length === 0 ||
-            note.evidenceSegmentIds.some((id) => typeof id !== 'string' || !id.trim())) {
-          throw new Error(`${label} section ${index} item ${itemIndex} must cite transcript segments`);
-        }
-        return {
-          text: string(note.text, `${label} section ${index} item ${itemIndex} text`),
-          evidenceSegmentIds: [...note.evidenceSegmentIds] as string[],
-        };
-      }),
+      items: parseMeetingNoteItems(section.items, `${label} section ${index}`),
     };
   });
+}
+
+export function parseMeetingInsight(value: unknown, label = 'meeting insight'): MeetingInsight {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`);
+  const insight = value as Record<string, unknown>;
+  if (!Array.isArray(insight.fields)) throw new Error(`${label} fields must be an array`);
+  const summary = typeof insight.summary === 'string' && insight.summary.trim() ? insight.summary.trim() : undefined;
+  return {
+    extractor: string(insight.extractor, `${label} extractor`),
+    createdAt: string(insight.createdAt, `${label} createdAt`),
+    runId: string(insight.runId, `${label} runId`),
+    ...(summary ? { summary } : {}),
+    fields: insight.fields.map((raw, index) => {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`${label} field ${index} is invalid`);
+      const field = raw as Record<string, unknown>;
+      return {
+        name: string(field.name, `${label} field ${index} name`),
+        items: parseMeetingNoteItems(field.items, `${label} field ${index}`),
+      };
+    }),
+  };
 }
 
 function parseAiSettings(value: unknown): MeetingAiSettings | undefined {
@@ -425,6 +481,9 @@ export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): Mee
   const analysis = parseAnalysis(artifact.analysis);
   const ai = parseAiSettings(artifact.ai);
   const transcriptEvidence = parseMeetingEvidence(artifact.transcriptEvidence);
+  if (artifact.insights !== undefined && !Array.isArray(artifact.insights)) throw new Error(`${path} insights must be an array`);
+  const insights = artifact.insights?.map((insight, index) => parseMeetingInsight(insight, `insight ${index}`));
+  const outdated = artifact.notesOutdated as Record<string, unknown> | undefined;
   return {
     schemaVersion: 1,
     meetingId: string(artifact.meetingId, 'meetingId'),
@@ -453,6 +512,11 @@ export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): Mee
       parseMeetingClaim(claim, `provisional claim ${index}`)),
     ...(analysis === undefined ? {} : { analysis }),
     ...(ai === undefined || Object.keys(ai).length === 0 ? {} : { ai }),
+    ...(optionalString(artifact.app, 'meeting app') === undefined ? {} : { app: artifact.app as string }),
+    ...(insights?.length ? { insights } : {}),
+    ...(outdated === undefined ? {} : { notesOutdated: {
+      at: string(outdated?.at, 'notesOutdated at'), reason: string(outdated?.reason, 'notesOutdated reason'),
+    } }),
     chat: artifact.chat.map((raw, index) => {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
         throw new Error(`chat message ${index} is invalid`);
@@ -502,9 +566,17 @@ export function loadMeetingArtifact(
   }
 }
 
+/** "Dana · by Friday": who owns an action or follow-up and when it is due, as said. */
+export function claimOwnerAndDue(claim: Pick<MeetingClaim, 'person' | 'due'>): string | undefined {
+  return [claim.person, claim.due].filter(Boolean).join(' · ') || undefined;
+}
+
 function markdownList(claims: MeetingClaim[]): string {
   return claims.length > 0
-    ? claims.map((claim) => `- ${claim.text} _(${claim.evidenceSegmentIds.join(', ')})_`).join('\n')
+    ? claims.map((claim) => {
+      const owner = claim.type === 'action_item' || claim.type === 'follow_up' ? claimOwnerAndDue(claim) : undefined;
+      return `- ${claim.text}${owner ? ` (${owner})` : ''} _(${claim.evidenceSegmentIds.join(', ')})_`;
+    }).join('\n')
     : '- None captured.';
 }
 
@@ -522,6 +594,36 @@ export function templatedNotesMarkdown(title: string, analysis: MeetingAnalysis)
       : '- Not discussed.'
   }`);
   return `# ${title}\n\n${analysis.template ? `_${analysis.template} notes_\n\n` : ''}${analysis.summary}\n\n${sections.join('\n\n')}\n`;
+}
+
+/** A file name for an extractor: "Customer pains" is customer-pains. */
+export function insightFileName(extractor: string): string {
+  return extractor.normalize('NFKD').replace(/[^\p{Letter}\p{Number}]+/gu, '-')
+    .replace(/^-+|-+$/gu, '').toLowerCase().slice(0, 60) || 'insight';
+}
+
+export function insightMarkdown(title: string, insight: MeetingInsight): string {
+  const fields = insight.fields.map((field) => `## ${field.name}\n\n${field.items.length
+    ? field.items.map((item) => `- ${item.text} _(${item.evidenceSegmentIds.join(', ')})_`).join('\n')
+    : '- Not covered.'}`);
+  return `# ${insight.extractor}\n\n_${title}_\n\n${insight.summary ? `${insight.summary}\n\n` : ''}${fields.join('\n\n')}\n`;
+}
+
+/** insights/ mirrors meeting.json: one JSON and one Markdown file per extractor, nothing stale. */
+function writeInsightProjections(directory: string, artifact: MeetingArtifact): void {
+  const folder = join(directory, 'insights');
+  const wanted = new Set<string>();
+  for (const insight of artifact.insights ?? []) {
+    const name = insightFileName(insight.extractor);
+    wanted.add(`${name}.json`); wanted.add(`${name}.md`);
+    atomicWrite(join(folder, `${name}.json`), `${JSON.stringify({ schemaVersion: 1, meetingId: artifact.meetingId,
+      title: artifact.title, transcriptRevision: artifact.transcriptEvidence?.revision, ...insight }, null, 2)}\n`);
+    atomicWrite(join(folder, `${name}.md`), insightMarkdown(artifact.title, insight));
+  }
+  if (!existsSync(folder)) return;
+  for (const file of readdirSync(folder)) {
+    if (/\.(?:json|md)$/u.test(file) && !wanted.has(file)) rmSync(join(folder, file), { force: true });
+  }
 }
 
 function writeMeetingProjections(
@@ -543,6 +645,10 @@ function writeMeetingProjections(
   atomicWrite(join(directory, 'documents', 'actions.md'), documentFor(artifact, 'action_item', 'Actions'));
   atomicWrite(join(directory, 'documents', 'notes.md'), documentFor(artifact, 'note', 'Notes'));
   atomicWrite(join(directory, 'documents', 'resources.md'), documentFor(artifact, 'resource', 'Resources'));
+  atomicWrite(join(directory, 'documents', 'risks.md'), documentFor(artifact, 'risk', 'Risks'));
+  atomicWrite(join(directory, 'documents', 'open-questions.md'), documentFor(artifact, 'open_question', 'Open questions'));
+  atomicWrite(join(directory, 'documents', 'follow-ups.md'), documentFor(artifact, 'follow_up', 'Follow-ups'));
+  writeInsightProjections(directory, artifact);
   if (analysis?.notes) {
     atomicWrite(join(directory, 'documents', 'meeting-notes.md'), templatedNotesMarkdown(artifact.title, analysis));
   } else {
@@ -617,13 +723,14 @@ function renamedInNotes(artifact: MeetingArtifact, rename: { from: string; to: s
     provisionalClaims: renamed(artifact.provisionalClaims),
     chat: renamed(artifact.chat),
     ...(artifact.analysis ? { analysis: renamed(artifact.analysis) } : {}),
+    ...(artifact.insights ? { insights: renamed(artifact.insights) } : {}),
   };
 }
 
 export function synchronizeMeetingTranscript(
   directory: string,
   record: TranscriptRecord,
-  options: { namesOnly?: { from: string; to: string } } = {},
+  options: { namesOnly?: { from: string; to: string }; keepNotes?: string } = {},
 ): MeetingArtifact | undefined {
   const path = join(directory, 'meeting.json');
   if (!existsSync(path)) return undefined;
@@ -637,6 +744,17 @@ export function synchronizeMeetingTranscript(
   if (options.namesOnly) {
     const updated: MeetingArtifact = { ...renamedInNotes(artifact, options.namesOnly),
       transcriptEvidence: evidence, updatedAt: new Date().toISOString() };
+    atomicWrite(path, `${JSON.stringify(updated, null, 2)}\n`);
+    writeMeetingProjections(directory, updated, record);
+    return updated;
+  }
+  // A corrected word or a removed phantom line leaves the meeting's notes
+  // mostly right, so they are kept and marked rather than thrown away. Segment
+  // IDs do not move, so every citation still points at the same moment.
+  if (options.keepNotes) {
+    const updated: MeetingArtifact = { ...artifact, transcriptEvidence: evidence, updatedAt: new Date().toISOString(),
+      ...(artifact.analysis || artifact.provisionalClaims.length || artifact.chat.length || artifact.insights?.length
+        ? { notesOutdated: { at: new Date().toISOString(), reason: options.keepNotes } } : {}) };
     atomicWrite(path, `${JSON.stringify(updated, null, 2)}\n`);
     writeMeetingProjections(directory, updated, record);
     return updated;
@@ -656,6 +774,8 @@ export function synchronizeMeetingTranscript(
     },
     provisionalClaims: change === 'revised' ? [] : artifact.provisionalClaims,
     analysis: undefined,
+    insights: undefined,
+    notesOutdated: undefined,
     chat: [],
     failure: undefined,
   };

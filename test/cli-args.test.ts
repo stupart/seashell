@@ -347,3 +347,81 @@ test('saved speaker identification creates an explicit library action', () => {
     kind: 'library', action: { kind: 'speakers-identify', id: 'meeting-1' }, json: true,
   });
 });
+
+describe('video CLI parsing', () => {
+  test('record --video names a window or a display, and either implies video', () => {
+    expect(parseCliArgs(['record'])).toEqual({ kind: 'record', command: 'start', json: false });
+    expect(parseCliArgs(['record', '--video', '--json'])).toEqual({ kind: 'record', command: 'start', json: true, video: {} });
+    expect(parseCliArgs(['record', '--video', '--window', 'Google Chrome'])).toEqual({
+      kind: 'record', command: 'start', json: false, video: { window: 'Google Chrome' } });
+    expect(parseCliArgs(['record', '--display', '2'])).toEqual({ kind: 'record', command: 'start', json: false, video: { display: 2 } });
+    expect(parseCliArgs(['record', 'stop', '--json'])).toEqual({ kind: 'record', command: 'stop', json: true });
+    for (const args of [['record', 'stop', '--video'], ['record', '--window', 'zoom', '--display', '1'],
+      ['record', '--display', '0'], ['record', '--window'], ['record', 'later']]) {
+      expect(() => parseCliArgs(args)).toThrow();
+    }
+  });
+
+  test('meeting video covers permission, settings and one meeting', () => {
+    const video = (...args: string[]) => (parseCliArgs(['meeting', 'video', ...args]) as { action: unknown }).action;
+    expect(video()).toEqual({ kind: 'video', operation: 'status' });
+    expect(video('--status', '--json')).toEqual({ kind: 'video', operation: 'status' });
+    expect(video('setup')).toEqual({ kind: 'video', operation: 'setup' });
+    expect(video('off')).toEqual({ kind: 'video', operation: 'off' });
+    expect(video('Zoom', 'on')).toEqual({ kind: 'video', operation: 'on', app: 'zoom' });
+    expect(video('meeting-20261110-ab12', '--at', '12:34')).toEqual({ kind: 'video', operation: 'open', id: 'meeting-20261110-ab12', atSeconds: 754 });
+    expect(video('meeting-1', '--at', '1:02:03')).toMatchObject({ atSeconds: 3723 });
+    expect(video('meeting-1', '--at', '90')).toMatchObject({ atSeconds: 90 });
+    expect(parseCliArgs(['meeting', 'video', 'meeting-1', '--library-dir', '/tmp/lib', '--json']))
+      .toMatchObject({ kind: 'meeting', libraryDir: '/tmp/lib', json: true });
+    for (const args of [['setup', '--status'], ['on', '--at', '1:00'], ['meeting-1', '--at', 'soon'], ['meeting-1', '--at', '1:2:3:4'],
+      ['a', 'b', 'c'], ['zoom', 'maybe'], ['--loud']]) {
+      expect(() => parseCliArgs(['meeting', 'video', ...args])).toThrow();
+    }
+  });
+});
+
+describe('meeting AI steering and asking', () => {
+  test('seashell query parses the kind and its filters', () => {
+    expect(parseCliArgs(['query', 'actions', '--person', 'Dana', '--since', '2026-10-01', '--json'])).toEqual({
+      kind: 'query', noteKind: 'actions', person: 'Dana', since: '2026-10-01', json: true });
+    expect(parseCliArgs(['query', '--about', 'pricing page', '--limit', '5'])).toEqual({ kind: 'query', about: 'pricing page', limit: 5, json: false });
+    expect(parseCliArgs(['query', 'all'])).toEqual({ kind: 'query', json: false });
+    expect(() => parseCliArgs(['query', 'actions', 'risks'])).toThrow('Usage: seashell query');
+  });
+
+  test('library clean-phantoms parses with ids and --dry-run', () => {
+    expect(parseCliArgs(['library', 'clean-phantoms', '--dry-run'])).toMatchObject({ kind: 'library', action: { kind: 'clean-phantoms', ids: [], dryRun: true } });
+    expect(parseCliArgs(['library', 'clean-phantoms', 'a', 'b', '--json'])).toMatchObject({ action: { kind: 'clean-phantoms', ids: ['a', 'b'], dryRun: false }, json: true });
+    expect(() => parseCliArgs(['library', 'list', '--dry-run'])).toThrow('--dry-run only applies');
+  });
+
+  test('prompts commands parse', () => {
+    expect(parseCliArgs(['prompts'])).toEqual({ kind: 'prompts', action: 'list', json: false });
+    expect(parseCliArgs(['prompts', 'reset', 'notes', '--json'])).toEqual({ kind: 'prompts', action: 'reset', name: 'notes', json: true });
+    expect(() => parseCliArgs(['prompts', 'reset'])).toThrow('Usage: seashell prompts');
+  });
+
+  test('extract and extractors parse as commands', () => {
+    expect(parseCliArgs(['extract', 'acme-call', 'Customer', 'pains'])).toEqual({ kind: 'extract', id: 'acme-call', extractor: 'Customer pains', json: false });
+    expect(parseCliArgs(['extractors', '--json'])).toEqual({ kind: 'extractors', json: true });
+    expect(() => parseCliArgs(['extract', 'acme-call'])).toThrow('Usage: seashell extract');
+  });
+
+  test('automations parse as commands', () => {
+    expect(parseCliArgs(['automations'])).toEqual({ kind: 'automations', action: 'list', json: false });
+    expect(parseCliArgs(['automations', 'run', 'weekly-sync', 'Post', 'it'])).toEqual({ kind: 'automations', action: 'run', id: 'weekly-sync', name: 'Post it', json: false });
+    expect(() => parseCliArgs(['automations', 'run'])).toThrow('Usage: seashell automations');
+  });
+
+  test('ai test parses', () => {
+    expect(parseCliArgs(['ai', 'test', '--json'])).toEqual({ kind: 'ai', action: 'test', json: true });
+  });
+});
+
+test('meeting computer-audio checks, or at the Mac runs the one-time check', () => {
+  expect(parseCliArgs(['meeting', 'computer-audio'])).toMatchObject({ kind: 'meeting', action: { kind: 'computer-audio', operation: 'check' } });
+  expect(parseCliArgs(['meeting', 'computer-audio', 'setup', '--json'])).toMatchObject({
+    kind: 'meeting', action: { kind: 'computer-audio', operation: 'setup' }, json: true });
+  expect(() => parseCliArgs(['meeting', 'computer-audio', 'allow'])).toThrow('seashell meeting computer-audio [setup|check]');
+});

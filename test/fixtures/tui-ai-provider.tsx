@@ -38,8 +38,13 @@ const until=async(check:()=>boolean)=>{const end=Date.now()+3000;while(!check()&
 const type=async(text:string)=>{input.write(text);await Bun.sleep(80);};
 try{
   await until(()=>starts===1);
-  await type('p');await until(()=>rendered.includes('Advanced · models and effort'));
-  // Existing power-user flow remains available behind Advanced.
+  // AI is a row in Settings: AI notes, the tenth row; narrow, Enter opens the row first.
+  await type(',');await until(()=>stripVTControlCharacters(rendered).includes('AI notes'));
+  for(let i=0;i<20;i++)await type('\x1b[A');
+  for(let i=0;i<9;i++)await type('\x1b[B');
+  await type('\r');if(columns<72)await type('\r');
+  await until(()=>rendered.includes('Models…'));
+  // Each role's model and effort, and the recommended ones, are under Models.
   await type('\x1b[B');await type('\x1b[B');await type('\r');
   await until(()=>/models by role/.test(stripVTControlCharacters(rendered)));
   await type('\r');await until(()=>/Codex · Ready/.test(stripVTControlCharacters(rendered)));

@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import { readFile } from 'fs/promises';
 import { createServer } from 'net';
 import { normalizeQuietCaptureWav } from './live-system-audio.ts';
+import { transcriptionUsesGpu } from './local-asr-profile.ts';
 import {
   beginManagedProcessSession,
   trackChildProcess,
@@ -14,6 +15,7 @@ export interface LocalAsrProfile {
   readonly threads: number;
   readonly requestTimeoutMs: number;
   readonly idleTimeoutMs: number;
+  /** Defaults to the CPU on Intel Macs; see transcriptionUsesGpu. */
   readonly disableGpu?: boolean;
 }
 
@@ -88,13 +90,15 @@ export class OwnedWhisperServer {
   private activeRequests = 0;
   private stopTrackingChild: (() => void) | undefined;
   private endManagedSession: (() => void) | undefined;
-  private forceCpu = false;
+  private forceCpu: boolean;
   private generation = 0;
 
   constructor(
     private readonly serverPath: string,
     private readonly profile: LocalAsrProfile,
-  ) {}
+  ) {
+    this.forceCpu = !transcriptionUsesGpu();
+  }
 
   async transcribe(audioFile: string, signal?: AbortSignal): Promise<string> {
     await this.ensureStarted();

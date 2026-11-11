@@ -221,7 +221,13 @@ export function disableMeetingLaunchAtLogin(
   return meetingLaunchAtLoginStatus(options);
 }
 
+/** The login agent's event log, and the older half kept when it is rotated. */
+export function meetingWatchLogFiles(options: LaunchAtLoginOptions = {}): { path: string; rotatedPath: string } {
+  const { logsDir } = paths(options);
+  return { path: join(logsDir, 'meeting-watch.jsonl'), rotatedPath: join(logsDir, 'meeting-watch.1.jsonl') };
+}
+
 export function readMeetingWatchLog(options: LaunchAtLoginOptions = {}): string {
-  const path = join(paths(options).logsDir, 'meeting-watch.jsonl');
-  return existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const { path, rotatedPath } = meetingWatchLogFiles(options);
+  return [rotatedPath, path].map((file) => existsSync(file) ? readFileSync(file, 'utf8') : '').join('');
 }

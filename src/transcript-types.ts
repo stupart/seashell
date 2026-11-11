@@ -30,6 +30,16 @@ export interface TranscriptSegment {
 export interface Speaker {
   id: string;
   label: string;
+  /** Set when Sea Shell proposed the label; renaming the speaker clears it. */
+  suggestion?: SpeakerSuggestion;
+}
+
+/** A name matched from a known voice (src/voiceprints.ts), not given by a person. */
+export interface SpeakerSuggestion {
+  source: 'voice';
+  /** The label before the suggestion; renaming back to it undoes the suggestion. */
+  previous: string;
+  similarity: number;
 }
 
 export interface ActionItem {

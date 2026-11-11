@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.humain.seashell.screen-capture</string>
+  <key>CFBundleName</key>
+  <string>Seashell Screen Capture</string>
+  <!-- Bump only when the arguments/sidecar/exit-code contract changes: a new
+       protocol replaces the installed copy, and macOS then asks for Screen
+       Recording access again. -->
+  <key>SeashellHelperProtocol</key>
+  <string>1</string>
+</dict>
+</plist>

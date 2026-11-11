@@ -146,13 +146,15 @@ else
     if [ "${SEASHELL_SKIP_AUTOSTART:-0}" = "1" ]; then
         SETUP_ARGS+=(--no-autostart)
     fi
-    "$SCRIPT_DIR/seashell" "${SETUP_ARGS[@]}"
+    # No terminal input, so setup applies its defaults without opening the guided setup.
+    "$SCRIPT_DIR/seashell" "${SETUP_ARGS[@]}" </dev/null
 fi
 
 echo ""
 echo "Installation complete!"
 echo ""
 echo "Usage:"
+echo "  seashell setup                   - Guided setup: recorder, microphone, computer audio"
 echo "  seashell                         - Open live transcription + library"
 echo "  seashell video.mp4               - Transcribe any supported media"
 echo "  seashell transcribe --help       - See file transcription options"

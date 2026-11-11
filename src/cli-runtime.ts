@@ -3,6 +3,7 @@ import { checkMeetConnection, requestMeetAccessibilityPermission, meetPermission
 import { microphonePermission } from './microphone-permission.ts';
 import { calendarPermission } from './calendar-permission.ts';
 import { readFeatureStatuses, renderFeatureStatusTable } from './feature-status.ts';
+import { oneSidedNotifier } from './capture-health.ts';
 import { runMeetingsMcpServer } from './meetings-mcp.ts';
 import { installMeetingsMcp } from './mcp-install.ts';
 import { mergeMeetingFragments, planMeetingMerges } from './meeting-merge.ts';
@@ -16,6 +17,7 @@ import type {
   CliCommand,
   LibraryCommand,
   MeetingCommand,
+  MeetingVideoAction,
   TranscribeCommandOptions,
 } from './cli-args.ts';
 import {
@@ -59,9 +61,14 @@ import { transcribeMedia } from './transcription-service.ts';
 import { PACKAGE_VERSION, renderCapabilityManifest, seashellCapabilityManifest } from './capabilities.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
 import {
+  defaultSystemAudioHelper,
   parseNativeSystemAudioEvent,
-  SYSTEM_AUDIO_HELPER,
+  systemAudioIdentity,
+  systemAudioIdentityArguments,
 } from './live-system-audio.ts';
+import { readAudioChecks } from './audio-checks.ts';
+import { checkComputerAudio } from './audio-levels.ts';
+import { systemAudioRuntimeHelperPath } from './runtime-host.ts';
 import {
   CaptureSessionStore,
   captureManifestPath,
@@ -76,7 +83,9 @@ import {
   enableMeetingLaunchAtLogin,
   SEASHELL_LAUNCH_AGENT_LABEL,
   meetingLaunchAtLoginStatus,
+  meetingWatchLogFiles,
 } from './launch-at-login.ts';
+import { WarningRateLimit, watchLogWriter } from './watch-log.ts';
 import { MEETING_SIGNALS_HELPER, readMeetingSignalSnapshot } from './meeting-automation.ts';
 import { buildMeetingContext, loadMeetingContextFiles } from './meeting-context.ts';
 import { writeMeetingConsent } from './meeting-consent.ts';
@@ -87,7 +96,27 @@ import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { setupDiarization } from './diarization-setup.ts';
 import { compareSavedSpeakers, renderSpeakerComparison } from './speaker-compare.ts';
+import { forgetVoiceprint, listVoiceprints } from './voiceprints.ts';
 import { initializeFirstInstall } from './first-install.ts';
+import { SCREEN_CAPTURE_HELPER, screenCapturePermission } from './video-capture.ts';
+import { clearVideoRequest, DEFAULT_MEETING_VIDEO, startRecordingWithVideo } from './video-recording.ts';
+import { openMeetingVideo } from './video-meeting.ts';
+import { testMeetingAi, type MeetingAiRole } from './humain-client.ts';
+import { ensurePromptsDirectory, listPrompts, resetPrompt } from './prompts.ts';
+import { ensureExtractorsDirectory, loadExtractors, runAutomaticExtractors, runExtractor } from './extractors.ts';
+import {
+  afterMeetingReady,
+  askAutomationApprovalWithDialog,
+  automationDecision,
+  ensureAutomationsDirectory,
+  loadAutomations,
+  readAutomationRuns,
+  runAutomations,
+} from './automations.ts';
+import { queryNotes } from './meeting-memory.ts';
+import { cleanPhantoms } from './transcript-edits.ts';
+import { claimOwnerAndDue, type MeetingAttendee } from './meeting-artifact.ts';
+import type { MeetingIntelligenceCommand } from './cli-args.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const PROJECT_ROOT = join(dirname(__filename), '..');
@@ -285,7 +314,31 @@ async function executeLibrary(command: LibraryCommand): Promise<number> {
       print(command.json ? JSON.stringify({ trashedTo: path }, null, 2) : `Moved to ${path}`);
       return 0;
     }
+    case 'clean-phantoms':
+      return executeCleanPhantoms(libraryDir, command.action.ids, command.action.dryRun, command.json);
   }
+}
+
+/** Lines heard in silence, per meeting. A dry run changes nothing. */
+async function executeCleanPhantoms(libraryDir: string, ids: string[], dryRun: boolean, json: boolean): Promise<number> {
+  const results = await cleanPhantoms(libraryDir, {
+    dryRun, ids, onStatus: (message) => { if (!json) process.stderr.write(`${message}\n`); },
+  });
+  if (json) {
+    print(JSON.stringify({ dryRun, meetings: results }, null, 2));
+    return 0;
+  }
+  const found = results.filter((result) => result.phantoms > 0);
+  const problems = results.filter((result) => result.skipped && result.skipped !== 'no saved audio');
+  const total = found.reduce((sum, result) => sum + result.phantoms, 0);
+  print([
+    ...found.map((result) => `${result.title} (${result.id}): ${result.phantoms} of ${result.segments} lines ${dryRun ? 'heard in silence' : 'removed'}`),
+    ...problems.map((result) => `${result.title} (${result.id}): skipped, ${result.skipped}`),
+    `${results.length - results.filter((result) => result.skipped).length} meetings checked; ${total} lines ${dryRun ? 'heard in silence' : 'removed'}.`,
+    ...(dryRun && total ? ['Dry run: nothing changed. Remove them: seashell library clean-phantoms'] : []),
+    ...(!dryRun && total ? ['Each old transcript is in its meeting\'s history folder. Notes were kept and marked as possibly out of date.'] : []),
+  ].join('\n'));
+  return 0;
 }
 
 interface DoctorCheck {
@@ -302,7 +355,9 @@ export function doctorChecks(options: {
   meetingAccessibilityHelper?: string;
   systemAudioProbeTimeoutMs?: number;
 } = {}): DoctorCheck[] {
-  const systemAudioHelper = options.systemAudioHelper ?? SYSTEM_AUDIO_HELPER;
+  // The copy the recorder runs, so the probe tests the permission meetings use.
+  const systemAudioHelper = options.systemAudioHelper ?? defaultSystemAudioHelper();
+  const identity = options.systemAudioHelper ? 'inherited' : systemAudioIdentity(systemAudioHelper);
   const meetingSignalsHelper = options.meetingSignalsHelper ?? MEETING_SIGNALS_HELPER;
   const meetingAccessibilityHelper = options.meetingAccessibilityHelper ?? MEETING_ACCESSIBILITY_HELPER;
   const commandCheck = (
@@ -328,7 +383,8 @@ export function doctorChecks(options: {
         help: 'Run ./install.sh before testing live system audio',
       };
     }
-    const result = spawnSync(systemAudioHelper, ['--probe-ms', '500'], {
+    // The identity meetings record with, so doctor never asks macOS about a new one.
+    const result = spawnSync(systemAudioHelper, [...systemAudioIdentityArguments(identity), '--probe-ms', '500'], {
       encoding: 'utf8',
       timeout: options.systemAudioProbeTimeoutMs ?? 5_000,
       // The native helper handles SIGTERM on its main queue, which CoreAudio
@@ -431,12 +487,25 @@ export function doctorChecks(options: {
       'Run ./install.sh; live system audio requires macOS 14.2+',
     ),
     systemAudioPermissionCheck(),
+    {
+      name: 'system-audio-identity',
+      ok: identity === 'own',
+      required: false,
+      ...(identity === 'own' ? { path: 'Meetings record computer audio with Seashell System Audio' }
+        : { help: 'Meetings record computer audio with the background recorder\'s permission. To switch, run seashell meeting computer-audio setup at your Mac, or press , in Seashell and check Computer audio.' }),
+    },
     meetingSignalCheck(),
     fileCheck(
       'meeting-accessibility-helper',
       meetingAccessibilityHelper,
       false,
       'Run ./install.sh; optional Meet names use macOS Accessibility. Set up access with seashell meeting speakers setup.',
+    ),
+    fileCheck(
+      'screen-capture-helper',
+      SCREEN_CAPTURE_HELPER,
+      false,
+      'Run ./install.sh; meeting video uses macOS Screen Recording. Set up access with seashell meeting video setup.',
     ),
   ];
 }
@@ -500,6 +569,8 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
   const config = loadConfig();
   const libraryDir = resolveLibraryDir(command.libraryDir, process.env, config);
   switch (command.action.kind) {
+    case 'video':
+      return executeMeetingVideo(command.action, command.json, libraryDir, config);
     case 'merge': {
       const groups = command.action.auto
         ? planMeetingMerges(libraryDir, { maxGapMinutes: command.action.maxGapMinutes })
@@ -573,6 +644,25 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
         ...(result.executable ? [`Permission belongs to: ${result.executable}`] : []),
       ].join('\n'));
       return result.authorization === 'authorized' ? 0 : 2;
+    }
+    case 'computer-audio': {
+      if (command.action.operation === 'setup') {
+        process.stderr.write('Playing a short sound to check. If macOS asks about "Seashell System Audio", choose Allow.\n');
+        const result = await checkComputerAudio();
+        if (result.refused) {
+          spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'], { stdio: 'ignore', timeout: 5_000 });
+        }
+        print(command.json ? JSON.stringify(result) : result.detail);
+        return result.heard ? 0 : 2;
+      }
+      // Read only: which copy is installed, and whether a check confirmed it.
+      const identity = systemAudioIdentity(systemAudioRuntimeHelperPath());
+      const checkedAt = readAudioChecks().computer;
+      print(command.json ? JSON.stringify({ identity, ...(checkedAt ? { checkedAt } : {}) }) : identity === 'own'
+        ? 'Meetings record computer audio with Seashell System Audio.'
+        : 'Meetings record computer audio with the background recorder\'s permission.\n' +
+          'To switch to Seashell System Audio, run this at your Mac: seashell meeting computer-audio setup');
+      return 0;
     }
     case 'speakers': {
       const selected = command.action.browser;
@@ -698,8 +788,14 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
         maxObserverRuns: config.meeting?.maxObserverRuns,
         onStatus: (message) => process.stderr.write(`${message}\n`),
       });
+      // Extractors whose "when" fits this meeting run after its final notes.
+      if (reconciliationRoute && artifact.analysis?.final) {
+        await runAutomaticExtractors(libraryDir, artifact.transcriptId, {
+          route: reconciliationRoute, onStatus: (message) => process.stderr.write(`${message}\n`),
+        });
+      }
       print(command.json
-        ? JSON.stringify(artifact, null, 2)
+        ? JSON.stringify(loadMeetingArtifact(libraryDir, artifact.transcriptId) ?? artifact, null, 2)
         : `Meeting enrichment ready: ${artifact.title}`);
       return 0;
     }
@@ -748,10 +844,31 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
     }
     case 'watch': {
       const once = command.action.once;
+      const notifyOneSided = oneSidedNotifier(notify);
       const controller = new AbortController();
       const stop = () => controller.abort();
       process.once('SIGINT', stop);
       process.once('SIGTERM', stop);
+      const warnings = new WarningRateLimit();
+      const writeEvent = command.json ? watchLogWriter(meetingWatchLogFiles(), { fallback: print }) : print;
+      // After a meeting is ready: extractors, then automations, one meeting at a time.
+      let followUps: Promise<void> = Promise.resolve();
+      const followUp = (transcriptId: string, app: string) => {
+        followUps = followUps.then(async () => {
+          const result = await afterMeetingReady(libraryDir, transcriptId, {
+            app, route: resolveMeetingRoute(config.meeting, 'reconciliation'), signal: controller.signal,
+            ...(!once ? { ask: askAutomationApprovalWithDialog } : {}),
+          });
+          if (command.json) print(JSON.stringify({ type: 'meeting.followed-up', at: new Date().toISOString(), transcriptId, ...result }));
+          else {
+            if (result.extracted.length) print(`Insights ready: ${result.extracted.join(', ')}.`);
+            for (const failure of result.extractorFailures) process.stderr.write(`Extractor ${failure.extractor} failed: ${failure.message}\n`);
+            for (const run of result.automations) print(`Automation ${run.automation}: ${run.status}${run.detail ? ` (${run.detail})` : ''}.`);
+          }
+        }).catch((error: unknown) => {
+          process.stderr.write(`Meeting follow-up failed: ${error instanceof Error ? error.message : String(error)}\n`);
+        });
+      };
       try {
         await runAutomaticMeetingWatch({
           config,
@@ -767,8 +884,18 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
           // The login agent has no window of its own, so it asks with a dialog.
           ...(!once ? { dependencies: { askToRecord: askToRecordWithDialog } } : {}),
           onEvent: (event) => {
+            // Like the dialog, the notice is for someone at the Mac, not a one-shot check.
+            if (!once) notifyOneSided(event);
+            // The same warning at most once per 10 minutes, with how often it recurred.
+            let repeats = 0;
+            if (event.type === 'watch.warning') {
+              const admitted = warnings.admit(event.message, Date.parse(event.at) || Date.now());
+              if (admitted === undefined) return;
+              repeats = admitted;
+            }
+            if (event.type === 'meeting.ready') followUp(event.transcriptId, event.candidate.appName);
             if (command.json) {
-              print(JSON.stringify(event));
+              writeEvent(JSON.stringify(repeats ? { ...event, repeats } : event));
               return;
             }
             if (event.type === 'watch.ready') print('Sea Shell is watching for meetings.');
@@ -787,6 +914,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       } finally {
         process.off('SIGINT', stop);
         process.off('SIGTERM', stop);
+        await followUps;
       }
       return 0;
     }
@@ -840,6 +968,53 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       return 0;
     }
   }
+}
+
+async function executeMeetingVideo(
+  action: MeetingVideoAction,
+  json: boolean,
+  libraryDir: string,
+  config: ReturnType<typeof loadConfig>,
+): Promise<number> {
+  if (action.operation === 'open') {
+    const { page, video } = openMeetingVideo(libraryDir, action.id, {
+      ...(action.atSeconds === undefined ? {} : { atSeconds: action.atSeconds }),
+    });
+    print(json ? JSON.stringify({ page, video }, null, 2) : page);
+    return 0;
+  }
+  if (action.operation === 'on' || action.operation === 'off') {
+    const enabled = action.operation === 'on';
+    if (action.app) {
+      const apps = meetingApps();
+      const app = apps.find((candidate) => candidate.id === action.app || candidate.name.toLocaleLowerCase() === action.app);
+      if (!app) throw new Error(`Unknown app. Choose one of: ${apps.map((candidate) => candidate.id).join(', ')}`);
+      updateMeetingConfig({ video: { apps: { ...config.meeting?.video?.apps, [app.id]: enabled } } });
+    } else updateMeetingConfig({ video: { enabled } });
+  }
+  const permission = await screenCapturePermission({ request: action.operation === 'setup' });
+  if (action.operation === 'setup' && permission.authorization !== 'authorized') {
+    spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'], { stdio: 'ignore', timeout: 5_000 });
+  }
+  const video = loadConfig().meeting?.video;
+  const enabled = video?.enabled ?? DEFAULT_MEETING_VIDEO.enabled;
+  const fps = video?.fps ?? DEFAULT_MEETING_VIDEO.fps;
+  const quality = video?.quality ?? DEFAULT_MEETING_VIDEO.quality;
+  const off = meetingApps().filter((app) => video?.apps?.[app.id] === false).map((app) => app.name);
+  print(json ? JSON.stringify({ enabled, fps, quality, apps: video?.apps ?? {}, permission }, null, 2) : [
+    `Meeting video · ${enabled ? 'on' : 'off'} · Screen Recording ${permission.authorization}`,
+    enabled
+      ? `Calls record their app's window at ${fps} fps, ${quality} quality${off.length ? `, except ${off.join(', ')}` : ''}.`
+      : 'Calls record audio only. Turn video on with: seashell meeting video on',
+    'Each meeting keeps its video in its folder, under capture/video. Sizes are in the README.',
+    permission.detail,
+    ...(permission.executable ? [`Permission belongs to: ${permission.executable}`] : []),
+    ...(action.operation === 'setup' && permission.authorization !== 'authorized'
+      ? ['Turn on Seashell Screen Capture in the window that opened, then check with: seashell meeting video --status'] : []),
+  ].join('\n'));
+  return action.operation === 'setup' || action.operation === 'status'
+    ? permission.authorization === 'authorized' ? 0 : 2
+    : 0;
 }
 
 async function executeCapture(
@@ -899,7 +1074,11 @@ async function executeCapture(
     ].join('\n'));
     return 0;
   }
+  // A live meeting saved its calendar event beside its transcript; its invitees cap how many voices there are.
+  let attendees: readonly MeetingAttendee[] | undefined;
+  try { attendees = loadMeetingArtifact(libraryDir, command.action.id)?.calendar?.attendees; } catch { /* No meeting saved for it yet. */ }
   const record = await finalizeCaptureTranscript(manifestPath, {
+    ...(attendees?.length ? { attendees } : {}),
     onStatus: (message) => process.stderr.write(`${message}\n`),
   });
   const saved = saveTranscriptRecord(libraryDir, record);
@@ -930,6 +1109,7 @@ export async function executeCliCommand(command: Exclude<CliCommand, { kind: 'tu
     case 'library':
       return executeLibrary(command);
     case 'ai': {
+      if (command.action === 'test') return executeAiTest(command.json);
       if (command.action === 'providers') {
         requireHumainNode();
         const result = await discoverHumainProviders();
@@ -965,7 +1145,9 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
     case 'mcp': {
       if (command.action === 'serve') {
         const config = loadConfig();
-        await runMeetingsMcpServer(resolveLibraryDir(undefined, process.env, config), PACKAGE_VERSION);
+        // Extractors run on the final-notes route as configured at the time of the call.
+        await runMeetingsMcpServer(resolveLibraryDir(undefined, process.env, config), PACKAGE_VERSION, process.stdin, process.stdout,
+          { route: () => resolveMeetingRoute(loadConfig().meeting, 'reconciliation') });
         return 0;
       }
       const result = installMeetingsMcp();
@@ -1008,10 +1190,18 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
       }
       if (command.command === 'start' && before.phase === 'recording') {
         print(command.json ? JSON.stringify({ recording: true, title: before.candidate?.title })
-          : `Already recording${before.candidate?.title ? ` ${before.candidate.title}` : ''}.`);
+          : `Already recording${before.candidate?.title ? ` ${before.candidate.title}` : ''}.${command.video ? ' Video can only start with a new recording.' : ''}`);
         return 0;
       }
-      writeMeetingCommand(command.command);
+      if (command.video) {
+        const permission = await screenCapturePermission();
+        if (permission.authorization !== 'authorized') process.stderr.write(`No video yet: ${permission.detail}\n`);
+        startRecordingWithVideo(command.video);
+      } else {
+        // A request left by an unanswered --video must not film this recording.
+        if (command.command === 'start') clearVideoRequest();
+        writeMeetingCommand(command.command);
+      }
       // The recorder picks commands up on its next check, every few seconds.
       const deadline = Date.now() + 12_000;
       let now = before;
@@ -1024,7 +1214,7 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
       const done = command.command === 'start' ? recording : !recording;
       print(command.json ? JSON.stringify({ recording, title: now.candidate?.title })
         : !done ? 'The recorder has not answered yet. Check seashell status in a moment.'
-        : recording ? `Recording${now.candidate?.title ? ` ${now.candidate.title}` : ''}. Stop with: seashell record stop`
+        : recording ? `Recording${now.candidate?.title ? ` ${now.candidate.title}` : ''}${command.video ? ' with video' : ''}. Stop with: seashell record stop`
         : 'Stopped. The transcript and notes are being written.');
       return done ? 0 : 1;
     }
@@ -1037,6 +1227,19 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
       const report = await compareSavedSpeakers(libraryDir, { ids: command.ids, last: command.last, onStatus: status });
       if (command.open && report.page) Bun.spawn(['open', report.page], { stdio: ['ignore', 'ignore', 'ignore'] });
       print(command.json ? JSON.stringify(report, null, 2) : renderSpeakerComparison(report));
+      return 0;
+    }
+    case 'speaker-voices': {
+      if (command.forget !== undefined) {
+        if (!forgetVoiceprint(command.forget)) throw new Error(`Sea Shell doesn't know a voice called "${command.forget}". See: seashell speakers voices`);
+        print(command.json ? JSON.stringify({ forgotten: command.forget }) : `Forgot ${command.forget}'s voice. Past transcripts keep the name.`);
+        return 0;
+      }
+      const people = listVoiceprints();
+      print(command.json ? JSON.stringify(people, null, 2) : people.length === 0
+        ? 'Sea Shell knows nobody by voice yet. Name a remote speaker in a meeting and it learns their voice, on this Mac only.'
+        : [...people.map((person) => `  ${person.name} · from ${person.meetings} meeting${person.meetings === 1 ? '' : 's'}`),
+          '', 'Voiceprints stay on this Mac. Forget one: seashell speakers voices forget <name>'].join('\n'));
       return 0;
     }
     case 'speaker-use': {
@@ -1091,7 +1294,150 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
       return executeUpdate(command.check, command.json);
     case 'meeting':
       return executeMeeting(command);
+    case 'prompts':
+    case 'extractors':
+    case 'extract':
+    case 'automations':
+    case 'query':
+      return executeMeetingIntelligence(command);
   }
+}
+
+const ROLE_NAMES: Record<MeetingAiRole, string> = { observer: 'Live analysis', reconciliation: 'Final notes', chat: 'Meeting chat' };
+
+/** One tiny fixed prompt through each route in use; no meeting text is sent. */
+async function executeAiTest(json: boolean): Promise<number> {
+  const config = loadConfig();
+  const routes = Object.fromEntries((['observer', 'reconciliation', 'chat'] as const)
+    .map((role) => [role, resolveMeetingRoute(config.meeting, role)]));
+  if (!json) process.stderr.write('Sending a short test message through each meeting AI route…\n');
+  const result = await testMeetingAi(routes, { mode: config.meeting?.mode ?? 'hybrid' });
+  if (json) {
+    print(JSON.stringify(result, null, 2));
+  } else if (!result.routes.length) {
+    print('No meeting AI is set up yet. Choose a provider: seashell ai setup');
+  } else {
+    print(['Meeting AI connection', ...result.routes.map((route) => {
+      const roles = route.roles.map((role) => ROLE_NAMES[role]).join(', ');
+      return route.ok
+        ? `  ✓ ${roles} · ${route.backend} ${route.model}${route.latencyMs === undefined ? '' : ` · answered in ${(route.latencyMs / 1000).toFixed(1)} s`}`
+        : `  ✗ ${roles} · ${route.backend} ${route.model}\n    ${route.reason}`;
+    })].join('\n'));
+  }
+  return result.ok ? 0 : 1;
+}
+
+/** Prompts, extractors, automations and cross-meeting queries. */
+async function executeMeetingIntelligence(command: MeetingIntelligenceCommand): Promise<number> {
+  const config = loadConfig();
+  const libraryDir = resolveLibraryDir(undefined, process.env, config);
+  const status = (message: string) => { if (!command.json) process.stderr.write(`${message}\n`); };
+  switch (command.kind) {
+    case 'prompts': {
+      if (command.action === 'reset') {
+        const path = resetPrompt(libraryDir, command.name);
+        print(command.json ? JSON.stringify({ path }, null, 2) : `Put back the original ${command.name} prompt: ${path}`);
+        return 0;
+      }
+      const directory = ensurePromptsDirectory(libraryDir);
+      const prompts = listPrompts(libraryDir);
+      print(command.json ? JSON.stringify({ directory, prompts: prompts.map(({ text: _text, ...prompt }) => prompt) }, null, 2) : [
+        `Meeting AI prompts: ${directory}`,
+        ...prompts.map((prompt) => `  ${prompt.name.padEnd(6)} ${prompt.title.padEnd(14)} ${prompt.state === 'empty' ? 'empty, sends nothing' : prompt.state}  ${prompt.path}`),
+        'Each file is sent to its role after "About me". Comments in a file are never sent.',
+        'What the notes must cover and how they cite the transcript stay fixed. Put one back: seashell prompts reset notes',
+      ].join('\n'));
+      return 0;
+    }
+    case 'extractors': {
+      const directory = ensureExtractorsDirectory(libraryDir);
+      const { extractors, problems } = loadExtractors(libraryDir);
+      const when = (extractor: (typeof extractors)[number]) => extractor.when.kind === 'always' ? 'after every meeting'
+        : extractor.when.kind === 'manual' ? 'by hand only'
+        : `when ${[...extractor.when.title, ...extractor.when.attendee, ...extractor.when.app].join(', ')} match`;
+      print(command.json ? JSON.stringify({ directory, extractors, problems }, null, 2) : [
+        `Extractors: ${directory}`,
+        ...extractors.map((extractor) => `  ${extractor.name} — ${when(extractor)} · ${extractor.fields.map((field) => field.name).join(', ')}`),
+        ...problems.map((problem) => `  ✗ ${problem.path}: ${problem.message}`),
+        'Run one: seashell extract <meeting-id> <name>. Results show under Insights in the meeting\'s notes.',
+      ].join('\n'));
+      return problems.length ? 1 : 0;
+    }
+    case 'extract': {
+      const route = resolveMeetingRoute(config.meeting, 'reconciliation');
+      if (!route) throw new Error('Meeting AI is not set up for final notes. Choose a provider: seashell ai setup');
+      const insight = await runExtractor(libraryDir, command.id, command.extractor, { route, onStatus: status });
+      print(command.json ? JSON.stringify(insight, null, 2) : [
+        insight.extractor,
+        ...(insight.summary ? [insight.summary] : []),
+        ...insight.fields.flatMap((field) => [`${field.name}:`, ...(field.items.length
+          ? field.items.map((item) => `  - ${item.text} (${item.evidenceSegmentIds.join(', ')})`) : ['  - Not covered.'])]),
+      ].join('\n'));
+      return 0;
+    }
+    case 'automations': {
+      if (command.action === 'run') {
+        const runs = await runAutomations(libraryDir, command.id, {
+          trigger: 'manual', ...(command.name ? { only: command.name } : {}),
+          ask: askAutomationApprovalWithDialog, route: resolveMeetingRoute(config.meeting, 'reconciliation'), onStatus: status,
+        });
+        print(command.json ? JSON.stringify(runs, null, 2) : runs.length ? runs.map((run) => [
+          `${run.automation}: ${run.status}${run.detail ? ` (${run.detail})` : ''}`,
+          ...run.actions.map((action) => `  ${action.status === 'ok' ? '✓' : action.status === 'skipped' ? '○' : '✗'} ${action.kind} ${action.target}${action.detail ? ` — ${action.detail}` : ''}`),
+        ].join('\n')).join('\n') : 'No automation fits this meeting.');
+        return runs.some((run) => run.status === 'failed') ? 1 : 0;
+      }
+      const directory = ensureAutomationsDirectory(libraryDir);
+      const { automations, problems } = loadAutomations(libraryDir);
+      const runs = readAutomationRuns(libraryDir);
+      print(command.json ? JSON.stringify({ directory, automations: automations.map((automation) => ({ ...automation,
+        approval: automationDecision(automation) ?? null, lastRun: runs.filter((run) => run.automation === automation.name).at(-1) ?? null })),
+      problems }, null, 2) : [
+        `Automations: ${directory}`,
+        ...automations.map((automation) => {
+          const last = runs.filter((run) => run.automation === automation.name).at(-1);
+          const outward = automation.actions.some((action) => action.kind === 'shell' || action.kind === 'webhook');
+          const decision = automationDecision(automation);
+          return `  ${automation.name} — ${automation.enabled ? 'on' : 'off'} · ${automation.actions.map((action) => action.kind).join(', ')}` +
+            `${outward ? ` · ${decision === 'allow' ? 'allowed to send' : decision === 'deny' ? 'not allowed to send' : 'asks before sending'}` : ''}` +
+            `${last ? ` · last run ${last.status} ${last.at.slice(0, 10)}` : ''}`;
+        }),
+        ...problems.map((problem) => `  ✗ ${problem.path}: ${problem.message}`),
+        `Runs are logged in ${join(libraryDir, 'automation-runs.jsonl')}. Run them for one meeting: seashell automations run <meeting-id>`,
+      ].join('\n'));
+      return problems.length ? 1 : 0;
+    }
+    case 'query': {
+      const result = queryNotes(libraryDir, {
+        ...(command.noteKind ? { kind: command.noteKind } : {}),
+        ...(command.person ? { person: command.person } : {}), ...(command.about ? { about: command.about } : {}),
+        ...(command.meeting ? { meeting: command.meeting } : {}), ...(command.since ? { since: command.since } : {}),
+        ...(command.until ? { until: command.until } : {}), ...(command.limit ? { limit: command.limit } : {}),
+      });
+      if (command.json) { print(JSON.stringify(result, null, 2)); return 0; }
+      if (!result.items.length) { print('Nothing matches in the meeting notes.'); return 0; }
+      const kinds: Record<string, string> = { decision: 'Decision', action_item: 'Action', risk: 'Risk', open_question: 'Question', follow_up: 'Follow-up' };
+      const lines: string[] = [];
+      let meeting = '';
+      for (const item of result.items) {
+        if (item.meetingId !== meeting) {
+          meeting = item.meetingId;
+          lines.push(`${lines.length ? '\n' : ''}${item.startedAt.slice(0, 10)}  ${item.title} (${item.meetingId})`);
+        }
+        const owner = item.type === 'action_item' || item.type === 'follow_up' ? claimOwnerAndDue(item) : undefined;
+        lines.push(`  ${(kinds[item.type] ?? item.type).padEnd(9)} ${item.text}${owner ? ` (${owner})` : ''}  [${item.evidence[0] ?? ''}]`);
+      }
+      if (result.truncated) lines.push('', 'More match; narrow it with --since, --person or --about, or raise --limit.');
+      print(lines.join('\n'));
+      return 0;
+    }
+  }
+}
+
+/** A notification that needs no answer. The text is an argument, never part of the script. */
+function notify(message: string): void {
+  Bun.spawn(['osascript', '-e', 'on run argv', '-e', 'display notification (item 1 of argv) with title "Seashell"', '-e', 'end run', message],
+    { stdout: 'ignore', stderr: 'ignore' }).unref();
 }
 
 /** A real question, with the call's name, that waits about as long as the answer is useful. */

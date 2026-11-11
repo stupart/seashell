@@ -16,6 +16,7 @@ import type { TranscriptFormat, TranscriptRecord } from './transcript-types.ts';
 import { archiveMeetingTranscript, synchronizeMeetingTranscript } from './meeting-artifact.ts';
 import { readBackgroundMeetingState, readBackgroundMeetingStatus, type BackgroundMeetingState, type BackgroundDraftStatus } from './background-meeting-status.ts';
 import { readCaptureHealth, type CaptureHealthSnapshot } from './capture-health.ts';
+import { rememberVoice } from './voiceprints.ts';
 
 export interface TranscriptLibraryEntry {
   id: string;
@@ -32,6 +33,8 @@ export interface TranscriptLibraryEntry {
   captureHealth?: CaptureHealthSnapshot;
   audioSavedThroughMs?: number;
   draftStatus?: BackgroundDraftStatus;
+  /** From a search: the first line that says what was searched for, and when. */
+  match?: { start: number; text: string };
 }
 
 export interface SavedTranscript {
@@ -175,7 +178,7 @@ function existingRecordPath(libraryDir: string, id: string): string | undefined 
 export function saveTranscriptRecord(
   libraryDir: string,
   record: TranscriptRecord,
-  options: { provisional?: boolean; namesOnly?: { from: string; to: string } } = {},
+  options: { provisional?: boolean; namesOnly?: { from: string; to: string }; keepNotes?: string } = {},
 ): SavedTranscript {
   assertTranscriptId(record.id);
   const existingPath = existingRecordPath(libraryDir, record.id);
@@ -197,15 +200,33 @@ export function saveTranscriptRecord(
     timestamps: true,
     speakers: record.speakers.length > 0,
   })}\n`);
-  try { if (!options.provisional) synchronizeMeetingTranscript(directory, record, { namesOnly: options.namesOnly }); } catch (error) {
+  try { if (!options.provisional) synchronizeMeetingTranscript(directory, record, { namesOnly: options.namesOnly, keepNotes: options.keepNotes }); } catch (error) {
     meetingWarning = `Transcript saved; meeting notes need repair: ${error instanceof Error ? error.message : String(error)}`;
   }
   return { directory, jsonPath, textPath, ...(meetingWarning ? { meetingWarning } : {}) };
 }
 
-function toEntry(path: string, record: TranscriptRecord): TranscriptLibraryEntry {
-  const directory = dirname(path);
-  const background = readBackgroundMeetingStatus(directory);
+type TranscriptSummary = Pick<TranscriptLibraryEntry,
+  'id' | 'title' | 'createdAt' | 'updatedAt' | 'duration' | 'sourceFilename' | 'speakerCount' | 'segmentCount'>;
+
+interface CachedTranscript {
+  /** Inode, size and modification time: an atomic save always changes it. */
+  readonly stamp: string;
+  /** Undefined when the file is not a readable transcript. */
+  readonly summary?: TranscriptSummary;
+  /** Lowercase title, source, speaker names and text, built on the first search. */
+  searchText?: string;
+  /** Each line and when it was said, so a search can show where it matched. */
+  searchLines?: ReadonlyArray<{ start: number; text: string }>;
+}
+
+/**
+ * The TUI lists the library every second while the background recorder runs.
+ * Parse each transcript.json once per change instead of on every listing.
+ */
+const transcriptCache = new Map<string, Map<string, CachedTranscript>>();
+
+function summarize(record: TranscriptRecord): TranscriptSummary {
   return {
     id: record.id,
     title: record.title,
@@ -215,6 +236,53 @@ function toEntry(path: string, record: TranscriptRecord): TranscriptLibraryEntry
     sourceFilename: record.source.filename,
     speakerCount: record.speakers.length,
     segmentCount: record.transcript.length,
+  };
+}
+
+function searchText(record: TranscriptRecord): string {
+  return [
+    record.title,
+    record.source.filename,
+    ...record.speakers.map((speaker) => speaker.label),
+    renderText(record),
+  ].join('\n').toLocaleLowerCase();
+}
+
+/** Every transcript in the library, reparsing only files that changed since the last call. */
+function cachedTranscripts(libraryDir: string, options: { search?: boolean } = {}): Array<{ path: string; cached: CachedTranscript }> {
+  const previous = transcriptCache.get(libraryDir);
+  const current = new Map<string, CachedTranscript>();
+  const results: Array<{ path: string; cached: CachedTranscript }> = [];
+  for (const path of transcriptJsonPaths(libraryDir)) {
+    let stamp: string;
+    try {
+      const stats = statSync(path, { bigint: true });
+      stamp = `${stats.ino}:${stats.size}:${stats.mtimeNs}`;
+    } catch {
+      continue;
+    }
+    let cached = previous?.get(path);
+    if (cached?.stamp !== stamp || (options.search && cached.summary && cached.searchText === undefined)) {
+      try {
+        const record = loadTranscriptPath(path);
+        cached = { stamp, summary: summarize(record), ...(options.search ? { searchText: searchText(record),
+          searchLines: record.transcript.map((segment) => ({ start: segment.start, text: segment.text.replace(/\s+/gu, ' ').trim() })) } : {}) };
+      } catch {
+        cached = { stamp };
+      }
+    }
+    current.set(path, cached);
+    results.push({ path, cached });
+  }
+  transcriptCache.set(libraryDir, current);
+  return results;
+}
+
+function toEntry(path: string, summary: TranscriptSummary): TranscriptLibraryEntry {
+  const directory = dirname(path);
+  const background = readBackgroundMeetingStatus(directory);
+  return {
+    ...summary,
     kind: existsSync(join(directory, 'meeting.json')) ? 'meeting' : 'transcript',
     directory,
     captureState: background?.state,
@@ -226,14 +294,8 @@ function toEntry(path: string, record: TranscriptRecord): TranscriptLibraryEntry
 
 /** The filesystem is authoritative; this derived listing can always be rebuilt. */
 export function listTranscriptRecords(libraryDir: string): TranscriptLibraryEntry[] {
-  return transcriptJsonPaths(libraryDir)
-    .flatMap((path) => {
-      try {
-        return [toEntry(path, loadTranscriptPath(path))];
-      } catch {
-        return [];
-      }
-    })
+  return cachedTranscripts(libraryDir)
+    .flatMap(({ path, cached }) => cached.summary ? [toEntry(path, cached.summary)] : [])
     .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
@@ -258,20 +320,11 @@ export function searchTranscriptRecords(
 ): TranscriptLibraryEntry[] {
   const normalized = query.trim().toLocaleLowerCase();
   if (!normalized) return listTranscriptRecords(libraryDir);
-  return transcriptJsonPaths(libraryDir)
-    .flatMap((path) => {
-      try {
-        const record = loadTranscriptPath(path);
-        const haystack = [
-          record.title,
-          record.source.filename,
-          ...record.speakers.map((speaker) => speaker.label),
-          renderText(record),
-        ].join('\n').toLocaleLowerCase();
-        return haystack.includes(normalized) ? [toEntry(path, record)] : [];
-      } catch {
-        return [];
-      }
+  return cachedTranscripts(libraryDir, { search: true })
+    .flatMap(({ path, cached }) => {
+      if (!cached.summary || !cached.searchText?.includes(normalized)) return [];
+      const match = cached.searchLines?.find((line) => line.text.toLocaleLowerCase().includes(normalized));
+      return [{ ...toEntry(path, cached.summary), ...(match ? { match } : {}) }];
     })
     .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
@@ -293,8 +346,12 @@ export function renameTranscriptSpeaker(
   if (!speaker) throw new Error(`Speaker ${speakerId} was not found in transcript ${transcriptId}`);
   const previous = speaker.label;
   speaker.label = trimmed;
+  // A name Tyler gives, even the suggested one, is no longer a suggestion.
+  delete speaker.suggestion;
   record.updatedAt = new Date().toISOString();
   saveTranscriptRecord(libraryDir, record, { namesOnly: { from: previous, to: trimmed } });
+  // The name teaches the local voice library this voice (src/voiceprints.ts).
+  rememberVoice(record, speakerId, trimmed);
   return record;
 }
 
