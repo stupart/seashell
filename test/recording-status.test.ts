@@ -68,7 +68,7 @@ test('a one-sided call names the likely cause live, and a saved meeting says you
     health.pcm('systemAudio', { peak: 1000, rms: 100, rmsDbfs: -45 }, undefined, time);
   }
   const live = recordingSummary({ mode: 'recording', health: health.snapshot, nowUnixMs: 61_000 });
-  expect(live.problems[0]).toBe('Microphone: not hearing you — muted or wrong mic? · i audio help');
+  expect(live.problems[0]).toBe('Microphone: silent — muted or wrong mic? · i audio help');
   // Two audible chunks of 681: something was heard, but not your side of the call.
   const chunk = (trackId: 'microphone' | 'system-audio', index: number, audible: boolean) =>
     ({ trackId, audible, startMs: index * 10_000, endMs: (index + 1) * 10_000 });
@@ -82,13 +82,15 @@ test('a one-sided call names the likely cause live, and a saved meeting says you
   expect(saved.problems).toEqual(['Microphone: your side wasn’t recorded']);
 });
 
-test('the title slot gets the most urgent problem in a few words: red only while a source fails', () => {
+test('the title slot gets the most urgent problem in a few words, its key apart: red only while a source fails', () => {
   const health = new CaptureHealthTracker({ nowUnixMs: 0 });
   health.state('microphone', { state: 'unavailable', code: 'microphone_stopped', message: 'The microphone stopped.' }, 1);
   health.pcm('systemAudio', { peak: 1000, rms: 500, rmsDbfs: -30 }, true, 2);
   const failing = recordingSummary({ mode: 'recording', health: health.snapshot, nowUnixMs: 3 });
-  expect(failing.alert).toEqual({ text: 'Mic not heard · i help', short: 'Mic not heard', color: 'red' });
+  expect(failing.alert).toEqual({ text: 'Mic silent', color: 'red', fix: ['i', 'mic help'] });
+  // What is happening keeps the title's own colour: only the alert says something is wrong.
   expect(failing.headline).toStartWith('● Recording');
+  expect(failing).not.toHaveProperty('color');
   // One-sided is attention, not failure.
   const quiet = new CaptureHealthTracker({ nowUnixMs: 0 });
   for (let time = 500; time <= 61_000; time += 500) {
@@ -96,7 +98,7 @@ test('the title slot gets the most urgent problem in a few words: red only while
     quiet.pcm('systemAudio', { peak: 1000, rms: 100, rmsDbfs: -45 }, undefined, time);
   }
   expect(recordingSummary({ mode: 'recording', health: quiet.snapshot, nowUnixMs: 61_000 }).alert)
-    .toMatchObject({ text: 'Not hearing you · i help', color: 'yellow' });
+    .toMatchObject({ text: 'Mic silent', color: 'yellow', fix: ['i', 'mic help'] });
   // A recorder warning is said whole when short, by its first sentence when narrow.
   expect(recordingSummary({ mode: 'watching', warning: 'Meet detection unavailable. Check Speakers.' }))
     .toMatchObject({ headline: 'Ready · watching for calls', alert: { text: 'Meet detection unavailable. Check Speakers', short: 'Meet detection unavailable' } });

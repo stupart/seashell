@@ -40,7 +40,7 @@ import {
 import { chatWithMeeting, enrichMeeting } from './meeting-enrichment.ts';
 import { Chalk } from 'chalk';
 import { HEADING, meetingViewLines, plainMeetingLines, SUBHEADING, type MeetingView } from './meeting-tui.ts';
-import { HELP_ROWS, HelpRow, KeyBar, Prompt, ScreenTitle, Sheet, Toast, type Hint, type TitleStatus } from './tui-chrome.tsx';
+import { HELP_ROWS, HelpRow, KeyBar, Prompt, ScreenTitle, Sheet, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
 import { timedTranscriptRows, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
   renderText,
@@ -76,7 +76,7 @@ import { providerName } from './ai-provider.ts';
 import SpeakerSettings from './SpeakerSettings.tsx';
 import SettingsScreen, { MENU_LABEL, type SettingsActions } from './SettingsScreen.tsx';
 import Onboarding, { DEFAULT_LEVEL_SOURCES, switchedOff, type GuideProgress, type LevelSources, type SystemSettingsPane } from './Onboarding.tsx';
-import { FEATURE_STATE_COLOR, FEATURE_STATE_SYMBOL, readFeatureStatuses, type FeatureStatus } from './feature-status.ts';
+import { FEATURE_STATE_COLOR, FEATURE_STATE_SYMBOL, readFeatureStatuses, type FeatureId, type FeatureStatus } from './feature-status.ts';
 import { stripVTControlCharacters } from 'util';
 import { startMeetSpeakerReader, meetBrowserMatchesApp, probeMeetSpeakers, type MeetSpeakerReader, type MeetProbe } from './meet-speakers.ts';
 import { backgroundMeetingMessage } from './background-meeting-status.ts';
@@ -226,6 +226,10 @@ export default function App(props: {
   const [captureAppBundle, setCaptureAppBundle] = useState<string>();
   const [aiSetupOpen, setAiSetupOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** The row Settings opens on, when a fix in the title's status slot sent the person there. */
+  const [settingsFocus, setSettingsFocus] = useState<FeatureId>();
+  /** What the title's status slot showed last, for the key that fixes it. */
+  const shownSlot = useRef<TitleStatus & { focus?: FeatureId }>(undefined);
   const [guideOpen, setGuideOpen] = useState(Boolean(props.guide));
   const [guideProgress, setGuideProgress] = useState<GuideProgress>();
   // The guide offers itself once, on a first run that still needs it.
@@ -1982,7 +1986,12 @@ export default function App(props: {
       setCaution('Review and edit this when it finishes.');
       return;
     }
-    if (input === ',') { setSettingsOpen(true); return; }
+    if (input === ',') {
+      const fixing = shownSlot.current;
+      setSettingsFocus(fixing?.fix?.[0] === ',' ? fixing.focus : undefined);
+      setSettingsOpen(true);
+      return;
+    }
     if (input === 'v') { setSpeakerSetupOpen(true); return; }
     if (input === 'p') { setAiSetupIntent(null); setAiSetupOpen(true); return; }
     if (key.tab || input === '\t' || input === 'h') {
@@ -2279,6 +2288,7 @@ export default function App(props: {
   };
 
   if (settingsOpen) return <SettingsScreen {...setupActionProps} config={config} columns={terminal.columns} rows={terminal.rows}
+    {...(settingsFocus ? { focus: settingsFocus } : {})}
     onOpenSpeakers={() => openSpeakers('settings')}
     onOpenAI={() => openAI('settings')}
     onOpenGuide={() => openGuide(true)}
@@ -2550,7 +2560,7 @@ export default function App(props: {
     nowUnixMs: statusNow,
   } : undefined;
   const summary = statusProps ? recordingSummary(statusProps) : undefined;
-  const quietlyDone = statusProps?.mode === 'ready' && !summary?.alert && summary?.color === undefined;
+  const quietlyDone = statusProps?.mode === 'ready' && !summary?.alert && summary?.label === 'Saved · transcript ready';
   const recordingElsewhere = activeBackgroundEntry && backgroundEntry?.id !== activeBackgroundEntry.id ? activeBackgroundEntry : undefined;
   // Home, before Seashell can record: the title says so, the body says what is missing.
   const settingUp = attention.length > 0 && view === 'live' && statusProps?.mode === 'watching';
@@ -2558,9 +2568,10 @@ export default function App(props: {
     ...(currentEntry?.duration ? [`${Math.max(1, Math.round(currentEntry.duration / 60))} min`] : [])].join(' · ') } : undefined;
   // The title names what is on screen; a call waiting to be recorded is asked about in the key bar,
   // and another call recording is said in the status slot.
-  const heading: { text: string; color?: 'red' | 'yellow' | 'cyan'; keep?: number } = settingUp ? { text: "Can't record yet", color: 'yellow' }
-    // Narrow, the meeting's title gives way before what is happening to it.
-    : summary && !quietlyDone ? { text: summary.headline, ...(summary.color ? { color: summary.color } : {}), keep: Bun.stringWidth(summary.label) }
+  const heading: { text: string; color?: 'yellow'; keep?: number } = settingUp ? { text: "Can't record yet", color: 'yellow' }
+    // Narrow, the meeting's title gives way before what is happening to it. What is happening keeps the
+    // title's colour whatever happens: only the alert beside it says something is wrong.
+    : summary && !quietlyDone ? { text: summary.headline, keep: Bun.stringWidth(summary.label) }
     // A long meeting title is cut before a warning beside it.
     : recordHeading ? { ...recordHeading, keep: 24 } : { text: '' };
   // Says the recorder is on, so a quiet screen never reads as a stopped one.
@@ -2568,13 +2579,17 @@ export default function App(props: {
     && !(summary && !quietlyDone) ? { text: 'Watching for calls', short: 'Watching' }
     : currentMeeting?.status === 'reconciling' || currentMeeting?.status === 'observing' ? { text: 'Writing notes…' } : undefined;
   // Warnings take the title's status slot, most urgent first; nothing adds a row under the title.
-  const slot: TitleStatus | undefined = recordingElsewhere ? { text: '● Another call is recording · l opens it', short: '● Another call', color: 'red' }
+  // The slot says only what is wrong; the key that fixes it leads the key bar, and a fix in
+  // Settings opens Settings on the row that fixes it.
+  const slot: (TitleStatus & { focus?: FeatureId }) | undefined = recordingElsewhere
+    ? { text: '● Another call is recording', short: '● Another call', fix: ['l', 'go to the call'] }
     : summary?.alert && !quietlyDone ? summary.alert
-    : currentMeeting?.status === 'failed' ? { text: 'Notes failed · g retry', color: 'red' }
+    : currentMeeting?.status === 'failed' ? { text: 'Notes failed', color: 'red', fix: ['g', 'retry notes'] }
     : attention[0] && !settingUp ? attentionStatus(attention[0])
     : currentMeeting && meetingView === 'transcript' && reading && showSpeakers && currentRecord?.speakers.some((speaker) => speaker.id === 'SYSTEM')
-      ? { text: 'Voices not separated · v setup', short: 'v speaker setup', color: 'yellow' }
+      ? { text: 'Voices not separated', color: 'yellow', fix: [',', 'speaker setup'], focus: 'speaker-separation' }
     : standing;
+  shownSlot.current = slot;
   const toast = error ? { text: error, color: 'red' as const } : copied ? { text: 'Copied.', color: 'green' as const } : notice ?? undefined;
 
   return (
@@ -2591,19 +2606,20 @@ export default function App(props: {
           : processing ? <Text color="magenta" wrap="truncate-end">◐ {processing.label}{processing.progress === undefined ? '' : ` ${processing.progress}%`}</Text>
           : toast ? <Toast text={toast.text} color={toast.color} columns={terminal.columns - 2} />
           : sheetHints ? <KeyBar hints={sheetHints} columns={terminal.columns - 2} help={false} />
-          : <KeyBar hints={hints} columns={terminal.columns - 2} />}
+          : <KeyBar hints={withFix(hints, slot)} columns={terminal.columns - 2} />}
       </Box>
     </Box>
   );
 }
 
-/** A setup problem in the title's status slot: what is wrong in a word or two, and the key that helps. */
-function attentionStatus(status: FeatureStatus): TitleStatus {
+/** A setup problem in the title's status slot: what is wrong in a word or two. The key that helps
+ * leads the key bar: audio help for a silent source, otherwise Settings, opened on the row that fixes it. */
+function attentionStatus(status: FeatureStatus): TitleStatus & { focus: FeatureId } {
   const silent = status.summary.includes('silent');
-  const what = status.id === 'recorder' ? status.state === 'attention' ? 'Recorder not responding' : 'Recorder off'
-    : status.id === 'microphone' ? silent ? 'Mic silent' : 'Mic not allowed'
-    : status.id === 'computer-audio' ? silent ? 'Computer audio silent' : 'Computer audio unconfirmed'
-    : status.id === 'detection' ? 'Meet not connected'
-    : `${MENU_LABEL[status.id]} needs you`;
-  return { text: `${what} · ${silent ? 'i help' : ', fixes'}`, short: what, color: 'yellow' };
+  const [what, fix] = status.id === 'recorder' ? [status.state === 'attention' ? 'Recorder not responding' : 'Recorder off', 'fix recorder']
+    : status.id === 'microphone' ? silent ? ['Mic silent', 'mic help'] : ['Mic not allowed', 'allow mic']
+    : status.id === 'computer-audio' ? silent ? ['Computer audio silent', 'audio help'] : ['Computer audio unconfirmed', 'check audio']
+    : status.id === 'detection' ? ['Meet not connected', 'connect Meet']
+    : [`${MENU_LABEL[status.id]} needs you`, 'settings'];
+  return { text: what, color: 'yellow', fix: [silent ? 'i' : ',', fix], focus: status.id };
 }

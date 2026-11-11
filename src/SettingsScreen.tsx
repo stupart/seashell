@@ -353,6 +353,8 @@ export default function SettingsScreen(props: SetupActionProps & {
   onOpenGuide?: () => void;
   onClose: () => void;
   dependencies?: FeatureStatusDependencies;
+  /** Open on this row, as a fix in the app's title line asks; otherwise on what needs the person. */
+  focus?: FeatureId;
 }) {
   const [statuses, setStatuses] = useState<FeatureStatus[]>();
   const [index, setIndex] = useState(0);
@@ -381,7 +383,9 @@ export default function SettingsScreen(props: SetupActionProps & {
         // itself, so a key pressed as it appears is never undone.
         if (opened.current) return;
         opened.current = true;
-        const first = menuItems(next).findIndex(item => item.kind === 'status' && !item.status.optional && item.status.state !== 'ok');
+        const list = menuItems(next);
+        const focused = list.findIndex(item => item.kind === 'status' && item.status.id === props.focus);
+        const first = focused >= 0 ? focused : list.findIndex(item => item.kind === 'status' && !item.status.optional && item.status.state !== 'ok');
         if (first >= 0) setIndex(first);
       })
       .catch(cause => { if (!controller.signal.aborted) setLoadError(cause instanceof Error ? cause.message : String(cause)); });

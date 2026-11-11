@@ -1,4 +1,5 @@
 import type { CaptureHealthSnapshot, CaptureSourceHealth } from './capture-health.ts';
+import type { Hint } from './tui-chrome.tsx';
 
 export type RecordingMode = 'watching' | 'awaiting-consent' | 'starting' | 'recording' | 'no-audio' | 'paused' | 'processing' | 'ready' | 'unavailable';
 export interface RecordingStatusProps {
@@ -49,7 +50,7 @@ function sourceLabel(source: CaptureSourceHealth | undefined, finished: boolean,
   if (source.state === 'starting') return 'opening…';
   if (stalePcm(source, now)) return 'signal not updating';
   if (source.lastPcmAtUnixMs === undefined) return 'waiting for audio';
-  if (oneSided(source)) return 'not hearing you — muted or wrong mic?';
+  if (oneSided(source)) return 'silent — muted or wrong mic?';
   if (source.state === 'quiet') return 'quiet — check if speaking';
   return source.lastSignalAtUnixMs === undefined ? 'waiting for sound' : 'sound detected';
 }
@@ -63,22 +64,27 @@ export function recordingNeedsAttention(health?: CaptureHealthSnapshot, finished
 }
 
 export interface RecordingSummary {
+  /** What is happening, then the meeting's title. It keeps the title line's own colour whatever happens:
+   * only its ● is red, and only the alert says something is wrong. */
   headline: string;
   /** The headline without the meeting's title: what is happening. */
   label: string;
-  color?: 'red' | 'yellow' | 'cyan';
   /** Mic, computer audio and saved audio, for a wide title line. */
   detail?: string;
   /** Everything that needs the person, in full: for `seashell` output and logs. */
   problems: string[];
-  /** The most urgent problem in a few words, for the title's status slot: red while a source fails. */
-  alert?: { text: string; short?: string; color: 'red' | 'yellow' };
+  /** The most urgent problem in a few words, for the title's status slot: red while a source fails,
+   * yellow when it needs a look. The key that helps leads the key bar. */
+  alert?: { text: string; short?: string; color: 'red' | 'yellow'; fix?: Hint };
 }
 
+const MIC_HELP: Hint = ['i', 'mic help'];
+const AUDIO_HELP: Hint = ['i', 'audio help'];
+
 /** A recorder warning for the title's status slot: whole when it is short, its first sentence when narrow. */
-function warningAlert(warning: string): { text: string; short: string } {
-  if (/not responding/iu.test(warning)) return { text: 'Recorder not responding · , check', short: 'Recorder not responding' };
-  if (/not hearing you|muted/iu.test(warning)) return { text: 'Not hearing you · i help', short: 'Not hearing you' };
+function warningAlert(warning: string): { text: string; short?: string; fix?: Hint } {
+  if (/not responding/iu.test(warning)) return { text: 'Recorder not responding', fix: [',', 'fix recorder'] };
+  if (/not hearing you|muted/iu.test(warning)) return { text: 'Mic silent', fix: MIC_HELP };
   const cut = (text: string, length: number) => text.length > length ? `${text.slice(0, length - 1)}…` : text;
   const whole = warning.trim().replace(/\.$/u, '');
   const first = whole.split(/(?<=[.!?])\s/u)[0]!.replace(/[.!?]$/u, '');
@@ -127,16 +133,17 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
   ];
   // Not capturing at all is a failure; quiet, one-sided or unconfirmed sound needs a look.
   const failed = (source?: CaptureSourceHealth) => !finished && (source?.state === 'unavailable' || source?.state === 'stopped');
-  const micWords = mic.startsWith('not hearing you') ? 'Not hearing you' : mic.startsWith('quiet') ? 'Mic quiet'
-    : mic === 'your side wasn’t recorded' ? 'Your side not recorded' : finished ? 'Mic interrupted' : 'Mic not heard';
-  const computerWords = computer.startsWith('quiet') ? 'Call audio quiet' : finished ? 'Computer audio interrupted' : 'Computer audio not heard';
-  const help = finished ? '' : ' · i help';
-  const sourceAlert = micBad && computerBad ? `${finished ? 'Audio interrupted' : 'Nothing heard'}${help}`
-    : micBad ? `${micWords}${help}` : computerBad ? `${computerWords}${help}`
-    : attention && !finished ? 'Check your input · i help' : undefined;
-  // Narrow, the key goes first: the key bar shows i too.
+  // One name for a microphone Seashell cannot hear, whether it stopped or sends silence.
+  const micWords = mic.startsWith('quiet') ? 'Mic quiet' : mic === 'your side wasn’t recorded' ? 'Your side not recorded'
+    : finished ? 'Mic interrupted' : 'Mic silent';
+  const computerWords = computer.startsWith('quiet') ? 'Call audio quiet' : finished ? 'Computer audio interrupted' : 'Computer audio silent';
+  const sourceAlert = micBad && computerBad ? finished ? 'Audio interrupted' : 'Nothing heard'
+    : micBad ? micWords : computerBad ? computerWords
+    : attention && !finished ? 'Check your input' : undefined;
+  // Audio help opens on whatever is wrong; once the call is over there is nothing left to check.
+  const help = finished ? {} : { fix: micBad && !computerBad ? MIC_HELP : AUDIO_HELP };
   const alert = sourceAlert
-    ? { text: sourceAlert, short: sourceAlert.replace(' · i help', ''),
+    ? { text: sourceAlert, ...help,
       color: failed(props.health?.microphone) || failed(props.health?.systemAudio) ? 'red' as const : 'yellow' as const }
     : props.warning ? { ...warningAlert(props.warning), color: 'yellow' as const }
     : props.draftLabel?.includes('delayed') ? { text: 'Live text delayed', color: 'yellow' as const } : undefined;
@@ -144,9 +151,6 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
     headline,
     label,
     ...(alert ? { alert } : {}),
-    ...(attention || props.mode === 'no-audio' || props.mode === 'unavailable' || props.mode === 'awaiting-consent'
-      ? { color: 'yellow' as const }
-      : props.mode === 'recording' ? { color: 'red' as const } : {}),
     ...(showSources ? { detail: saved } : {}),
     problems,
   };
