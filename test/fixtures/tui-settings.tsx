@@ -72,8 +72,8 @@ try {
   { stdin: t.input as any, stdout: t.output as any, stderr: t.output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
   const type = async (text: string) => { t.input.write(text); await Bun.sleep(60); };
 
-  // The title counts from the rows the list marks: the microphone to fix, then the extras.
-  await until(() => t.all().includes('Recording needs 1 fix') || t.all().includes('1 to fix'), 'summary line');
+  // The title counts the marks the list shows: the microphone's ✗ is failing.
+  await until(() => /\d failing/u.test(t.all()), 'summary line');
   assert.ok(t.all().includes('Speakers') && t.all().includes('Extras'), 'the list has sections');
   assert.equal(permissionRequests, 0, 'Opening Settings never asks for permission');
   if (narrow) {
@@ -159,7 +159,7 @@ try {
   // The title's status slot says what is wrong; the key that fixes it leads the key bar.
   await until(() => main.all().includes('Mic not allowed') && main.all().includes(', allow mic'), 'the app says what is wrong and where to look');
   await press(',');
-  await until(() => main.all().includes('Checking what works') || main.all().includes('to fix') || main.all().includes('needs 1 fix'), 'comma opens Settings');
+  await until(() => main.all().includes('Checking what works') || main.all().includes('failing'), 'comma opens Settings');
   await until(() => main.all().includes('Esc back'), 'settings footer');
   await press('\x1b');
   await until(() => main.all().lastIndexOf('? help') > main.all().lastIndexOf('Esc back'), 'Esc returns to the app');

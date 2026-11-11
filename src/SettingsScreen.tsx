@@ -355,18 +355,15 @@ const RUN_SYMBOL: Record<AutomationRun['status'], [string, 'green' | 'red' | 'ye
 };
 
 /**
- * The title's status: whether recording works, counted from the same rows the list marks,
- * then how many optional rows to check. Never "extras", which is the name of one group.
- * Narrow, it says the same in fewer words.
+ * The title's status: the list's own marks, counted. ✗ is failing and ! is to check; the worst colours it.
+ * Only a list of ✓ and – reads "Everything works": – is a choice, not a problem.
  */
-export function settingsStatus(statuses: readonly FeatureStatus[], room: number): TitleStatus {
-  const fixes = statuses.filter(status => !status.optional && status.state !== 'ok').length;
-  const extras = statuses.filter(status => status.optional && (status.state === 'broken' || status.state === 'attention')).length;
-  const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
-  const check = extras ? [`${extras} to check`] : [];
-  const full = [fixes ? `Recording needs ${plural(fixes, 'fix', 'fixes')}` : 'Recording works', ...check].join(' · ');
-  const short = [fixes ? `${fixes} to fix` : 'Recording works', ...check].join(' · ');
-  return { text: Bun.stringWidth(full) <= room ? full : short, color: fixes || extras ? 'yellow' : 'green' };
+export function settingsStatus(statuses: readonly FeatureStatus[]): TitleStatus {
+  const failing = statuses.filter(status => status.state === 'broken').length;
+  const check = statuses.filter(status => status.state === 'attention').length;
+  if (!failing && !check) return { text: 'Everything works', color: 'green' };
+  const text = [failing ? `${failing} failing` : '', check ? `${check} to check` : ''].filter(Boolean).join(' · ');
+  return { text, color: failing ? 'red' : 'yellow' };
 }
 
 /** Everything Seashell can do, whether it works right now, and one key to fix it. */
@@ -719,11 +716,10 @@ export default function SettingsScreen(props: SetupActionProps & {
         : action ? [['Enter', lowerFirst(FEATURE_ACTION_LABEL[action])] as Hint] : selected && testable(selected) ? [['Enter', 'test it now'] as Hint] : []),
       ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ['r', retryRun ? 'try again' : 'recheck'], ['Esc', 'back'],
     ];
-  const titleRoom = props.columns - 2 - 14;
   const failed = setup.message?.tone === 'failed' ? setup.message.text : undefined;
 
   return <Box flexDirection="column" paddingX={1} {...(props.rows ? { height: props.rows } : {})} overflow="hidden">
-    <ScreenTitle name="Settings" status={statuses ? settingsStatus(statuses, titleRoom) : undefined} />
+    <ScreenTitle name="Settings" status={statuses ? settingsStatus(statuses) : undefined} />
     <Box flexDirection="row" flexGrow={1} overflow="hidden">
       {(!compact || !inDetail) && menu}
       {(!compact || inDetail) && <Box flexDirection="column" flexGrow={1} minWidth={0} overflow="hidden" {...(compact ? {} : { paddingLeft: 1 })}>

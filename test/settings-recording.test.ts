@@ -16,16 +16,14 @@ test('recording turned off the old way reads as off, and defaults read as Seashe
   expect(recordingRows({})[1]!.value).toBe('ask');
 });
 
-test("the Settings title counts the same rows the list marks: recording first, then the extras", () => {
+test("the Settings title counts the marks the list shows, coloured by the worst", () => {
   const status = (id: string, optional: boolean, state: 'ok' | 'attention' | 'off' | 'broken') =>
     ({ id, label: id, optional, state, summary: '', detail: '' }) as never;
-  const healthy = [status('recorder', false, 'ok'), status('microphone', false, 'ok'),
+  const rows = [status('recorder', false, 'ok'), status('microphone', false, 'ok'),
     status('extractors', true, 'broken'), status('automations', true, 'broken'), status('video', true, 'attention'), status('calendar', true, 'off')];
-  // Off is a choice, not a problem: only broken and attention extras are counted.
-  expect(settingsStatus(healthy, 80)).toEqual({ text: 'Recording works · 3 to check', color: 'yellow' });
-  expect(settingsStatus(healthy.slice(0, 2), 80)).toEqual({ text: 'Recording works', color: 'green' });
-  const broken = [status('recorder', false, 'broken'), status('microphone', false, 'attention'), status('video', true, 'attention')];
-  expect(settingsStatus(broken, 80).text).toBe('Recording needs 2 fixes · 1 to check');
-  // Narrow, the same counts in fewer words.
-  expect(settingsStatus(broken, 30).text).toBe('2 to fix · 1 to check');
+  // Two ✗ and one ! read as failing first, in red, whether or not the rows are optional.
+  expect(settingsStatus(rows)).toEqual({ text: '2 failing · 1 to check', color: 'red' });
+  expect(settingsStatus([status('recorder', false, 'ok'), status('video', true, 'attention')])).toEqual({ text: '1 to check', color: 'yellow' });
+  // Off is a choice, not a problem.
+  expect(settingsStatus([status('recorder', false, 'ok'), status('calendar', true, 'off')])).toEqual({ text: 'Everything works', color: 'green' });
 });
