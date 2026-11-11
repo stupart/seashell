@@ -242,3 +242,34 @@ test('saved voices, prompts, extractors and automations each say how they stand'
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('Vocabulary counts its words and says what an old engine cannot do with them', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'seashell-status-vocabulary-'));
+  const previous = process.env.SEASHELL_VOCABULARY_FILE;
+  process.env.SEASHELL_VOCABULARY_FILE = join(home, 'Vocabulary.txt');
+  try {
+    expect((await byId({})).vocabulary).toMatchObject({ state: 'off', summary: 'None yet', action: 'open-vocabulary' });
+    writeFileSync(process.env.SEASHELL_VOCABULARY_FILE, '# names\nPriya Raman\nNorthwind\n');
+    const ai = { speakerBrowser: 'auto', backend: 'codex', model: 'fixture' };
+    const rev4 = async () => new Set(['observe', 'reconcile', 'chat', 'extract', 'brief', 'draft']);
+    const rev3 = async () => new Set(['observe', 'reconcile', 'chat', 'extract']);
+    expect((await byId({ engine: rev4 }, ai)).vocabulary).toMatchObject({ state: 'ok', summary: '2 words' });
+    expect((await byId({ engine: rev3 }, ai)).vocabulary).toMatchObject({ state: 'attention', summary: '2 words · AI engine too old',
+      fix: 'Transcription uses them; the AI engine is too old to. Install a newer AI engine: seashell ai install <humain-package.tgz>' });
+  } finally {
+    process.env.SEASHELL_VOCABULARY_FILE = previous;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('Briefs are on by default, wait quietly for a calendar and an AI, and say when the engine is too old', async () => {
+  const rev3 = async () => new Set(['observe', 'reconcile', 'chat', 'extract']);
+  const calendar = { enabled: true, policy: 'ask' };
+  const calendarOk = { calendar: async () => ({ authorization: 'authorized', detail: 'Allowed.', calendars: 2 }) } as FeatureStatusDependencies;
+  expect((await byId({})).briefs).toMatchObject({ state: 'off', summary: 'On · needs calendar titles', command: 'seashell meeting calendar setup' });
+  expect((await byId(calendarOk, { calendar })).briefs).toMatchObject({ state: 'off', summary: 'On · needs AI notes', command: 'seashell ai setup' });
+  const ready = { calendar, backend: 'codex', model: 'fixture' };
+  expect((await byId({ ...calendarOk, engine: async () => undefined }, ready)).briefs).toMatchObject({ state: 'ok', summary: 'On · 15 minutes before' });
+  expect((await byId({ ...calendarOk, engine: rev3 }, ready)).briefs).toMatchObject({ state: 'attention', summary: 'On · AI engine too old' });
+  expect((await byId(calendarOk, { ...ready, briefs: { enabled: false } })).briefs).toMatchObject({ state: 'off', summary: 'Off', action: 'turn-on-briefs' });
+});

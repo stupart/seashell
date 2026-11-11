@@ -17,6 +17,8 @@ export interface LocalAsrProfile {
   readonly idleTimeoutMs: number;
   /** Defaults to the CPU on Intel Macs; see transcriptionUsesGpu. */
   readonly disableGpu?: boolean;
+  /** Spellings to prefer, as Whisper's prompt for every chunk (vocabulary.ts). */
+  readonly prompt?: string;
 }
 
 export interface LiveAsrJob {
@@ -112,6 +114,7 @@ export class OwnedWhisperServer {
       form.set('language', 'en');
       form.set('response_format', 'verbose_json');
       form.set('temperature', '0.0');
+      if (this.profile.prompt) form.set('prompt', this.profile.prompt);
       const timeout = AbortSignal.timeout(this.profile.requestTimeoutMs);
       const combined = signal === undefined ? timeout : AbortSignal.any([signal, timeout]);
       const response = await fetch(`${this.endpoint}/inference`, {

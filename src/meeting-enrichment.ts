@@ -3,6 +3,7 @@ import { createHash } from 'crypto';
 import { dirname, join } from 'path';
 import {
   appendProvisionalOverlay,
+  citesNothing,
   createChatMessage,
   createMeetingArtifact,
   loadMeetingArtifact,
@@ -23,9 +24,15 @@ import { meetingInstructions, type MeetingInstructions } from './meeting-templat
 import { rolePrompt, type PromptRole } from './prompts.ts';
 import {
   humainRouteRequest,
+  meetingEngineActions,
+  NEWER_ENGINE,
+  olderThanRevision4,
   runHumainMeeting,
   type HumainMeetingRoute,
+  type MeetingEngineCheck,
 } from './humain-client.ts';
+import { carryCaptureNotes, meetingOwnerNotes, ownerNotesForAi } from './owner-notes.ts';
+import { loadVocabulary } from './vocabulary.ts';
 import { findTranscriptRecord } from './transcript-library.ts';
 import { speakerLabel } from './transcript-renderer.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
@@ -58,7 +65,15 @@ export interface MeetingEnrichmentOptions {
   onStatus?: (message: string) => void;
   /** Deterministic seam for tests and embedded hosts. */
   runner?: typeof runHumainMeeting;
+  /** What the installed engine can do. With a runner and no check, the engine is taken to be current. */
+  engine?: MeetingEngineCheck;
 }
+
+/** The installed engine's check, or none for a test's runner, which stands in for a current engine. */
+export function engineCheck(options: { runner?: unknown; engine?: MeetingEngineCheck }): MeetingEngineCheck {
+  return options.engine ?? (options.runner ? async () => undefined : meetingEngineActions);
+}
+
 
 function enrichmentRoute(
   options: MeetingEnrichmentOptions,
@@ -111,18 +126,23 @@ export function meetingSegments(record: TranscriptRecord) {
 }
 
 /**
- * Claims as Humain takes them back: each citing only lines this transcript
- * has, since Humain refuses a claim that cites any other. A claim whose every
- * line was removed is left out: it stays in the notes, marked, but a point
- * nobody can check no longer steers the AI. Unchanged claims are the same
+ * Claims as Humain takes them back, in the shape every engine accepts: each
+ * citing only lines this transcript has, since Humain refuses a claim that
+ * cites any other, and none naming the owner's notes. A claim with no line
+ * left is not sent as a claim, for one of two reasons. One whose every line
+ * was removed stays in the notes, marked, but a point nobody can check no
+ * longer steers the AI. One that only the owner's notes support was never
+ * "removed": it stays the owner's, and reaches Humain the way every owner note
+ * does, as the note itself in `ownerNotes`. Unchanged claims are the same
  * objects, so a request that needed no filtering keeps its idempotency key.
  */
 export function claimsForHumain(claims: readonly MeetingClaim[], validIds: ReadonlySet<string>): MeetingClaim[] {
   return claims.flatMap((claim) => {
-    const { removedEvidenceSegmentIds: removed, ...sent } = claim;
+    const { removedEvidenceSegmentIds: removed, ownerNoteIds: notes, ...sent } = claim;
     const evidence = sent.evidenceSegmentIds.filter((id) => validIds.has(id));
-    if (!removed && evidence.length === sent.evidenceSegmentIds.length) return [claim];
-    return evidence.length ? [{ ...sent, evidenceSegmentIds: evidence }] : [];
+    if (!evidence.length) return [];
+    if (!removed && !notes && evidence.length === sent.evidenceSegmentIds.length) return [claim];
+    return [{ ...sent, evidenceSegmentIds: evidence }];
   });
 }
 
@@ -138,7 +158,16 @@ export function conversationForHumain(messages: readonly MeetingChatMessage[], v
 function parseEnrichmentOutput(
   value: unknown,
   validEvidenceIds: Set<string>,
+  validNoteIds: ReadonlySet<string> = new Set(),
 ): HumainEnrichmentOutput {
+  /** A point cites real segments and real notes, and at least one of the two. */
+  const unsupported = (item: { evidenceSegmentIds: string[]; ownerNoteIds?: string[] }, label: string, cites = 'cites'): string | undefined => {
+    const missing = item.evidenceSegmentIds.find((id) => !validEvidenceIds.has(id));
+    if (missing) return `${label} ${cites} missing segment ${missing}`;
+    const note = item.ownerNoteIds?.find((id) => !validNoteIds.has(id));
+    if (note) return `${label} ${cites} missing owner note ${note}`;
+    return citesNothing(item) ? `${label} ${cites} nothing` : undefined;
+  };
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Humain meeting output must be an object');
   }
@@ -151,15 +180,15 @@ function parseEnrichmentOutput(
     if (!MEETING_CLAIM_TYPES.includes(parsed.type)) {
       throw new Error(`Humain claim ${index} has an unsupported type`);
     }
-    const missing = parsed.evidenceSegmentIds.find((id) => !validEvidenceIds.has(id));
-    if (missing) throw new Error(`Humain claim ${index} cites missing segment ${missing}`);
+    const problem = unsupported(parsed, `Humain claim ${index}`);
+    if (problem) throw new Error(problem);
     return parsed;
   });
   if (output.notes === undefined) return { summary: output.summary.trim(), claims };
   const notes = parseMeetingNotes(output.notes, 'Humain notes');
   for (const section of notes) {
-    const missing = section.items.flatMap((item) => item.evidenceSegmentIds).find((id) => !validEvidenceIds.has(id));
-    if (missing) throw new Error(`Humain notes "${section.heading}" cite missing segment ${missing}`);
+    const problem = section.items.map((item) => unsupported(item, `Humain notes "${section.heading}"`, 'cite')).find(Boolean);
+    if (problem) throw new Error(problem);
   }
   return { summary: output.summary.trim(), claims, notes };
 }
@@ -178,6 +207,8 @@ export function ownerInstructions(
   artifact: MeetingArtifact,
   options: Pick<MeetingEnrichmentOptions, 'instructions'>,
   role?: PromptRole,
+  /** The owner's vocabulary goes to every run an engine can take it in. */
+  include: { vocabulary?: boolean } = {},
 ): { instructions?: MeetingInstructions } {
   if (options.instructions !== undefined) {
     return options.instructions === null ? {} : { instructions: options.instructions };
@@ -188,13 +219,18 @@ export function ownerInstructions(
     ...(artifact.ai?.template ? { template: artifact.ai.template } : {}),
     ...(artifact.ai?.note ? { note: artifact.ai.note } : {}),
   });
+  const vocabulary = include.vocabulary === false ? [] : loadVocabulary(libraryDir).terms;
+  const withVocabulary = (value: MeetingInstructions | undefined) => vocabulary.length ? { ...value, vocabulary } : value;
   const prompt = role ? rolePrompt(libraryDir, role) : undefined;
-  if (!prompt) return instructions ? { instructions } : {};
+  if (!prompt) {
+    const result = withVocabulary(instructions);
+    return result ? { instructions: result } : {};
+  }
   const profile = [instructions?.profile, prompt].filter(Boolean).join('\n\n');
   if (profile.length > MAX_INSTRUCTION_CHARS) {
     throw new Error(`"About me" and the ${role === 'observer' ? 'live' : role === 'reconciliation' ? 'notes' : 'chat'} prompt are ${profile.length.toLocaleString('en-US')} characters together; the limit is 16,000. Shorten one of them.`);
   }
-  return { instructions: { ...instructions, profile } };
+  return { instructions: withVocabulary({ ...instructions, profile })! };
 }
 
 function compactClaims(claims: MeetingClaim[]): MeetingClaim[] {
@@ -255,8 +291,11 @@ export async function enrichMeeting(
   const segments = meetingSegments(record);
   if (segments.length === 0) throw new Error('Meeting enrichment requires transcript text');
   const validIds = new Set(segments.map((segment) => segment.id));
+  // Notes typed during the call wait in its capture bundle until they are carried into meeting.json.
+  try { carryCaptureNotes(libraryDir, transcriptId); } catch { /* They are still read from the bundle below. */ }
   let artifact = baseArtifact(record, loadMeetingArtifact(libraryDir, transcriptId), options);
   if (artifact.ai?.off) throw new MeetingAiOffError();
+  const older = await olderThanRevision4(engineCheck(options));
   const mode = options.mode ?? artifact.mode;
   const minimum = options.minimumNewSegments ?? 3;
   const maximum = options.maximumNewSegments ?? 12;
@@ -267,7 +306,7 @@ export async function enrichMeeting(
   try {
     if (mode === 'streaming' || mode === 'hybrid') {
       const observerRoute = enrichmentRoute(options, 'observer');
-      const { instructions } = ownerInstructions(libraryDir, artifact, options, 'observer');
+      const { instructions } = ownerInstructions(libraryDir, artifact, options, 'observer', { vocabulary: !older });
       artifact = { ...artifact, status: 'observing', mode };
       saveMeetingArtifact(libraryDir, artifact);
       let cursor = artifact.session.cursor;
@@ -344,7 +383,11 @@ export async function enrichMeeting(
 
     if (mode === 'post-session' || mode === 'hybrid') {
       const reconciliationRoute = enrichmentRoute(options, 'reconciliation');
-      const { instructions } = ownerInstructions(libraryDir, artifact, options, 'reconciliation');
+      const { instructions } = ownerInstructions(libraryDir, artifact, options, 'reconciliation', { vocabulary: !older });
+      // The owner's own account of the meeting. An engine before revision 4 would ignore them, so it is not sent them.
+      const written = meetingOwnerNotes(libraryDir, transcriptId, artifact);
+      const ownerNotes = older ? [] : ownerNotesForAi(artifact, written);
+      if (older && written.length) options.onStatus?.(`Your notes are kept, but this AI engine cannot read them. ${NEWER_ENGINE}`);
       artifact = { ...artifact, status: 'reconciling', mode };
       saveMeetingArtifact(libraryDir, artifact);
       options.onStatus?.('Writing the notes…');
@@ -361,6 +404,7 @@ export async function enrichMeeting(
         reconciliationRoute,
         approvedContext,
         ...(instructions ? [instructions] : []),
+        ...(ownerNotes.length ? [ownerNotes] : []),
       ]);
       const { runId, idempotencyKey: attemptKey } = retryableRun(storeDir,
         runSafeId(`meeting-${transcriptId}-reconcile`, idempotencyKey), idempotencyKey);
@@ -371,9 +415,10 @@ export async function enrichMeeting(
         provisionalClaims,
         context: approvedContext,
         ...(instructions ? { instructions } : {}),
+        ...(ownerNotes.length ? { ownerNotes } : {}),
         idempotencyKey: attemptKey,
       }, { storeDir, runId, onStatus: options.onStatus, timeoutMs: HUMAIN_ROLE_TIMEOUT_MS.reconcile });
-      const output = parseEnrichmentOutput(result.output, validIds);
+      const output = parseEnrichmentOutput(result.output, validIds, new Set(ownerNotes.map((note) => note.id)));
       if (instructions?.template && output.notes === undefined) {
         // An engine from before templates ignores them and returns plain claims.
         options.onStatus?.('This Humain version does not write templated notes yet; run `seashell ai install` with a newer engine.');
@@ -385,6 +430,7 @@ export async function enrichMeeting(
         runId: result.runId,
         createdAt: new Date().toISOString(),
         ...(output.notes && instructions?.template ? { template: instructions.template.name, notes: output.notes } : {}),
+        ...(older && written.length ? { ownerNotesUnread: true } : {}),
       };
       artifact = {
         ...artifact,
@@ -435,30 +481,38 @@ export async function enrichMeeting(
   }
 }
 
-export async function chatWithMeeting(
+/** A question about one meeting, as Humain's chat reads it, and its answer checked against the transcript. */
+async function askHumain(
   libraryDir: string,
   transcriptId: string,
   question: string,
   route: HumainMeetingRoute,
-  onStatus?: (message: string) => void,
-  /** Deterministic seam for tests and embedded hosts. */
-  runner: typeof runHumainMeeting = runHumainMeeting,
-): Promise<MeetingArtifact> {
+  options: {
+    onStatus?: ((message: string) => void) | undefined;
+    runner: typeof runHumainMeeting;
+    engine?: MeetingEngineCheck | undefined;
+    /** Asked while the call is still being recorded: the transcript so far, nothing saved. */
+    partial?: boolean;
+    signal?: AbortSignal | undefined;
+  },
+): Promise<{ record: TranscriptRecord; artifact: MeetingArtifact | undefined; answer: string; evidenceSegmentIds: string[]; runId: string }> {
   const { record, path } = findTranscriptRecord(libraryDir, transcriptId);
   const artifact = loadMeetingArtifact(libraryDir, transcriptId);
-  if (!artifact) throw new Error('Create the meeting artifact before using meeting chat');
-  if (artifact.ai?.off) throw new MeetingAiOffError();
+  if (!artifact && !options.partial) throw new Error('Create the meeting artifact before using meeting chat');
+  if (artifact?.ai?.off) throw new MeetingAiOffError();
   const trimmed = question.trim();
   if (!trimmed) throw new Error('Meeting question cannot be empty');
   const segments = meetingSegments(record);
+  if (options.partial && !segments.length) throw new Error('Nothing has been said yet.');
   const validIds = new Set(segments.map((segment) => segment.id));
   const approvedContext = {
-    calendar: artifact.calendar ?? null,
-    attendees: artifact.attendees,
-    priorConversation: conversationForHumain(artifact.chat.slice(-10), validIds),
+    calendar: artifact?.calendar ?? null,
+    attendees: artifact?.attendees ?? [],
+    priorConversation: options.partial || !artifact ? [] : conversationForHumain(artifact.chat.slice(-10), validIds),
   };
-  const finalClaims = claimsForHumain(artifact.analysis?.claims ?? artifact.provisionalClaims, validIds);
-  const { instructions } = ownerInstructions(libraryDir, artifact, {}, 'chat');
+  const older = await olderThanRevision4(engineCheck(options));
+  const { instructions } = artifact ? ownerInstructions(libraryDir, artifact, {}, 'chat', { vocabulary: !older }) : {};
+  const finalClaims = claimsForHumain(artifact?.analysis?.claims ?? artifact?.provisionalClaims ?? [], validIds);
   const idempotencyKey = stableKey([
     transcriptId,
     'chat',
@@ -468,22 +522,27 @@ export async function chatWithMeeting(
     route,
     approvedContext,
     ...(instructions ? [instructions] : []),
+    ...(options.partial ? ['partial'] : []),
   ]);
-  const { runId, idempotencyKey: attemptKey } = retryableRun(join(dirname(path), '.humain'),
-    runSafeId(`meeting-${transcriptId}-chat`, idempotencyKey), idempotencyKey);
-  const result = await runner('chat', {
-    meetingId: artifact.meetingId,
+  const storeDir = join(dirname(path), '.humain');
+  const { runId, idempotencyKey: attemptKey } = retryableRun(storeDir,
+    runSafeId(`meeting-${transcriptId}-${options.partial ? 'live-question' : 'chat'}`, idempotencyKey), idempotencyKey);
+  const result = await options.runner('chat', {
+    meetingId: artifact?.meetingId ?? record.id,
     ...humainRouteRequest(route),
     question: trimmed,
     segments,
     finalClaims,
     context: approvedContext,
     ...(instructions ? { instructions } : {}),
+    // The call is still going: what has been said so far, not the whole meeting.
+    ...(options.partial ? { partial: true } : {}),
     idempotencyKey: attemptKey,
   }, {
-    storeDir: join(dirname(path), '.humain'),
+    storeDir,
     runId,
-    onStatus,
+    ...(options.onStatus ? { onStatus: options.onStatus } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
     timeoutMs: HUMAIN_ROLE_TIMEOUT_MS.chat,
   });
   if (!result.output || typeof result.output !== 'object' || Array.isArray(result.output)) {
@@ -497,17 +556,87 @@ export async function chatWithMeeting(
   ) {
     throw new Error('Humain chat returned invalid answer evidence');
   }
+  return { record, artifact, answer: output.answer.trim(), evidenceSegmentIds: output.evidenceSegmentIds as string[], runId: result.runId };
+}
+
+export async function chatWithMeeting(
+  libraryDir: string,
+  transcriptId: string,
+  question: string,
+  route: HumainMeetingRoute,
+  onStatus?: (message: string) => void,
+  /** Deterministic seam for tests and embedded hosts. */
+  runner: typeof runHumainMeeting = runHumainMeeting,
+  engine?: MeetingEngineCheck,
+): Promise<MeetingArtifact> {
+  const { artifact, answer, evidenceSegmentIds, runId } = await askHumain(libraryDir, transcriptId, question, route, { onStatus, runner, engine });
   const updated: MeetingArtifact = {
-    ...artifact,
+    ...artifact!,
     chat: [
-      ...artifact.chat,
-      createChatMessage('user', trimmed),
-      createChatMessage('assistant', output.answer, {
-        evidenceSegmentIds: output.evidenceSegmentIds as string[],
-        runId: result.runId,
-      }),
+      ...artifact!.chat,
+      createChatMessage('user', question.trim()),
+      createChatMessage('assistant', answer, { evidenceSegmentIds, runId }),
     ],
   };
   saveMeetingArtifact(libraryDir, updated);
   return updated;
+}
+
+/** A line of the call an answer rests on: when, who, and what they said. */
+export interface CitedMoment {
+  id: string;
+  start: number;
+  speakerId?: string;
+  speaker?: string;
+  text: string;
+}
+
+export interface LiveAnswer {
+  question: string;
+  answer: string;
+  moments: CitedMoment[];
+}
+
+/** How far back "What did I miss?" looks when you were watching all along. */
+export const CATCH_UP_SECONDS = 5 * 60;
+
+/**
+ * "What did I miss?", as a question about a stretch of the call: since you last
+ * looked, or the last five minutes, whichever is longer.
+ */
+export function catchUpQuestion(nowSeconds: number, lastLookedSeconds?: number): { question: string; from: number } {
+  const from = Math.max(0, Math.min(nowSeconds - CATCH_UP_SECONDS, lastLookedSeconds ?? Infinity));
+  const clock = (seconds: number) => {
+    const whole = Math.max(0, Math.floor(seconds));
+    const minutes = `${Math.floor(whole % 3600 / 60)}`.padStart(whole >= 3600 ? 2 : 1, '0');
+    return `${whole >= 3600 ? `${Math.floor(whole / 3600)}:` : ''}${minutes}:${String(whole % 60).padStart(2, '0')}`;
+  };
+  return {
+    from,
+    question: `What did I miss? Cover what was said from ${clock(from)} to ${clock(nowSeconds)} on the transcript clock: ` +
+      'anything decided, anything asked of me or still waiting on me, and anything I should answer, most important first. Keep it short.',
+  };
+}
+
+/**
+ * A question during a call, over what has been said so far. Nothing is saved:
+ * the transcript is still growing, and the final notes replace it all. A
+ * private meeting is refused before anything is sent.
+ */
+export async function askDuringCall(
+  libraryDir: string,
+  transcriptId: string,
+  question: string,
+  route: HumainMeetingRoute,
+  options: { onStatus?: (message: string) => void; runner?: typeof runHumainMeeting; engine?: MeetingEngineCheck; signal?: AbortSignal } = {},
+): Promise<LiveAnswer> {
+  const { record, answer, evidenceSegmentIds } = await askHumain(libraryDir, transcriptId, question, route,
+    { onStatus: options.onStatus, runner: options.runner ?? runHumainMeeting, engine: options.engine, partial: true, signal: options.signal });
+  const byId = new Map(meetingSegments(record).map((segment) => [segment.id, segment]));
+  const moments = evidenceSegmentIds.flatMap((id) => {
+    const segment = byId.get(id);
+    return segment ? [{ id, start: segment.start, text: segment.text, ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
+      ...(segment.speakerLabel ? { speaker: segment.speakerLabel } : {}) }] : [];
+  }).toSorted((left, right) => left.start - right.start);
+  return { question: question.trim(), answer, moments };
 }

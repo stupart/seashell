@@ -12,3 +12,9 @@ process.env.SEASHELL_APPROVAL_KEYCHAIN = 'off';
 
 // Naming, forgetting and private meetings change the voice library. Tests get their own, never the one in Application Support.
 process.env.SEASHELL_VOICES_DIR ||= mkdtempSync(join(tmpdir(), 'seashell-test-voices-'));
+
+// Vocabulary and briefs sit beside the real library by default. A test that names no library
+// must never read the owner's words or write a brief there.
+const scratch = mkdtempSync(join(tmpdir(), 'seashell-test-files-'));
+process.env.SEASHELL_VOCABULARY_FILE ||= join(scratch, 'Vocabulary.txt');
+process.env.SEASHELL_BRIEFS_DIR ||= join(scratch, 'Briefs');

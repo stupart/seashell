@@ -96,14 +96,29 @@ try {
   await type('y');
   await until(() => listPrompts(library).find((prompt) => prompt.name === 'notes')?.state === 'default', 'the prompt is as shipped again');
 
+  // Vocabulary: Enter opens the file in the text editor, made with its explanation the first time.
+  await type(LEFT, DOWN);
+  if (narrow) await type(ENTER);
+  await until(() => frame().includes('No words yet') || frame().includes('None yet'), 'the vocabulary has no words yet');
+  await type(ENTER);
+  await until(() => opened.length === 2, 'Enter opens the vocabulary');
+  assert.ok(opened[1]!.endsWith('Vocabulary.txt') && existsSync(opened[1]!), 'the file is made beside the library');
+
   // Extractors: Enter opens the folder, made with its example the first time.
   await type(LEFT, DOWN, ENTER);
   if (narrow) await type(ENTER);
   await until(() => folders.length === 1, 'Enter opens the extractors folder');
   assert.ok(existsSync(join(folders[0]!, 'customer-pains.md')), 'the folder starts with an example');
 
+  // Briefs: on by default, and Enter turns them off.
+  await type(LEFT, DOWN, DOWN);
+  if (narrow) await type(ENTER);
+  await until(() => frame().includes('Enter turn off'), 'briefs are on and offer to turn off');
+  await type(ENTER);
+  await until(() => JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.briefs?.enabled === false, 'Enter turns briefs off');
+
   // Video: Enter switches it. Off, then on again, which asks macOS for Screen Recording.
-  await type(LEFT, DOWN, DOWN, DOWN);
+  await type(LEFT, DOWN, DOWN);
   if (narrow) await type(ENTER);
   await until(() => frame().includes('needs Screen Recording'), 'video is on but not allowed');
   await type(ENTER);
@@ -114,7 +129,7 @@ try {
   assert.equal(JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.video?.enabled, true);
 
   // Computer audio: the one-time check that lets meetings use Seashell System Audio.
-  await type(LEFT, ...Array(11).fill('\x1b[A'));
+  await type(LEFT, ...Array(13).fill('\x1b[A'));
   if (narrow) await type(ENTER);
   await until(() => frame().includes('Enter check computer audio'), 'computer audio offers the check');
   // Wide, the detail wraps beside the menu's border; read the words only.

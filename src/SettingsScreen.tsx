@@ -21,6 +21,7 @@ import { calendarPermission } from './calendar-permission.ts';
 import { join } from 'path';
 import { ensureTemplatesDirectory, PROFILE_FILE } from './meeting-templates.ts';
 import { ensurePromptsDirectory, listPrompts, resetPrompt, type PromptSummary } from './prompts.ts';
+import { ensureVocabularyFile } from './vocabulary.ts';
 import { ensureExtractorsDirectory, loadExtractors, type ExtractorWhen } from './extractors.ts';
 import { askAutomationApprovalWithDialog, ensureAutomationsDirectory, loadAutomations, readAutomationRuns, runAutomations, runFailure,
   type Automation, type AutomationRun } from './automations.ts';
@@ -46,9 +47,11 @@ export const MENU_LABEL: Record<FeatureId, string> = {
   'ai-notes': 'AI notes',
   'notes-templates': 'Templates',
   prompts: 'Prompts',
+  vocabulary: 'Vocabulary',
   // What the notes call them; the files that make them live in the Extractors folder.
   extractors: 'Insights',
   automations: 'Automations',
+  briefs: 'Briefs',
   calendar: 'Calendar titles',
   video: 'Video',
 };
@@ -151,6 +154,26 @@ export function useSetupActions(props: SetupActionProps & { onFinished?: () => v
         (props.actions?.openFolder ?? openFolder)(directory);
         // The notes call them Insights; the folder on disk keeps its name, so the toast says both.
         done(`Opened the ${action === 'open-extractors' ? 'Insights folder (Extractors)' : 'Automations folder'} in Finder.`);
+        return true;
+      } catch (cause) {
+        failure(cause);
+        return false;
+      } finally { props.onFinished?.(); }
+    }
+    if (action === 'open-vocabulary') {
+      try {
+        (props.actions?.openFile ?? openTextFile)(ensureVocabularyFile(props.libraryDir));
+        done('Opened Vocabulary. Save it and the next meeting spells those words that way.');
+        return true;
+      } catch (cause) {
+        failure(cause);
+        return false;
+      } finally { props.onFinished?.(); }
+    }
+    if (action === 'turn-on-briefs') {
+      try {
+        props.onConfigChange?.(updateMeetingConfig({ briefs: { enabled: true } }));
+        done('Briefs on. Seashell writes one before a meeting that has history.');
         return true;
       } catch (cause) {
         failure(cause);
@@ -318,7 +341,7 @@ type MenuItem =
 const SECTIONS: ReadonlyArray<readonly [string, ReadonlyArray<FeatureId | 'recording'>]> = [
   ['Recording', ['recording', 'recorder', 'detection', 'microphone', 'computer-audio', 'transcription']],
   ['Speakers', ['meet-names', 'speaker-separation', 'voices']],
-  ['AI notes', ['ai-notes', 'notes-templates', 'prompts', 'extractors', 'automations']],
+  ['AI notes', ['ai-notes', 'notes-templates', 'prompts', 'vocabulary', 'extractors', 'automations', 'briefs']],
   ['Extras', ['calendar', 'video']],
 ];
 
@@ -483,6 +506,17 @@ export default function SettingsScreen(props: SetupActionProps & {
     return !result || result.status === 'ok' ? { tone: 'done', text: `${run.automation} worked.` }
       : { tone: 'failed', text: result.status === 'skipped' ? `${run.automation} did not run.` : `${run.automation} failed again.` };
   });
+  // Briefs are one switch: Enter turns them off, and on again.
+  const switchBriefs = (on: boolean) => {
+    if (!on) { void setup.run('turn-on-briefs'); return; }
+    try {
+      const saved = updateMeetingConfig({ briefs: { enabled: false } });
+      setConfig(saved);
+      props.onConfigChange?.(saved);
+      setup.done('Briefs off. Nothing is written before meetings.');
+    } catch (cause) { setup.failure(cause); }
+    setRefresh(value => value + 1);
+  };
   // Video is one switch: Enter turns it on, and asks macOS for Screen Recording if it must; Enter again turns it off.
   const switchVideo = (on: boolean) => {
     try {
@@ -553,6 +587,7 @@ export default function SettingsScreen(props: SetupActionProps & {
     if (selected?.kind === 'guide') props.onOpenGuide?.();
     else if (compact && !inDetail || list !== undefined && listLength > 0) { setInDetail(true); setRowIndex(0); setup.setMessage(undefined); }
     else if (key.return && selected?.kind === 'status' && selected.status.id === 'video') switchVideo(selected.status.state !== 'off');
+    else if (key.return && selected?.kind === 'status' && selected.status.id === 'briefs') switchBriefs(selected.status.action !== 'turn-on-briefs');
     else if (key.return && selected?.kind === 'status' && selected.status.action) void setup.run(selected.status.action);
     // Only hearing it proves a microphone or the Mac's sound works, and the guide listens.
     else if (key.return && selected?.kind === 'status' && testable(selected)) {
@@ -717,6 +752,7 @@ export default function SettingsScreen(props: SetupActionProps & {
 
   const action = selected?.kind === 'status' ? selected.status.action : undefined;
   const video = selected?.kind === 'status' && selected.status.id === 'video' ? selected.status : undefined;
+  const briefs = selected?.kind === 'status' && selected.status.id === 'briefs' ? selected.status : undefined;
   // One order everywhere: what Enter does, then moving, then r, then Esc. Trying a failed run again
   // is the fix, so it leads; on that row r only ever tries again, and recheck gives way.
   const hints: Hint[] = compact && !inDetail ? [['Enter', 'open'], ['↑↓', 'choose'], ['r', 'recheck'], ['Esc', 'back']]
@@ -728,6 +764,7 @@ export default function SettingsScreen(props: SetupActionProps & {
       ...(retryRun ? [['r', 'try again'] as Hint] : []),
       ...(selected?.kind === 'recording' ? [['Enter', 'change'] as Hint] : selected?.kind === 'guide' ? [['Enter', 'start'] as Hint]
         : video ? [['Enter', video.state === 'off' ? 'turn on' : 'turn off'] as Hint]
+        : briefs ? [['Enter', briefs.action === 'turn-on-briefs' ? 'turn on' : 'turn off'] as Hint]
         : list === 'prompts' ? [['Enter', 'choose a prompt'] as Hint] : list === 'voices' && listLength ? [['Enter', 'choose someone'] as Hint]
         : action ? [['Enter', lowerFirst(FEATURE_ACTION_LABEL[action])] as Hint] : selected && testable(selected) ? [['Enter', 'test it now'] as Hint] : []),
       ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ...(retryRun ? [] : [['r', 'recheck'] as Hint]), ['Esc', 'back'],

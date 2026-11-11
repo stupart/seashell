@@ -1,4 +1,4 @@
-import type { MeetingArtifact, MeetingClaim, MeetingClaimType } from './meeting-artifact.ts';
+import type { MeetingArtifact, MeetingClaim, MeetingClaimType, OwnerNote } from './meeting-artifact.ts';
 import { citedSegmentIds, claimOwnerAndDue, sourceLineRemoved, transcriptSegmentId } from './meeting-artifact.ts';
 import { compareMeetingEvidence, meetingEvidence } from './meeting-evidence.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
@@ -77,6 +77,12 @@ export const SUBHEADING = '## ';
  * A bullet with either reads `- text META owner META clock`, with an empty part where one is unknown.
  */
 export const META = '\t';
+/**
+ * Marks a point that came from something the owner typed. It leads the time in
+ * the dim right column, so the words of the point stay as written; help says
+ * what it means.
+ */
+export const FROM_YOUR_NOTES = '✎';
 
 /** A line of the notes taken apart: its text, who owns it and by when, and when it was said. */
 export function bulletParts(line: string): { body: string; owner?: string; clock?: string } {
@@ -118,6 +124,10 @@ export function meetingViewLines(
   artifact: MeetingArtifact,
   view: Exclude<MeetingView, 'transcript'>,
   record?: TranscriptRecord,
+  /** Everything the owner typed, including notes still in a recording's bundle; meeting.json's when unset. */
+  ownerNotes: readonly OwnerNote[] = artifact.ownerNotes ?? [],
+  /** The call is still being recorded, so notes cannot be written yet. */
+  recording = false,
 ): string[] {
   if (view === 'chat') {
     const sources = createSources(artifact, record);
@@ -130,32 +140,42 @@ export function meetingViewLines(
     ]);
   }
 
+  // What the owner typed, in the order it happened, each with its time on the right.
+  const noteBullet = (note: OwnerNote) => note.at === undefined ? `- ${note.text}` : `- ${note.text}${META}${META}${formatTuiClock(note.at)}`;
+  const notesById = new Map(ownerNotes.map((note) => [note.id, note]));
   if (artifact.ai?.off) {
     return [
       'AI is off for this meeting.',
       'Seashell sends it to no model: no live analysis, notes or chat, and agents using the meetings server are refused it.',
       'The transcript is here as usual. Press g to turn AI back on.',
+      ...(ownerNotes.length ? ['', `${HEADING}Your notes`, ...ownerNotes.map(noteBullet)] : []),
     ];
   }
 
   const start = createStart(artifact, record);
-  type Item = { text: string; ids: readonly string[]; owner?: string | undefined; removed?: boolean };
-  // The time is the citation: it finds the line in the transcript. A point
-  // whose every line was removed stays, and says so.
+  type Item = { text: string; ids: readonly string[]; owner?: string | undefined; removed?: boolean; notes?: readonly string[] | undefined };
+  // A point from the owner's notes is placed where they wrote it, when the transcript cannot place it.
+  const at = (item: Item) => start(item.ids) ?? (item.notes ?? []).map((id) => notesById.get(id)?.at)
+    .filter((time): time is number => time !== undefined).sort((a, b) => a - b)[0];
+  // The time is the citation: it finds the line in the transcript. ✎ before it says the point came from your notes.
+  // A point whose every cited line was removed stays, and says so; one that only ever
+  // rested on your notes cited no line, so it has none removed and is simply yours.
   const bullet = (item: Item) => {
-    const said = start(item.ids);
-    const clock = said === undefined ? '' : formatTuiClock(said);
+    const said = at(item);
+    const time = said === undefined ? '' : formatTuiClock(said);
+    const clock = item.notes?.length ? (time ? `${FROM_YOUR_NOTES} ${time}` : FROM_YOUR_NOTES) : time;
     const text = item.removed ? `${item.text} (source line removed)` : item.text;
     return item.owner || clock ? `- ${text}${META}${item.owner ?? ''}${META}${clock}` : `- ${text}`;
   };
   // In the order they were said; anything Seashell cannot place keeps its place at the end.
-  const inOrder = (items: Item[]) => items.map((item, index) => ({ item, index, at: start(item.ids) ?? Number.POSITIVE_INFINITY }))
+  const inOrder = (items: Item[]) => items.map((item, index) => ({ item, index, at: at(item) ?? Number.POSITIVE_INFINITY }))
     .sort((a, b) => a.at - b.at || a.index - b.index).map(({ item }) => item);
   const claims = artifact.analysis?.claims ?? artifact.provisionalClaims;
   const summary = artifact.analysis?.summary || (
     artifact.status === 'failed'
       ? 'The transcript is safe, but the notes failed. Press g to try again.'
       : artifact.status === 'reconciling' ? 'Writing the notes…'
+      : recording ? claims.length ? 'Notes so far. The final notes are written when the call ends.' : 'Notes are written when the call ends.'
       : claims.length ? 'Notes so far. Press g for final notes.' : 'No notes yet. Press g to write them.'
   );
   // Actions and decisions lead, so they are never a scroll away. A template is
@@ -190,10 +210,12 @@ export function meetingViewLines(
   const fromClaims = (types: MeetingClaimType[]): Item[] => {
     const items = claims.filter((claim) => types.includes(claim.type) && !repeated(claim));
     shown.push(...items.map((claim) => saying(claim.text, claim.evidenceSegmentIds)));
-    return items.map((claim) => ({ text: claim.text, ids: claim.evidenceSegmentIds, owner: ownerOf(claim), removed: sourceLineRemoved(claim) }));
+    return items.map((claim) => ({ text: claim.text, ids: claim.evidenceSegmentIds, owner: ownerOf(claim),
+      removed: sourceLineRemoved(claim), notes: claim.ownerNoteIds }));
   };
   const fromSection = (section: (typeof sections)[number]): Item[] =>
-    section.items.map((item) => ({ text: item.text, ids: item.evidenceSegmentIds, owner: ownerFor(item), removed: sourceLineRemoved(item) }));
+    section.items.map((item) => ({ text: item.text, ids: item.evidenceSegmentIds, owner: ownerFor(item),
+      removed: sourceLineRemoved(item), notes: item.ownerNoteIds }));
   const groupOf = (heading: string) => LEADING_GROUPS.find(([, , names]) => names.test(heading.trim()));
   const stale = record && artifact.transcriptEvidence &&
     compareMeetingEvidence(artifact.transcriptEvidence, meetingEvidence(record)) !== 'same';
@@ -230,8 +252,16 @@ export function meetingViewLines(
     });
     return lines.length ? [`${SUBHEADING}${name}`, ...lines] : [];
   });
+  // Notes the AI has not read yet, or could not: during the call, or before notes are written.
+  // Once the notes use one, it shows there, marked ✎, and not here a second time.
+  const used = new Set([...claims.flatMap((claim) => claim.ownerNoteIds ?? []),
+    ...sections.flatMap((section) => section.items.flatMap((item) => item.ownerNoteIds ?? []))]);
+  const unused = ownerNotes.filter((note) => !used.has(note.id));
+  const yours = unused.length ? ['', `${HEADING}Your notes`, ...unused.map(noteBullet),
+    ...(artifact.analysis?.ownerNotesUnread ? ['The AI engine that wrote these notes could not read yours. Install a newer AI engine: seashell ai install <humain-package.tgz>'] : [])] : [];
   return [
     summary,
+    ...yours,
     ...leading,
     ...template,
     ...trailing,

@@ -38,6 +38,8 @@ export interface MeetingInstructions {
   profile?: string;
   template?: { name: string; body: string };
   note?: string;
+  /** Spellings to use: names, companies, jargon (vocabulary.ts). Revision 4. */
+  vocabulary?: string[];
 }
 
 const PROFILE_STARTER = `<!--

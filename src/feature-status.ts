@@ -9,7 +9,9 @@ import { captureCoverage, type CaptureCoverage } from './capture-health.ts';
 import { loadCaptureSession } from './capture-session.ts';
 import type { SeashellConfig } from './config.ts';
 import { diarizationStatus } from './diarization-environment.ts';
-import { resolveHumainExecutable } from './humain-client.ts';
+import { meetingEngineActions, NEWER_ENGINE, olderThanRevision4, resolveHumainExecutable, type MeetingEngineCheck } from './humain-client.ts';
+import { briefsEnabled } from './config.ts';
+import { loadVocabulary, vocabularyPath } from './vocabulary.ts';
 import { meetingLaunchAtLoginStatus } from './launch-at-login.ts';
 import { loadMeetingTemplates, loadProfile, templatesDirectory } from './meeting-templates.ts';
 import { checkMeetConnection, type MeetProbe } from './meet-speakers.ts';
@@ -32,10 +34,11 @@ const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 /** ok: works · attention: works partly or needs one step · off: not set up (optional) · broken: should work and does not. */
 export type FeatureState = 'ok' | 'attention' | 'off' | 'broken';
 export type FeatureAction = 'enable-recorder' | 'connect-meet' | 'allow-microphone' | 'allow-calendar' | 'open-speakers' | 'open-ai' | 'open-templates'
-  | 'open-extractors' | 'open-automations' | 'turn-on-video' | 'allow-screen-recording' | 'check-computer-audio';
+  | 'open-extractors' | 'open-automations' | 'turn-on-video' | 'allow-screen-recording' | 'check-computer-audio'
+  | 'open-vocabulary' | 'turn-on-briefs';
 export type FeatureId = 'recorder' | 'detection' | 'microphone' | 'computer-audio' | 'transcription'
-  | 'meet-names' | 'speaker-separation' | 'voices' | 'ai-notes' | 'notes-templates' | 'prompts' | 'extractors' | 'automations'
-  | 'calendar' | 'video';
+  | 'meet-names' | 'speaker-separation' | 'voices' | 'ai-notes' | 'notes-templates' | 'prompts' | 'vocabulary' | 'extractors' | 'automations'
+  | 'briefs' | 'calendar' | 'video';
 
 export interface FeatureStatus {
   readonly id: FeatureId;
@@ -67,6 +70,8 @@ export const FEATURE_ACTION_LABEL: Record<FeatureAction, string> = {
   'turn-on-video': 'Turn video on',
   'allow-screen-recording': 'Allow Screen Recording',
   'check-computer-audio': 'Check computer audio',
+  'open-vocabulary': 'Open Vocabulary',
+  'turn-on-briefs': 'Turn briefs on',
 };
 
 /** What the most recent recorded meeting actually captured, per source. */
@@ -103,6 +108,8 @@ export interface FeatureStatusDependencies {
   readonly screenRecording?: (signal?: AbortSignal) => Promise<HelperPermissionStatus>;
   /** The people with a saved voice. */
   readonly voices?: () => ReadonlyArray<{ name: string; meetings: number }>;
+  /** What the installed AI engine can do, read from its own usage line. */
+  readonly engine?: MeetingEngineCheck;
 }
 
 export function lastMeetingEvidence(libraryDir: string): MeetingEvidence | undefined {
@@ -331,7 +338,13 @@ export async function readFeatureStatuses(options: {
   });
 
   statuses.push(templatesStatus(options.libraryDir));
-  statuses.push(promptsStatus(options.libraryDir), extractorsStatus(options.libraryDir), automationsStatus(options.libraryDir));
+  const vocabulary = loadVocabulary(options.libraryDir);
+  // Asked only when something waits on it: the engine says what it can do from its usage line, never a prompt.
+  const older = engine && aiConfigured && (vocabulary.terms.length > 0 || briefsEnabled(options.config))
+    ? await olderThanRevision4(deps.engine ?? meetingEngineActions) : false;
+  statuses.push(promptsStatus(options.libraryDir), vocabularyStatus(options.libraryDir, vocabulary, older),
+    extractorsStatus(options.libraryDir), automationsStatus(options.libraryDir),
+    briefsStatus(options.config, { calendarOn, aiConfigured: aiConfigured && engine, older }));
 
   const titlesDetail = 'Names each meeting after its calendar event (matched by its Meet link) and lists the attendees, which later helps name speakers.';
   statuses.push({
@@ -351,6 +364,34 @@ export async function readFeatureStatuses(options: {
 
   statuses.push(videoStatus(videoOn, screenRecording));
   return statuses;
+}
+
+/** Names and words to spell right, as a file the owner edits. */
+function vocabularyStatus(libraryDir: string, vocabulary: ReturnType<typeof loadVocabulary>, older: boolean): FeatureStatus {
+  const base = { id: 'vocabulary', label: 'Vocabulary', optional: true, action: 'open-vocabulary', command: 'seashell vocabulary',
+    detail: 'Names, companies and words for Seashell to spell right, one per line. Transcription and the meeting AI both use them.' } as const;
+  const count = `${vocabulary.terms.length} ${vocabulary.terms.length === 1 ? 'word' : 'words'}`;
+  if (vocabulary.problems.length) return { ...base, state: 'attention', summary: `${count} · some left out`, fix: vocabulary.problems[0]! };
+  if (!vocabulary.terms.length) return { ...base, state: 'off', summary: existsSync(vocabularyPath(libraryDir)) ? 'No words yet' : 'None yet',
+    fix: 'Open it and add the names and words you use, one per line.' };
+  // Transcription still uses them; only the notes cannot.
+  return older ? { ...base, state: 'attention', summary: `${count} · AI engine too old`,
+    fix: `Transcription uses them; the AI engine is too old to. ${NEWER_ENGINE}` }
+    : { ...base, state: 'ok', summary: count };
+}
+
+const BRIEFS_DETAIL = 'About 15 minutes before a calendar meeting, Seashell writes a brief from past meetings with the same title or the same people, and tells you once. A meeting with no history gets none. Private meetings are never read.';
+
+/** Briefs before meetings: on by default, and only as useful as the calendar and the AI it needs. Off is never a nag. */
+function briefsStatus(config: SeashellConfig, ready: { calendarOn: boolean; aiConfigured: boolean; older: boolean }): FeatureStatus {
+  // Each says the one step that lets briefs happen; once they can, the command makes one now.
+  const base = { id: 'briefs', label: 'Briefs before meetings', optional: true, detail: BRIEFS_DETAIL } as const;
+  if (!briefsEnabled(config)) return { ...base, state: 'off', summary: 'Off', action: 'turn-on-briefs' };
+  if (!ready.calendarOn) return { ...base, state: 'off', summary: 'On · needs calendar titles', fix: 'Turn on calendar titles, under Extras.',
+    command: 'seashell meeting calendar setup' };
+  if (!ready.aiConfigured) return { ...base, state: 'off', summary: 'On · needs AI notes', fix: 'Choose an AI under AI notes.', command: 'seashell ai setup' };
+  if (ready.older) return { ...base, state: 'attention', summary: 'On · AI engine too old', fix: NEWER_ENGINE };
+  return { ...base, state: 'ok', summary: 'On · 15 minutes before', command: 'seashell brief next' };
 }
 
 const VIDEO_DETAIL = 'Records the call\'s window beside its audio, about 60 MB an hour. In a meeting, w plays it from the line you are reading.';

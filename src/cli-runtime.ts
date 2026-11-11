@@ -5,6 +5,7 @@ import { calendarPermission } from './calendar-permission.ts';
 import { readFeatureStatuses, renderFeatureStatusTable } from './feature-status.ts';
 import { oneSidedNotifier } from './capture-health.ts';
 import { runMeetingsMcpServer } from './meetings-mcp.ts';
+import { addMeetingNote, carryCaptureNotes, recordingBundle, noteAtMoment, writeNoteCommand } from './owner-notes.ts';
 import { installMeetingsMcp } from './mcp-install.ts';
 import { mergeMeetingFragments, planMeetingMerges } from './meeting-merge.ts';
 import { discoverHumainProviders, resolveHumainExecutable } from './humain-client.ts';
@@ -28,7 +29,12 @@ import {
   resolveSaveByDefault,
   updateMeetingConfig,
   updateSpeakerEngine,
+  type SeashellConfig,
 } from './config.ts';
+import { findBrief, makeBrief, nextCalendarMeeting, upcomingFromEvent, type UpcomingMeeting } from './briefs.ts';
+import { draftFollowUp, draftText } from './drafts.ts';
+import { ensureVocabularyFile, loadVocabulary } from './vocabulary.ts';
+import { formatTuiClock } from './tui-state.ts';
 import { parseCalendarEvents, readMacCalendarEventsAsync } from './calendar.ts';
 import {
   findTranscriptRecord,
@@ -914,7 +920,8 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
               codeRoot: PROJECT_ROOT }),
           } : {}),
           // The login agent has no window of its own, so it asks with a dialog.
-          ...(!once ? { dependencies: { askToRecord: askToRecordWithDialog } } : {}),
+          // It also says, once per meeting, that a brief is ready.
+          ...(!once ? { dependencies: { askToRecord: askToRecordWithDialog, notify } } : {}),
           onEvent: (event) => {
             // Like the dialog, the notice is for someone at the Mac, not a one-shot check.
             if (!once) { notifyOneSided(event); notifyMicrophone(event); notifyScreenFilmed(event); }
@@ -940,6 +947,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
               print(`Possible ${event.candidate.appName} meeting detected; run \`seashell meeting consent approve\` to record it.`);
             }
             else if (event.type === 'meeting.stopped') print(`Stopped recording ${event.candidate.title}.`);
+            else if (event.type === 'brief.ready') print(`Brief ready for ${event.title}: ${event.path}`);
             else process.stderr.write(`${event.type}: ${event.message}\n`);
           },
         });
@@ -1121,6 +1129,7 @@ async function executeCapture(
   });
   store.setStatus('completed', 'final-transcript-published');
   store.attachTo(saved.directory);
+  try { carryCaptureNotes(libraryDir, record.id); } catch { /* They stay in the bundle, where the meeting still reads them. */ }
   print(command.json ? JSON.stringify(record, null, 2) : (
     `Recovered ${record.title}\n${saved.directory}`
   ));
@@ -1177,9 +1186,9 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
     case 'mcp': {
       if (command.action === 'serve') {
         const config = loadConfig();
-        // Extractors run on the final-notes route as configured at the time of the call.
+        // Extractors and briefs run on the final-notes route, drafts on chat's, as configured at the time of the call.
         await runMeetingsMcpServer(resolveLibraryDir(undefined, process.env, config), PACKAGE_VERSION, process.stdin, process.stdout,
-          { route: () => resolveMeetingRoute(loadConfig().meeting, 'reconciliation') });
+          { route: () => resolveMeetingRoute(loadConfig().meeting, 'reconciliation'), chatRoute: () => resolveMeetingRoute(loadConfig().meeting, 'chat') });
         return 0;
       }
       const result = installMeetingsMcp();
@@ -1333,6 +1342,10 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
     case 'extract':
     case 'automations':
     case 'query':
+    case 'note':
+    case 'brief':
+    case 'draft':
+    case 'vocabulary':
       return executeMeetingIntelligence(command);
   }
 }
@@ -1442,6 +1455,59 @@ async function executeMeetingIntelligence(command: MeetingIntelligenceCommand): 
       ].join('\n'));
       return problems.length ? 1 : 0;
     }
+    case 'vocabulary': {
+      const path = ensureVocabularyFile(libraryDir);
+      const vocabulary = loadVocabulary(libraryDir);
+      print(command.json ? JSON.stringify(vocabulary, null, 2) : [
+        `Vocabulary: ${path}`,
+        vocabulary.terms.length ? `  ${vocabulary.terms.join(', ')}` : '  No words yet. Add one per line: names, companies, jargon.',
+        ...vocabulary.problems.map((problem) => `  ! ${problem}`),
+        'Transcription and the meeting AI spell these as written. Lines starting with # are notes to you.',
+      ].join('\n'));
+      return 0;
+    }
+    case 'note': {
+      if (command.meeting) {
+        const note = addMeetingNote(libraryDir, command.meeting, command.text, command.atSeconds === undefined ? {} : { at: command.atSeconds });
+        const { record } = findTranscriptRecord(libraryDir, command.meeting);
+        print(command.json ? JSON.stringify(note, null, 2)
+          : `Added a note to ${record.title}${note.at === undefined ? '' : ` at ${formatTuiClock(note.at)}`}. It is used the next time its notes are written.`);
+        return 0;
+      }
+      const watch = readBackgroundWatchStatus(libraryDir);
+      if (watch?.phase !== 'recording' || !watch.sessionId) {
+        throw new Error('Nothing is recording. To add a note to a meeting: seashell note "<text>" --meeting <id>');
+      }
+      const typedAt = Date.now();
+      const path = writeNoteCommand(command.text, typedAt);
+      // The recorder picks notes up on its next check, every few seconds.
+      const deadline = Date.now() + 12_000;
+      while (existsSync(path) && Date.now() < deadline) await Bun.sleep(250);
+      const bundle = recordingBundle(libraryDir, watch.sessionId);
+      const at = bundle ? noteAtMoment(bundle, typedAt) : undefined;
+      const taken = !existsSync(path);
+      print(command.json ? JSON.stringify({ kept: taken, ...(at === undefined ? {} : { at }) })
+        : taken ? `Noted${at === undefined ? '' : ` at ${formatTuiClock(at)}`}${watch.candidate?.title ? ` in ${watch.candidate.title}` : ''}.`
+        : 'The recorder has not picked the note up yet. It keeps it for 10 minutes; check seashell status.');
+      return taken ? 0 : 1;
+    }
+    case 'brief': {
+      const route = resolveMeetingRoute(config.meeting, 'reconciliation');
+      if (!route) throw new Error('Meeting AI is not set up, so there is no one to write the brief. Choose a provider: seashell ai setup');
+      const upcoming = await briefTarget(libraryDir, config, command.target);
+      const brief = findBrief(libraryDir, upcoming) ?? await makeBrief(libraryDir, upcoming, { route, onStatus: status });
+      print(command.json ? JSON.stringify(brief, null, 2) : `${readFileSync(brief.path, 'utf8').replace(/^---[\s\S]*?---\n/u, '').trim()}\n\nSaved: ${brief.path}`);
+      return 0;
+    }
+    case 'draft': {
+      const route = resolveMeetingRoute(config.meeting, 'chat');
+      if (!route) throw new Error('Meeting AI is not set up for chat. Choose a provider: seashell ai setup');
+      const draft = await draftFollowUp(libraryDir, command.id, command.slack ? 'slack' : 'email', route,
+        { ...(command.ask ? { ask: command.ask } : {}), onStatus: status });
+      print(command.json ? JSON.stringify(draft, null, 2) : draftText(draft));
+      if (!command.json) process.stderr.write('Nothing was sent.\n');
+      return 0;
+    }
     case 'query': {
       const result = queryNotes(libraryDir, {
         ...(command.noteKind ? { kind: command.noteKind } : {}),
@@ -1467,6 +1533,30 @@ async function executeMeetingIntelligence(command: MeetingIntelligenceCommand): 
       return 0;
     }
   }
+}
+
+/**
+ * The meeting a brief is for: the next on the calendar, or the next whose title
+ * has these words. Without a calendar event, a title still finds its past
+ * meetings, as a series does.
+ */
+async function briefTarget(libraryDir: string, config: SeashellConfig, target: 'next' | { title: string }): Promise<UpcomingMeeting> {
+  const calendar = config.meeting?.calendar;
+  const events = calendar?.enabled && (calendar.policy ?? 'ask') !== 'off'
+    ? await readMacCalendarEventsAsync({ leadMinutes: 7 * 24 * 60, lookbackMinutes: 0 }) : [];
+  if (target === 'next') {
+    if (!calendar?.enabled) throw new Error('Briefs for the next meeting come from your calendar. Turn on calendar titles: seashell meeting calendar setup');
+    const next = nextCalendarMeeting(events);
+    if (!next) throw new Error('Nothing on your calendar in the next week.');
+    return upcomingFromEvent(next);
+  }
+  const words = target.title.toLocaleLowerCase('en-US').split(/\s+/u);
+  const has = (title: string) => words.every((word) => title.toLocaleLowerCase('en-US').includes(word));
+  const event = events.filter((candidate) => has(candidate.title)).toSorted((left, right) => left.startAt.localeCompare(right.startAt))[0];
+  if (event) return upcomingFromEvent(event);
+  // Not on the calendar: the newest past meeting with those words names the series.
+  const past = listTranscriptRecords(libraryDir).find((entry) => has(entry.title));
+  return { title: past?.title ?? target.title, startsAt: new Date().toISOString(), attendees: [] };
 }
 
 /** A notification that needs no answer. The text is an argument, never part of the script. */

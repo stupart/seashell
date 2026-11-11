@@ -425,3 +425,21 @@ test('meeting computer-audio checks, or at the Mac runs the one-time check', () 
     kind: 'meeting', action: { kind: 'computer-audio', operation: 'setup' }, json: true });
   expect(() => parseCliArgs(['meeting', 'computer-audio', 'allow'])).toThrow('seashell meeting computer-audio [setup|check]');
 });
+
+test('notes, briefs, drafts and vocabulary parse as a person types them', () => {
+  expect(parseCliArgs(['note', 'Dana', 'sounded', 'unsure'])).toEqual({ kind: 'note', text: 'Dana sounded unsure', json: false });
+  expect(parseCliArgs(['note', 'Send the guide', '--meeting', 'acme-call', '--at', '12:34', '--json']))
+    .toEqual({ kind: 'note', text: 'Send the guide', meeting: 'acme-call', atSeconds: 754, json: true });
+  // A time belongs to a meeting: during a recording the note is timed when typed.
+  expect(() => parseCliArgs(['note', 'x', '--at', '1:00'])).toThrow('Usage: seashell note');
+  expect(() => parseCliArgs(['note'])).toThrow('Usage: seashell note');
+  expect(parseCliArgs(['brief'])).toEqual({ kind: 'brief', target: 'next', json: false });
+  expect(parseCliArgs(['brief', 'next', '--json'])).toEqual({ kind: 'brief', target: 'next', json: true });
+  expect(parseCliArgs(['brief', 'Weekly', 'sync'])).toEqual({ kind: 'brief', target: { title: 'Weekly sync' }, json: false });
+  expect(parseCliArgs(['draft', 'acme-call'])).toEqual({ kind: 'draft', id: 'acme-call', slack: false, json: false });
+  expect(parseCliArgs(['draft', 'acme-call', '--slack', '--ask', 'keep it to three bullets']))
+    .toEqual({ kind: 'draft', id: 'acme-call', slack: true, ask: 'keep it to three bullets', json: false });
+  expect(() => parseCliArgs(['draft'])).toThrow('Usage: seashell draft');
+  expect(parseCliArgs(['vocabulary', '--json'])).toEqual({ kind: 'vocabulary', json: true });
+  expect(() => parseCliArgs(['vocabulary', 'add'])).toThrow('Usage: seashell vocabulary');
+});

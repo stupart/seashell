@@ -1,6 +1,6 @@
 import { installedHumainCli, requireHumainNode } from './humain-install.ts';
 import { spawn } from 'child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
 import {
@@ -9,8 +9,12 @@ import {
   trackTempDirectory,
 } from './process-lifecycle.ts';
 
-/** extract runs one owner-written extractor over a finished meeting. */
-export type HumainMeetingAction = 'observe' | 'reconcile' | 'chat' | 'extract';
+/**
+ * extract runs one owner-written extractor over a finished meeting. brief
+ * prepares the owner for an upcoming meeting from past ones; draft writes a
+ * follow-up email or Slack message from one meeting. Both need revision 4.
+ */
+export type HumainMeetingAction = 'observe' | 'reconcile' | 'chat' | 'extract' | 'brief' | 'draft';
 export type HumainBackend = 'codex' | 'claude-code' | 'openrouter' | 'local-openai';
 
 export interface HumainMeetingRoute {
@@ -339,6 +343,52 @@ export function humainRouteProbeArgs(route: HumainMeetingRoute, timeoutMs: numbe
 /** An engine from before a command prints its usage instead of running it. */
 export function olderHumainEngine(message: string): boolean {
   return /usage: humain|unknown (?:command|subcommand|option)|is not supported/iu.test(message);
+}
+
+/** What to do about an engine too old for something, in the words every surface uses. */
+export const NEWER_ENGINE = 'Install a newer AI engine: seashell ai install <humain-package.tgz>';
+
+/** The meeting actions an engine lists in its usage line: "humain meeting observe|reconcile|chat|extract <request.json>". */
+export function parseMeetingActions(message: string): ReadonlySet<string> | undefined {
+  const listed = /humain meeting ((?:[a-z-]+\|)+[a-z-]+)/iu.exec(message)?.[1];
+  return listed ? new Set(listed.toLowerCase().split('|')) : undefined;
+}
+
+/** Reads the installed engine's meeting actions; undefined when it cannot say. */
+export type MeetingEngineCheck = () => Promise<ReadonlySet<string> | undefined>;
+
+const engineActions = new Map<string, ReadonlySet<string> | undefined>();
+
+/**
+ * The meeting actions the installed engine knows, from the usage line in its
+ * own script. Running it would say the same, but the engine checks every
+ * provider first, which takes many seconds; reading the file takes none, and
+ * no prompt is sent. Read once per engine file.
+ */
+export const meetingEngineActions: MeetingEngineCheck = async (env: NodeJS.ProcessEnv = process.env) => {
+  let script: string;
+  try {
+    const executable = resolveHumainExecutable(env);
+    script = executable.prefix[0] ?? executable.command;
+  } catch { return undefined; }
+  try {
+    const { mtimeMs, size } = statSync(script);
+    const key = `${script}:${mtimeMs}:${size}`;
+    if (!engineActions.has(key)) {
+      engineActions.set(key, size <= 64 * 1024 * 1024 ? parseMeetingActions(readFileSync(script, 'latin1')) : undefined);
+    }
+    return engineActions.get(key);
+  } catch { return undefined; }
+};
+
+/**
+ * Revision 4 brought briefs, drafts, the owner's notes and vocabulary together,
+ * so an engine whose usage lists no brief has none of them. An engine that
+ * cannot say is taken to be current: what it refuses, it refuses plainly.
+ */
+export async function olderThanRevision4(check: MeetingEngineCheck): Promise<boolean> {
+  const actions = await check().catch(() => undefined);
+  return actions !== undefined && !actions.has('brief');
 }
 
 export function parseHumainRouteProbe(stdout: string, route: HumainMeetingRoute): HumainRouteProbe {
