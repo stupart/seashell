@@ -849,8 +849,11 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       const stop = () => controller.abort();
       process.once('SIGINT', stop);
       process.once('SIGTERM', stop);
-      const warnings = new WarningRateLimit();
       const writeEvent = command.json ? watchLogWriter(meetingWatchLogFiles(), { fallback: print }) : print;
+      // A warning that stopped recurring is forgotten with how often it came back unseen.
+      const warnings = new WarningRateLimit(undefined, (message, repeats) => command.json
+        ? writeEvent(JSON.stringify({ type: 'watch.warning', at: new Date().toISOString(), message, repeats, final: true }))
+        : process.stderr.write(`watch.warning: ${message} (repeated ${repeats} more times)\n`));
       // After a meeting is ready: extractors, then automations, one meeting at a time.
       let followUps: Promise<void> = Promise.resolve();
       const followUp = (transcriptId: string, app: string) => {

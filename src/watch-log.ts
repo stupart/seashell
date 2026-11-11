@@ -3,6 +3,8 @@ import { copyFileSync, fstatSync, ftruncateSync, renameSync, rmSync, statSync, w
 
 /** The same warning is logged at most once in this window. */
 export const WARNING_REPEAT_MS = 10 * 60_000;
+/** The most distinct warnings remembered at once; the longest unseen go first. */
+export const WARNING_LIMIT_ENTRIES = 256;
 /** Past this size meeting-watch.jsonl moves to its rotated file and starts again. */
 export const WATCH_LOG_MAX_BYTES = 1024 * 1024;
 
@@ -10,11 +12,26 @@ export const WATCH_LOG_MAX_BYTES = 1024 * 1024;
  * Meet and capture warnings can flip between a few messages every few seconds
  * for hours. Each message is shown once per window; the repeats in between are
  * counted, so alternating messages are repeats too.
+ *
+ * A login agent runs for weeks, and a warning that names a path or a number
+ * is a new message every time. A warning is forgotten two windows after it
+ * last showed, or when 256 others are newer, and the repeats nobody saw go to
+ * onForgotten so the count is never lost.
  */
 export class WarningRateLimit {
+  /** Oldest shown first: showing a message again moves it to the end. */
   readonly #shown = new Map<string, { atUnixMs: number; repeats: number }>();
 
-  constructor(readonly windowMs = WARNING_REPEAT_MS) {}
+  constructor(
+    readonly windowMs = WARNING_REPEAT_MS,
+    readonly onForgotten: (message: string, repeats: number) => void = () => {},
+    readonly maxEntries = WARNING_LIMIT_ENTRIES,
+  ) {}
+
+  /** How many warnings are remembered. */
+  get size(): number {
+    return this.#shown.size;
+  }
 
   /** Undefined to drop the warning; otherwise how many repeats were dropped since it last showed. */
   admit(message: string, nowUnixMs: number): number | undefined {
@@ -23,11 +40,26 @@ export class WarningRateLimit {
       shown.repeats += 1;
       return undefined;
     }
-    for (const [key, value] of this.#shown) {
-      if (value.repeats === 0 && nowUnixMs - value.atUnixMs >= this.windowMs) this.#shown.delete(key);
-    }
+    this.#shown.delete(message);
+    this.#forget(nowUnixMs);
     this.#shown.set(message, { atUnixMs: nowUnixMs, repeats: 0 });
     return shown?.repeats ?? 0;
+  }
+
+  /** Make room for one more. A warning with unseen repeats waits a second window, in case it shows again with its count. */
+  #forget(nowUnixMs: number): void {
+    const drop = (key: string, repeats: number) => {
+      this.#shown.delete(key);
+      if (repeats > 0) this.onForgotten(key, repeats);
+    };
+    for (const [key, value] of this.#shown) {
+      const age = nowUnixMs - value.atUnixMs;
+      if (age >= (value.repeats === 0 ? 1 : 2) * this.windowMs) drop(key, value.repeats);
+    }
+    for (const [key, value] of this.#shown) {
+      if (this.#shown.size < this.maxEntries) break;
+      drop(key, value.repeats);
+    }
   }
 }
 
