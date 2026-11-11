@@ -566,8 +566,9 @@ holds:
 - **Prompts:** what the AI is told for live analysis, final notes and chat.
   Enter on one opens it in your text editor. `D` puts an edited one back as
   shipped, after you say yes.
-- **Extractors** and **Automations:** what each folder holds, any file that
-  does not load, and the last automation runs. Enter opens the folder.
+- **Insights** (the files in the Extractors folder) and **Automations:** what
+  each folder holds, any file that does not load, and the last automation runs.
+  Enter opens the folder.
 - **Video:** on or off, and whether macOS lets Seashell record the screen.
 
 Drag-and-drop also accepts absolute audio or video paths. Live microphone and
@@ -826,7 +827,7 @@ seashell extract <id> "Customer pains"           # run one now
 Results show under **Insights** in the meeting's notes and are saved beside it
 as `insights/<name>.json` and `.md`. Private meetings are never sent.
 Extractors need Humain prompt revision 3 or later. In Seashell, **,** →
-**Extractors** lists them and opens the folder, and rewriting a meeting's
+**Insights** lists them and opens the folder, and rewriting a meeting's
 notes with **G** runs the extractors that fit it again.
 
 ### Automations

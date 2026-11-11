@@ -45,7 +45,8 @@ export const MENU_LABEL: Record<FeatureId, string> = {
   'ai-notes': 'AI notes',
   'notes-templates': 'Templates',
   prompts: 'Prompts',
-  extractors: 'Extractors',
+  // What the notes call them; the files that make them live in the Extractors folder.
+  extractors: 'Insights',
   automations: 'Automations',
   calendar: 'Calendar titles',
   video: 'Video',
@@ -336,11 +337,17 @@ function whenWords(when: ExtractorWhen): string {
   return `When it mentions ${words.slice(0, 3).join(', ')}${words.length > 3 ? '…' : ''}`;
 }
 
-/** A file that does not load, named by its file: `risks.md has no fields. Open it to add some.` */
-function problemText(problem: { path: string; message: string }): string {
-  const file = problem.path.split('/').at(-1);
-  const named = /^"[^"]*"(:?)\s*(.*)$/su.exec(problem.message);
-  return named ? `${file}${named[1] ? ':' : ''} ${named[2]}` : `${file}: ${problem.message}`;
+/**
+ * A file that does not load, as a row beside the ones that do: its name, then what is wrong in a
+ * few words. `"Risks" has no fields. Open it to add some.` is `Risks  ✗ Nothing to pull out yet`.
+ */
+function problemParts(problem: { path: string; message: string }): [name: string, why: string] {
+  const named = /^"([^"]*)"(?::)?\s*(.*)$/su.exec(problem.message);
+  const name = named?.[1] || problem.path.split('/').at(-1)!.replace(/\.md$/u, '');
+  const why = (named?.[2] ?? problem.message).trim();
+  const words = /^has no fields\b/u.test(why) ? 'Nothing to pull out yet' : /^has no actions\b/u.test(why) ? 'Nothing to do yet'
+    : why.replace(/\.$/u, '');
+  return [name, words.charAt(0).toUpperCase() + words.slice(1)];
 }
 
 const RUN_SYMBOL: Record<AutomationRun['status'], [string, 'green' | 'red' | 'yellow']> = {
@@ -600,8 +607,11 @@ export default function SettingsScreen(props: SetupActionProps & {
     return <Text key={key} inverse={chosen} wrap="truncate-end">{chosen ? '› ' : '  '}{label.slice(0, labelWidth - 1).padEnd(labelWidth)}
       <Text dimColor={!chosen}>{value}</Text></Text>;
   };
-  const problemLines = (problems: readonly { path: string; message: string }[]) => problems.map(problem =>
-    <Text key={problem.path} color="red" wrap="truncate-end">✗ {problemText(problem)}</Text>);
+  // In the same columns as the files that load, so the broken one reads as one of them.
+  const problemLines = (problems: readonly { path: string; message: string }[]) => problems.map(problem => {
+    const [name, why] = problemParts(problem);
+    return <Text key={problem.path} wrap="truncate-end">{'  '}{name.slice(0, 21).padEnd(22)}<Text color="red">✗ {why}</Text></Text>;
+  });
   const filesBody = (id: FeatureId) => {
     if (id === 'prompts') return files.prompts.map((prompt, i) => listRow(prompt.name, i, prompt.title, PROMPT_STATE[prompt.state], 18));
     if (id === 'voices') return files.voices.map((voice, i) =>

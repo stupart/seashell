@@ -62,7 +62,7 @@ export const FEATURE_ACTION_LABEL: Record<FeatureAction, string> = {
   'open-speakers': 'Open speaker setup',
   'open-ai': 'Choose AI',
   'open-templates': 'Open your templates and About me',
-  'open-extractors': 'Open the extractors folder',
+  'open-extractors': 'Open the Extractors folder',
   'open-automations': 'Open the automations folder',
   'turn-on-video': 'Turn video on',
   'allow-screen-recording': 'Allow Screen Recording',
@@ -394,8 +394,8 @@ function promptsStatus(libraryDir: string): FeatureStatus {
 
 /** Markdown files that pull the same things out of every meeting. */
 function extractorsStatus(libraryDir: string): FeatureStatus {
-  const base = { id: 'extractors', label: 'Insight extractors', optional: true, action: 'open-extractors', command: 'seashell extractors',
-    detail: 'Pull the same few things out of a meeting every time, each one cited. Results show under Insights in the notes. Each is a Markdown file.' } as const;
+  const base = { id: 'extractors', label: 'Insights', optional: true, action: 'open-extractors', command: 'seashell extractors',
+    detail: 'The same few things pulled out of every meeting, each one cited, under Insights in the notes. Each comes from a Markdown file in the Extractors folder.' } as const;
   const { extractors, problems } = loadExtractors(libraryDir);
   if (problems.length) return { ...base, state: 'broken', summary: `${problems.length} ${problems.length === 1 ? 'file does' : 'files do'} not load`,
     fix: 'Fix the file marked ✗ below. Until then it never runs.' };
