@@ -108,6 +108,7 @@ import {
   afterMeetingReady,
   askAutomationApprovalWithDialog,
   automationDecision,
+  automationNeedsApproval,
   ensureAutomationsDirectory,
   loadAutomations,
   readAutomationRuns,
@@ -1396,9 +1397,9 @@ async function executeMeetingIntelligence(command: MeetingIntelligenceCommand): 
         `Automations: ${directory}`,
         ...automations.map((automation) => {
           const last = runs.filter((run) => run.automation === automation.name).at(-1);
-          const outward = automation.actions.some((action) => action.kind === 'shell' || action.kind === 'webhook');
+          const outward = automationNeedsApproval(automation, libraryDir);
           const decision = automationDecision(automation);
-          return `  ${automation.name} — ${automation.enabled ? 'on' : 'off'} · ${automation.actions.map((action) => action.kind).join(', ')}` +
+          return `  ${automation.name} — ${automation.enabled ? 'on' : automation.by === 'agent' ? 'off: made by an agent; turn on in the file' : 'off'} · ${automation.actions.map((action) => action.kind).join(', ')}` +
             `${outward ? ` · ${decision === 'allow' ? 'allowed to send' : decision === 'deny' ? 'not allowed to send' : 'asks before sending'}` : ''}` +
             `${last ? ` · last run ${last.status} ${last.at.slice(0, 10)}` : ''}`;
         }),

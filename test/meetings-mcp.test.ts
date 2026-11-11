@@ -151,9 +151,12 @@ test('write tools say so in their annotations, and the server no longer calls it
     'delete_automation', 'update_prompt', 'update_template', 'edit_segment', 'rename_speaker']) {
     expect((byName.get(name) as any).readOnlyHint).toBe(false);
   }
-  for (const name of ['delete_extractor', 'delete_automation', 'update_prompt', 'update_template', 'update_extractor', 'update_automation']) {
+  for (const name of ['delete_extractor', 'delete_automation', 'update_prompt', 'update_template', 'update_extractor', 'update_automation',
+    'create_automation']) {
     expect((byName.get(name) as any).destructiveHint).toBe(true);
   }
+  // An automation, once its owner turns it on, can replace files and send meetings outside.
+  for (const name of ['create_automation', 'update_automation']) expect((byName.get(name) as any).openWorldHint).toBe(true);
   // A corrected line is kept in history, so editing is not destructive; an extractor talks to the AI provider.
   expect((byName.get('edit_segment') as any).destructiveHint).toBe(false);
   expect((byName.get('run_extractor') as any).openWorldHint).toBe(true);
@@ -224,10 +227,19 @@ test('agents edit prompts, templates and automations as the user\'s files', asyn
 
   const automation = await call(root, 'create_automation', { name: 'Post notes', filters: { title: ['sync'] },
     actions: [{ kind: 'webhook', value: 'https://hooks.example.com/z' }] }, deps);
-  expect(automation.value).toMatchObject({ name: 'Post notes', enabled: true, actions: [{ kind: 'webhook', url: 'https://hooks.example.com/z' }] });
+  // An agent's automation is saved off, says who made it, and waits for its owner to turn it on in the file.
+  expect(automation.value).toMatchObject({ name: 'Post notes', enabled: false, by: 'agent', actions: [{ kind: 'webhook', url: 'https://hooks.example.com/z' }] });
+  expect(readFileSync(automation.value.path, 'utf8')).toContain('enabled: false\nmade-by: agent\n');
   expect(automation.value.hash).toBeUndefined();
   expect((await call(root, 'list_automations', {}, deps)).value.automations[0]).toMatchObject({ name: 'Post notes', approval: 'not asked yet', recentRuns: [] });
-  expect((await call(root, 'update_automation', { automation: 'Post notes', enabled: false }, deps)).value.enabled).toBe(false);
+  expect(await call(root, 'create_automation', { name: 'On at once', enabled: true, actions: [{ kind: 'write', value: '~/Notes' }] }, deps))
+    .toEqual({ error: true, value: expect.stringContaining('Only the user can turn an automation on') });
+  // The owner turns it on; any change an agent makes turns it off again.
+  writeFileSync(automation.value.path, readFileSync(automation.value.path, 'utf8').replace('enabled: false', 'enabled: true'));
+  expect((await call(root, 'list_automations', {}, deps)).value.automations[0].enabled).toBe(true);
+  expect((await call(root, 'update_automation', { automation: 'Post notes', filters: { title: ['standup'] } }, deps)).value)
+    .toMatchObject({ enabled: false, by: 'agent' });
+  expect((await call(root, 'update_automation', { automation: 'Post notes', enabled: true }, deps)).error).toBe(true);
   expect((await call(root, 'create_automation', { name: 'Odd', actions: [{ kind: 'email', value: 'x' }] }, deps)).error).toBe(true);
   expect((await call(root, 'delete_automation', { automation: 'Post notes' }, deps)).value.deleted).toEndWith('post-notes.md');
 });

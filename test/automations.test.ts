@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -14,8 +14,10 @@ import {
   runFailure,
   runShellAction,
   updateAutomation,
+  writeTargetPath,
   type AutomationApprovalRequest,
 } from '../src/automations.ts';
+import { automationState } from '../src/SettingsScreen.tsx';
 import { ensureExtractorsDirectory } from '../src/extractors.ts';
 import type { runHumainMeeting } from '../src/humain-client.ts';
 import { createMeetingArtifact, loadMeetingArtifact, saveMeetingArtifact } from '../src/meeting-artifact.ts';
@@ -190,4 +192,70 @@ test('a failed run says why in plain words, and whether trying again could help'
   expect(runFailure(run('Archive', 'The operation timed out.'))).toEqual({ text: "The server at crm.example.com didn't answer.", retry: true });
   expect(runFailure(run('Post to the CRM', 'the server refused it (403)'))).toEqual({ text: 'The CRM refused it (403).', retry: false });
   expect(runFailure(run('Script', 'exit 1', 'shell'))).toEqual({ text: 'exit 1', retry: false });
+});
+
+test('a write never replaces a file Seashell did not make, never follows a link, and keeps its own file private', async () => {
+  const { home, root, record, env } = library();
+  const folder = join(home, 'Notes');
+  mkdirSync(folder);
+  const theirs = join(folder, '2026-10-05 Weekly sync.md');
+  writeFileSync(theirs, 'Notes I wrote myself.\n');
+  // A link where the file would go, pointing at something else that must stay as it is.
+  const elsewhere = mkdtempSync(join(tmpdir(), 'seashell-elsewhere-'));
+  roots.push(elsewhere);
+  const victim = join(elsewhere, 'settings.md');
+  writeFileSync(victim, 'Do not touch.\n');
+  symlinkSync(victim, join(folder, `${record.id}.md`));
+  automation(env, 'save.md', `---\nname: Save\n---\n- write: ${folder}\n- write: ${folder}/{id}.md\n`);
+  const [run] = await runAutomations(root, record.id, { env, trigger: 'manual' });
+  expect(run!.actions.map((action) => [action.status, action.detail])).toEqual([
+    ['ok', join(folder, '2026-10-05 Weekly sync (2).md')], ['ok', join(folder, `${record.id} (2).md`)]]);
+  expect(readFileSync(theirs, 'utf8')).toBe('Notes I wrote myself.\n');
+  expect(readFileSync(victim, 'utf8')).toBe('Do not touch.\n');
+  const ours = join(folder, '2026-10-05 Weekly sync (2).md');
+  expect(statSync(ours).mode & 0o777).toBe(0o600);
+  // Run again, Seashell replaces the file it wrote for this meeting; one changed since is kept, and the notes go beside it.
+  writeFileSync(join(folder, `${record.id} (2).md`), 'Edited by hand.\n');
+  const [again] = await runAutomations(root, record.id, { env, trigger: 'manual' });
+  expect(again!.actions.map((action) => action.detail)).toEqual([ours, join(folder, `${record.id} (3).md`)]);
+  expect(readFileSync(join(folder, `${record.id} (2).md`), 'utf8')).toBe('Edited by hand.\n');
+  expect(readdirSync(folder).sort()).toEqual(['2026-10-05 Weekly sync (2).md', '2026-10-05 Weekly sync.md',
+    `${record.id} (2).md`, `${record.id} (3).md`, `${record.id}.md`]);
+});
+
+test('a write outside the Sea Shell folder asks first, like shell and webhook, and still replaces nothing', async () => {
+  const { root, record, env } = library();
+  const outside = mkdtempSync(join(tmpdir(), 'seashell-outside-'));
+  roots.push(outside);
+  const settings = join(outside, 'CLAUDE.md');
+  writeFileSync(settings, 'Agent instructions.\n');
+  automation(env, 'save.md', `---\nname: Save\n---\n- write: ${settings}\n`);
+  const asked: AutomationApprovalRequest[] = [];
+  const ask = (answer: 'allow' | undefined) => async (request: AutomationApprovalRequest) => { asked.push(request); return answer; };
+  const [waiting] = await runAutomations(root, record.id, { env, trigger: 'manual', ask: ask(undefined) });
+  expect(waiting!.actions[0]).toMatchObject({ status: 'skipped', detail: expect.stringContaining('Waiting for your approval') });
+  expect(asked).toEqual([{ automation: 'Save', meeting: 'Weekly sync', actions: [`Save to: ${settings}`] }]);
+  expect(readdirSync(outside)).toEqual(['CLAUDE.md']);
+  const [allowed] = await runAutomations(root, record.id, { env, trigger: 'manual', ask: ask('allow') });
+  expect(allowed!.actions[0]).toMatchObject({ status: 'ok', detail: join(outside, 'CLAUDE (2).md') });
+  expect(readFileSync(settings, 'utf8')).toBe('Agent instructions.\n');
+});
+
+test('a title from the calendar cannot step out of the folder or hide characters; bad paths do not load', () => {
+  const record = { id: 'weekly-sync', createdAt: '2026-10-05T09:00:00Z' };
+  expect(writeTargetPath('/notes/{title}/{date}.md', record, '../../.ssh/authorized_keys')).toBe('/notes/ssh authorized keys/2026-10-05.md');
+  expect(writeTargetPath('/notes', record, 'Plan \u202Egnp.exe\u0000 / Q3: ready?')).toBe('/notes/2026-10-05 Plan gnp exe Q3 ready.md');
+  expect(writeTargetPath('/notes', record, '..')).toBe('/notes/2026-10-05 Meeting.md');
+  expect(() => writeTargetPath('/notes/{id}.md', { ...record, id: '../x' }, 'T')).toThrow('meeting ID');
+  for (const [target, problem] of [['~/Notes/../.claude', 'step up'], ['Notes', 'starting with ~/ or /'], ['~/Notes\u202E', 'control characters']]) {
+    expect(() => parseAutomation(`---\nname: Bad\n---\n- write: ${target}\n`, '/x/bad.md')).toThrow(problem);
+  }
+});
+
+test('an automation an agent made reads as off until its owner turns it on in the file', () => {
+  const made = parseAutomation('---\nname: Post\nenabled: false\nmade-by: agent\n---\n- webhook: https://hooks.example.com/x\n', '/x/post.md');
+  expect(made).toMatchObject({ enabled: false, by: 'agent' });
+  expect(automationState(made)).toBe('Off: made by an agent; turn on in the file');
+  expect(automationState({ ...made, enabled: true })).toBe('On');
+  expect(automationState({ enabled: false })).toBe('Off');
 });

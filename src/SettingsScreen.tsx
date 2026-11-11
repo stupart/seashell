@@ -23,7 +23,7 @@ import { ensureTemplatesDirectory, PROFILE_FILE } from './meeting-templates.ts';
 import { ensurePromptsDirectory, listPrompts, resetPrompt, type PromptSummary } from './prompts.ts';
 import { ensureExtractorsDirectory, loadExtractors, type ExtractorWhen } from './extractors.ts';
 import { askAutomationApprovalWithDialog, ensureAutomationsDirectory, loadAutomations, readAutomationRuns, runAutomations, runFailure,
-  type AutomationRun } from './automations.ts';
+  type Automation, type AutomationRun } from './automations.ts';
 import { forgetVoiceprint, listVoiceprints } from './voiceprints.ts';
 import { screenCapturePermission } from './video-capture.ts';
 import { checkComputerAudio, type ComputerAudioCheck } from './audio-levels.ts';
@@ -331,6 +331,11 @@ const PROMPT_STATE: Record<PromptSummary['state'], string> = { default: 'As ship
 const ACTION_WORDS: Record<string, string> = {
   write: 'saves a file', webhook: 'posts to a web address', shell: 'runs a command', extract: 'runs an extractor',
 };
+
+/** On or off; one an agent made stays off until its owner turns it on, and says how. */
+export function automationState(automation: Pick<Automation, 'enabled' | 'by'>): string {
+  return automation.enabled ? 'On' : automation.by === 'agent' ? 'Off: made by an agent; turn on in the file' : 'Off';
+}
 
 /** When an extractor runs, in a few words. */
 function whenWords(when: ExtractorWhen): string {
@@ -655,7 +660,7 @@ export default function SettingsScreen(props: SetupActionProps & {
     </>;
     if (id === 'automations') return <>
       {files.automations.automations.map(automation => <Text key={automation.path} wrap="truncate-end">
-        {'  '}{automation.name.slice(0, 21).padEnd(22)}<Text dimColor>{automation.enabled ? 'On' : 'Off'} · {[...new Set(automation.actions.map(action => ACTION_WORDS[action.kind] ?? action.kind))].join(', ')}</Text>
+        {'  '}{automation.name.slice(0, 21).padEnd(22)}<Text dimColor>{automationState(automation)} · {[...new Set(automation.actions.map(action => ACTION_WORDS[action.kind] ?? action.kind))].join(', ')}</Text>
       </Text>)}
       {problemLines(files.automations.problems)}
       {files.runs.length > 0 && <Box flexDirection="column" marginTop={1} flexShrink={0}>

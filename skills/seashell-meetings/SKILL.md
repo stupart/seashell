@@ -64,7 +64,9 @@ These tools change the user's own files. Say what you changed.
 - **Automations:** `list_automations`, `create_automation`,
   `update_automation`, `delete_automation`. They run when a meeting is ready:
   extract, write the notes to a folder, run a shell command with the meeting
-  JSON on stdin, or post to a webhook. Shell and webhook actions wait until the
+  JSON on stdin, or post to a webhook. One you add or change is saved off: tell
+  the user to read its file and change `enabled: false` to `enabled: true`.
+  Shell, webhook and writes outside the Sea Shell folder then wait until the
   user allows them in a Seashell dialog, and again after any change; tell the
   user to expect that dialog.
 

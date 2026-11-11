@@ -849,15 +849,27 @@ title: [discovery, demo]
 
 `title`, `attendee`, `app` and `calendar` narrow which meetings it runs for;
 every one you list must match. `write` saves the notes and transcript as
-Markdown in a folder (or at a `.md` path using `{date}`, `{title}` and `{id}`).
+Markdown in a folder (or at a `.md` path using `{date}`, `{title}` and `{id}`),
+starting with `~/` or `/`. `{title}` keeps only the letters, numbers and spaces
+of the meeting's title, so a calendar invite can't point it at another folder.
+`write` never replaces a file Seashell didn't write, and never writes through a
+link: when a file is already there, or you changed the one Seashell wrote, the
+notes go beside it as `… (2).md`. Only you can read the files it writes.
 `shell` runs a command with the meeting's JSON on stdin, and
 `SEASHELL_MEETING_ID` and `SEASHELL_MEETING_DIR` set. `webhook` posts the same
 JSON.
 
 Anything sent outside Seashell asks first. The first time a `shell` or
-`webhook` action would run, the background recorder shows a dialog naming the
-automation, the meeting and exactly what would run or where it would go. Your
-answer is remembered for that version of the file; any edit asks again.
+`webhook` action would run, or a `write` to a folder outside the Sea Shell
+folder (the one that holds Transcripts and Automations), the background
+recorder shows a dialog naming the automation, the meeting and exactly what
+would run or where it would go. Your answer is remembered for that version of
+the file; any edit asks again.
+
+An automation an agent adds or changes through the meetings server is saved
+off, marked `made-by: agent`. Read it, then change `enabled: false` to
+`enabled: true` to turn it on. Settings shows it as "Off: made by an agent".
+An agent can't turn one on.
 Approvals live beside Seashell's settings, not in the Automations folder.
 Each automation runs once per meeting, private meetings never run, and every
 run is logged to `automation-runs.jsonl` in your library.
@@ -895,9 +907,9 @@ Tools that change your files, which the agent uses only when you ask:
 `update_template`, `create_extractor`, `update_extractor`, `delete_extractor`,
 `run_extractor`, `create_automation`, `update_automation` and
 `delete_automation`. A corrected line keeps the old transcript in the meeting's
-history and keeps the notes, marked as possibly out of date. Automations an
-agent writes still ask you before sending anything outside. Every tool refuses
-private meetings.
+history and keeps the notes, marked as possibly out of date. An automation an
+agent adds or changes stays off until you turn it on in its file, and still
+asks you before sending anything outside. Every tool refuses private meetings.
 
 ### Google Meet status
 
