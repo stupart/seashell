@@ -87,6 +87,7 @@ import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { setupDiarization } from './diarization-setup.ts';
 import { compareSavedSpeakers, renderSpeakerComparison } from './speaker-compare.ts';
+import { forgetVoiceprint, listVoiceprints } from './voiceprints.ts';
 import { initializeFirstInstall } from './first-install.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1037,6 +1038,19 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
       const report = await compareSavedSpeakers(libraryDir, { ids: command.ids, last: command.last, onStatus: status });
       if (command.open && report.page) Bun.spawn(['open', report.page], { stdio: ['ignore', 'ignore', 'ignore'] });
       print(command.json ? JSON.stringify(report, null, 2) : renderSpeakerComparison(report));
+      return 0;
+    }
+    case 'speaker-voices': {
+      if (command.forget !== undefined) {
+        if (!forgetVoiceprint(command.forget)) throw new Error(`Sea Shell doesn't know a voice called "${command.forget}". See: seashell speakers voices`);
+        print(command.json ? JSON.stringify({ forgotten: command.forget }) : `Forgot ${command.forget}'s voice. Past transcripts keep the name.`);
+        return 0;
+      }
+      const people = listVoiceprints();
+      print(command.json ? JSON.stringify(people, null, 2) : people.length === 0
+        ? 'Sea Shell knows nobody by voice yet. Name a remote speaker in a meeting and it learns their voice, on this Mac only.'
+        : [...people.map((person) => `  ${person.name} · from ${person.meetings} meeting${person.meetings === 1 ? '' : 's'}`),
+          '', 'Voiceprints stay on this Mac. Forget one: seashell speakers voices forget <name>'].join('\n'));
       return 0;
     }
     case 'speaker-use': {

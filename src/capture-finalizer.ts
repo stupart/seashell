@@ -21,7 +21,7 @@ import {
   type CaptureTrackId,
 } from './capture-session.ts';
 import { diarizationStatus } from './diarization-environment.ts';
-import { remoteVoiceCeiling } from './diarize.ts';
+import { remoteVoiceCeiling, type SpeakerVoice } from './diarize.ts';
 import { parseMeetingArtifact, type MeetingAttendee } from './meeting-artifact.ts';
 import { isLikelySystemAudioLeak } from './live-echo.ts';
 import { meetSpeakerForSegment, readMeetSamples } from './meet-speakers.ts';
@@ -35,6 +35,7 @@ import type {
   TranscriptSegment,
 } from './transcript-types.ts';
 import { transcribeMedia, type TranscribeMediaOptions } from './transcription-service.ts';
+import { applyVoiceSuggestions, matchKnownVoices, saveMeetingVoices, type VoiceMatch } from './voiceprints.ts';
 import { transcribeWithTimestamps } from './whisper-timestamps.ts';
 import {
   runHumainTranscription,
@@ -315,6 +316,8 @@ export async function finalizeCaptureTranscript(
     let speakerAnalysis: NonNullable<StructuredTranscript['speakerAnalysis']> = {
       status: 'source-only', detail: 'Labels identify audio sources, not individual people.',
     };
+    let remoteVoices = new Map<string, SpeakerVoice>();
+    let voiceNames = new Map<string, VoiceMatch>();
     if (audibleMicrophone) {
       if (options.remoteRoute) {
         segments.push(...await remoteTrackSegments(
@@ -334,14 +337,18 @@ export async function finalizeCaptureTranscript(
         options.onStatus?.('Separating remote speakers…');
         try {
           const ceiling = remoteVoiceCeiling(options.attendees ?? savedAttendees(absoluteManifest));
+          let voices: ReadonlyMap<string, SpeakerVoice> = new Map();
           const separation: TranscribeMediaOptions = { speakers: true, title: options.title, onStatus: options.onStatus,
-            ...(ceiling === undefined ? {} : { maxSpeakers: ceiling }) };
+            ...(ceiling === undefined ? {} : { maxSpeakers: ceiling }), onVoices: (found) => { voices = found; } };
           const document = await (options.systemDiarizer ?? transcribeMedia)(system, separation);
           const speakerIds = new Map(document.speakers.map((speaker) => [speaker.id, remoteSpeakerId(speaker.id)]));
           // The final combined timeline needs fresh evidence IDs. Per-track IDs can collide.
-          segments.push(...labelMeet(document.transcript.map(({ id: _id, ...segment }) => ({ ...segment,
+          const remote = document.transcript.map(({ id: _id, ...segment }) => ({ ...segment,
             speaker: speakerIds.get(segment.speaker ?? '') ?? remoteSpeakerId('UNKNOWN'),
-          }))));
+          }));
+          remoteVoices = new Map([...voices].flatMap(([id, voice]) => (speakerIds.has(id) ? [[speakerIds.get(id)!, voice] as const] : [])));
+          voiceNames = matchKnownVoices(remoteVoices);
+          segments.push(...labelMeet(remote));
           separated = true;
           speakerAnalysis = { status: 'complete', model: document.speakerAnalysis?.model ?? diarizationStatus().model,
             detail: 'Remote voices separated locally. Microphone is a separate source; names need confirmation.' };
@@ -375,7 +382,7 @@ export async function finalizeCaptureTranscript(
     const duration = Math.max(0, ...manifest.chunks.map((chunk) => chunk.endMs)) / 1_000;
     if (meetSpeakers.size > 0) speakerAnalysis = { status: 'platform-hints',
       detail: 'Names suggested by Google Meet speaking indicators. Review overlap and speaker changes; other computer audio may be misattributed.' };
-    return createTranscriptRecord({
+    const record = createTranscriptRecord({
       speakerAnalysis,
       transcript: [...reconciled],
       speakers: [
@@ -393,6 +400,9 @@ export async function finalizeCaptureTranscript(
       title: options.title ?? `Recovered live capture ${new Date(manifest.createdAt).toLocaleString()}`,
       source: { filename: 'Live capture session', duration, format: 'capture-session/0.1' },
     });
+    // The voices go to the local voice library, never into the transcript.
+    try { saveMeetingVoices(record.id, remoteVoices); } catch { /* Naming a speaker later just won't learn the voice. */ }
+    return applyVoiceSuggestions(record, voiceNames);
   } finally {
     for (const path of temporaryTracks) {
       if (existsSync(path)) rmSync(path, { force: true });

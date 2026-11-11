@@ -16,6 +16,7 @@ import type { TranscriptFormat, TranscriptRecord } from './transcript-types.ts';
 import { archiveMeetingTranscript, synchronizeMeetingTranscript } from './meeting-artifact.ts';
 import { readBackgroundMeetingState, readBackgroundMeetingStatus, type BackgroundMeetingState, type BackgroundDraftStatus } from './background-meeting-status.ts';
 import { readCaptureHealth, type CaptureHealthSnapshot } from './capture-health.ts';
+import { rememberVoice } from './voiceprints.ts';
 
 export interface TranscriptLibraryEntry {
   id: string;
@@ -293,8 +294,12 @@ export function renameTranscriptSpeaker(
   if (!speaker) throw new Error(`Speaker ${speakerId} was not found in transcript ${transcriptId}`);
   const previous = speaker.label;
   speaker.label = trimmed;
+  // A name Tyler gives, even the suggested one, is no longer a suggestion.
+  delete speaker.suggestion;
   record.updatedAt = new Date().toISOString();
   saveTranscriptRecord(libraryDir, record, { namesOnly: { from: previous, to: trimmed } });
+  // The name teaches the local voice library this voice (src/voiceprints.ts).
+  rememberVoice(record, speakerId, trimmed);
   return record;
 }
 

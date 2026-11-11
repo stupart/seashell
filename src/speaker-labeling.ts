@@ -74,6 +74,18 @@ function normalizedWords(value: string): string {
     .replace(/\s+/g, ' ');
 }
 
+/**
+ * Whether two names can be the same person: equal once case, accents and
+ * punctuation are set aside, or one is the start of the other ("Ada" and
+ * "Ada Lovelace"). "Alex Smith" and "Alex Jones" are not.
+ */
+export function namesAgree(left: string, right: string): boolean {
+  const a = normalizedWords(left).split(' ').filter(Boolean);
+  const b = normalizedWords(right).split(' ').filter(Boolean);
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  return shorter.length > 0 && shorter.every((word, index) => word === longer[index]);
+}
+
 function hasPhrase(text: string, phrase: string): boolean {
   return ` ${text} `.includes(` ${phrase} `);
 }
@@ -106,7 +118,8 @@ function attendeeAliases(attendees: MeetAttendee[]): Map<string, string> {
   );
 }
 
-function anonymousSpeakerLabel(speaker: Speaker): boolean {
+/** A label that numbers a voice rather than naming a person. */
+export function anonymousSpeakerLabel(speaker: Speaker): boolean {
   const label = speaker.label.trim();
   return label === speaker.id || /^(?:SPEAKER|REMOTE)[_ ]\d+$|^Remote speaker \d+$|^(?:LOCAL|UNKNOWN|Unknown remote speaker)$/i.test(label);
 }
@@ -227,7 +240,8 @@ export class EvidenceSpeakerLabeler implements SpeakerLabeler {
     }
 
     return request.speakers.map((speaker) => {
-      if (!anonymousSpeakerLabel(speaker)) return { ...speaker };
+      const suggested = speaker.suggestion?.source === 'voice';
+      if (!suggested && !anonymousSpeakerLabel(speaker)) return { ...speaker };
       const ranked = [...(votes.get(speaker.id) ?? new Map())]
         .toSorted(([, a], [, b]) => b.score - a.score);
       const [bestName, bestVote] = ranked[0] ?? [];
@@ -235,6 +249,9 @@ export class EvidenceSpeakerLabeler implements SpeakerLabeler {
       if (!bestName || !bestVote || bestVote.score < 3 || bestVote.score - runnerUp < 2) {
         return { ...speaker };
       }
+      // A voice match and the meeting's own evidence that disagree are both
+      // set aside: the speaker goes back to its number rather than a guess.
+      if (suggested) return namesAgree(bestName, speaker.label) ? { ...speaker } : { ...speaker, label: speaker.suggestion!.previous };
       return { ...speaker, label: bestName };
     });
   }
@@ -343,10 +360,13 @@ export async function applySpeakerLabels(
     labels.set(speaker.id, speaker.label);
   }
 
-  const speakers = document.speakers.map((speaker) => ({
-    id: speaker.id,
-    label: labels.get(speaker.id) ?? speaker.label,
-  }));
+  // A suggested name the labeler kept stays a suggestion; one it changed is gone.
+  const speakers = document.speakers.map((speaker) => {
+    const label = labels.get(speaker.id) ?? speaker.label;
+    return label === speaker.label && speaker.suggestion
+      ? { id: speaker.id, label, suggestion: { ...speaker.suggestion } }
+      : { id: speaker.id, label };
+  });
 
   return { ...document, speakers };
 }
