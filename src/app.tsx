@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Box, Text, measureElement, useApp, useInput, useStdin, useStdout, type DOMElement } from 'ink';
 import { execFileSync, spawnSync } from 'child_process';
 import { randomUUID } from 'crypto';
-import { existsSync, statSync, unlinkSync } from 'fs';
+import { existsSync, readFileSync, statSync, unlinkSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import {
@@ -31,11 +31,13 @@ import { createTranscriptRecord } from './transcript-record.ts';
 import { loadMeetingTemplates, meetingInstructions, NO_TEMPLATE } from './meeting-templates.ts';
 import {
   createChatMessage,
+  claimOwnerAndDue,
   createMeetingArtifact,
   loadMeetingArtifact,
   saveMeetingArtifact,
   type MeetingArtifact,
   type MeetingCalendarEvent,
+  type MeetingClaim,
 } from './meeting-artifact.ts';
 import { askDuringCall, catchUpQuestion, chatWithMeeting, enrichMeeting, type LiveAnswer } from './meeting-enrichment.ts';
 import { addMeetingNote, addRecordingNote, meetingOwnerNotes, recordingBundle } from './owner-notes.ts';
@@ -169,6 +171,10 @@ interface SheetLine {
   color?: 'cyan' | 'red';
   /** Already laid out to the width, as a notes row is; drawn as it is. */
   raw?: boolean;
+  /** The chosen point of a list in a sheet: inverse, with › where its bullet was. */
+  inverse?: boolean;
+  /** Which point of the sheet's list this row belongs to. */
+  point?: number;
 }
 
 /** Blocks of text as rows a sheet can scroll through, each wrapped at word breaks. */
@@ -385,7 +391,11 @@ export default function App(props: {
   const [comingUp, setComingUp] = useState<ComingUpMeeting[]>([]);
   const [comingUpRow, setComingUpRow] = useState<number | null>(null);
   /** `retry`: it failed, and trying again may work; having nothing to brief from is not a failure. */
-  const [briefSheet, setBriefSheet] = useState<{ meeting: ComingUpMeeting; brief?: Brief; error?: string; retry?: boolean; status?: string; abort?: AbortController; scroll: number } | null>(null);
+  const [briefSheet, setBriefSheet] = useState<{ meeting: ComingUpMeeting; brief?: Brief; error?: string; retry?: boolean; status?: string; abort?: AbortController; scroll: number;
+    /** The chosen point, which Enter finds in the past meeting it cites. */
+    point?: number } | null>(null);
+  /** A past meeting opened at a moment, from a brief: its transcript scrolls there once its rows are laid out. */
+  const [jumpTo, setJumpTo] = useState<{ id: string; at: number } | null>(null);
 
   const microphoneCapture = useRef<MicrophoneCaptureHandle | null>(null);
   const systemAudioCapture = useRef<SystemAudioCaptureHandle | null>(null);
@@ -1044,6 +1054,12 @@ export default function App(props: {
     : Math.min(transcriptScroll, Math.max(latestTranscriptScroll, currentMatch ?? 0));
   // A line cut at the top keeps its time and speaker in view.
   const visibleTranscriptRows = transcriptWindow(timedRows, visibleTranscriptScroll, visibleRows);
+  // A brief's point opens its past meeting at the moment it cites. The rows rewrap as the reader is
+  // measured and the list closes, so the moment is found again whenever they do, until the next key.
+  useEffect(() => {
+    if (!jumpTo || selectedRecord?.id !== jumpTo.id || meetingView !== 'transcript' || !timedRows.length) return;
+    setTranscriptScroll(Math.max(0, timedRows.findIndex((row) => row.start !== undefined && row.start >= jumpTo.at - 0.5)));
+  }, [jumpTo, selectedRecord?.id, meetingView, timedRows]);
   // The rows rewrap once the list closes, so the match is found again whenever they do.
   useEffect(() => {
     if (currentMatch !== undefined) setTranscriptScroll(currentMatch);
@@ -1929,22 +1945,48 @@ export default function App(props: {
           ...(draft.sources && times.length ? [{ text: `  ${[...new Set(times)].join(', ')}`, dim: true }] : [])];
       }),
     ], sheetColumns) : [];
+  // Who owns each point a brief cites, from the past meeting's own notes: "You · Fri".
+  const briefClaims = useMemo(() => new Map((briefSheet?.brief?.meetings ?? []).map((meeting): [string, MeetingClaim[]] => {
+    try { const artifact = loadMeetingArtifact(libraryRoot, meeting.id); return [meeting.id, artifact?.analysis?.claims ?? artifact?.provisionalClaims ?? []]; }
+    catch { return [meeting.id, []]; }
+  })), [briefSheet?.brief?.key, libraryRoot]);
+  // The points a brief cites, in order: which past meeting, and when in it.
+  const briefPoints = (briefSheet?.brief?.sections ?? []).flatMap((section) => section.items).map((item) => {
+    const source = item.sources[0];
+    const meeting = source && briefSheet!.brief!.meetings.find((candidate) => candidate.id === source.meetingId);
+    const times = source?.evidenceSegmentIds.flatMap((id) => meeting?.moments[id] === undefined ? [] : [meeting.moments[id]!]).sort((a, b) => a - b) ?? [];
+    const claim = source && briefClaims.get(source.meetingId)?.find((candidate) => (candidate.type === 'action_item' || candidate.type === 'follow_up')
+      && candidate.evidenceSegmentIds.some((id) => source.evidenceSegmentIds.includes(id)));
+    return { meeting, at: times[0], owner: claim ? claimOwnerAndDue(claim) : undefined };
+  });
   const briefLines = briefSheet ? (() => {
     const brief = briefSheet.brief;
     if (!brief) return sheetLines([briefSheet.error ? { text: briefSheet.error, color: 'red' } : { text: `◐ ${briefSheet.status ?? 'Writing the brief…'}`, dim: true }], sheetColumns);
-    // Each point says which past meeting and when, dim against the right edge, as the notes do.
-    const moment = (source: Brief['sections'][number]['items'][number]['sources'][number]) => {
-      const meeting = brief.meetings.find((candidate) => candidate.id === source.meetingId);
-      const times = source.evidenceSegmentIds.flatMap((id) => meeting?.moments[id] === undefined ? [] : [meeting.moments[id]!]).sort((a, b) => a - b);
-      return meeting ? `${listWhen(meeting.startedAt, new Date(statusNow))}${times.length ? ` ${formatTuiClock(times[0]!)}` : ''}` : '';
-    };
+    const now = new Date(statusNow);
+    // One past meeting is named once, under the title; each point then needs only its time. From several,
+    // each point says which day, too. Who owns it sits against the right edge, as in the notes.
+    const single = brief.meetings.length === 1 ? brief.meetings[0] : undefined;
+    const from = single ? `${single.title}, ${listWhen(single.startedAt, now)}` : `${brief.meetings.length} past meetings`;
+    let point = 0;
     return sheetLines([
-      { text: `${meetingWhen(brief.upcoming.startsAt, new Date(statusNow))} · from ${brief.meetings.length} past ${brief.meetings.length === 1 ? 'meeting' : 'meetings'}`, dim: true },
+      { text: `${upcomingWhen(brief.upcoming.startsAt, now)} · from ${from}`, dim: true },
       '', { text: brief.summary },
-      ...brief.sections.flatMap((section) => ['' as const, { text: section.heading, bold: true, color: 'cyan' as const },
-        ...(section.items.length ? wrappedMeetingRows(section.items.map((item) => item.sources.length
-          ? `- ${item.text}${META}${META}${moment(item.sources[0]!)}` : `- ${item.text}`), sheetColumns).map((text) => ({ text, raw: true }))
-          : [{ text: '- Nothing came up.', dim: true }])]),
+      ...brief.sections.flatMap((section) => {
+        const first = point;
+        point += section.items.length;
+        const bullets = section.items.map((item, index) => {
+          const { meeting, at, owner } = briefPoints[first + index]!;
+          const when = meeting ? [...(single ? [] : [listWhen(meeting.startedAt, now)]), ...(at === undefined ? [] : [formatTuiClock(at)])].join(' ') : '';
+          return owner || when ? `- ${item.text}${META}${owner ?? ''}${META}${when}` : `- ${item.text}`;
+        });
+        let index = first - 1;
+        return ['' as const, { text: section.heading, bold: true, color: 'cyan' as const },
+          ...(section.items.length ? wrappedMeetingRows(bullets, sheetColumns).map((text) => {
+            if (text.startsWith('- ')) index += 1;
+            const chosen = index === (briefSheet.point ?? 0);
+            return { text: chosen && text.startsWith('- ') ? `› ${text.slice(2)}` : text, raw: true, point: index, ...(chosen ? { inverse: true } : {}) };
+          }) : [{ text: '- Nothing came up.', dim: true }])];
+      }),
     ], sheetColumns);
   })() : [];
   const scrolling = liveAnswer ? { lines: liveLines, scroll: liveAnswer.scroll, set: (scroll: number) => setLiveAnswer((current) => current && { ...current, scroll }) }
@@ -1977,6 +2019,7 @@ export default function App(props: {
     }
     setError(null);
     setNotice(null);
+    setJumpTo(null);
     // Any key means someone is looking; "What did I miss?" covers the time since the one before.
     const lookedAtUnixMs = lastLookedAt.current;
     lastLookedAt.current = Date.now();
@@ -2037,7 +2080,17 @@ export default function App(props: {
         return;
       }
       const most = Math.max(0, scrolling.lines.length - sheetRowCount);
-      const step = key.upArrow || input === 'k' ? -1 : key.downArrow || input === 'j' ? 1 : key.pageUp ? -sheetRowCount : key.pageDown ? sheetRowCount : 0;
+      // In a brief, ↑↓ choose a point, and the view follows it; Page Up and Down scroll.
+      const choose = key.upArrow || input === 'k' ? -1 : key.downArrow || input === 'j' ? 1 : 0;
+      if (briefSheet?.brief && briefPoints.length && choose) {
+        const point = Math.min(briefPoints.length - 1, Math.max(0, (briefSheet.point ?? 0) + choose));
+        const rows = briefLines.flatMap((line, index) => line.point === point ? [index] : []);
+        const top = Math.min(briefSheet.scroll, rows[0] ?? 0);
+        const scroll = Math.min(most, Math.max(top, (rows.at(-1) ?? 0) - sheetRowCount + 1));
+        setBriefSheet((current) => current && { ...current, point, scroll: point === 0 ? 0 : scroll });
+        return;
+      }
+      const step = choose || (key.pageUp ? -sheetRowCount : key.pageDown ? sheetRowCount : 0);
       if (step) { scrolling.set(Math.min(most, Math.max(0, scrolling.scroll + step))); return; }
       // + keeps the answer as one of your notes, timed now, as a note typed now would be.
       if (liveAnswer?.answer && !liveAnswer.saved && input === '+') {
@@ -2064,6 +2117,20 @@ export default function App(props: {
         openBrief(briefSheet.meeting);
       } else if (briefSheet?.brief && input === 'o') {
         try { openTextFile(briefSheet.brief.path); } catch (cause) { setError(failureText(cause)); }
+      } else if (briefSheet?.brief && input === 'c') {
+        const text = readFileSync(briefSheet.brief.path, 'utf8').replace(/^---[\s\S]*?---\n/u, '').trim();
+        const copied = spawnSync('pbcopy', [], { input: text, encoding: 'utf8' });
+        if (copied.error || copied.status !== 0) setError('Copy failed'); else setNotice('Copied.');
+      } else if (briefSheet?.brief && key.return) {
+        // Where the chosen point was said: that past meeting's transcript, at that moment.
+        const { meeting, at } = briefPoints[briefSheet.point ?? 0] ?? {};
+        const entry = meeting && libraryEntries.find((candidate) => candidate.id === meeting.id);
+        if (!entry) { setCaution('That meeting is no longer in your library.'); return; }
+        setBriefSheet(null); setComingUpRow(null); setHistoryOpen(false);
+        openRecord(entry);
+        setMeetingView('transcript');
+        setFollowLiveTranscript(false);
+        if (at !== undefined) setJumpTo({ id: entry.id, at });
       }
       return;
     }
@@ -2942,7 +3009,8 @@ export default function App(props: {
     : draft ? draft.result ? [['c', 'copy'], ...(draft.result.kind === 'email' ? [['o', 'open in Mail'] as Hint] : []), ['g', 'write again'],
       ['t', draft.sources ? 'hide times' : 'show times'], ...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']]
       : draft.error ? [['Enter', 'try again'], ['g', 'write again'], ['Esc', 'back']] : [['Esc', 'cancel']]
-    : briefSheet ? briefSheet.brief ? [['o', 'open the file'], ...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']]
+    : briefSheet ? briefSheet.brief ? [...(briefPoints[briefSheet.point ?? 0]?.meeting ? [['Enter', 'where it was said'] as Hint] : []), ['c', 'copy'],
+      ...(briefPoints.length > 1 ? [['↑↓', 'choose'] as Hint] : []), ['o', 'open the file'], ['Esc', 'back']]
       : briefSheet.retry ? [['Enter', 'try again'], ['Esc', 'back']]
       : briefSheet.error ? [['Esc', 'back']] : [['Esc', 'cancel']]
     : comingUpRow !== null ? [...(comingUp[comingUpRow]?.brief ? [['Enter', 'read brief'] as Hint]
@@ -3047,7 +3115,7 @@ export default function App(props: {
   // The answer, the follow-up and the brief scroll: what is out of view is said in the corner, as a meeting's is.
   const scrollSheet = scrolling ? <Sheet>
     {scrolling.lines.slice(scrolling.scroll, scrolling.scroll + sheetRowCount).map((line, index) => <Box key={index} flexShrink={0} height={1}>
-      <Text wrap="truncate-end" dimColor={line.dim ?? false} bold={line.bold ?? false} {...(line.color ? { color: line.color } : {})}>{line.text || ' '}</Text>
+      <Text wrap="truncate-end" dimColor={line.dim ?? false} bold={line.bold ?? false} inverse={line.inverse ?? false} {...(line.color ? { color: line.color } : {})}>{line.text || ' '}</Text>
     </Box>)}
   </Sheet> : null;
   const sheet = helpSheet ?? scrollSheet ?? audioSheet ?? notesSheet ?? speakerSheet ?? comingUpSheet;
