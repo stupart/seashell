@@ -581,6 +581,7 @@ export class AutomaticMeetingWatchService {
     const cloud = routing.cloud;
     let record: TranscriptRecord = await this.#dependencies.finalizeCapture(capture.manifestPath, {
       title: candidate.title,
+      ...(candidate.calendar ? { attendees: candidate.calendar.attendees } : {}),
       ...(canonical === 'cloud' && cloud?.uploadConsent ? {
         remoteRoute: {
           model: cloud.model,

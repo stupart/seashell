@@ -610,3 +610,50 @@ test('a call that needs a yes is asked about directly, and the answer starts it'
     expect((await service.pollOnce()).kind).toBe('start');
   } finally { process.env.HOME = original; await service.shutdown(); }
 });
+
+test('the watcher hands the calendar invitees to the finalizer as a speaker ceiling', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-auto-attendees-'));
+  roots.push(root);
+  let now = Date.parse('2026-11-10T15:05:00Z');
+  let active = true;
+  const attendees = [
+    { name: 'Ada Example', email: 'ada@example.com', response: 'accepted' },
+    { name: 'Grace Example', email: 'grace@example.com', response: 'accepted' },
+  ];
+  let handed: unknown;
+  const service = new AutomaticMeetingWatchService({
+    config: { libraryDir: root, meeting: {
+      calendar: { enabled: true, policy: 'all' },
+      automation: { enabled: true, mode: 'automatic', confirmationPolls: 2, endGraceSeconds: 1 },
+    } },
+    dependencies: {
+      now: () => new Date(now),
+      readCalendar: async () => [{ provider: 'macos-eventkit', eventId: 'e1', title: 'Design review',
+        startAt: '2026-11-10T15:00:00Z', endAt: '2026-11-10T15:30:00Z', attendees }],
+      readSignals: () => ({ schemaVersion: 1, capturedAtUnixMs: now, supported: true,
+        inputProcesses: active ? [{ pid: 42, bundleId: 'us.zoom.xos', name: 'Zoom' }] : [] }),
+      startCapture: () => {
+        const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'attendees-test', startedAtUnixMs: now });
+        return { store, sessionId: 'attendees-test', manifestPath: store.manifestPath,
+          async stop() { return store.setStatus('captured', 'test'); } };
+      },
+      finalizeCapture: async (_path, options) => {
+        handed = options?.attendees;
+        return createTranscriptRecord({ transcript: [{ start: 0, end: 1, text: 'Hello.' }], speakers: [] },
+          { id: 'attendees-test', now: new Date(now) });
+      },
+    },
+  });
+  for (let poll = 0; poll < 4 && service.phase !== 'recording'; poll += 1) {
+    await service.pollOnce();
+    await Bun.sleep(5);
+    now += 1_000;
+  }
+  active = false;
+  for (let poll = 0; poll < 4 && handed === undefined; poll += 1) {
+    await service.pollOnce();
+    now += 1_000;
+  }
+  await service.shutdown();
+  expect(handed).toEqual(attendees);
+});

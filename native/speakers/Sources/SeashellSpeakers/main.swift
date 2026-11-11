@@ -324,17 +324,19 @@ if let exactly = options.numSpeakers {
 /// At most this many voices on the model-processed channel, when the caller knows.
 let voiceLimit = options.maxSpeakers.map { $0 - fixed }
 // Nemotron 3 finds the count itself and takes no hint, so a stated count goes to
-// community-1. A ceiling is the exception in auto: a call that may have more
-// people than its eight slots skips it, and an answer over the ceiling is refused.
+// community-1. A ceiling alone is the exception: a call that may have more
+// people than its eight slots skips Nemotron 3, and an answer over the ceiling
+// is refused in `choose`.
+let nemotronFits = options.numSpeakers == nil && options.minSpeakers == nil &&
+    (voiceLimit ?? 0) <= nemotronConfig.numSpeakers
 var useNemotron: Bool
 switch engine {
 case .community1: useNemotron = false
 case .nemotron3:
-    useNemotron = !constrained
-    if constrained { note("Nemotron 3 takes no speaker count; using community-1 for this file.") }
+    useNemotron = nemotronFits
+    if !nemotronFits { note("Nemotron 3 can't take that speaker count; using community-1 for this file.") }
 case .auto:
-    useNemotron = nemotronReady(root) && options.numSpeakers == nil && options.minSpeakers == nil &&
-        (voiceLimit ?? 0) <= nemotronConfig.numSpeakers
+    useNemotron = nemotronReady(root) && nemotronFits
 }
 if !useNemotron && !modelsReady(root) {
     fail("Speaker models are not downloaded. Run: seashell setup --speakers", code: 2)
@@ -534,6 +536,10 @@ func choose(_ samples: [Float]) async throws -> (spans: [Span], model: String) {
         // can hold, and they would be merged. community-1 has no cap.
         if Set(spans.map(\.speaker)).count >= nemotronConfig.numSpeakers, modelsReady(root) {
             note("All eight speaker slots are in use; using community-1 for this channel.")
+            return (try await community1(samples), modelName)
+        }
+        if let voiceLimit, Set(spans.map(\.speaker)).count > voiceLimit, modelsReady(root) {
+            note("Nemotron 3 heard more voices than the meeting has people; using community-1 for this channel.")
             return (try await community1(samples), modelName)
         }
         return (spans, nemotronModelName)

@@ -5,6 +5,7 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readFileSync,
   renameSync,
   rmSync,
   writeSync,
@@ -20,6 +21,8 @@ import {
   type CaptureTrackId,
 } from './capture-session.ts';
 import { diarizationStatus } from './diarization-environment.ts';
+import { remoteVoiceCeiling } from './diarize.ts';
+import { parseMeetingArtifact, type MeetingAttendee } from './meeting-artifact.ts';
 import { isLikelySystemAudioLeak } from './live-echo.ts';
 import { meetSpeakerForSegment, readMeetSamples } from './meet-speakers.ts';
 import { amplifyPcm, hasAudiblePcmSignal, pcmS16leSignalLevel, pcmS16leToWav, quietAudioGain } from './live-system-audio.ts';
@@ -31,7 +34,7 @@ import type {
   TranscriptRecord,
   TranscriptSegment,
 } from './transcript-types.ts';
-import { transcribeMedia } from './transcription-service.ts';
+import { transcribeMedia, type TranscribeMediaOptions } from './transcription-service.ts';
 import { transcribeWithTimestamps } from './whisper-timestamps.ts';
 import {
   runHumainTranscription,
@@ -177,12 +180,23 @@ export interface FinalizeCaptureOptions {
   /** Explicit retry should report a failure; automatic finalization keeps source text. */
   readonly strictSpeakers?: boolean;
   /** Test/provider seam; output timing must use the supplied track's clock. */
-  readonly systemDiarizer?: (path: string) => Promise<StructuredTranscript>;
+  readonly systemDiarizer?: (path: string, options: TranscribeMediaOptions) => Promise<StructuredTranscript>;
+  /** Calendar invitees, a ceiling on remote voices. Read from a saved meeting's meeting.json when omitted. */
+  readonly attendees?: readonly MeetingAttendee[];
   readonly localTranscriber?: typeof transcribeWithTimestamps;
   /** Explicit pinned remote canonical route. Omit to keep the final fully local. */
   readonly remoteRoute?: HumainTranscriptionRoute;
   /** Test/provider seam. Production defaults to the Humain CLI boundary. */
   readonly remoteTranscriber?: typeof runHumainTranscription;
+}
+
+/** The invitees of a meeting already saved beside its capture, as when separating it again. */
+function savedAttendees(manifestPath: string): readonly MeetingAttendee[] {
+  try {
+    return parseMeetingArtifact(JSON.parse(readFileSync(join(dirname(dirname(manifestPath)), 'meeting.json'), 'utf8'))).calendar?.attendees ?? [];
+  } catch {
+    return [];
+  }
 }
 
 /** A stopped draft queue is not a complete transcript. Publish only a canonical
@@ -319,16 +333,17 @@ export async function finalizeCaptureTranscript(
       if (useDiarization && system) {
         options.onStatus?.('Separating remote speakers…');
         try {
-          const document = options.systemDiarizer
-            ? await options.systemDiarizer(system)
-            : await transcribeMedia(system, { speakers: true, title: options.title, onStatus: options.onStatus });
+          const ceiling = remoteVoiceCeiling(options.attendees ?? savedAttendees(absoluteManifest));
+          const separation: TranscribeMediaOptions = { speakers: true, title: options.title, onStatus: options.onStatus,
+            ...(ceiling === undefined ? {} : { maxSpeakers: ceiling }) };
+          const document = await (options.systemDiarizer ?? transcribeMedia)(system, separation);
           const speakerIds = new Map(document.speakers.map((speaker) => [speaker.id, remoteSpeakerId(speaker.id)]));
           // The final combined timeline needs fresh evidence IDs. Per-track IDs can collide.
           segments.push(...labelMeet(document.transcript.map(({ id: _id, ...segment }) => ({ ...segment,
             speaker: speakerIds.get(segment.speaker ?? '') ?? remoteSpeakerId('UNKNOWN'),
           }))));
           separated = true;
-          speakerAnalysis = { status: 'complete', model: diarizationStatus().model,
+          speakerAnalysis = { status: 'complete', model: document.speakerAnalysis?.model ?? diarizationStatus().model,
             detail: 'Remote voices separated locally. Microphone is a separate source; names need confirmation.' };
         } catch (error) {
           if (options.strictSpeakers) throw error;

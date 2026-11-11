@@ -183,6 +183,24 @@ async function transcribePreparedAudio(
   );
 }
 
+/**
+ * The most voices the remote channel should hold, from the calendar invite.
+ *
+ * Everyone invited who hasn't declined, minus Tyler, plus one seat for a guest
+ * who wasn't invited or a Tyler missing from his own list. The extra seat is
+ * cheap and a missing one is not: on four AMI meetings a ceiling one below the
+ * real count raised wrong-speaker words from 4.5% to 14.0%, while a ceiling
+ * one above changed nothing. A meeting room can seat several people behind
+ * one invite, so an invite with a room gives no ceiling.
+ */
+export function remoteVoiceCeiling(attendees: readonly { email?: string; response?: string }[]): number | undefined {
+  if (attendees.some((attendee) => /@resource\.calendar\.google\.com$/iu.test(attendee.email ?? ''))) return undefined;
+  const invited = attendees.filter((attendee) => attendee.response !== 'declined').length;
+  if (invited < 2) return undefined;
+  const remote = invited - 1;
+  return remote + 1;
+}
+
 function positiveIntegerArgument(
   args: string[],
   flag: string,
