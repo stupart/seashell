@@ -163,7 +163,10 @@ function parseEnrichmentOutput(
   validNoteIds: ReadonlySet<string> = new Set(),
 ): HumainEnrichmentOutput {
   /** A point cites real segments and real notes, and at least one of the two. */
-  const unsupported = (item: { evidenceSegmentIds: string[]; ownerNoteIds?: string[] }, label: string, cites = 'cites'): string | undefined => {
+  const unsupported = (item: { evidenceSegmentIds: string[]; ownerNoteIds?: string[]; removedEvidenceSegmentIds?: string[] }, label: string, cites = 'cites'): string | undefined => {
+    // Humain is never sent a removed line, so one it names is not a line it was given.
+    const removed = item.removedEvidenceSegmentIds?.[0];
+    if (removed) return `${label} ${cites} missing segment ${removed}`;
     const missing = item.evidenceSegmentIds.find((id) => !validEvidenceIds.has(id));
     if (missing) return `${label} ${cites} missing segment ${missing}`;
     const note = item.ownerNoteIds?.find((id) => !validNoteIds.has(id));

@@ -262,6 +262,11 @@ function parseExtractOutput(value: unknown, extractor: Extractor, validIds: Set<
     const items = parseMeetingNoteItems(found.items, `Humain extractor field "${field.name}"`);
     const missing = items.flatMap((item) => item.evidenceSegmentIds).find((id) => !validIds.has(id));
     if (missing) throw new Error(`Humain extractor field "${field.name}" cites missing segment ${missing}`);
+    // The note parser also reads saved points that rest on your notes, or on lines since removed.
+    // An extractor is given only the transcript, so each point it finds cites a line of it.
+    if (items.some((item) => !item.evidenceSegmentIds.length || item.ownerNoteIds?.length || item.removedEvidenceSegmentIds?.length)) {
+      throw new Error(`Humain extractor field "${field.name}" has a point that cites no line it was given`);
+    }
     return { name: field.name, items };
   });
   if (output.fields.length !== extractor.fields.length) throw new Error('Humain extractor output has extra fields');

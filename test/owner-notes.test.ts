@@ -136,10 +136,12 @@ test('a point citing a note that was not sent, or nothing at all, is refused', a
   for (const claim of [
     { id: 'c1', type: 'note', text: 'Invented.', evidenceSegmentIds: [], ownerNoteIds: ['n-nope'], confidence: 0.5 },
     { id: 'c1', type: 'note', text: 'Uncited.', evidenceSegmentIds: [], confidence: 0.5 },
+    // Humain is never sent a removed line, so it cannot cite one.
+    { id: 'c1', type: 'note', text: 'Half invented.', evidenceSegmentIds: ['s000001'], removedEvidenceSegmentIds: ['s000777'], confidence: 0.5 },
   ]) {
     const humain = fake(() => ({ summary: 'S', claims: [claim] }));
     await expect(enrichMeeting(root, record.id, { mode: 'post-session', route, runner: humain.runner, engine: rev4, instructions: null }))
-      .rejects.toThrow(/cites (missing owner note n-nope|nothing)/u);
+      .rejects.toThrow(/cites (missing owner note n-nope|nothing|missing segment s000777)/u);
   }
 });
 
