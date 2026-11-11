@@ -9,6 +9,7 @@
  * Fake data only: this repository is public. It never reads the real library,
  * config, microphone or system audio, and keys that would open another app
  * (file picker, Finder, clipboard, System Settings) are left out on purpose.
+ * Setup steps act on a pretend Mac, and the level meters hear a pretend room.
  */
 import { mock } from 'bun:test';
 import React from 'react';
@@ -21,6 +22,8 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import type { FeatureStatusDependencies } from '../src/feature-status.ts';
 import type { MeetingArtifact } from '../src/meeting-artifact.ts';
+import type { LevelSource, LevelSources } from '../src/Onboarding.tsx';
+import type { SettingsActions } from '../src/SettingsScreen.tsx';
 
 const OUT = join(dirname(fileURLToPath(import.meta.url)), '..', 'out', 'journeys');
 const WIDE = { columns: 100, rows: 30 };
@@ -34,10 +37,14 @@ const ESC = '\x1b';
 const ENTER = '\r';
 
 interface Frame { title: string; note?: string; keys?: string; ansi: string; text: string }
+/** What the pretend room sounds like to each meter. */
+type Sound = 'zeros' | 'room' | 'speech' | 'music';
+interface Room { microphone: Sound; computer: Sound }
 interface Context {
   library: string;
   meeting: (id: string) => MeetingArtifact;
   background: Background;
+  room: Room;
   type: (keys: string) => Promise<void>;
   sleep: (ms: number) => Promise<void>;
 }
@@ -65,6 +72,8 @@ interface Journey {
   library: 'empty' | 'demo';
   /** No background recorder, so this window captures by itself. A real install has one. */
   standalone?: boolean;
+  /** Seashell has never been set up: there is no settings file yet. */
+  firstRun?: boolean;
   narrow?: boolean;
   steps: Step[];
 }
@@ -75,13 +84,33 @@ export const JOURNEYS: Journey[] = [
     machine: 'fresh', library: 'empty', narrow: true,
     steps: [
       { title: 'Opening screen', note: 'What do I do first?' },
-      { title: 'Keyboard help', press: ['?'], until: 'Keyboard help', note: 'Pressed ? to find out what is possible.' },
+      { title: 'Keyboard help', press: ['?'], until: 'Keys', note: 'Pressed ? to find out what is possible.' },
       { title: 'Settings', press: [ESC, ','], keys: 'Esc , ', until: 'Settings', note: 'Checklist of what works and what does not.' },
       { title: 'Moved down the list', press: [DOWN, DOWN], keys: '↓ ↓' },
       { title: 'Back to the app', press: [ESC], keys: 'Esc' },
       { title: 'Speakers setup', press: ['v'], until: 'peaker', note: 'Setting up who-said-what.' },
       { title: 'Back to the app', press: [ESC], keys: 'Esc' },
       { title: 'AI setup', press: ['p'], until: 'AI', note: 'Choosing what writes the notes.' },
+    ],
+  },
+  {
+    id: 'onboarding', title: 'Guided setup', who: 'Someone opening Seashell for the very first time, before anything is set up.',
+    machine: 'fresh', library: 'empty', firstRun: true, narrow: true,
+    steps: [
+      { title: 'The guide opens by itself', until: 'Background recorder', note: 'A first run that cannot record yet starts here.' },
+      { title: 'Recorder started', press: [ENTER], keys: 'Enter', until: 'Running' },
+      { title: 'Microphone permission', press: [ENTER], keys: 'Enter', until: 'Seashell Microphone', note: 'macOS asks once.' },
+      { title: 'Allowed, now listening', press: [ENTER], keys: 'Enter', until: 'Listening', note: 'A live level from the microphone recorder.' },
+      { title: 'Silence', note: 'The microphone sends pure zeros, as a muted or wrong input does. Does it say what to check?',
+        world: ({ sleep }) => sleep(6_000), until: 'sending silence' },
+      { title: 'Spoke', note: 'Speech-level sound passes the step and lets go of the microphone.',
+        world: ({ room }) => { room.microphone = 'speech'; }, until: 'Heard you' },
+      { title: 'Computer audio', press: [ENTER], keys: 'Enter', until: 'Listening' },
+      { title: 'Played a sound', world: ({ room }) => { room.computer = 'music'; }, until: 'Heard your Mac' },
+      { title: 'Optional extras', press: [ENTER], keys: 'Enter', until: 'Optional extras' },
+      { title: 'Finish chosen', press: [DOWN, DOWN, DOWN, DOWN], keys: '↓ ↓ ↓ ↓' },
+      { title: 'Done', press: [ENTER], keys: 'Enter', until: "You're set" },
+      { title: 'Back in the app', press: [ENTER], keys: 'Enter', until: 'ready', note: 'What the guide heard counts: nothing left to fix.' },
     ],
   },
   {
@@ -167,6 +196,7 @@ export const JOURNEYS: Journey[] = [
       { title: 'Audio help', press: ['i'], keys: 'I', until: 'Sound' },
       { title: 'Back', press: [ESC], keys: 'Esc' },
       { title: 'Settings', press: [','], keys: ',', until: 'Settings' },
+      { title: 'What to check', press: [ENTER], keys: 'Enter', note: 'Narrow, Enter opens the item; wide, it is already beside the list.' },
     ],
   },
   {
@@ -182,10 +212,18 @@ export const JOURNEYS: Journey[] = [
     id: 'settings', title: 'Settings and help', who: 'Someone checking that everything is healthy.',
     machine: 'ready', library: 'demo', narrow: true,
     steps: [
-      { title: 'Settings', press: [','], keys: ',', until: 'Settings' },
+      { title: 'Settings', press: [','], keys: ',', until: 'Recording', note: 'Opens on which calls get recorded.' },
+      { title: 'Changing recording', press: [ENTER], keys: 'Enter', until: 'Calls' },
+      { title: 'FaceTime off', press: [DOWN, DOWN, DOWN, DOWN, DOWN, LEFT], keys: '↓ ↓ ↓ ↓ ↓ ←', until: 'never recorded',
+        note: '"Can I default FaceTime off but the rest on?"' },
+      { title: 'Calls ask first', press: [UP, UP, UP, UP, UP, RIGHT], keys: '↑ ↑ ↑ ↑ ↑ →' },
+      { title: 'Done changing', press: [ESC], keys: 'Esc' },
       { title: 'Down the list', press: [DOWN, DOWN, DOWN, DOWN], keys: '↓ ↓ ↓ ↓' },
-      { title: 'Further down', press: [DOWN, DOWN, DOWN, DOWN], keys: '↓ ↓ ↓ ↓' },
-      { title: 'Help', press: [ESC, '?'], keys: 'Esc ?', until: 'Keyboard help' },
+      { title: 'Further down', press: [DOWN, DOWN, DOWN, DOWN, DOWN], keys: '↓ ↓ ↓ ↓ ↓' },
+      { title: 'Guided setup again', press: [UP, UP, UP, UP, UP, UP, UP, UP, ENTER], keys: '↑ × 8 Enter', until: 'Guided setup',
+        note: 'Re-run any time to hear the microphone again.' },
+      { title: 'Back to Settings', press: [ESC], keys: 'Esc', until: 'Recording' },
+      { title: 'Help', press: [ESC, '?'], keys: 'Esc ?', until: 'Keys' },
     ],
   },
 ];
@@ -219,9 +257,9 @@ async function seed(library: string): Promise<void> {
   const { createTranscriptRecord } = await import('../src/transcript-record.ts');
   const { saveTranscriptRecord } = await import('../src/transcript-library.ts');
   const { createMeetingArtifact, saveMeetingArtifact } = await import('../src/meeting-artifact.ts');
-  const add = (id: string, title: string, hoursAgo: number, notes: boolean) => {
+  const add = (id: string, title: string, when: number | Date, notes: boolean) => {
     const record = createTranscriptRecord({ transcript: demoTranscript(), speakers: SPEAKERS },
-      { id, title, now: new Date(Date.now() - hoursAgo * 3_600_000) });
+      { id, title, now: typeof when === 'number' ? new Date(Date.now() - when * 3_600_000) : when });
     saveTranscriptRecord(library, record);
     const artifact = createMeetingArtifact(record);
     if (notes) {
@@ -252,7 +290,14 @@ async function seed(library: string): Promise<void> {
   };
   add('demo-weekly', 'Weekly product sync', 27, false);
   add('demo-acme', 'Acme discovery call', 3, true);
-  add('demo-hiring', 'Hiring loop debrief', 75, true);
+  // Two on one day, so the list shows their times and its date column can be checked.
+  const daysAgo = (days: number, hour: number, minute: number) => {
+    const at = new Date(Date.now() - days * 86_400_000);
+    at.setHours(hour, minute, 0, 0);
+    return at;
+  };
+  add('demo-hiring', 'Hiring loop debrief', daysAgo(3, 14, 30), true);
+  add('demo-roadmap', 'Roadmap review', daysAgo(3, 9, 5), true);
   add('demo-board', 'Board prep', 120, true);
 }
 
@@ -281,21 +326,56 @@ async function endMeeting(library: string, background: Background) {
   background.writeBackgroundWatchStatus(library, { phase: 'watching' });
 }
 
-function dependencies(machine: Machine): FeatureStatusDependencies {
-  const fresh = machine === 'fresh';
+/** The pretend Mac: what is set up, which the setup actions change. */
+interface Mac { recorder: boolean; microphone: boolean; meet: boolean; calendar: boolean; fresh: boolean; micSilent: boolean }
+
+function dependencies(mac: Mac): FeatureStatusDependencies {
   return {
-    launchAtLogin: () => ({ enabled: !fresh, loaded: !fresh, label: 'demo', plistPath: '/demo', command: [] }),
-    watchStatus: () => (fresh ? undefined : { schemaVersion: 1, phase: 'watching', pid: 1, updatedAtUnixMs: Date.now() }) as never,
-    meetConnection: async () => (fresh
-      ? { state: 'off', detail: 'Not connected', accessibilityTrusted: false }
-      : { state: 'idle', detail: 'Join a call', accessibilityTrusted: true }) as never,
-    microphone: async () => (fresh ? { authorization: 'notDetermined', detail: 'Not asked.' } : { authorization: 'authorized', detail: 'Allowed.' }) as never,
-    lastMeeting: () => (fresh ? undefined : { title: 'Acme discovery call', createdAt: new Date().toISOString(), microphoneChunks: 3,
-      audibleMicrophoneChunks: machine === 'mic-silent' ? 0 : 3, computerChunks: 3, audibleComputerChunks: 3, meetingKey: 'meet:chrome:/abc-defg-hij' }) as never,
-    speakerSeparationReady: () => !fresh, aiEngineInstalled: () => !fresh,
+    launchAtLogin: () => ({ enabled: mac.recorder, loaded: mac.recorder, label: 'demo', plistPath: '/demo', command: [] }),
+    watchStatus: () => (mac.recorder ? { schemaVersion: 1, phase: 'watching', pid: 1, updatedAtUnixMs: Date.now() } : undefined) as never,
+    meetConnection: async () => (mac.meet
+      ? { state: 'idle', detail: 'Join a call', accessibilityTrusted: true }
+      : { state: 'off', detail: 'Not connected', accessibilityTrusted: false }) as never,
+    microphone: async () => (mac.microphone ? { authorization: 'authorized', detail: 'Allowed.' } : { authorization: 'notDetermined', detail: 'Not asked.' }) as never,
+    calendar: async () => ({ authorization: mac.calendar ? 'authorized' : 'notDetermined', detail: 'Calendar.', calendars: 2 }) as never,
+    lastMeeting: () => (mac.fresh ? undefined : { title: 'Acme discovery call', createdAt: new Date().toISOString(), microphoneChunks: 3,
+      audibleMicrophoneChunks: mac.micSilent ? 0 : 3, computerChunks: 3, audibleComputerChunks: 3, meetingKey: 'meet:chrome:/abc-defg-hij' }) as never,
+    speakerSeparationReady: () => !mac.fresh, aiEngineInstalled: () => !mac.fresh,
     transcriptionReady: () => true, systemAudioHelperReady: () => true,
     microphoneRecorderSince: () => Date.now() - 86_400_000,
   };
+}
+
+/** Setup that changes the pretend Mac instead of launchd, macOS permissions or System Settings. */
+function setupActions(mac: Mac): SettingsActions {
+  return {
+    enableRecorder: () => { mac.recorder = true; },
+    allowMicrophone: async () => { mac.microphone = true; return { authorization: 'authorized', detail: 'Allowed.' }; },
+    connectMeet: async () => { mac.meet = true; return { detail: 'Google Meet connected.' }; },
+    allowCalendar: async () => { mac.calendar = true; return { authorization: 'authorized', detail: 'Allowed.' }; },
+    openTemplates: () => {},
+  };
+}
+
+const LEVELS: Record<Sound, { peak: number; rmsDbfs: number }> = {
+  zeros: { peak: 0, rmsDbfs: Number.NEGATIVE_INFINITY },
+  room: { peak: 40, rmsDbfs: -62 },
+  speech: { peak: 9_000, rmsDbfs: -24 },
+  music: { peak: 12_000, rmsDbfs: -20 },
+};
+
+/** A meter that hears whatever the room is set to, ten times a second, with a little movement. */
+function pretendLevels(room: Room): LevelSources {
+  const source = (which: keyof Room): LevelSource => ({ onLevel }) => {
+    let tick = 0;
+    const timer = setInterval(() => {
+      const level = LEVELS[room[which]];
+      const sway = level.peak ? Math.sin(tick++ / 2) * 6 : 0;
+      onLevel({ peak: level.peak, rms: 0, rmsDbfs: level.rmsDbfs + sway });
+    }, 100);
+    return () => clearInterval(timer);
+  };
+  return { microphone: source('microphone'), computer: source('computer') };
 }
 
 /** One journey in this process: Bun's module mocks last for the process, so each gets its own. */
@@ -312,7 +392,10 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
   else delete process.env.SEASHELL_DISABLE_LISTENER;
   const config = journey.standalone ? { meeting: { automation: { enabled: false } } }
     : journey.machine === 'fresh' ? {} : { meeting: { speakerBrowser: 'auto', backend: 'claude-code', model: 'sonnet' } };
-  writeFileSync(process.env.SEASHELL_CONFIG, JSON.stringify(config));
+  if (!journey.firstRun) writeFileSync(process.env.SEASHELL_CONFIG, JSON.stringify(config));
+  const fresh = journey.machine === 'fresh';
+  const mac: Mac = { recorder: !fresh, microphone: !fresh, meet: !fresh, calendar: false, fresh, micSilent: journey.machine === 'mic-silent' };
+  const room: Room = { microphone: 'zeros', computer: 'zeros' };
   Object.defineProperty(process.stdout, 'columns', { value: size.columns });
   Object.defineProperty(process.stdout, 'rows', { value: size.rows });
 
@@ -320,7 +403,7 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
   mock.module('../src/meeting-consent.ts', () => ({ writeMeetingConsent: () => undefined }));
   const features = { ...await import('../src/feature-status.ts') };
   mock.module('../src/feature-status.ts', () => ({ ...features,
-    readFeatureStatuses: (options: object) => features.readFeatureStatuses({ ...options, dependencies: dependencies(journey.machine) } as never) }));
+    readFeatureStatuses: (options: object) => features.readFeatureStatuses({ ...options, dependencies: dependencies(mac) } as never) }));
   const client = { ...await import('../src/humain-client.ts') };
   mock.module('../src/humain-client.ts', () => ({ ...client,
     async discoverHumainProviders() { return { integrations: [
@@ -341,11 +424,11 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
   const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
   let latest = '';
   const output = Object.assign(new Writable({ write(chunk, _encoding, done) { latest = chunk.toString() || latest; done(); } }), size);
-  const app = render(<App />, { stdin: input as never, stdout: output as never, stderr: output as never,
+  const app = render(<App levels={pretendLevels(room)} setupActions={setupActions(mac)} openSettings={() => {}} />, { stdin: input as never, stdout: output as never, stderr: output as never,
     debug: true, patchConsole: false, exitOnCtrlC: false });
   const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
   const type = async (keys: string) => { input.write(keys); await sleep(70); };
-  const context: Context = { library, background, type, sleep, meeting: (id) => loadMeetingArtifact(library, id) };
+  const context: Context = { library, background, room, type, sleep, meeting: (id) => loadMeetingArtifact(library, id) };
   const frames: Frame[] = [];
   try {
     await sleep(500);
@@ -487,6 +570,16 @@ await Promise.all(Array.from({ length: 4 }, async () => {
     const frames = JSON.parse(readFileSync(path, 'utf8')) as Frame[];
     rmSync(path);
     results.push({ ...job, frames });
+    // Every screen fits its window: nothing runs past the edge or pushes the title line off the top.
+    const size = job.size === 'wide' ? WIDE : NARROW;
+    frames.forEach((frame, index) => {
+      const lines = frame.text.replace(/\n$/u, '').split('\n');
+      const over = lines.filter((line) => Bun.stringWidth(line) > size.columns);
+      if (lines.length <= size.rows && !over.length) return;
+      failed += 1;
+      console.error(`${job.journey.id} (${job.size}) step ${index + 1} does not fit ${size.columns} × ${size.rows}: ` +
+        `${lines.length} rows${over.length ? `, too wide: ${JSON.stringify(over[0])}` : ''}`);
+    });
     frames.forEach((frame, index) => {
       const heading = `# ${job.journey.title} · ${job.size} · step ${index + 1}: ${frame.title}${frame.keys ? ` (pressed ${frame.keys})` : ''}\n`;
       writeFileSync(join(OUT, 'frames', `${job.journey.id}-${job.size}-${String(index + 1).padStart(2, '0')}.txt`), heading + frame.text);

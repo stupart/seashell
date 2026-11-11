@@ -23,6 +23,11 @@ try {
       }} />);
     await ui.waitUntilExit();
     if (saved) process.stdout.write(saved + '\n');
+  } else if (command.kind === 'setup' && !command.json && process.stdin.isTTY && process.stdout.isTTY) {
+    // A person at a terminal goes on from the defaults to the guided setup; scripts and installers stop at the defaults.
+    process.exitCode = await executeCliCommand(command);
+    process.stdout.write('\x1B[2J\x1B[0f');
+    render(<App guide />);
   } else if (command.kind === 'tui') {
     process.stdout.write('\x1B[2J\x1B[0f');
     render(<App libraryDir={command.libraryDir} />);
