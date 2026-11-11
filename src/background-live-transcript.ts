@@ -4,6 +4,7 @@ import type { CommittedCaptureChunk } from './capture-session.ts';
 import { reconcileLiveEcho } from './live-echo.ts';
 import { loadLocalAsrProfile } from './local-asr-profile.ts';
 import { LiveAsrScheduler, OwnedWhisperServer } from './local-asr-scheduler.ts';
+import { defaultWhisperPrompt } from './vocabulary.ts';
 import type { MeetSpeaker } from './meet-speakers.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
 import { saveTranscriptRecord } from './transcript-library.ts';
@@ -46,9 +47,11 @@ export interface BackgroundLiveTranscriptHandle {
 function createLocalTranscriber(): BackgroundDraftTranscriber {
   const root = join(dirname(fileURLToPath(import.meta.url)), '..');
   const profile = loadLocalAsrProfile(join(root, 'models', DEFAULT_WHISPER_MODEL_FILENAME));
+  const prompt = defaultWhisperPrompt();
   return new OwnedWhisperServer(join(root, 'whisper.cpp', 'build', 'bin', 'whisper-server'), {
     ...profile, requestTimeoutMs: 120_000, idleTimeoutMs: 60_000,
     disableGpu: process.env.SEASHELL_DISABLE_GPU === '1',
+    ...(prompt ? { prompt } : {}),
   });
 }
 function positiveBound(value: number, name: string, maximum: number): number {
