@@ -4,7 +4,7 @@ import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { createMeetingArtifact, loadMeetingArtifact, saveMeetingArtifact, type MeetingClaim } from '../src/meeting-artifact.ts';
 import { enrichMeeting } from '../src/meeting-enrichment.ts';
-import { getMeeting, listActionItems, queryNotes } from '../src/meeting-memory.ts';
+import { getMeeting, listActionItems, listMeetings, queryNotes } from '../src/meeting-memory.ts';
 import { META, meetingViewLines } from '../src/meeting-tui.ts';
 import { findTranscriptRecord, saveTranscriptRecord } from '../src/transcript-library.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
@@ -147,4 +147,38 @@ test('a person is found by whole names, by the owner before the speaker, and "me
   saveTranscriptRecord(root, { ...record, speakers: [{ id: 'LOCAL', label: 'Tyler' }, record.speakers[1]!] }, { namesOnly: { from: 'Microphone', to: 'Tyler' } });
   expect(owners('Tyler')).toEqual(['Send the numbers.', 'Book a room.']);
   expect(owners('me')).toEqual(['Send the numbers.', 'Book a room.']);
+});
+
+test('a plain date is a day where the user is, as meeting folders are; a full timestamp is exact', () => {
+  const zone = process.env.TZ;
+  process.env.TZ = 'America/Toronto';
+  try {
+    const home = mkdtempSync(join(tmpdir(), 'seashell-dates-'));
+    roots.push(home);
+    const root = join(home, 'Transcripts');
+    mkdirSync(root);
+    // 23:30 on 1 October in Toronto is already 2 October in UTC.
+    const late = createTranscriptRecord({ transcript: [{ start: 1, end: 2, text: 'Late call.', speaker: 'LOCAL' }], speakers: [] },
+      { id: 'late-call', now: new Date('2026-10-02T03:30:00Z'), title: 'Late call' });
+    saveTranscriptRecord(root, late);
+    expect(findTranscriptRecord(root, late.id).path).toContain(`${join(root, '2026-10-01')}/`);
+    saveMeetingArtifact(root, { ...createMeetingArtifact(late), status: 'ready', analysis: { final: true, summary: 'Late.', runId: 'r',
+      createdAt: '2026-10-02T04:00:00Z', claims: [claim('l', 'action_item', 'Call back.', 's000001', { person: 'You' })] } });
+    const found = (args: Record<string, string>) => [
+      listMeetings(root, { from: args.since, to: args.until }).meetings.length,
+      queryNotes(root, args).items.length,
+      ...(args.until ? [] : [listActionItems(root, { since: args.since }).items.length]),
+    ];
+    expect(found({ since: '2026-10-01', until: '2026-10-01' })).toEqual([1, 1]);
+    expect(found({ since: '2026-10-02' })).toEqual([0, 0, 0]);
+    expect(found({ since: '2026-10-01' })).toEqual([1, 1, 1]);
+    expect(found({ since: '2026-09-30', until: '2026-09-30' })).toEqual([0, 0]);
+    // A timestamp is a moment, not a day.
+    expect(found({ since: '2026-10-02T03:30:00Z' })).toEqual([1, 1, 1]);
+    expect(found({ since: '2026-10-02T03:30:01Z' })).toEqual([0, 0, 0]);
+    expect(found({ since: '2026-10-01T00:00:00Z', until: '2026-10-02T03:29:59Z' })).toEqual([0, 0]);
+    expect(() => queryNotes(root, { since: '2026-02-30' })).toThrow('must be an ISO date');
+  } finally {
+    if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone;
+  }
 });

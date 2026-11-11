@@ -791,8 +791,10 @@ seashell query questions --meeting "hiring sync"
 Kinds are decisions, actions, risks, questions and follow-ups (all five when
 left out). `--person` matches whole names or their start, so `dan` finds Dana
 but not Jordan, and an action belongs to its owner, not whoever said it. `me`,
-`I` and `you` find your own, as does the name you gave your microphone. Each
-line names its meeting and the transcript moment it came from;
+`I` and `you` find your own, as does the name you gave your microphone. A date
+like `2026-10-01` is that day where you are, as the library's folders are; a
+full timestamp is that exact moment. Each line names its meeting and the
+transcript moment it came from;
 `--json` adds a quote. Seashell does not track whether an action was done.
 Private meetings never appear.
 

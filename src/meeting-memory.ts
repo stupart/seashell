@@ -33,12 +33,26 @@ export function count(value: unknown, name: string, fallback: number, maximum: n
   return Math.min(value as number, maximum);
 }
 
-function date(value: unknown, name: string): number | undefined {
+/**
+ * A day or a moment, as first and last millisecond. A plain date is that day
+ * where the user is, as meeting folders are named: "2026-10-01" runs from
+ * local midnight to the next. A full timestamp is that exact moment.
+ */
+function date(value: unknown, name: string): { start: number; end: number } | undefined {
   const raw = text(value, name);
   if (raw === undefined) return undefined;
+  const plain = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(raw);
+  if (plain) {
+    const [year, month, day] = [Number(plain[1]), Number(plain[2]) - 1, Number(plain[3])];
+    const start = new Date(year, month, day);
+    if (start.getFullYear() !== year || start.getMonth() !== month || start.getDate() !== day) {
+      throw new Error(`${name} must be an ISO date such as 2026-10-01`);
+    }
+    return { start: start.getTime(), end: new Date(year, month, day + 1).getTime() - 1 };
+  }
   const parsed = Date.parse(raw);
   if (!Number.isFinite(parsed)) throw new Error(`${name} must be an ISO date such as 2026-10-01`);
-  return parsed;
+  return { start: parsed, end: parsed };
 }
 
 export function clock(seconds: number): string {
@@ -110,7 +124,7 @@ export function listMeetings(libraryDir: string, args: Arguments = {}) {
   const meetings = [];
   for (const entry of listTranscriptRecords(libraryDir)) {
     const started = Date.parse(entry.createdAt);
-    if ((from !== undefined && started < from) || (to !== undefined && started > to + 86_400_000 - 1)) continue;
+    if ((from !== undefined && started < from.start) || (to !== undefined && started > to.end)) continue;
     if (isPrivate(entry.directory)) {
       // Listed so a question about it gets a straight answer, but nothing of its content.
       if (!query || entry.title.toLocaleLowerCase().includes(query)) {
@@ -216,7 +230,7 @@ export function listActionItems(libraryDir: string, args: Arguments = {}) {
   const limit = count(args.limit, 'limit', 50, 500);
   const items = [];
   for (const entry of listTranscriptRecords(libraryDir)) {
-    if (since !== undefined && Date.parse(entry.createdAt) < since) continue;
+    if (since !== undefined && Date.parse(entry.createdAt) < since.start) continue;
     if (isPrivate(entry.directory)) continue;
     const artifact = loadMeetingArtifact(libraryDir, entry.id);
     for (const claim of claimsOf(artifact)) {
@@ -290,7 +304,7 @@ export function queryNotes(libraryDir: string, args: Arguments = {}) {
   const items = [];
   for (const entry of listTranscriptRecords(libraryDir)) {
     const started = Date.parse(entry.createdAt);
-    if ((since !== undefined && started < since) || (until !== undefined && started > until + 86_400_000 - 1)) continue;
+    if ((since !== undefined && started < since.start) || (until !== undefined && started > until.end)) continue;
     if (meeting && !meeting.every(word => entry.title.toLocaleLowerCase().includes(word))) continue;
     if (isPrivate(entry.directory)) continue;
     const artifact = loadMeetingArtifact(libraryDir, entry.id);
