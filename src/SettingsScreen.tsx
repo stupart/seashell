@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { spawnSync } from 'child_process';
 import { existsSync } from 'fs';
 import { Box, Text, useInput } from 'ink';
-import { defaultConfigPath, loadConfig, updateMeetingConfig, type SeashellConfig } from './config.ts';
+import { defaultConfigPath, updateMeetingConfig, type SeashellConfig } from './config.ts';
 import {
   FEATURE_ACTION_LABEL,
   FEATURE_STATE_COLOR,
@@ -23,13 +23,14 @@ import { ensureTemplatesDirectory, PROFILE_FILE } from './meeting-templates.ts';
 import { DEFAULT_MEETING_AUTOMATION, meetingApps, type AppRecordingPolicy } from './meeting-automation.ts';
 import { KeyBar, Paragraph, ScreenTitle, type Hint } from './tui-chrome.tsx';
 
-const MENU_LABEL: Record<FeatureId, string> = {
+/** Short names, shared with the guided setup so each thing has one name. */
+export const MENU_LABEL: Record<FeatureId, string> = {
   recorder: 'Recorder',
   detection: 'Meeting detection',
   microphone: 'Microphone',
   'computer-audio': 'Computer audio',
   transcription: 'Transcription',
-  'meet-names': 'Meet names',
+  'meet-names': 'Google Meet names',
   'speaker-separation': 'Who said what',
   'ai-notes': 'AI notes',
   'notes-templates': 'Templates',
@@ -210,6 +211,8 @@ type MenuItem =
   | { readonly kind: 'status'; readonly status: FeatureStatus };
 
 const MENU_WIDTH = 26;
+/** "Choose AI" reads "choose AI" in a key bar, never "choose ai". */
+const lowerFirst = (text: string) => text.charAt(0).toLowerCase() + text.slice(1);
 
 /** Everything Seashell can do, whether it works right now, and one key to fix it. */
 export default function SettingsScreen(props: SetupActionProps & {
@@ -380,7 +383,7 @@ export default function SettingsScreen(props: SetupActionProps & {
     : inDetail && selected?.kind === 'recording' ? [['↑↓', 'choose'], ['←→', 'change'], ['Esc', 'done']]
     : [
       ...(selected?.kind === 'recording' ? [['Enter', 'change'] as Hint] : selected?.kind === 'guide' ? [['Enter', 'start'] as Hint]
-        : action ? [['Enter', FEATURE_ACTION_LABEL[action].toLowerCase()] as Hint] : selected && testable(selected) ? [['Enter', 'test it now'] as Hint] : []),
+        : action ? [['Enter', lowerFirst(FEATURE_ACTION_LABEL[action])] as Hint] : selected && testable(selected) ? [['Enter', 'test it now'] as Hint] : []),
       ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ['r', 'recheck'], ['Esc', 'back'],
     ];
   const titleDetail = statuses ? <Text color={needs.length ? 'yellow' : 'green'}>

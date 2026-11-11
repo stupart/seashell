@@ -119,19 +119,19 @@ try {
   rendered = '';
   const again = render(<App levels={levels} setupActions={actions} openSettings={() => {}} />,
     { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
-  await until(() => plain().includes('set it up step by step'), 'the home screen offers the guide');
+  await until(() => plain().includes('one step at a time'), 'the home screen offers the guide');
   assert.ok(!plain().includes('Guided setup'), 'not opened by itself after the first run');
   await type('\r');
   await until(() => plain().includes('Guided setup') && plain().includes('Background recorder'), 'Enter starts the guide');
   await type('\x1b');
-  await until(() => since('Guided setup').includes('set it up step by step'), 'Esc leaves it for later');
+  await until(() => since('Guided setup').includes('one step at a time'), 'Esc leaves it for later');
   again.unmount();
 
   // A window started with listening off never opens a real device, even for the guide.
   rendered = '';
   const off = render(<App setupActions={actions} openSettings={() => {}} />,
     { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
-  await until(() => plain().includes('set it up step by step'), 'offered again');
+  await until(() => plain().includes('one step at a time'), 'offered again');
   await type('\r');
   await until(() => plain().includes('Background recorder'), 'guide');
   await type('s');

@@ -20,7 +20,7 @@ import {
   type PcmSignalLevel,
 } from './live-system-audio.ts';
 import { terminateManagedChild, trackChildProcess } from './process-lifecycle.ts';
-import { useSetupActions, type SetupActionProps } from './SettingsScreen.tsx';
+import { MENU_LABEL, useSetupActions, type SetupActionProps } from './SettingsScreen.tsx';
 import { KeyBar, Paragraph, ScreenTitle, type Hint } from './tui-chrome.tsx';
 
 // MARK: - Levels
@@ -187,12 +187,7 @@ export interface GuideProgress {
   readonly heard: { readonly microphone?: boolean; readonly computer?: boolean };
 }
 
-const EXTRAS: ReadonlyArray<readonly [FeatureId, string]> = [
-  ['meet-names', 'Google Meet names'],
-  ['speaker-separation', 'Tell voices apart'],
-  ['ai-notes', 'AI notes'],
-  ['calendar', 'Calendar titles'],
-];
+const EXTRAS: readonly FeatureId[] = ['meet-names', 'speaker-separation', 'ai-notes', 'calendar'];
 
 /** Which steps to show: anything not done yet, and always the microphone, because only hearing it proves it. */
 export function planGuide(statuses: readonly FeatureStatus[]): GuideStep[] {
@@ -201,7 +196,7 @@ export function planGuide(statuses: readonly FeatureStatus[]): GuideStep[] {
     ...(state('recorder') !== 'ok' ? ['recorder' as const] : []),
     'microphone',
     ...(state('computer-audio') !== 'ok' ? ['computer' as const] : []),
-    ...(EXTRAS.some(([id]) => state(id) !== 'ok') ? ['extras' as const] : []),
+    ...(EXTRAS.some(id => state(id) !== 'ok') ? ['extras' as const] : []),
     'done',
   ];
 }
@@ -234,6 +229,7 @@ export default function Onboarding(props: SetupActionProps & {
   onClose: () => void;
   levels?: LevelSources;
   openSettings?: (pane: SystemSettingsPane) => void;
+  fromSettings?: boolean;
   dependencies?: FeatureStatusDependencies;
 }) {
   const [statuses, setStatuses] = useState<FeatureStatus[]>();
@@ -281,7 +277,7 @@ export default function Onboarding(props: SetupActionProps & {
     props.onProgress(current => current && { ...current, at: Math.min(current.steps.length - 1, current.at + 1) });
   };
   const recorder = status('recorder');
-  const extras = EXTRAS.map(([id, label]) => ({ id, label, status: status(id) }));
+  const extras = EXTRAS.map(id => ({ id, label: MENU_LABEL[id], status: status(id) }));
   const latest = useRef({ step, recorder, microphone, micAllowed, extras, extraIndex, mic, computer });
   latest.current = { step, recorder, microphone, micAllowed, extras, extraIndex, mic, computer };
 
@@ -410,13 +406,15 @@ export default function Onboarding(props: SetupActionProps & {
         : 'Anything skipped is in Settings. Press , in the app, or run this guide again from there.'} />
     </>;
 
-  const meterHints = (meter: Meter, done: boolean): Hint[] => done ? [['Enter', 'next'], ['Esc', 'later']]
-    : [['o', 'Sound settings'], ...(meter.problem?.kind === 'permission' ? [['p', 'Privacy'] as Hint] : []), ['s', 'skip'], ['Esc', 'later']];
-  const hints: Hint[] = !progress ? [['Esc', 'later']]
-    : step === 'recorder' ? [['Enter', recorder?.state === 'ok' ? 'next' : recorder?.state === 'off' ? 'turn on' : 'start it'], ['s', 'skip'], ['Esc', 'later']]
-    : step === 'microphone' ? !micAllowed ? [['Enter', 'allow'], ['s', 'skip'], ['Esc', 'later']] : meterHints(mic, Boolean(mic.heard || heard.microphone))
+  // Started from Settings, Esc goes back there; on a first run it leaves setup for later.
+  const leave = props.fromSettings ? 'back' : 'later';
+  const meterHints = (meter: Meter, done: boolean): Hint[] => done ? [['Enter', 'next'], ['Esc', leave]]
+    : [['o', 'Sound settings'], ...(meter.problem?.kind === 'permission' ? [['p', 'Privacy'] as Hint] : []), ['s', 'skip'], ['Esc', leave]];
+  const hints: Hint[] = !progress ? [['Esc', leave]]
+    : step === 'recorder' ? [['Enter', recorder?.state === 'ok' ? 'next' : recorder?.state === 'off' ? 'turn on' : 'start it'], ['s', 'skip'], ['Esc', leave]]
+    : step === 'microphone' ? !micAllowed ? [['Enter', 'allow'], ['s', 'skip'], ['Esc', leave]] : meterHints(mic, Boolean(mic.heard || heard.microphone))
     : step === 'computer' ? meterHints(computer, Boolean(computer.heard || heard.computer))
-    : step === 'extras' ? [['Enter', extraIndex < extras.length ? 'set up' : 'finish'], ['↑↓', 'choose'], ['s', 'skip'], ['Esc', 'later']]
+    : step === 'extras' ? [['Enter', extraIndex < extras.length ? 'set up' : 'finish'], ['↑↓', 'choose'], ['s', 'skip'], ['Esc', leave]]
     : [['Enter', 'done']];
   const counted = progress?.steps.filter(candidate => candidate !== 'done') ?? [];
   const place = step && step !== 'done' ? `  Step ${counted.indexOf(step) + 1} of ${counted.length}` : '';

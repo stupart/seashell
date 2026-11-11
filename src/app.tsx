@@ -2161,6 +2161,7 @@ export default function App(props: {
     {...(props.openSettings ? { openSettings: props.openSettings } : {})}
     onOpenSpeakers={() => openSpeakers('guide')}
     onOpenAI={() => openAI('guide')}
+    fromSettings={guideFromSettings}
     onClose={() => { setGuideOpen(false); if (guideFromSettings) setSettingsOpen(true); }} />;
 
   if (speakerSetupOpen) return <SpeakerSettings columns={terminal.columns} rows={terminal.rows}
@@ -2209,7 +2210,7 @@ export default function App(props: {
   const atHome = view === 'live' && paused && !currentMeeting;
   const byHand: Hint[] = watchOwnership === 'external' ? [['space', activeBackgroundEntry ? 'stop' : 'record']] : [];
   const hints: Hint[] = consentPending ? [['m', 'record'], ['x', 'ignore']]
-    : atHome && attention.length ? [['Enter', 'set up step by step'], [',', 'settings'], ['f', 'import']]
+    : atHome && attention.length ? [['Enter', 'guided setup'], [',', 'settings'], ['f', 'import']]
     : !historyOpen && activeBackgroundEntry && currentRecordBusy ? [['space', 'stop'], ['↑↓', 'scroll'],
       ...(followLiveTranscript ? [] : [['l', 'latest'] as Hint]), ['h', 'meetings'], ['i', 'audio']]
     : !navigationItems.some((item) => item.kind === 'record') && historyOpen ? [['f', 'import'], ['/', 'search']]
@@ -2228,8 +2229,11 @@ export default function App(props: {
   // The time appears when it tells two meetings of the same day apart.
   const withTime = (entry: TranscriptLibraryEntry) =>
     visibleEntries.some((other) => other.id !== entry.id && sameDay(other.createdAt, entry.createdAt));
-  const dateColumn = Math.max(0, ...navigationItems.slice(sidebarStart, sidebarStart + layout.visibleLibraryItems)
+  // Dates line up as a column when titles still keep their room; a narrow sidebar gives the room to titles.
+  const listRowWidth = (layout.compact ? terminal.columns - 2 : layout.sidebarWidth - 2) - 2;
+  const widestDate = Math.max(0, ...navigationItems.slice(sidebarStart, sidebarStart + layout.visibleLibraryItems)
     .map((item) => item.kind === 'record' ? listWhen(item.entry.createdAt, new Date(statusNow), withTime(item.entry)).length : 0));
+  const dateColumn = listRowWidth - widestDate >= 24 ? widestDate : 0;
   const list = (
     <Box width={layout.compact ? undefined : layout.sidebarWidth} flexGrow={layout.compact ? 1 : 0} flexShrink={0}
       flexDirection="column" overflow="hidden" paddingRight={layout.compact ? 0 : 1}
@@ -2261,7 +2265,7 @@ export default function App(props: {
     <Text> </Text>
     {attention.map((status) => <Text key={status.id}>{status.label}: {status.summary}</Text>)}
     <Text> </Text>
-    <Text>Press <Text bold>Enter</Text> to set it up step by step.</Text>
+    <Text>Press <Text bold>Enter</Text> for a guided setup, one step at a time.</Text>
   </> : <>
     <Text bold>Seashell is ready.</Text>
     <Text> </Text>
