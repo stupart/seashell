@@ -84,8 +84,8 @@ interface AppPattern {
 }
 
 /** The apps Seashell recognises, by the id used in settings. */
-export function meetingApps(): ReadonlyArray<{ id: string; name: string }> {
-  return APP_PATTERNS.map(({ id, name }) => ({ id, name }));
+export function meetingApps(): ReadonlyArray<{ id: string; name: string; bundleIds: readonly string[] }> {
+  return APP_PATTERNS.map(({ id, name, bundleIds }) => ({ id, name, bundleIds }));
 }
 
 const APP_PATTERNS: readonly AppPattern[] = Object.freeze([
