@@ -1,6 +1,8 @@
 import { expect, test } from 'bun:test';
 import { createMeetingArtifact } from '../src/meeting-artifact.ts';
-import { meetingViewLines } from '../src/meeting-tui.ts';
+import { META, meetingViewLines, plainMeetingLines, SUBHEADING } from '../src/meeting-tui.ts';
+import { wrappedMeetingRows } from '../src/transcript-viewport.ts';
+import { stripVTControlCharacters } from 'util';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 
 test('meeting views stay concise and show only relevant artifact layers', () => {
@@ -42,7 +44,7 @@ test('meeting answers and claims expose the exact cited passage, without unrelat
   artifact.provisionalClaims = [{ id: 'd1', type: 'decision', text: 'Release Monday.',
     evidenceSegmentIds: ['s1', 's2'], confidence: 0.9 }];
   // Notes point at the moment rather than repeating the quote.
-  expect(meetingViewLines(artifact, 'notes', record)).toContain('- Release Monday.  00:05');
+  expect(meetingViewLines(artifact, 'notes', record)).toContain(`- Release Monday.${META}00:05`);
   artifact.chat[0]!.evidenceSegmentIds = ['missing'];
   expect(meetingViewLines(artifact, 'chat', record).join('\n')).toContain('cited passages are unavailable');
   artifact.chat[0]!.evidenceSegmentIds = ['s1'];
@@ -74,4 +76,37 @@ test('notes keep every decision and action, and drop only what a template sectio
   expect(lines).toContain('- Dana reviews the security summary by Friday.');
   expect(lines).not.toContain('- Send the security summary.');
   expect(lines.indexOf('# Decisions')).toBeLessThan(lines.indexOf('# Next steps'));
+});
+
+test("a template's wording of an action keeps the action's owner and due date", () => {
+  const record = createTranscriptRecord({ transcript: [{ start: 35, end: 40, text: 'I will send the security summary by Friday.' }], speakers: [] }, { id: 'owned' });
+  const artifact = createMeetingArtifact(record);
+  artifact.analysis = {
+    final: true, summary: 'Settled.', runId: 'r', createdAt: new Date().toISOString(),
+    claims: [{ id: 'a', type: 'action_item', text: 'Send the security summary.', person: 'You', due: 'Fri', evidenceSegmentIds: ['s000001'], confidence: 0.9 }],
+    notes: [{ heading: 'Next steps', items: [{ text: 'Send the security summary.', evidenceSegmentIds: ['s000001'] }] }],
+  };
+  const lines = meetingViewLines(artifact, 'notes', record);
+  expect(lines).toContain(`- Send the security summary.${META}You · Fri  00:35`);
+  expect(lines).not.toContain('# Actions');
+  // On screen the owner and time sit dim against the right edge; copied, they follow the line.
+  const rows = wrappedMeetingRows(lines, 60).map((row) => stripVTControlCharacters(row));
+  expect(rows).toContain(`- Send the security summary.${' '.repeat(60 - 28 - 16)}You · Fri  00:35`);
+  expect(plainMeetingLines(lines)).toContain('- Send the security summary.  You · Fri  00:35');
+});
+
+test('insights name each extractor once, label their fields, and leave out what the notes already say', () => {
+  const record = createTranscriptRecord({ transcript: [
+    { start: 7, end: 9, text: 'The per-seat price works.' },
+    { start: 14, end: 16, text: 'Legal needs it in writing.' },
+  ], speakers: [] }, { id: 'insightful' });
+  const artifact = createMeetingArtifact(record);
+  artifact.analysis = { final: true, summary: 'Priced.', runId: 'r', createdAt: new Date().toISOString(), claims: [],
+    notes: [{ heading: 'Where they stand', items: [{ text: 'Per-seat pricing works for them.', evidenceSegmentIds: ['s000001'] }] }] };
+  artifact.insights = [{ extractor: 'Customer pains', createdAt: new Date().toISOString(), runId: 'i', fields: [
+    { name: 'Pains', items: [{ text: 'Legal needs it in writing.', evidenceSegmentIds: ['s000002'] }] },
+    { name: 'Budget', items: [{ text: 'The per-seat pricing works for them.', evidenceSegmentIds: ['s000001'] }] },
+  ] }];
+  const lines = meetingViewLines(artifact, 'notes', record);
+  expect(lines.slice(lines.indexOf('# Insights'))).toEqual(['# Insights', `${SUBHEADING}Customer pains`, `- Pains: Legal needs it in writing.${META}00:14`]);
 });
