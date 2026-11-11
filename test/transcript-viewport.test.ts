@@ -56,13 +56,18 @@ test('a line cut at the top of the view keeps its time and speaker', () => {
   // Stacked: the time and speaker sit on a row of their own above the words that are left.
   const stacked = timedTranscriptRows(timedRecord, 40, options);
   expect(plain(transcriptWindow(stacked, 1, 3))).toEqual(['00:00  You', 'A made-up opening line that is long', 'enough to wrap onto a second row here.']);
-  expect(plain(transcriptWindow(stacked, 2, 3))).toEqual(['00:00  You', 'enough to wrap onto a second row here.', '01:05  Speaker 1']);
+  // A row from the middle of a line starts with "…", so the time and speaker over it never read as one sentence with it.
+  expect(plain(transcriptWindow(stacked, 2, 3))).toEqual(['00:00  You', '…enough to wrap onto a second row here.', '01:05  Speaker 1']);
   // The last scroll leaves room for that row, so the last words are never pushed out of view.
   const last = lastTranscriptScroll(stacked, 3);
   expect(plain(transcriptWindow(stacked, last, 3)).at(-1)).toBe('A short reply.');
   // In columns: the cut row takes its line's time and speaker beside it.
   const columns = timedTranscriptRows(timedRecord, 64, options);
-  expect(plain(transcriptWindow(columns, 1, 2))[0]).toMatch(/^00:00  You {8}\S/u);
+  expect(plain(transcriptWindow(columns, 1, 2))[0]).toMatch(/^00:00  You {8}…\S/u);
+  // The rows after a line's first leave a column for "…", so a cut row fits as its line's first does.
+  for (const width of [40, 64]) for (const row of transcriptWindow(timedTranscriptRows(timedRecord, width, options), 2, 3)) {
+    expect(Bun.stringWidth(stripVTControlCharacters(row.text))).toBeLessThanOrEqual(width);
+  }
   expect(lastTranscriptScroll(columns, 2)).toBe(columns.length - 2);
 });
 

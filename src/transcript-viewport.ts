@@ -18,17 +18,32 @@ export interface TranscriptRow {
   pinned?: string;
   /** Where it stacks: its line's time and speaker, on a row of their own above it at the top of the view. */
   heading?: string;
+  /** Not the first row of its line: cut at the top of the view, it starts with "…", so it never reads as the line's start. */
+  continued?: true;
+}
+
+/**
+ * A line wrapped to rows, the rows after its first one column narrower: one cut at the top of the view
+ * starts with "…" under its time and speaker, and still fits.
+ */
+function wrapLine(text: string, columns: number): string[] {
+  const [first = '', ...rest] = wrapWords(text, columns);
+  return rest.length ? [first, ...wrapWords(rest.join(' '), Math.max(1, columns - 1))] : [first];
 }
 
 /**
  * The rows in view from this scroll position. A line cut at the top keeps its time and speaker in
- * view: beside its words where the transcript has columns, on a row above them where it stacks.
+ * view: beside its words where the transcript has columns, on a row above them where it stacks. Its
+ * words start with "…", so "00:00 You" over "you landed on the pilot." never reads as one sentence.
  */
 export function transcriptWindow(rows: readonly TranscriptRow[], scroll: number, count: number): TranscriptRow[] {
   const top = rows[scroll];
   const timed = (text: string): TranscriptRow => top?.start === undefined ? { text } : { text, start: top.start };
   if (top?.pinned !== undefined) return [timed(top.pinned), ...rows.slice(scroll + 1, scroll + count)];
-  if (top?.heading !== undefined) return [timed(top.heading), ...rows.slice(scroll, scroll + count - 1)];
+  if (top?.heading !== undefined) {
+    return [timed(top.heading), ...count > 1 ? [top.continued ? { ...top, text: `…${top.text}` } : top] : [],
+      ...rows.slice(scroll + 1, scroll + count - 1)];
+  }
   return rows.slice(scroll, scroll + count);
 }
 
@@ -79,13 +94,13 @@ export function timedTranscriptRows(
     const timed = (row: string) => ({ text: row, start: segment.start });
     if (stacked) {
       const heading = [clock, styled(id, name)].filter(Boolean).join('  ');
-      return [timed(heading), ...wrapWords(text, width).map((line) => ({ ...timed(line), heading }))];
+      return [timed(heading), ...wrapLine(text, width).map((line, index) => ({ ...timed(line), heading, ...index ? { continued: true as const } : {} }))];
     }
     const label = options.speakers ? styled(id, name.slice(0, nameWidth).padEnd(nameWidth)) : '';
     const prefix = [clock, label].filter(Boolean).join('  ');
     const indent = (clockWidth ? clockWidth + 2 : 0) + (options.speakers ? nameWidth + 2 : 0);
-    return wrapWords(text, Math.max(1, width - indent))
-      .map((line, index) => index === 0 ? timed(`${prefix}  ${line}`) : { ...timed(' '.repeat(indent) + line), pinned: `${prefix}  ${line}` });
+    return wrapLine(text, Math.max(1, width - indent)).map((line, index) => index === 0 ? timed(`${prefix}  ${line}`)
+      : { ...timed(' '.repeat(indent) + line), pinned: `${prefix}  …${line}`, continued: true as const });
   });
 }
 
