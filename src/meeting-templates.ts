@@ -54,21 +54,38 @@ export function templatesDirectory(libraryDir: string, env: NodeJS.ProcessEnv = 
   return env.SEASHELL_TEMPLATES_DIR || join(dirname(libraryDir), 'Templates');
 }
 
-/** A small, strict subset of YAML: `key: value` and `key: [a, b]`. */
-function parseFrontmatter(text: string): { fields: Record<string, string | string[]>; body: string } {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/u.exec(text);
+export type FrontmatterValue = string | string[] | Record<string, string | string[]>;
+
+/**
+ * A small, strict subset of YAML: `key: value`, `key: [a, b]`, and a key with
+ * nothing after it followed by indented `name: value` lines, kept in order:
+ *
+ *   fields:
+ *     pains: What is hard for them today
+ */
+export function parseFrontmatter(text: string): { fields: Record<string, FrontmatterValue>; body: string } {
+  const match = /^---\r?\n(?:([\s\S]*?)\r?\n)?---(?:\r?\n|$)/u.exec(text);
   if (!match) return { fields: {}, body: text };
-  const fields: Record<string, string | string[]> = {};
-  for (const line of match[1]!.split(/\r?\n/u)) {
-    const pair = /^([A-Za-z][\w-]*):\s*(.*)$/u.exec(line.trim());
+  const fields: Record<string, FrontmatterValue> = {};
+  let nested: Record<string, string | string[]> | undefined;
+  for (const line of (match[1] ?? '').split(/\r?\n/u)) {
+    const pair = /^([\p{L}\p{N}][\p{L}\p{N}_ -]*?):\s*(.*)$/u.exec(line.trim());
     if (!pair) continue;
     const [, key, raw] = pair as unknown as [string, string, string];
-    const list = /^\[(.*)\]$/u.exec(raw);
-    fields[key] = list
-      ? list[1]!.split(',').map((item) => unquote(item.trim())).filter(Boolean)
-      : unquote(raw.trim());
+    const value = frontmatterValue(raw);
+    if (/^\s/u.test(line) && nested) { nested[key] = value; continue; }
+    if (!/^[A-Za-z][\w-]*$/u.test(key)) continue;
+    nested = raw.trim() ? undefined : {};
+    fields[key] = nested ?? value;
   }
   return { fields, body: text.slice(match[0].length) };
+}
+
+function frontmatterValue(raw: string): string | string[] {
+  const list = /^\[(.*)\]$/u.exec(raw.trim());
+  return list
+    ? list[1]!.split(',').map((item) => unquote(item.trim())).filter(Boolean)
+    : unquote(raw.trim());
 }
 
 function unquote(value: string): string {
@@ -76,7 +93,7 @@ function unquote(value: string): string {
 }
 
 /** Comments are notes to the person editing the file, not instructions. */
-function meaningful(body: string): string {
+export function meaningful(body: string): string {
   return body.replace(/<!--[\s\S]*?-->/gu, '').trim();
 }
 
@@ -128,6 +145,49 @@ export function loadMeetingTemplates(libraryDir: string, env: NodeJS.ProcessEnv 
     });
 }
 
+/** The profile file as written, comments included; the starter when there is none yet. */
+export function readProfileFile(libraryDir: string, env: NodeJS.ProcessEnv = process.env): string {
+  const path = join(templatesDirectory(libraryDir, env), PROFILE_FILE);
+  return existsSync(path) ? readFileSync(path, 'utf8') : PROFILE_STARTER;
+}
+
+export function writeProfile(libraryDir: string, text: string, env: NodeJS.ProcessEnv = process.env): string {
+  const path = join(ensureTemplatesDirectory(libraryDir, env), PROFILE_FILE);
+  writeFileSync(path, text.endsWith('\n') || !text ? text : `${text}\n`, { mode: 0o600 });
+  return path;
+}
+
+/**
+ * Write a template, replacing the one with this name or adding a new file.
+ * The folder is seeded first, so the built-in templates stay alongside it.
+ */
+export function writeMeetingTemplate(
+  libraryDir: string,
+  template: { name: string; body: string; description?: string; match?: string[]; default?: boolean },
+  env: NodeJS.ProcessEnv = process.env,
+): MeetingTemplate {
+  const directory = ensureTemplatesDirectory(libraryDir, env);
+  const name = template.name.replace(/\s+/gu, ' ').trim();
+  if (!name || name.toLocaleLowerCase('en-US') === basename(PROFILE_FILE, '.md').toLocaleLowerCase('en-US')) {
+    throw new Error('Give the template a name other than "About me"');
+  }
+  const existing = findMeetingTemplate(loadMeetingTemplates(libraryDir, env), name);
+  const slug = name.normalize('NFKD').replace(/[^\p{Letter}\p{Number}]+/gu, '-').replace(/^-+|-+$/gu, '').toLowerCase() || 'template';
+  const path = existing?.path ?? join(directory, `${slug}.md`);
+  const oneLine = (value: string) => value.replace(/\s+/gu, ' ').trim();
+  const match = template.match ?? existing?.match ?? [];
+  const description = template.description ?? existing?.description;
+  const text = ['---', `name: ${oneLine(name)}`,
+    ...(description ? [`description: ${oneLine(description)}`] : []),
+    ...(match.length ? [`match: [${match.map(oneLine).join(', ')}]`] : []),
+    ...((template.default ?? existing?.default) ? ['default: true'] : []),
+    '---', template.body.trim(), ''].join('\n');
+  const parsed = parseMeetingTemplate(text, path);
+  if (!parsed) throw new Error('The template body is empty. Write one ## heading per section of the notes.');
+  writeFileSync(path, text, { mode: 0o600 });
+  return parsed;
+}
+
 export function loadProfile(libraryDir: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
   const path = join(templatesDirectory(libraryDir, env), PROFILE_FILE);
   if (!existsSync(path)) return undefined;
@@ -137,6 +197,12 @@ export function loadProfile(libraryDir: string, env: NodeJS.ProcessEnv = process
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+/** Whether a phrase appears in a text as whole words, ignoring case: "demo" is in "Acme demo", not "demolition". */
+export function phraseMatches(text: string | undefined, phrase: string): boolean {
+  if (!text || !phrase.trim()) return false;
+  return new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegExp(phrase.trim())}($|[^\\p{L}\\p{N}])`, 'iu').test(text);
 }
 
 /**
@@ -151,8 +217,7 @@ export function selectMeetingTemplate(
   let best: { template: MeetingTemplate; length: number } | undefined;
   for (const template of templates) {
     for (const phrase of template.match) {
-      const pattern = new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegExp(phrase)}($|[^\\p{L}\\p{N}])`, 'iu');
-      if (title && pattern.test(title) && phrase.length > (best?.length ?? 0)) best = { template, length: phrase.length };
+      if (phraseMatches(title, phrase) && phrase.length > (best?.length ?? 0)) best = { template, length: phrase.length };
     }
   }
   return best?.template ?? templates.find((template) => template.default);

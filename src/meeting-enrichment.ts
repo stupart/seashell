@@ -19,6 +19,7 @@ import {
   type MeetingNoteSection,
 } from './meeting-artifact.ts';
 import { meetingInstructions, type MeetingInstructions } from './meeting-templates.ts';
+import { rolePrompt, type PromptRole } from './prompts.ts';
 import {
   humainRouteRequest,
   runHumainMeeting,
@@ -67,11 +68,11 @@ function enrichmentRoute(
   return route;
 }
 
-function stableKey(parts: unknown[]): string {
+export function stableKey(parts: unknown[]): string {
   return createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 }
 
-function runSafeId(value: string, idempotencyKey: string): string {
+export function runSafeId(value: string, idempotencyKey: string): string {
   // Reserve the digest before truncating the readable prefix. Long transcript
   // IDs and changed requests must never share one durable run directory.
   return `${value.replace(/[^a-zA-Z0-9_-]+/gu, '-').slice(0, 63)}-${idempotencyKey.slice(0, 32)}`;
@@ -137,20 +138,37 @@ function parseEnrichmentOutput(
   return { summary: output.summary.trim(), claims, notes };
 }
 
+/** Humain bounds each instruction so it can ride in every call's system prompt. */
+const MAX_INSTRUCTION_CHARS = 16_000;
+
 /**
  * The owner's instructions for this meeting. A template chosen for the
  * meeting wins over the calendar match; "none" leaves notes untemplated.
+ * Given a role, that role's prompt from the Prompts folder follows "About me":
+ * both are standing guidance, which Humain reads as the owner's profile.
  */
-function ownerInstructions(libraryDir: string, artifact: MeetingArtifact, options: MeetingEnrichmentOptions) {
+export function ownerInstructions(
+  libraryDir: string,
+  artifact: MeetingArtifact,
+  options: Pick<MeetingEnrichmentOptions, 'instructions'>,
+  role?: PromptRole,
+): { instructions?: MeetingInstructions } {
   if (options.instructions !== undefined) {
     return options.instructions === null ? {} : { instructions: options.instructions };
   }
-  return meetingInstructions(libraryDir, {
+  const { instructions } = meetingInstructions(libraryDir, {
     title: artifact.title,
     ...(artifact.calendar?.title ? { calendarTitle: artifact.calendar.title } : {}),
     ...(artifact.ai?.template ? { template: artifact.ai.template } : {}),
     ...(artifact.ai?.note ? { note: artifact.ai.note } : {}),
   });
+  const prompt = role ? rolePrompt(libraryDir, role) : undefined;
+  if (!prompt) return instructions ? { instructions } : {};
+  const profile = [instructions?.profile, prompt].filter(Boolean).join('\n\n');
+  if (profile.length > MAX_INSTRUCTION_CHARS) {
+    throw new Error(`"About me" and the ${role === 'observer' ? 'live' : role === 'reconciliation' ? 'notes' : 'chat'} prompt are ${profile.length.toLocaleString('en-US')} characters together; the limit is 16,000. Shorten one of them.`);
+  }
+  return { instructions: { ...instructions, profile } };
 }
 
 function compactClaims(claims: MeetingClaim[]): MeetingClaim[] {
@@ -219,11 +237,11 @@ export async function enrichMeeting(
   const overlap = options.overlapSegments ?? artifact.session.overlapSegments;
   const storeDir = join(dirname(found.path), '.humain');
   const runner = options.runner ?? runHumainMeeting;
-  const { instructions } = ownerInstructions(libraryDir, artifact, options);
 
   try {
     if (mode === 'streaming' || mode === 'hybrid') {
       const observerRoute = enrichmentRoute(options, 'observer');
+      const { instructions } = ownerInstructions(libraryDir, artifact, options, 'observer');
       artifact = { ...artifact, status: 'observing', mode };
       saveMeetingArtifact(libraryDir, artifact);
       let cursor = artifact.session.cursor;
@@ -299,6 +317,7 @@ export async function enrichMeeting(
 
     if (mode === 'post-session' || mode === 'hybrid') {
       const reconciliationRoute = enrichmentRoute(options, 'reconciliation');
+      const { instructions } = ownerInstructions(libraryDir, artifact, options, 'reconciliation');
       artifact = { ...artifact, status: 'reconciling', mode };
       saveMeetingArtifact(libraryDir, artifact);
       options.onStatus?.('Reconciling complete meeting…');
@@ -342,6 +361,8 @@ export async function enrichMeeting(
       artifact = {
         ...artifact,
         analysis,
+        // Fresh notes match the transcript again.
+        notesOutdated: undefined,
         session: {
           ...artifact.session,
           reconciliationRunId: result.runId,
@@ -392,6 +413,8 @@ export async function chatWithMeeting(
   question: string,
   route: HumainMeetingRoute,
   onStatus?: (message: string) => void,
+  /** Deterministic seam for tests and embedded hosts. */
+  runner: typeof runHumainMeeting = runHumainMeeting,
 ): Promise<MeetingArtifact> {
   const { record, path } = findTranscriptRecord(libraryDir, transcriptId);
   const artifact = loadMeetingArtifact(libraryDir, transcriptId);
@@ -406,7 +429,7 @@ export async function chatWithMeeting(
     attendees: artifact.attendees,
     priorConversation: artifact.chat.slice(-10),
   };
-  const { instructions } = ownerInstructions(libraryDir, artifact, {});
+  const { instructions } = ownerInstructions(libraryDir, artifact, {}, 'chat');
   const idempotencyKey = stableKey([
     transcriptId,
     'chat',
@@ -419,7 +442,7 @@ export async function chatWithMeeting(
   ]);
   const { runId, idempotencyKey: attemptKey } = retryableRun(join(dirname(path), '.humain'),
     runSafeId(`meeting-${transcriptId}-chat`, idempotencyKey), idempotencyKey);
-  const result = await runHumainMeeting('chat', {
+  const result = await runner('chat', {
     meetingId: artifact.meetingId,
     ...humainRouteRequest(route),
     question: trimmed,

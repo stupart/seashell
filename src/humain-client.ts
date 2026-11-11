@@ -1,4 +1,4 @@
-import { installedHumainCli } from './humain-install.ts';
+import { installedHumainCli, requireHumainNode } from './humain-install.ts';
 import { spawn } from 'child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -9,7 +9,8 @@ import {
   trackTempDirectory,
 } from './process-lifecycle.ts';
 
-export type HumainMeetingAction = 'observe' | 'reconcile' | 'chat';
+/** extract runs one owner-written extractor over a finished meeting. */
+export type HumainMeetingAction = 'observe' | 'reconcile' | 'chat' | 'extract';
 export type HumainBackend = 'codex' | 'claude-code' | 'openrouter' | 'local-openai';
 
 export interface HumainMeetingRoute {
@@ -314,4 +315,157 @@ export async function discoverHumainModels(backend: HumainBackend, options: { si
       description: typeof row.description === 'string' ? clean(row.description) : '', efforts,
       ...(efforts.includes(row.defaultEffort) ? { defaultEffort: row.defaultEffort } : {}), isDefault: row.isDefault === true }];
   });
+}
+
+/** Why a route could not answer, in Humain's terms. */
+export type HumainRouteFailureKind = 'not-signed-in' | 'model-missing' | 'timeout' | 'provider-error';
+
+export interface HumainRouteProbe {
+  ok: boolean;
+  backend: HumainBackend;
+  model: string;
+  latencyMs?: number;
+  failure?: { kind: HumainRouteFailureKind; message: string };
+}
+
+const ROUTE_FAILURE_KINDS: readonly HumainRouteFailureKind[] = ['not-signed-in', 'model-missing', 'timeout', 'provider-error'];
+
+/** The probe sends Humain's own fixed, harmless prompt; never any meeting text. */
+export function humainRouteProbeArgs(route: HumainMeetingRoute, timeoutMs: number): string[] {
+  return ['doctor', 'route', '--backend', route.backend, '--model', route.model,
+    ...(route.effort === undefined ? [] : ['--effort', route.effort]), '--timeout-ms', String(timeoutMs)];
+}
+
+/** An engine from before a command prints its usage instead of running it. */
+export function olderHumainEngine(message: string): boolean {
+  return /usage: humain|unknown (?:command|subcommand|option)|is not supported/iu.test(message);
+}
+
+export function parseHumainRouteProbe(stdout: string, route: HumainMeetingRoute): HumainRouteProbe {
+  let value: any;
+  try { value = JSON.parse(stdout); } catch { throw new Error('Humain returned malformed JSON'); }
+  const failure = value?.failure;
+  if (!value || typeof value.ok !== 'boolean' || value.backend !== route.backend || value.model !== route.model ||
+      (value.latencyMs !== undefined && (!Number.isFinite(value.latencyMs) || value.latencyMs < 0)) ||
+      (failure !== undefined && (!ROUTE_FAILURE_KINDS.includes(failure?.kind) || typeof failure?.message !== 'string')) ||
+      (!value.ok && failure === undefined)) {
+    throw new Error('Humain returned an incompatible connection test result');
+  }
+  return {
+    ok: value.ok, backend: route.backend, model: route.model,
+    ...(value.latencyMs === undefined ? {} : { latencyMs: Math.round(value.latencyMs) }),
+    ...(failure === undefined ? {} : { failure: { kind: failure.kind, message: failure.message.slice(0, 500) } }),
+  };
+}
+
+/**
+ * One tiny fixed prompt through one route. A failure is a result, never a
+ * throw. Humain stops waiting at `timeoutMs`; the process gets a little longer
+ * so Humain can say so itself.
+ */
+export async function probeHumainRoute(
+  route: HumainMeetingRoute,
+  options: { env?: NodeJS.ProcessEnv; signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<HumainRouteProbe> {
+  const timeoutMs = Math.min(300_000, Math.max(1_000, options.timeoutMs ?? 60_000));
+  try {
+    const stdout = await runHumainCommand(humainRouteProbeArgs(route, timeoutMs), { ...options, timeoutMs: timeoutMs + 15_000 }, 100_000);
+    return parseHumainRouteProbe(stdout, route);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, backend: route.backend, model: route.model, failure: message === 'Humain run timed out'
+      ? { kind: 'timeout', message: `Humain itself did not answer within ${Math.round(timeoutMs / 1000) + 15} seconds.` }
+      : olderHumainEngine(message)
+        ? { kind: 'provider-error', message: 'This Humain version cannot test connections yet. Install a newer engine: seashell ai install <humain-package.tgz>' }
+        : { kind: 'provider-error', message: message.slice(0, 500) } };
+  }
+}
+
+export type MeetingAiRole = 'observer' | 'reconciliation' | 'chat';
+
+export interface MeetingAiRouteTest {
+  roles: MeetingAiRole[];
+  backend: HumainBackend;
+  model: string;
+  ok: boolean;
+  latencyMs?: number;
+  failure?: { kind: HumainRouteFailureKind | 'engine-missing'; message: string };
+  /** One plain sentence for the person: what is wrong and what to do. */
+  reason?: string;
+}
+
+export interface MeetingAiTest {
+  ok: boolean;
+  engine: { ready: boolean; detail?: string };
+  routes: MeetingAiRouteTest[];
+}
+
+const PROVIDER_NAMES: Record<HumainBackend, string> = {
+  codex: 'Codex', 'claude-code': 'Claude Code', openrouter: 'OpenRouter', 'local-openai': 'Your local model server',
+};
+
+function plainReason(kind: NonNullable<MeetingAiRouteTest['failure']>['kind'],
+  route: { backend: HumainBackend; model: string }, message: string): string {
+  const provider = PROVIDER_NAMES[route.backend];
+  const detail = message.trim() ? ` ${message.trim()}` : '';
+  switch (kind) {
+    case 'engine-missing': return message;
+    case 'not-signed-in': return `${provider} is not signed in.${detail}`;
+    case 'model-missing': return `${provider} does not offer the model "${route.model}". Choose another in Settings (,) or with seashell ai setup.${detail}`;
+    case 'timeout': return `${provider} did not answer in time.${detail}`;
+    default: return `${provider} could not answer.${detail}`;
+  }
+}
+
+/**
+ * Check every meeting AI route that is in use: the engine first, then one
+ * fixed prompt per distinct provider and model. Roles sharing a route share
+ * one test. `mode` decides whether live analysis and final notes are in use.
+ */
+export async function testMeetingAi(
+  routes: Partial<Record<MeetingAiRole, HumainMeetingRoute>>,
+  options: {
+    mode?: 'streaming' | 'post-session' | 'hybrid';
+    env?: NodeJS.ProcessEnv;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    /** Seams for tests: no engine is started and no prompt is sent. */
+    checkEngine?: () => void;
+    probe?: typeof probeHumainRoute;
+  } = {},
+): Promise<MeetingAiTest> {
+  const mode = options.mode ?? 'hybrid';
+  const inUse: MeetingAiRole[] = [
+    ...(mode !== 'post-session' ? ['observer' as const] : []),
+    ...(mode !== 'streaming' ? ['reconciliation' as const] : []),
+    'chat',
+  ];
+  const distinct = new Map<string, { route: HumainMeetingRoute; roles: MeetingAiRole[] }>();
+  for (const role of inUse) {
+    const route = routes[role];
+    if (!route) continue;
+    const key = JSON.stringify([route.backend, route.model, route.effort ?? null]);
+    const entry = distinct.get(key) ?? { route, roles: [] };
+    entry.roles.push(role);
+    distinct.set(key, entry);
+  }
+  try {
+    if (options.checkEngine) options.checkEngine();
+    else { resolveHumainExecutable(options.env); requireHumainNode({ ...process.env, ...options.env }); }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, engine: { ready: false, detail: message }, routes: [...distinct.values()].map(({ route, roles }) => ({
+      roles, backend: route.backend, model: route.model, ok: false,
+      failure: { kind: 'engine-missing', message }, reason: message,
+    })) };
+  }
+  const probe = options.probe ?? probeHumainRoute;
+  const results: MeetingAiRouteTest[] = [];
+  for (const { route, roles } of distinct.values()) {
+    const result = await probe(route, { env: options.env, signal: options.signal, timeoutMs: options.timeoutMs });
+    results.push({ roles, backend: route.backend, model: route.model, ok: result.ok,
+      ...(result.latencyMs === undefined ? {} : { latencyMs: result.latencyMs }),
+      ...(result.failure ? { failure: result.failure, reason: plainReason(result.failure.kind, route, result.failure.message) } : {}) });
+  }
+  return { ok: results.length > 0 && results.every((result) => result.ok), engine: { ready: true }, routes: results };
 }

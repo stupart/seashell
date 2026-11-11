@@ -33,9 +33,9 @@ export function meetingsMcpCommand(which: (command: string) => string | null = B
 }
 
 /**
- * Register the read-only meetings server with Claude Code and Codex at user
- * scope, using each tool's own `mcp add`, and install the usage skill. Running
- * it again leaves existing registrations alone.
+ * Register the meetings server with Claude Code and Codex at user scope, using
+ * each tool's own `mcp add`, and install the usage skill. Running it again
+ * leaves existing registrations alone and brings the skill up to date.
  */
 export function installMeetingsMcp(options: MeetingsMcpInstallOptions = {}): MeetingsMcpInstallResult {
   const runner = options.runner ?? spawnSync;

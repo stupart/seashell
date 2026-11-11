@@ -133,7 +133,8 @@ describe('templated meeting notes', () => {
     for (const request of requests) {
       expect(request.instructions?.template?.name).toBe('Customer call');
       expect(request.instructions?.template?.body).toContain('## Goals and pain points');
-      expect(request.instructions?.profile).toBe('I sell design retainers.');
+      // "About me" leads; the role's prompt from the Prompts folder follows it.
+      expect(request.instructions?.profile?.startsWith('I sell design retainers.\n\n')).toBeTrue();
       expect(request.instructions?.note).toBe('Capture the budget.');
     }
     const saved = loadMeetingArtifact(root, record.id)!;

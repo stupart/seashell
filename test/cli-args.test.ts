@@ -380,3 +380,41 @@ describe('video CLI parsing', () => {
     }
   });
 });
+
+describe('meeting AI steering and asking', () => {
+  test('seashell query parses the kind and its filters', () => {
+    expect(parseCliArgs(['query', 'actions', '--person', 'Dana', '--since', '2026-10-01', '--json'])).toEqual({
+      kind: 'query', noteKind: 'actions', person: 'Dana', since: '2026-10-01', json: true });
+    expect(parseCliArgs(['query', '--about', 'pricing page', '--limit', '5'])).toEqual({ kind: 'query', about: 'pricing page', limit: 5, json: false });
+    expect(parseCliArgs(['query', 'all'])).toEqual({ kind: 'query', json: false });
+    expect(() => parseCliArgs(['query', 'actions', 'risks'])).toThrow('Usage: seashell query');
+  });
+
+  test('library clean-phantoms parses with ids and --dry-run', () => {
+    expect(parseCliArgs(['library', 'clean-phantoms', '--dry-run'])).toMatchObject({ kind: 'library', action: { kind: 'clean-phantoms', ids: [], dryRun: true } });
+    expect(parseCliArgs(['library', 'clean-phantoms', 'a', 'b', '--json'])).toMatchObject({ action: { kind: 'clean-phantoms', ids: ['a', 'b'], dryRun: false }, json: true });
+    expect(() => parseCliArgs(['library', 'list', '--dry-run'])).toThrow('--dry-run only applies');
+  });
+
+  test('prompts commands parse', () => {
+    expect(parseCliArgs(['prompts'])).toEqual({ kind: 'prompts', action: 'list', json: false });
+    expect(parseCliArgs(['prompts', 'reset', 'notes', '--json'])).toEqual({ kind: 'prompts', action: 'reset', name: 'notes', json: true });
+    expect(() => parseCliArgs(['prompts', 'reset'])).toThrow('Usage: seashell prompts');
+  });
+
+  test('extract and extractors parse as commands', () => {
+    expect(parseCliArgs(['extract', 'acme-call', 'Customer', 'pains'])).toEqual({ kind: 'extract', id: 'acme-call', extractor: 'Customer pains', json: false });
+    expect(parseCliArgs(['extractors', '--json'])).toEqual({ kind: 'extractors', json: true });
+    expect(() => parseCliArgs(['extract', 'acme-call'])).toThrow('Usage: seashell extract');
+  });
+
+  test('automations parse as commands', () => {
+    expect(parseCliArgs(['automations'])).toEqual({ kind: 'automations', action: 'list', json: false });
+    expect(parseCliArgs(['automations', 'run', 'weekly-sync', 'Post', 'it'])).toEqual({ kind: 'automations', action: 'run', id: 'weekly-sync', name: 'Post it', json: false });
+    expect(() => parseCliArgs(['automations', 'run'])).toThrow('Usage: seashell automations');
+  });
+
+  test('ai test parses', () => {
+    expect(parseCliArgs(['ai', 'test', '--json'])).toEqual({ kind: 'ai', action: 'test', json: true });
+  });
+});

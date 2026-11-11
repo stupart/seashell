@@ -175,7 +175,7 @@ function existingRecordPath(libraryDir: string, id: string): string | undefined 
 export function saveTranscriptRecord(
   libraryDir: string,
   record: TranscriptRecord,
-  options: { provisional?: boolean; namesOnly?: { from: string; to: string } } = {},
+  options: { provisional?: boolean; namesOnly?: { from: string; to: string }; keepNotes?: string } = {},
 ): SavedTranscript {
   assertTranscriptId(record.id);
   const existingPath = existingRecordPath(libraryDir, record.id);
@@ -197,7 +197,7 @@ export function saveTranscriptRecord(
     timestamps: true,
     speakers: record.speakers.length > 0,
   })}\n`);
-  try { if (!options.provisional) synchronizeMeetingTranscript(directory, record, { namesOnly: options.namesOnly }); } catch (error) {
+  try { if (!options.provisional) synchronizeMeetingTranscript(directory, record, { namesOnly: options.namesOnly, keepNotes: options.keepNotes }); } catch (error) {
     meetingWarning = `Transcript saved; meeting notes need repair: ${error instanceof Error ? error.message : String(error)}`;
   }
   return { directory, jsonPath, textPath, ...(meetingWarning ? { meetingWarning } : {}) };

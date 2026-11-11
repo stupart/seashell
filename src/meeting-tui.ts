@@ -1,5 +1,5 @@
 import type { MeetingArtifact, MeetingClaim, MeetingClaimType } from './meeting-artifact.ts';
-import { transcriptSegmentId } from './meeting-artifact.ts';
+import { claimOwnerAndDue, transcriptSegmentId } from './meeting-artifact.ts';
 import { compareMeetingEvidence, meetingEvidence } from './meeting-evidence.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 import { formatTuiClock } from './tui-state.ts';
@@ -60,9 +60,17 @@ function wordsOf(text: string): Set<string> {
 /** Lines starting with this are headings; wrappedMeetingRows keeps them, the app makes them bold. */
 export const HEADING = '# ';
 
-const CLAIM_GROUPS: Array<[string, MeetingClaimType[]]> = [
+/** What the meeting settled and left open leads; the template follows; then everything else. */
+const LEADING_GROUPS: Array<[string, MeetingClaimType[]]> = [
   ['Decisions', ['decision']],
   ['Actions', ['action_item']],
+  ['Risks', ['risk']],
+  ['Open questions', ['open_question']],
+  ['Follow-ups', ['follow_up']],
+];
+
+const CLAIM_GROUPS: Array<[string, MeetingClaimType[]]> = [
+  ...LEADING_GROUPS,
   ['Dates', ['date']],
   ['Notes', ['note', 'highlight']],
   ['Facts and feedback', ['fact', 'feedback']],
@@ -118,15 +126,29 @@ export function meetingViewLines(
     return said.some((other) => claim.evidenceSegmentIds.some((id) => other.passages.has(id)) &&
       [...words].filter((word) => other.words.has(word)).length >= Math.max(2, words.size * 0.7));
   };
+  // An action or follow-up says who and by when, as it was said.
+  const claimText = (claim: MeetingClaim) => {
+    const owner = claim.type === 'action_item' || claim.type === 'follow_up' ? claimOwnerAndDue(claim) : undefined;
+    return owner ? `${claim.text} (${owner})` : claim.text;
+  };
   const group = ([title, types]: [string, MeetingClaimType[]]) => {
     const items = claims.filter((claim) => types.includes(claim.type) && !repeated(claim));
-    return items.length ? ['', `${HEADING}${title}`, ...items.map((claim) => bullet(claim.text, claim.evidenceSegmentIds))] : [];
+    return items.length ? ['', `${HEADING}${title}`, ...items.map((claim) => bullet(claimText(claim), claim.evidenceSegmentIds))] : [];
   };
   const stale = record && artifact.transcriptEvidence &&
     compareMeetingEvidence(artifact.transcriptEvidence, meetingEvidence(record)) !== 'same';
+  // Each extractor's fields, under one Insights heading; an empty field is left out.
+  const insights = (artifact.insights ?? []).flatMap((insight) => {
+    const found = insight.fields.filter((field) => field.items.length);
+    if (!found.length) return [`${insight.extractor}: nothing found.`];
+    return found.flatMap((field) => [
+      insight.fields.length === 1 ? insight.extractor : `${insight.extractor} · ${field.name}`,
+      ...field.items.map((item) => bullet(item.text, item.evidenceSegmentIds)),
+    ]);
+  });
   return [
     summary,
-    ...CLAIM_GROUPS.slice(0, 2).flatMap(group),
+    ...CLAIM_GROUPS.slice(0, LEADING_GROUPS.length).flatMap(group),
     ...sections.flatMap((section) => [
       '',
       `${HEADING}${section.heading}`,
@@ -134,7 +156,10 @@ export function meetingViewLines(
         ? section.items.map((item) => bullet(item.text, item.evidenceSegmentIds))
         : ['- Not discussed.']),
     ]),
-    ...CLAIM_GROUPS.slice(2).flatMap(group),
-    ...(stale ? ['', 'The transcript changed since these notes. Press g to rewrite them.'] : []),
+    ...CLAIM_GROUPS.slice(LEADING_GROUPS.length).flatMap(group),
+    ...(insights.length ? ['', `${HEADING}Insights`, ...insights] : []),
+    ...(stale ? ['', 'The transcript changed since these notes. Press g to rewrite them.']
+      : artifact.notesOutdated ? ['', `${artifact.notesOutdated.reason} after these notes were written, so they may be out of date. Press g to rewrite them.`]
+      : []),
   ];
 }
