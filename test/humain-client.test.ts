@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { discoverHumainModels, humainRouteRequest, runHumainMeeting, runHumainTranscription, type HumainTranscriptionRoute } from '../src/humain-client.ts';
+import { discoverHumainModels, humainRouteRequest, probeHumainRoute, runHumainMeeting, runHumainTranscription, testMeetingAi, type HumainMeetingRoute, type HumainTranscriptionRoute } from '../src/humain-client.ts';
 
 const roots: string[] = [];
 
@@ -143,4 +143,52 @@ test('an unconfigured developer checkout is not silently used as Humain', () => 
   `], { env: { ...process.env, HOME: root, PATH: '', HUMAIN_CLI: '' } });
   expect(result.exitCode).toBe(0);
   expect(result.stdout.toString()).toContain('Humain is not available');
+});
+
+test('a route probe sends only the route, and reads Humain\'s answer or failure', async () => {
+  const f = fixture();
+  const codex: HumainMeetingRoute = { backend: 'codex', model: 'fast-model', effort: 'low' };
+  const env = (result: unknown) => ({ ...f.options.env, FIXTURE_RESULT: JSON.stringify(result) });
+  expect(await probeHumainRoute(codex, { env: env({ ok: true, backend: 'codex', model: 'fast-model', latencyMs: 812.4 }) }))
+    .toEqual({ ok: true, backend: 'codex', model: 'fast-model', latencyMs: 812 });
+  // No meeting text: the command line carries the route and nothing else.
+  expect(JSON.parse(readFileSync(f.argsPath, 'utf8'))).toEqual(['doctor', 'route', '--backend', 'codex', '--model', 'fast-model', '--effort', 'low', '--timeout-ms', '60000']);
+  const failure = { kind: 'not-signed-in' as const, message: 'Run codex login.' };
+  expect(await probeHumainRoute(codex, { env: env({ ok: false, backend: 'codex', model: 'fast-model', failure }) }))
+    .toEqual({ ok: false, backend: 'codex', model: 'fast-model', failure });
+  // An answer about some other route, or an older engine without a probe, is a failure, never a pass.
+  expect((await probeHumainRoute(codex, { env: env({ ok: true, backend: 'codex', model: 'other' }) })).failure?.kind).toBe('provider-error');
+  const slow = { kind: 'timeout' as const, message: 'No answer within 60 seconds.' };
+  expect((await probeHumainRoute(codex, { env: env({ ok: false, backend: 'codex', model: 'fast-model', latencyMs: 60_000, failure: slow }) })).failure).toEqual(slow);
+});
+
+test('the AI test checks the engine first, then each distinct route in use once, in plain words', async () => {
+  const fast: HumainMeetingRoute = { backend: 'codex', model: 'fast' };
+  const deep: HumainMeetingRoute = { backend: 'claude-code', model: 'deep' };
+  const probed: string[] = [];
+  const probe = async (route: HumainMeetingRoute) => {
+    probed.push(`${route.backend}/${route.model}`);
+    return route.backend === 'codex'
+      ? { ok: true, backend: route.backend, model: route.model, latencyMs: 900 }
+      : { ok: false, backend: route.backend, model: route.model, failure: { kind: 'model-missing' as const, message: '' } };
+  };
+  const result = await testMeetingAi({ observer: fast, reconciliation: deep, chat: fast }, { mode: 'hybrid', checkEngine: () => {}, probe });
+  expect(probed).toEqual(['codex/fast', 'claude-code/deep']);
+  expect(result.ok).toBeFalse();
+  expect(result.routes).toEqual([
+    { roles: ['observer', 'chat'], backend: 'codex', model: 'fast', ok: true, latencyMs: 900 },
+    { roles: ['reconciliation'], backend: 'claude-code', model: 'deep', ok: false, failure: { kind: 'model-missing', message: '' },
+      reason: 'Claude Code does not offer the model "deep". Choose another in Settings (,) or with seashell ai setup.' },
+  ]);
+  // Final notes only: live analysis is not in use, so it is not tested.
+  probed.length = 0;
+  expect((await testMeetingAi({ observer: deep, reconciliation: fast, chat: fast }, { mode: 'post-session', checkEngine: () => {}, probe })).ok).toBeTrue();
+  expect(probed).toEqual(['codex/fast']);
+  // No engine: nothing is probed, and every route says why.
+  probed.length = 0;
+  const missing = await testMeetingAi({ chat: fast }, { checkEngine: () => { throw new Error('Humain is not available. Run seashell ai install <humain-package.tgz>, or install its CLI.'); }, probe });
+  expect(probed).toEqual([]);
+  expect(missing.engine.ready).toBeFalse();
+  expect(missing.routes[0]?.reason).toContain('seashell ai install');
+  expect((await testMeetingAi({}, { checkEngine: () => {}, probe })).ok).toBeFalse();
 });
