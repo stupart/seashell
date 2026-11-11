@@ -287,10 +287,13 @@ Background meetings record your microphone through a small native helper,
 background runtime itself cannot be granted one). Run
 `seashell meeting microphone setup` once and choose **Allow**; check it any time
 with `seashell meeting microphone`. Other people in a call are recorded from your
-Mac's sound by **Seashell System Audio**, which holds its own Screen & System
-Audio Recording permission. The guided setup tests that same helper, so a pass
-there means meetings hear the others too, and Settings remembers it after a
-restart. macOS asks once; choose **Allow**. If you leave a call and rejoin within three
+Mac's sound. Meetings keep the background recorder's permission for this until
+you allow **Seashell System Audio**, the helper's own, at your Mac: press **,**
+→ Computer audio → **Enter**, or run `seashell meeting computer-audio setup`.
+Seashell plays a short sound, macOS asks once, and from the next call meetings
+use it. No call waits on a question nobody is there to answer. If macOS later
+refuses it, or it sends only silence, the recording goes back to the background
+recorder's permission and says so. If you leave a call and rejoin within three
 minutes, the recording continues in the same History entry. To name meetings
 after their calendar event, press **,** → Meeting titles from Calendar (or run
 `seashell meeting calendar setup`); **Seashell Calendar** asks macOS once. Use
@@ -1400,9 +1403,10 @@ seashell doctor
   packages, accept the model terms, and provide `HF_TOKEN` for the first run.
 - **Aggregate channel mismatch:** verify the channel count and physical routing
   before using `--channel-roles`.
-- **System audio unavailable:** run `seashell doctor`; allow **Seashell System
-  Audio** in System Settings → Privacy & Security → Screen & System Audio
-  Recording. The guided setup (Settings → Guided setup) asks macOS and tests it. Set `SEASHELL_DISABLE_SYSTEM_AUDIO=1`
+- **System audio unavailable:** run `seashell doctor`. To record with
+  **Seashell System Audio**, run `seashell meeting computer-audio setup` at your
+  Mac and choose Allow, or turn it on in System Settings → Privacy & Security →
+  Screen & System Audio Recording. Set `SEASHELL_DISABLE_SYSTEM_AUDIO=1`
   for an explicit microphone-only session.
 - **Doctor says the helper started but no buffer was observed:** CoreAudio taps
   may stay idle when nothing is playing. Run `seashell capture test --seconds 5`

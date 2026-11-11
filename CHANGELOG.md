@@ -66,10 +66,14 @@
   "Your side wasn't recorded" in yellow, and Settings says to check it.
 - Computer audio survives any number of device changes, and restarts by itself
   if it stalls.
-- Computer audio is now recorded by its own helper, **Seashell System Audio**.
-  The guided setup tests that same helper, so a pass means meetings hear the
-  others too, and Settings remembers the pass after a restart. macOS asks once
-  for this helper; the old Seashell Background permission no longer applies.
+- Computer audio can now record with its own permission, **Seashell System
+  Audio**, instead of the background recorder's. Meetings switch only after you
+  allow it at your Mac: Settings → Computer audio → Enter, or
+  `seashell meeting computer-audio setup`. Until then nothing changes, so no
+  call waits on a macOS question. If macOS later refuses it, or it sends only
+  silence, the recording goes back to the old permission and says so.
+- The guided setup tests that same helper, and Settings remembers a pass after
+  a restart.
 
 **Setup and Settings**
 
