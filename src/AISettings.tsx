@@ -108,6 +108,7 @@ export default function AISettings(props: {
   const providerNames = names.join(' + ');
   const canUse = Boolean(proposal || configured);
   const { stdout } = useStdout();
+  const width = (stdout?.columns ?? 80) - 2;
   // Testing sends one tiny fixed prompt through each route that is saved, so it waits for a proposal to be saved first.
   // Once AI is chosen there is nothing to confirm: Esc goes back.
   const home: Array<[HomeEntry, string]> = [
@@ -176,17 +177,17 @@ export default function AISettings(props: {
           {ready(AI_PROVIDERS[i]!.id) ? '✓' : '–'}</Text> </> : null}{label}</Text>)}
     </Box>
     <Box flexDirection="column" marginTop={1}>
-      {screen === 'home' && canUse && <Text dimColor>{backends.some((id) => id !== 'local-openai')
-        ? `Your meeting text will be sent through your ${names.join(' and ')} ${names.length === 1 ? 'account' : 'accounts'}. Usage follows your plan.`
-        : 'Meeting text stays with your configured local model server.'}</Text>}
-      {screen === 'providers' && <Text dimColor>{AI_PROVIDERS[index]?.privacy}</Text>}
+      {screen === 'home' && canUse && <Paragraph width={width} dimColor text={backends.some((id) => id !== 'local-openai')
+        ? `Your meeting text will be sent through your ${names.join(' and ')} ${names.length === 1 ? 'account' : 'accounts'}.`
+        : 'Meeting text stays with your configured local model server.'} />}
+      {screen === 'providers' && <Paragraph width={width} dimColor text={AI_PROVIDERS[index]?.privacy ?? ''} />}
       {screen === 'home' && (testing || test) && <Box flexDirection="column" marginTop={1}>
         <Text bold>Connection test</Text>
-        {testing ? <Text dimColor>Sending one short fixed prompt to each AI in use. No meeting text is sent.</Text>
-          : test && <ConnectionTest test={test} width={(stdout?.columns ?? 80) - 2} />}
+        {testing ? <Paragraph width={width} dimColor text="Sending one short fixed prompt to each AI in use. No meeting text is sent." />
+          : test && <ConnectionTest test={test} width={width} />}
       </Box>}
-      {error && <Text color="red">{error.slice(0, 240)}</Text>}
-      {!busy && !canUse && screen === 'home' && <Text dimColor>No Seashell account needed. Connect a provider or return to your transcript.</Text>}
+      {error && <Paragraph width={width} color="red" text={error.slice(0, 240)} />}
+      {!busy && !canUse && screen === 'home' && <Paragraph width={width} dimColor text="No Seashell account needed. Connect a provider or return to your transcript." />}
     </Box>
     <Box flexGrow={1} />
     <Box flexShrink={0}>{testing ? <Prompt text="◐ Testing…" dimColor hints={[['Esc', 'cancel']]} columns={(stdout?.columns ?? 80) - 2} />

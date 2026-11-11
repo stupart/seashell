@@ -2666,9 +2666,8 @@ export default function App(props: {
   </Box>;
   const audioSheet = audioHelpOpen ? <Sheet>
     {finding && <Box flexShrink={0} marginBottom={1}><Paragraph text={finding.text} width={sheetWidth} color={finding.color} /></Box>}
-    {step(1, 'Quiet can just mean you are muted or nobody is speaking.')}
-    {step(2, 'Check the right microphone is chosen and its level moves.')}
-    {step(3, 'Check Seashell Microphone is allowed in Privacy & Security.')}
+    {step(1, 'Check the right microphone is chosen and its level moves.')}
+    {step(2, 'Check Seashell Microphone is allowed in Privacy & Security.')}
   </Sheet> : null;
   const sheet = helpSheet ?? audioSheet ?? notesSheet ?? speakerSheet;
   // A sheet's name takes the title line, as a screen's does; what is wrong stays in the status slot.

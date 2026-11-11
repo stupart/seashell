@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, Text, useStdout } from 'ink';
-import wrapAnsi from 'wrap-ansi';
+import { wrapWords } from './tui-state.ts';
 
 export type Hint = readonly [key: string, label: string];
 type Tone = 'red' | 'yellow' | 'green' | 'cyan';
@@ -189,12 +189,12 @@ export function HelpRow(props: { group: string; keys: string }) {
   </Box>;
 }
 
-/** Text wrapped at word breaks with no stray space starting a line, which Ink's own wrapping leaves. */
+/** Text wrapped at word breaks with no stray space starting a line, which Ink's own wrapping leaves,
+ * and no word alone on its last line. */
 export function Paragraph(props: { text: string; width: number; color?: Tone; dimColor?: boolean; bold?: boolean }) {
   const { text, width: columns, ...style } = props;
   return <Box flexDirection="column" flexShrink={0}>
-    {wrapAnsi(text, Math.max(8, columns), { hard: true, trim: true }).split('\n')
-      .map((line, index) => <Text key={index} {...style}>{line || ' '}</Text>)}
+    {wrapWords(text, Math.max(8, columns)).map((line, index) => <Text key={index} {...style}>{line || ' '}</Text>)}
   </Box>;
 }
 
@@ -205,5 +205,5 @@ export const HELP_ROWS: ReadonlyArray<readonly [string, string]> = [
   ['When asked', 'y record · n ignore'],
   ['Recording', 'starts and stops with the call · space record or stop by hand · V record with video · i audio help'],
   ['Add', 'f import a file · F import and separate speakers'],
-  ['Setup', ', settings: speakers, AI and everything else'],
+  ['Setup', ', settings: speakers, AI and more'],
 ];

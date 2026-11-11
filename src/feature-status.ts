@@ -261,8 +261,8 @@ export async function readFeatureStatuses(options: {
   const computerCheck = ownConfirmed && heardInSetup(checks.computer, computerSince) ? checks.computer : undefined;
   const computerDetail = 'Records everyone else from your Mac\'s audio output.';
   const check = { action: 'check-computer-audio', command: 'seashell meeting computer-audio setup' } as const;
-  // Recording works either way; a test sound at the Mac moves it onto Seashell's own permission.
-  const finish = 'Enter plays a test sound to finish setup.';
+  // Recording works either way; a test sound at the Mac moves it onto Seashell's own permission,
+  // which the key bar offers. Under a ✓ there is nothing more to say.
   const allow = 'Enter plays a test sound to check it.';
   statuses.push({
     id: 'computer-audio', label: 'Other people (computer audio)', optional: false,
@@ -271,7 +271,7 @@ export async function readFeatureStatuses(options: {
     : evidence?.audibleComputerChunks ? { state: 'ok', summary: 'Heard in last meeting',
       detail: `${computerDetail} Last meeting: "${evidence.title}" (${when(evidence)}).`,
       // Until a check at the Mac, it records with the background recorder's permission.
-      ...(ownConfirmed ? {} : { ...check, fix: finish }) } as const
+      ...(ownConfirmed ? {} : check) } as const
     : computerCheck ? { state: 'ok', summary: 'Heard during setup',
       detail: `${computerDetail} The check heard your Mac through Seashell System Audio at ${checkedOn(computerCheck)}.` } as const
     : evidence ? { state: 'attention', summary: 'Silent in last meeting',

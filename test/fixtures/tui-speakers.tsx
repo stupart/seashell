@@ -68,7 +68,7 @@ try {
   await type('\r'); await until(() => plain().includes('Privacy & Security'));
   assert.ok(plain().includes('Background access missing'));
   assert.ok(plain().includes('Terminal access alone is not enough'));
-  assert.ok(plain().includes('People panel open'));
+  assert.ok(plain().includes("Meet's People panel in Chrome. Keep it open."));
   assert.equal(permissionRequests, 1, 'Only explicit Connect requests Accessibility');
   assert.equal(JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.speakerBrowser, 'auto');
   assert.equal(starts, 1, 'Connecting Meet preserves the running microphone');

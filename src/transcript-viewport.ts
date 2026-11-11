@@ -1,5 +1,4 @@
 import { Chalk } from 'chalk';
-import wrapAnsi from 'wrap-ansi';
 import { stripVTControlCharacters } from 'util';
 import { coalesceTranscriptSegments, speakerLabel } from './transcript-renderer.ts';
 import type { StructuredTranscript } from './transcript-types.ts';
@@ -58,7 +57,7 @@ export function timedTranscriptRows(
   const segments = coalesceTranscriptSegments(record);
   if (!options.timestamps && !options.speakers) {
     const text = segments.map((segment) => stripVTControlCharacters(segment.text)).join(' ');
-    return text ? wrapAnsi(text, width, { hard: true }).split('\n').map((row) => ({ text: row })) : [];
+    return text ? wrapWords(text, width).map((row) => ({ text: row })) : [];
   }
   const names = new Map(segments.map((segment) => {
     const label = options.speakers ? speakerLabel(record, segment.speaker) : undefined;
@@ -80,12 +79,12 @@ export function timedTranscriptRows(
     const timed = (row: string) => ({ text: row, start: segment.start });
     if (stacked) {
       const heading = [clock, styled(id, name)].filter(Boolean).join('  ');
-      return [timed(heading), ...wrapAnsi(text, width, { hard: true }).split('\n').map((line) => ({ ...timed(line), heading }))];
+      return [timed(heading), ...wrapWords(text, width).map((line) => ({ ...timed(line), heading }))];
     }
     const label = options.speakers ? styled(id, name.slice(0, nameWidth).padEnd(nameWidth)) : '';
     const prefix = [clock, label].filter(Boolean).join('  ');
     const indent = (clockWidth ? clockWidth + 2 : 0) + (options.speakers ? nameWidth + 2 : 0);
-    return wrapAnsi(text, Math.max(1, width - indent), { hard: true }).split('\n')
+    return wrapWords(text, Math.max(1, width - indent))
       .map((line, index) => index === 0 ? timed(`${prefix}  ${line}`) : { ...timed(' '.repeat(indent) + line), pinned: `${prefix}  ${line}` });
   });
 }

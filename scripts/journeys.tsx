@@ -110,7 +110,7 @@ export const JOURNEYS: Journey[] = [
       { title: 'Microphone permission', press: [ENTER], keys: 'Enter', until: 'Seashell Microphone', note: 'macOS asks once.' },
       { title: 'Allowed, now listening', press: [ENTER], keys: 'Enter', until: 'Listening', note: 'A live level from the microphone recorder.' },
       { title: 'Silence', note: 'The microphone sends pure zeros, as a muted or wrong input does. Does it say what to check?',
-        world: ({ sleep }) => sleep(6_000), until: 'sending silence' },
+        world: ({ sleep }) => sleep(6_000), until: 'may be muted' },
       { title: 'Spoke', note: 'Speech-level sound passes the step and lets go of the microphone.',
         world: ({ room }) => { room.microphone = 'speech'; }, until: 'Heard you' },
       { title: 'Computer audio', press: [ENTER], keys: 'Enter', until: 'Listening' },

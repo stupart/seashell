@@ -674,7 +674,7 @@ export default function SettingsScreen(props: SetupActionProps & {
     return null;
   };
   const detail = !selected ? null : selected.kind === 'recording' ? <>
-    {heading('Which calls', <Text dimColor wrap="truncate-end">Which calls Seashell records, and when it asks first.</Text>)}
+    {heading('Which calls')}
     <Box flexDirection="column" flexShrink={1} overflow="hidden" marginTop={1}>
       {rows.map((row, i) => {
         const chosen = inDetail && i === rowIndex;
