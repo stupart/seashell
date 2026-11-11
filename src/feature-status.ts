@@ -2,6 +2,7 @@ import { existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { currentMeetingRoutes } from './ai-provider.ts';
+import { readAudioChecks, type AudioChecks } from './audio-checks.ts';
 import { readBackgroundMeetingStatus } from './background-meeting-status.ts';
 import { readBackgroundWatchStatus } from './background-watch-status.ts';
 import { captureCoverage, type CaptureCoverage } from './capture-health.ts';
@@ -16,7 +17,7 @@ import { microphonePermission, type MicrophonePermissionStatus } from './microph
 import { calendarPermission } from './calendar-permission.ts';
 import type { HelperPermissionStatus } from './helper-permission.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
-import { microphoneRuntimeHelperPath } from './runtime-host.ts';
+import { microphoneRuntimeHelperPath, systemAudioRuntimeHelperPath } from './runtime-host.ts';
 import { listTranscriptRecords } from './transcript-library.ts';
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -80,6 +81,10 @@ export interface FeatureStatusDependencies {
   readonly systemAudioHelperReady?: () => boolean;
   /** When the native microphone recorder was installed; earlier meetings could not hear you. */
   readonly microphoneRecorderSince?: () => number | undefined;
+  /** When the computer-audio helper macOS judges was installed; a check or meeting before it used another identity. */
+  readonly systemAudioRecorderSince?: () => number | undefined;
+  /** What the guided setup heard itself (src/audio-checks.ts). */
+  readonly audioChecks?: () => AudioChecks;
 }
 
 export function lastMeetingEvidence(libraryDir: string): MeetingEvidence | undefined {
@@ -111,6 +116,7 @@ function aiEngineInstalled(): boolean {
 
 const when = (evidence: MeetingEvidence) =>
   new Date(evidence.createdAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+const checkedOn = (at: string) => new Date(at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
 /**
  * One honest checklist for every capability: permission and process state are
@@ -183,9 +189,14 @@ export async function readFeatureStatuses(options: {
     try { return statSync(microphoneRuntimeHelperPath()).mtimeMs; } catch { return undefined; }
   }))();
   const predatesRecorder = Boolean(evidence && recorderSince !== undefined && Date.parse(evidence.createdAt) < recorderSince);
-  const micSilent = evidence && evidence.microphoneChunks > 0 && evidence.audibleMicrophoneChunks === 0 && !predatesRecorder;
+  // The guided setup hearing you since that meeting outweighs it, until the helper is replaced.
+  const checks = (deps.audioChecks ?? readAudioChecks)();
+  const heardInSetup = (at: string | undefined, since: number | undefined) => at !== undefined &&
+    (since === undefined || Date.parse(at) >= since) && (!evidence || Date.parse(at) > Date.parse(evidence.createdAt));
+  const micCheck = heardInSetup(checks.microphone, recorderSince) ? checks.microphone : undefined;
+  const micSilent = evidence && evidence.microphoneChunks > 0 && evidence.audibleMicrophoneChunks === 0 && !predatesRecorder && !micCheck;
   // A couple of audible moments in an hour is not your side of the call.
-  const almostSilent = evidence?.coverage?.yourSideMissing && !predatesRecorder
+  const almostSilent = evidence?.coverage?.yourSideMissing && !predatesRecorder && !micCheck
     ? { evidence, minutes: Math.max(1, Math.round(evidence.coverage.otherSideAudibleSeconds / 60)) } : undefined;
   statuses.push({
     id: 'microphone', label: 'Your microphone', optional: false,
@@ -198,10 +209,11 @@ export async function readFeatureStatuses(options: {
         ? { state: 'attention', summary: 'Allowed · your side almost silent',
           detail: `Your side was almost silent in "${almostSilent.evidence.title}" (${when(almostSilent.evidence)}). The others talked for about ${almostSilent.minutes} minutes, but your microphone picked up almost nothing.`,
           fix: 'Check that you are not muted, and that the right microphone is selected in System Settings → Sound → Input.' } as const
-        : { state: 'ok', summary: evidence?.audibleMicrophoneChunks ? 'Heard in last meeting'
+        : { state: 'ok', summary: micCheck ? 'Heard during setup' : evidence?.audibleMicrophoneChunks ? 'Heard in last meeting'
             : predatesRecorder ? 'Allowed · your next meeting confirms it' : 'Allowed',
           detail: 'Records your side of the conversation as its own track, so your words are labelled as you.' +
-            (predatesRecorder && !evidence?.audibleMicrophoneChunks
+            (micCheck ? ` The guided setup heard you on ${checkedOn(micCheck)}.`
+              : predatesRecorder && !evidence?.audibleMicrophoneChunks
               ? ' Meetings recorded before this update could not hear you; that is fixed now.' : '') } as const
       : microphone.authorization === 'notDetermined'
         ? { state: 'broken', summary: 'Not allowed yet',
@@ -214,19 +226,32 @@ export async function readFeatureStatuses(options: {
             detail: microphone.detail, fix: 'Update Seashell.', command: 'brew upgrade stupart/tap/seashell' } as const),
   });
 
-  // Computer audio: no prompt-free permission check exists, so rely on evidence.
+  // Computer audio: no prompt-free permission check exists, so rely on what was heard,
+  // by the last meeting or by the guided setup, through the helper the recorder runs now.
   const helperReady = (deps.systemAudioHelperReady ?? (() => existsSync(join(PROJECT_ROOT, 'native', 'bin', 'seashell-system-audio'))))();
+  const computerSince = (deps.systemAudioRecorderSince ?? (() => {
+    try { return statSync(systemAudioRuntimeHelperPath()).mtimeMs; } catch { return undefined; }
+  }))();
+  const computerCheck = heardInSetup(checks.computer, computerSince) ? checks.computer : undefined;
+  // Heard by an earlier helper, with another permission: it says nothing about this one.
+  const computerPredates = Boolean(evidence && computerSince !== undefined && Date.parse(evidence.createdAt) < computerSince);
+  const computerDetail = 'Records everyone else from your Mac\'s audio output.';
   statuses.push({
     id: 'computer-audio', label: 'Other people (computer audio)', optional: false,
     ...(!helperReady ? { state: 'broken', summary: 'Recorder missing', detail: 'The computer-audio recorder is not installed.',
       fix: 'Update Seashell.', command: 'brew upgrade stupart/tap/seashell' } as const
-    : evidence?.audibleComputerChunks ? { state: 'ok', summary: 'Heard in last meeting',
-      detail: `Records everyone else from your Mac's audio output. Last meeting: "${evidence.title}" (${when(evidence)}).` } as const
-    : evidence ? { state: 'attention', summary: 'Silent in last meeting',
-      detail: `Nothing was heard from your computer in "${evidence.title}" (${when(evidence)}). macOS may need Screen & System Audio Recording access for Seashell Background.`,
-      fix: 'Allow Seashell Background in Privacy & Security → Screen & System Audio Recording.' } as const
+    : evidence?.audibleComputerChunks && !computerPredates ? { state: 'ok', summary: 'Heard in last meeting',
+      detail: `${computerDetail} Last meeting: "${evidence.title}" (${when(evidence)}).` } as const
+    : computerCheck ? { state: 'ok', summary: 'Heard during setup',
+      detail: `${computerDetail} The guided setup heard your Mac on ${checkedOn(computerCheck)}.` } as const
+    : evidence && !computerPredates ? { state: 'attention', summary: 'Silent in last meeting',
+      detail: `Nothing was heard from your computer in "${evidence.title}" (${when(evidence)}). macOS may need System Audio Recording access for Seashell System Audio.`,
+      fix: 'Allow Seashell System Audio in Privacy & Security → Screen & System Audio Recording.' } as const
+    : evidence ? { state: 'attention', summary: 'Not confirmed since the update',
+      detail: `${computerDetail} It now records with its own helper, Seashell System Audio, so macOS asks once more. Test it in the guided setup, or your next meeting confirms it.`,
+      fix: 'Test it in the guided setup and choose Allow if macOS asks.' } as const
     : { state: 'attention', summary: 'Not confirmed yet',
-      detail: 'Records everyone else from your Mac\'s audio output. It is confirmed after your first recorded meeting.' } as const),
+      detail: `${computerDetail} Test it in the guided setup, or your first recorded meeting confirms it.` } as const),
   });
 
   const transcriptionReady = (deps.transcriptionReady ?? (() =>

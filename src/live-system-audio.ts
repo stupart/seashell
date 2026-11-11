@@ -5,6 +5,7 @@ import { tmpdir } from 'os';
 import { basename, dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { terminateManagedChild } from './process-lifecycle.ts';
+import { prepareRuntimeHelper, SYSTEM_AUDIO_RUNTIME_HELPER, type RuntimeHostOptions } from './runtime-host.ts';
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const SYSTEM_AUDIO_HELPER = join(
@@ -13,6 +14,27 @@ export const SYSTEM_AUDIO_HELPER = join(
   'bin',
   'seashell-system-audio',
 );
+
+let preparedHelper: string | undefined;
+
+/**
+ * The helper every launcher runs: the background recorder, the guided setup's
+ * test and `seashell doctor`. It answers for its own System Audio Recording
+ * permission, so the stable copy keeps that permission across updates, and a
+ * test from a terminal checks exactly what the recorder will use.
+ */
+export function defaultSystemAudioHelper(options: { bundled?: string; runtimeHost?: RuntimeHostOptions } = {}): string {
+  const bundled = options.bundled ?? SYSTEM_AUDIO_HELPER;
+  if (process.platform !== 'darwin' || !existsSync(bundled)) return bundled;
+  const shared = options.bundled === undefined && options.runtimeHost === undefined;
+  if (shared && preparedHelper && existsSync(preparedHelper)) return preparedHelper;
+  let path: string;
+  // The packaged copy still answers for itself; it only lacks a stable path.
+  try { path = prepareRuntimeHelper(bundled, SYSTEM_AUDIO_RUNTIME_HELPER, options.runtimeHost); } catch { path = bundled; }
+  if (shared) preparedHelper = path;
+  return path;
+}
+
 export const LIVE_CAPTURE_SAMPLE_RATE = 16_000;
 export const LIVE_CAPTURE_CHUNK_MILLISECONDS = 10_000;
 
@@ -492,7 +514,7 @@ export function systemAudioCanRecover(code: string | undefined, heard: boolean):
 }
 
 function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { readonly expectAudio: boolean }): SystemAudioCaptureHandle {
-  const helperPath = options.helperPath ?? SYSTEM_AUDIO_HELPER;
+  const helperPath = options.helperPath ?? defaultSystemAudioHelper();
   if (!existsSync(helperPath)) {
     options.onState({
       state: 'unavailable',

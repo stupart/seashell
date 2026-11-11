@@ -36,6 +36,7 @@ const dependencies: FeatureStatusDependencies = {
   transcriptionReady: () => true, systemAudioHelperReady: () => true,
   // The silent meeting happened after the native recorder was installed: a real problem.
   microphoneRecorderSince: () => Date.now() - 86_400_000,
+  systemAudioRecorderSince: () => Date.now() - 86_400_000,
 };
 // The app's own Settings and header nudge must use fixture machine state, never this Mac's.
 const real = { ...await import('../../src/feature-status.ts') };

@@ -35,6 +35,7 @@ const dependencies: FeatureStatusDependencies = {
   speakerSeparationReady: () => false, aiEngineInstalled: () => false,
   transcriptionReady: () => true, systemAudioHelperReady: () => true,
   microphoneRecorderSince: () => Date.now() - 86_400_000,
+  systemAudioRecorderSince: () => Date.now() - 86_400_000,
 };
 const real = { ...await import('../../src/feature-status.ts') };
 mock.module('../../src/feature-status.ts', () => ({ ...real,
@@ -100,6 +101,10 @@ try {
   await until(() => plain().includes('Play any sound') && plain().includes('Step 3 of 4'), 'computer audio');
   room.computer = { peak: 12000, rmsDbfs: -20 };
   await until(() => plain().includes('Heard your Mac'), 'computer audio passes');
+  // Kept beside the settings file, so a restart still knows both were heard.
+  const checks = join(root, 'audio-checks.json');
+  await until(() => existsSync(checks) && Boolean(JSON.parse(readFileSync(checks, 'utf8')).computer), 'the passed checks are remembered');
+  assert.ok(JSON.parse(readFileSync(checks, 'utf8')).microphone);
 
   await type('\r');
   await until(() => plain().includes('Optional extras'), 'optional extras');
@@ -123,6 +128,8 @@ try {
   assert.ok(!plain().includes('Guided setup'), 'not opened by itself after the first run');
   await type('\r');
   await until(() => plain().includes('Guided setup') && plain().includes('Background recorder'), 'Enter starts the guide');
+  // After a restart, computer audio heard during setup is not asked for again.
+  await until(() => plain().includes('Step 1 of 3'), 'a remembered computer-audio check skips its step');
   await type('\x1b');
   await until(() => since('Guided setup').includes('one step at a time'), 'Esc leaves it for later');
   again.unmount();

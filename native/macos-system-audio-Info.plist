@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.humain.seashell.system-audio</string>
+  <key>CFBundleName</key>
+  <string>Seashell System Audio</string>
+  <!-- Bump only when the PCM/event contract changes: a new protocol replaces
+       the installed copy, and macOS then asks for System Audio Recording again. -->
+  <key>SeashellHelperProtocol</key>
+  <string>1</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>Seashell records the other people in the calls it captures from your Mac's sound. Audio stays on this Mac.</string>
+</dict>
+</plist>
