@@ -458,9 +458,10 @@ seashell meeting video <id> --at 12:34   # opens at that moment
 
 In Seashell, press **W** in a meeting that has video. It opens at the
 transcript line at the top of the screen, or at the start from Notes or Chat.
-Click a line to see that moment; the line being said is highlighted. The page
-works offline. The video has no sound of its own: the transcript carries the
-words.
+Click a line, or press Return on it, to see that moment; Space plays or pauses
+and the arrow keys move between lines. The line being said is highlighted and
+kept in view. The page works offline. The video has no sound of its own: the
+transcript carries the words.
 
 Turn video off, or off for one app:
 

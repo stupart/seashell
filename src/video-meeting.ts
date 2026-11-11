@@ -120,9 +120,9 @@ export function renderVideoPlayerPage(directory: string, record: TranscriptRecor
 <title>${title}</title>
 <style>
 :root { color-scheme: light dark; --bg: #f6f5f2; --panel: #fff; --text: #1d1d1f; --muted: #6b6b70;
-  --line: #e4e2dd; --accent: #0a66d8; --hover: rgb(10 102 216 / 8%); --current: #fff3d1; --gutter: 20px; }
+  --line: #e4e2dd; --accent: #0a66d8; --hover: rgb(127 127 127 / 8%); --current: rgb(10 102 216 / 10%); --gutter: 20px; }
 @media (prefers-color-scheme: dark) { :root { --bg: #161617; --panel: #1e1e20; --text: #f2f2f2; --muted: #a1a1a6;
-  --line: #2d2d30; --accent: #5aa2ff; --hover: rgb(90 162 255 / 9%); --current: #3b3322; } }
+  --line: #2d2d30; --accent: #5aa2ff; --hover: rgb(127 127 127 / 10%); --current: rgb(90 162 255 / 16%); } }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body { display: grid; grid-template-rows: auto minmax(0, 1fr); background: var(--bg); color: var(--text);
@@ -130,21 +130,25 @@ body { display: grid; grid-template-rows: auto minmax(0, 1fr); background: var(-
 header { padding: 14px var(--gutter); border-bottom: 1px solid var(--line); }
 h1 { margin: 0; font-size: 17px; font-weight: 600; line-height: 1.4; overflow-wrap: anywhere; text-wrap: balance;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
-main { display: grid; grid-template-columns: minmax(0, 3fr) minmax(320px, 2fr); min-height: 0; }
-.stage { display: flex; flex-direction: column; gap: 10px; padding: var(--gutter); min-height: 0; container-type: size; }
-/* Only as wide as the picture fits, so the box never letterboxes whatever the movie's shape (--ratio is set once
-   it loads). The clip rounds WebKit's paused overlay too; the ring keeps a white slide's edge on a light page. */
-video { display: block; flex: none; width: 100%; height: auto; aspect-ratio: auto 16 / 10;
-  max-width: calc((100cqh - 2.5em) * var(--ratio, 1.6)); border-radius: 8px; box-shadow: 0 0 0 1px var(--line);
-  clip-path: inset(-1px round 9px); }
+main { display: grid; grid-template-columns: minmax(0, 1fr) clamp(360px, 32vw, 480px); min-height: 0; }
+/* The video is only as wide as the picture fits (--ratio is set once it loads), so it never letterboxes whatever
+   the movie's shape; a narrower one is centred, and the status line shares its edges. */
+.stage { --fit: calc((100cqh - 38px) * var(--ratio, 1.6)); display: flex; flex-direction: column; gap: 10px;
+  padding: var(--gutter); min-height: 0; container-type: size; }
+video, .status { width: 100%; max-width: var(--fit); margin-inline: auto; }
+/* The clip rounds WebKit's paused overlay too; the ring keeps a white slide's edge on a light page. */
+video { display: block; flex: none; height: auto; aspect-ratio: auto 16 / 10; border-radius: 8px;
+  box-shadow: 0 0 0 1px var(--line); clip-path: inset(-1px round 9px); }
 video:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.status { margin: 0; color: var(--muted); font-size: 13px; }
+.status { margin-block: 0; color: var(--muted); font-size: 13px; }
 .status:empty { display: none; }
-ol { display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 12px; align-content: start;
+ol { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; align-content: start;
   position: relative; margin: 0; padding: 8px 0; list-style: none; overflow-y: auto; overscroll-behavior: contain;
-  background: var(--panel); border-left: 1px solid var(--line); }
+  background: var(--panel); border-left: 1px solid var(--line);
+  mask-image: linear-gradient(transparent, #000 8px, #000 calc(100% - 8px), transparent); }
 li { grid-column: 1 / -1; display: grid; grid-template-columns: 4em minmax(0, 1fr); grid-template-columns: subgrid;
-  align-items: baseline; margin: 0 8px; padding: 8px 12px; border-radius: 8px; cursor: pointer; overflow-wrap: anywhere; }
+  align-items: baseline; margin: 0 8px; padding: 8px 12px; border-radius: 8px; cursor: pointer; overflow-wrap: anywhere;
+  text-wrap: pretty; }
 @media (hover: hover) { li:hover { background: var(--hover); } }
 li.current { background: var(--current); }
 li.before { color: var(--muted); }
@@ -152,10 +156,13 @@ li:focus { outline: none; }
 li:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 time { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .speaker { display: block; font-size: 13px; font-weight: 600; }
+.speaker.unknown { color: var(--muted); }
+/* The same speaker again: read out, not shown. */
+.speaker.same { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @media (max-width: 860px) {
+  header { border-bottom: 0; }
   main { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  .stage { container-type: normal; }
-  video { max-width: calc(45vh * var(--ratio, 1.6)); }
+  .stage { --fit: calc(45vh * var(--ratio, 1.6)); container-type: normal; }
   ol { border-left: 0; border-top: 1px solid var(--line); }
 }
 </style>
@@ -173,6 +180,7 @@ time { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums;
 <script>
 const data = JSON.parse(document.getElementById('meeting-data').textContent);
 const video = document.querySelector('video');
+const stage = document.querySelector('.stage');
 const list = document.querySelector('ol');
 const status = document.querySelector('.status');
 const movies = data.movies;
@@ -189,6 +197,7 @@ const clock = (seconds) => {
 // Video time = transcript time + offset. A later movie takes over once it has started.
 const movieAt = (t) => movies.reduce((found, entry, index) => (t + entry.offset >= 0 ? index : found), 0);
 const firstPicture = -movies[0].offset;
+let said = '';
 const items = data.lines.map((line) => {
   const item = document.createElement('li');
   item.setAttribute('role', 'option');
@@ -196,12 +205,14 @@ const items = data.lines.map((line) => {
   const time = document.createElement('time');
   time.textContent = clock(line.start);
   const body = document.createElement('div');
-  if (line.speaker) {
+  // A name shows when the speaker changes; a line nobody was matched to after a named one says so.
+  if (line.speaker || said) {
     const who = document.createElement('span');
-    who.className = 'speaker';
-    who.textContent = line.speaker;
+    who.className = line.speaker ? (line.speaker === said ? 'speaker same' : 'speaker') : 'speaker unknown';
+    who.textContent = line.speaker || 'Unknown';
     body.append(who);
   }
+  said = line.speaker;
   body.append(document.createTextNode(line.text));
   item.append(time, body);
   if (line.end < firstPicture) item.classList.add('before');
@@ -233,7 +244,7 @@ function reveal(item, how) {
   list.scrollTo({ top: Math.max(0, target), behavior: smooth ? 'smooth' : 'auto' });
 }
 video.addEventListener('loadedmetadata', () => {
-  if (video.videoHeight) video.style.setProperty('--ratio', String(video.videoWidth / video.videoHeight));
+  if (video.videoHeight) stage.style.setProperty('--ratio', String(video.videoWidth / video.videoHeight));
 });
 function load(index, then) {
   if (index === movie) { then(); return; }

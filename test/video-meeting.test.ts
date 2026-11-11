@@ -188,12 +188,14 @@ function playerHarness(html: string) {
   });
   // Loading a movie reports its size at once.
   Object.defineProperty(video, 'src', { get: () => source, set: (value: string) => { source = value; dispatch(video, 'loadedmetadata'); } });
-  body.append(video, status, list);
+  const stage = new El('section');
+  stage.append(video, status);
+  body.append(stage, list);
   const json = /<script type="application\/json" id="meeting-data">(.*?)<\/script>/su.exec(html)![1]!;
   const doc = {
     body, activeElement: body as El,
     getElementById: () => ({ textContent: json }),
-    querySelector: (selector: string) => ({ video, ol: list, '.status': status })[selector],
+    querySelector: (selector: string) => ({ video, ol: list, '.status': status, '.stage': stage })[selector],
     createElement: (tag: string) => new El(tag),
     createTextNode: (text: string) => ({ nodeType: 3, textContent: text }),
     addEventListener: (type: string, fn: (event: FakeEvent) => void) => { (documentListeners[type] ??= []).push({ fn }); },
@@ -203,7 +205,7 @@ function playerHarness(html: string) {
     doc, () => ({ matches: true }), () => ({ isCollapsed: true }), { hash: '' }, El);
   const items = list.children as El[];
   return {
-    video, list, status, items, doc,
+    video, list, status, stage, items, doc,
     key: (key: string, target: El = doc.activeElement) => dispatch(target, 'keydown', key),
     click: (item: El) => dispatch(item, 'click'),
     current: () => items.findIndex((item) => item.classes.has('current')),
@@ -263,7 +265,7 @@ test('the player says when the video starts late and which part of a resumed cal
     { ...movie(-1), segments: [movie(-1), movie(-70, '/m/capture/video/000002.mp4')] }, 75));
   expect(resumed.status.textContent).toBe('Part 2 of 2, from 1:10.');
   expect((resumed.video as unknown as { src: string }).src).toBe('capture/video/000002.mp4');
-  expect(resumed.video.style.properties['--ratio']).toBe(String(1920 / 1200));
+  expect(resumed.stage.style.properties['--ratio']).toBe(String(1920 / 1200));
 });
 
 test('the player page is labelled, themed, offline and small', () => {
@@ -278,4 +280,18 @@ test('the player page is labelled, themed, offline and small', () => {
   expect(html).not.toMatch(/<link|@import|@font-face|url\(/u);
   const shell = html.replace(/<script type="application\/json" id="meeting-data">.*?<\/script>/su, '');
   expect(shell.length).toBeLessThan(14_000);
+});
+
+test('a speaker is named when they start talking, and a line matched to nobody after a named one says so', () => {
+  const said = ['SPEAKER_00', 'SPEAKER_00', 'SPEAKER_01', undefined, undefined, 'SPEAKER_01'];
+  const record = createTranscriptRecord({
+    transcript: said.map((speaker, index) => ({ start: index * 5, end: index * 5 + 4, text: `Line ${index}`, ...(speaker ? { speaker } : {}) })),
+    speakers: [{ id: 'SPEAKER_00', label: 'Avery' }, { id: 'SPEAKER_01', label: 'Rowan' }],
+  }, { id: 'g', title: 'Grouped' });
+  const page = playerHarness(renderVideoPlayerPage('/m', record, { ...movie(-1), segments: [movie(-1)] }));
+  const names = page.items.map((item) => {
+    const who = (item.children[1] as unknown as { children: { classes?: Set<string>; textContent: string }[] }).children[0]!;
+    return who.classes ? `${who.textContent}${who.classes.has('same') ? ' (read, not shown)' : ''}${who.classes.has('unknown') ? ' (muted)' : ''}` : '-';
+  });
+  expect(names).toEqual(['Avery', 'Avery (read, not shown)', 'Rowan', 'Unknown (muted)', '-', 'Rowan']);
 });
