@@ -146,15 +146,15 @@ video:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .transcript { display: grid; grid-template-rows: minmax(0, 1fr); min-height: 0; background: var(--panel);
   border-left: 1px solid var(--line); }
 /* The first line starts level with the video; lines fade out over the list's padding rather than being cut. */
-ol { --top: var(--gutter); display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px;
-  align-content: start; position: relative; min-height: 0; margin: 0; padding: var(--top) 0 8px; list-style: none;
+ol { --top: var(--gutter); --end: 32px; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px;
+  align-content: start; position: relative; min-height: 0; margin: 0; padding: var(--top) 0 var(--end); list-style: none;
   overflow-y: auto; overscroll-behavior: contain;
-  mask-image: linear-gradient(transparent, #000 var(--top), #000 calc(100% - 8px), transparent); }
+  mask-image: linear-gradient(transparent, #000 var(--top), #000 calc(100% - var(--end)), transparent); }
 li { grid-column: 1 / -1; display: grid; grid-template-columns: 4em minmax(0, 1fr); grid-template-columns: subgrid;
   align-items: baseline; margin: 0 8px; padding: 8px 12px; border-radius: 8px; cursor: pointer; overflow-wrap: anywhere;
   text-wrap: pretty; }
 li > div { max-width: 66ch; }
-li.turn { margin-top: 12px; }
+li.turn { margin-top: 16px; }
 @media (pointer: coarse) { li { min-height: 44px; padding-block: 11px; } }
 @media (hover: hover) { li:hover { background: var(--hover); } }
 li.current { background: var(--current); }
@@ -243,15 +243,15 @@ function tabStop(item) {
 // starting the view on a whole line rather than through one.
 function reveal(item, how) {
   const view = list.clientHeight, top = item.offsetTop, bottom = top + item.offsetHeight, at = list.scrollTop;
-  const pad = parseFloat(getComputedStyle(list).paddingTop);
+  const style = getComputedStyle(list), pad = parseFloat(style.paddingTop), end = parseFloat(style.paddingBottom);
   let target;
   if (how === 'nearest') {
     if (top < at + pad) target = top - pad;
-    else if (bottom > at + view - 8) target = bottom - view + 8;
+    else if (bottom > at + view - end) target = bottom - view + end;
     else return;
   } else {
     if (how === 'follow' && top >= at + pad && bottom <= at + view * 0.8) return;
-    target = Math.max(0, top - Math.max(pad, Math.min(view * 0.25, view - (bottom - top) - 8)));
+    target = Math.max(0, top - Math.max(pad, Math.min(view * 0.25, view - (bottom - top) - end)));
     const cut = items.find((entry) => entry.offsetTop + entry.offsetHeight > target + pad);
     if (cut && cut !== item && cut.offsetTop < target + pad) {
       const after = items[items.indexOf(cut) + 1];
@@ -298,7 +298,9 @@ function highlight(how = 'follow') {
 function say() {
   const notes = [];
   if (items.some((item) => item.classList.contains('before'))) notes.push('The video starts at ' + clock(firstPicture) + '; earlier lines have no picture.');
-  if (movies.length > 1) notes.push('Video ' + (movie + 1) + ' of ' + movies.length + ', from ' + clock(-movies[movie].offset) + '.');
+  // A resumed call has a movie per stretch, each with its own clock.
+  if (movie > 0) notes.push('Recording resumed at ' + clock(-movies[movie].offset) + '.');
+  else if (movies.length > 1) notes.push('The recording resumes at ' + clock(-movies[1].offset) + '.');
   status.textContent = notes.join(' ');
 }
 function choose(item) {

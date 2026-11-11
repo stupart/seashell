@@ -203,7 +203,7 @@ function playerHarness(html: string, view = 400) {
   };
   const script = /<script>\n([\s\S]*?)<\/script>/u.exec(html)![1]!;
   new Function('document', 'matchMedia', 'getSelection', 'getComputedStyle', 'location', 'Element', script)(
-    doc, () => ({ matches: true }), () => ({ isCollapsed: true }), () => ({ paddingTop: '20px' }), { hash: '' }, El);
+    doc, () => ({ matches: true }), () => ({ isCollapsed: true }), () => ({ paddingTop: '20px', paddingBottom: '32px' }), { hash: '' }, El);
   const items = list.children as El[];
   return {
     video, list, status, stage, items, doc,
@@ -264,7 +264,10 @@ test('the player says when the video starts late and which part of a resumed cal
   expect(late.items.filter((item) => item.classes.has('before')).length).toBe(4);
   const resumed = playerHarness(renderVideoPlayerPage('/m', record,
     { ...movie(-1), segments: [movie(-1), movie(-70, '/m/capture/video/000002.mp4')] }, 75));
-  expect(resumed.status.textContent).toBe('Video 2 of 2, from 1:10.');
+  expect(resumed.status.textContent).toBe('Recording resumed at 1:10.');
+  const before = playerHarness(renderVideoPlayerPage('/m', record,
+    { ...movie(-1), segments: [movie(-1), movie(-70, '/m/capture/video/000002.mp4')] }, 20));
+  expect(before.status.textContent).toBe('The recording resumes at 1:10.');
   expect((resumed.video as unknown as { src: string }).src).toBe('capture/video/000002.mp4');
   expect(resumed.stage.style.properties['--ratio']).toBe(String(1920 / 1200));
 });
