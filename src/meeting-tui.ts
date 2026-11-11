@@ -83,6 +83,8 @@ export const META = '\t';
  * what it means.
  */
 export const FROM_YOUR_NOTES = '✎';
+/** In the time column of a point whose every cited line was removed from the transcript. */
+export const LINE_REMOVED = 'line removed';
 
 /** A line of the notes taken apart: its text, who owns it and by when, and when it was said. */
 export function bulletParts(line: string): { body: string; owner?: string; clock?: string } {
@@ -162,14 +164,13 @@ export function meetingViewLines(
   const at = (item: Item) => start(item.ids) ?? (item.notes ?? []).map((id) => notesById.get(id)?.at)
     .filter((time): time is number => time !== undefined).sort((a, b) => a - b)[0];
   // The time is the citation: it finds the line in the transcript. ✎ before it says the point came from your notes.
-  // A point whose every cited line was removed stays, and says so; one that only ever
-  // rested on your notes cited no line, so it has none removed and is simply yours.
+  // A point whose every cited line was removed stays, and says so where its time would be, dim, so its
+  // words stay as written; one that only ever rested on your notes cited no line, so it is simply yours.
   const bullet = (item: Item) => {
     const said = at(item);
-    const time = said === undefined ? '' : formatTuiClock(said);
+    const time = item.removed ? LINE_REMOVED : said === undefined ? '' : formatTuiClock(said);
     const clock = item.notes?.length ? (time ? `${FROM_YOUR_NOTES} ${time}` : FROM_YOUR_NOTES) : time;
-    const text = item.removed ? `${item.text} (source line removed)` : item.text;
-    return item.owner || clock ? `- ${text}${META}${item.owner ?? ''}${META}${clock}` : `- ${text}`;
+    return item.owner || clock ? `- ${item.text}${META}${item.owner ?? ''}${META}${clock}` : `- ${item.text}`;
   };
   // In the order they were said; anything Seashell cannot place keeps its place at the end.
   const inOrder = (items: Item[]) => items.map((item, index) => ({ item, index, at: at(item) ?? Number.POSITIVE_INFINITY }))

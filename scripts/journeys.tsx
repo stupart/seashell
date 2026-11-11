@@ -351,6 +351,9 @@ export const JOURNEYS: Journey[] = [
       { title: 'Notes without yours', press: [...Array(6).fill(UP), DOWN, DOWN, DOWN, DOWN, ENTER], keys: '↑ × 6 ↓ × 4 Enter', until: 'Board',
         note: 'One yellow line under your notes; the key bar leads with AI settings.' },
       { title: 'AI settings', press: [','], narrowPress: [ENTER], keys: ',', until: 'too old', note: 'Settings opens on AI notes, which says what to do in plain words.' },
+      { title: 'A point whose line was removed', press: [ESC, ...Array(7).fill(DOWN)], narrowInstead: [ESC, ESC, ...Array(9).fill(DOWN)], keys: 'Esc ↓ × 7',
+        until: 'line removed',
+        note: 'Its words stay as written; the time column says its line is gone.' },
     ],
   },
   {
@@ -412,7 +415,8 @@ async function seed(library: string): Promise<void> {
     // Priya was named in an earlier call, so Seashell suggests her name for this voice.
     const speakers = id === 'demo-acme' ? SPEAKERS.map((speaker) => speaker.id === 'REMOTE_01'
       ? { ...speaker, label: 'Priya', suggestion: { source: 'voice' as const, previous: speaker.label, similarity: 0.83 } } : speaker) : SPEAKERS;
-    const record = createTranscriptRecord({ transcript: demoTranscript(), speakers },
+    // Board prep lost a line heard in silence, which one of its points rested on.
+    const record = createTranscriptRecord({ transcript: demoTranscript().filter((segment) => id !== 'demo-board' || segment.id !== 's000003'), speakers },
       { id, title, now: typeof when === 'number' ? new Date(Date.now() - when * 3_600_000) : when });
     const { directory } = saveTranscriptRecord(library, record);
     if (id === 'demo-roadmap') {
@@ -456,6 +460,9 @@ async function seed(library: string): Promise<void> {
           // Only your notes say it: there is no line in the transcript to cite.
           ...(id === 'demo-acme' ? [{ id: 'c8', type: 'follow_up', text: 'Check whether their legal team needs the data in Canada before the kickoff.',
             person: 'You', evidenceSegmentIds: [], ownerNoteIds: ['n1'], confidence: 0.7 }] : []),
+          // The line it rested on was heard in silence and removed from the transcript; the point stays, and says so.
+          ...(id === 'demo-board' ? [{ id: 'c9', type: 'decision', text: 'Share the board deck once the hiring plan is final.',
+            evidenceSegmentIds: [], removedEvidenceSegmentIds: ['s000003'], confidence: 0.7 }] : []),
         ] as never,
         notes: [
           { heading: 'Where they stand', items: [{ text: 'Per-seat pricing works for them.', evidenceSegmentIds: ['s000001'] }] },

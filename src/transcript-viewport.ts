@@ -3,7 +3,7 @@ import { stripVTControlCharacters } from 'util';
 import { coalesceTranscriptSegments, speakerLabel } from './transcript-renderer.ts';
 import type { StructuredTranscript } from './transcript-types.ts';
 import { formatTuiClock, speakerColors, speakerDisplayName, wrapWords, YOUR_SPEAKER_ID } from './tui-state.ts';
-import { bulletParts, CAUTION } from './meeting-tui.ts';
+import { bulletParts, CAUTION, LINE_REMOVED } from './meeting-tui.ts';
 
 const color = new Chalk({ level: 1 });
 const MAX_NAME_COLUMN = 18;
@@ -116,7 +116,8 @@ const MIN_BULLET_TEXT_COLUMNS = 24;
 export function wrappedMeetingRows(lines: readonly string[], columns: number): string[] {
   const width = Math.max(1, Math.floor(columns));
   const parts = lines.map(bulletParts);
-  const clockColumn = Math.max(0, ...parts.map(({ body, clock }) => body.startsWith('- ') && clock ? clock.length : 0));
+  // The times share one column; "line removed" reaches left past it on its own row rather than widen it for all.
+  const clockColumn = Math.max(0, ...parts.map(({ body, clock }) => body.startsWith('- ') && clock && !clock.includes(LINE_REMOVED) ? clock.length : 0));
   return parts.flatMap(({ body, owner, clock }) => {
     const clean = stripVTControlCharacters(body) || ' ';
     // Something to look at stays marked on every row, so all of it is yellow.
@@ -124,10 +125,11 @@ export function wrappedMeetingRows(lines: readonly string[], columns: number): s
     if (!clean.startsWith('- ')) return wrapWords(clean, width);
     const text = clean.slice(2);
     if (!owner && !clock) return wrapWords(text, Math.max(1, width - 2)).map((row, index) => `${index ? '  ' : '- '}${row}`);
-    const time = clock ? color.dim(clock.padStart(clockColumn)) : '';
+    const clockWidth = Math.max(clockColumn, clock ? Bun.stringWidth(clock) : 0);
+    const time = clock ? color.dim(clock.padStart(clockWidth)) : '';
     const shown = owner && clock ? `${owner}  ${time}` : owner ?? time;
     // The time column is kept on a line without a time, so its owner still ends where the others do.
-    const metaWidth = owner ? Bun.stringWidth(owner) + (clockColumn ? 2 + clockColumn : 0) : clockColumn;
+    const metaWidth = owner ? Bun.stringWidth(owner) + (clockWidth ? 2 + clockWidth : 0) : clockWidth;
     const room = width - 2 - metaWidth - 2;
     if (room < MIN_BULLET_TEXT_COLUMNS) {
       return [...wrapWords(text, Math.max(1, width - 2)).map((row, index) => `${index ? '  ' : '- '}${row}`),
