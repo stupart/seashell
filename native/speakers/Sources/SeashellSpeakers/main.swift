@@ -349,12 +349,21 @@ do {
     // community-1 is also the fallback when Nemotron 3 fills all eight slots,
     // and its embedding model gives every engine's voices their voiceprints.
     if modelsReady(root) { manager.initialize(models: try await OfflineDiarizerModels.load(from: root)) }
-    if useNemotron {
-        nemotron = Nemotron3Diarizer(config: nemotronConfig,
-            models: try await Nemotron3Models.loadFromHuggingFace(config: nemotronConfig, cacheDirectory: root))
-    }
 } catch {
     fail("Could not load the speaker models: \(error.localizedDescription). Run: seashell setup --speakers")
+}
+if useNemotron {
+    do {
+        nemotron = Nemotron3Diarizer(config: nemotronConfig,
+            models: try await Nemotron3Models.loadFromHuggingFace(config: nemotronConfig, cacheDirectory: root))
+    } catch {
+        // auto has community-1's answer to stand on; only Nemotron 3 by itself has nothing else.
+        guard engine == .auto else {
+            fail("Could not load the speaker models: \(error.localizedDescription). Run: seashell setup --speakers")
+        }
+        note("Nemotron 3 could not load (\(error.localizedDescription)); using community-1.")
+        useNemotron = false
+    }
 }
 
 let audio: [[Float]]
@@ -548,7 +557,12 @@ func choose(_ samples: [Float]) async throws -> (spans: [Span], model: String) {
         let checkedVoices = await embedVoices(samples, checked)
         let fallback = (mergeSameVoices(checked, checkedVoices), modelName)
         guard let nemotron else { return fallback }
-        let spans = try nemotron3(samples, nemotron)
+        // community-1 has already answered: a Nemotron 3 failure must not throw that away.
+        let spans: [Span]
+        do { spans = try nemotron3(samples, nemotron) } catch {
+            note("Nemotron 3 failed on this channel (\(error.localizedDescription)); using community-1.")
+            return fallback
+        }
         let found = Set(spans.map(\.speaker)).count
         if found >= nemotronConfig.numSpeakers {
             note("All eight speaker slots are in use; using community-1 for this channel.")
