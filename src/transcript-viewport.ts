@@ -3,7 +3,7 @@ import wrapAnsi from 'wrap-ansi';
 import { stripVTControlCharacters } from 'util';
 import { coalesceTranscriptSegments, speakerLabel } from './transcript-renderer.ts';
 import type { StructuredTranscript } from './transcript-types.ts';
-import { formatTuiClock, SPEAKER_COLORS, speakerColorIndex, speakerDisplayName } from './tui-state.ts';
+import { formatTuiClock, SPEAKER_COLORS, speakerColorIndex, speakerDisplayName, wrapWords } from './tui-state.ts';
 import { bulletParts } from './meeting-tui.ts';
 
 const color = new Chalk({ level: 1 });
@@ -64,32 +64,36 @@ export function timedTranscriptRows(
   });
 }
 
+/** A bullet's text keeps at least this much room beside who owns it and when it was said. */
+const MIN_BULLET_TEXT_COLUMNS = 24;
+
 /**
- * Notes and chat as terminal rows. Bullets hang under their dash; who owns one and by when sits
- * against the right edge, in the text's own weight, then when it was said, dim. Where the
- * transcript stacks its lines, a bullet starts with its time instead, as the transcript's lines do.
+ * Notes and chat as terminal rows, in one layout at every width. A bullet's text wraps under itself;
+ * on its first row, against the right edge, sits who owns it and by when, in the text's own weight,
+ * then when it was said, dim. The times share one column, so every owner ends in one place. Where
+ * that leaves the text too little room, owner and time go on the row under the text, indented.
  */
 export function wrappedMeetingRows(lines: readonly string[], columns: number): string[] {
   const width = Math.max(1, Math.floor(columns));
-  const timeFirst = width < MIN_COLUMNS_FOR_NAME_COLUMN;
-  return lines.flatMap((line) => {
-    const { body, owner, clock } = bulletParts(line);
+  const parts = lines.map(bulletParts);
+  const clockColumn = Math.max(0, ...parts.map(({ body, clock }) => body.startsWith('- ') && clock ? clock.length : 0));
+  return parts.flatMap(({ body, owner, clock }) => {
     const clean = stripVTControlCharacters(body) || ' ';
-    if (!clean.startsWith('- ')) return wrapAnsi(clean, width, { hard: true }).split('\n');
-    const timed = timeFirst && clock !== undefined;
-    const indent = timed ? clock.length + 2 : 2;
-    const rows = wrapAnsi(clean.slice(2), Math.max(1, width - indent), { hard: true }).split('\n')
-      .map((row, index) => index > 0 ? `${' '.repeat(indent)}${row}` : timed ? `${color.dim(clock)}  ${row}` : `- ${row}`);
-    const meta = [owner, timed ? undefined : clock].filter((part): part is string => Boolean(part));
-    if (!meta.length) return rows;
-    // On the bullet's last row when there is room, otherwise on a row of their own.
-    const shown = meta.length === 2 ? `${meta[0]}  ${color.dim(meta[1]!)}` : owner ? meta[0]! : color.dim(meta[0]!);
-    const metaWidth = Bun.stringWidth(meta.join('  '));
-    const last = rows.at(-1)!;
-    const gap = width - Bun.stringWidth(stripVTControlCharacters(last)) - metaWidth;
-    if (gap >= 3) rows[rows.length - 1] = `${last}${' '.repeat(gap)}${shown}`;
-    else rows.push(`${' '.repeat(Math.max(2, width - metaWidth))}${shown}`);
-    return rows;
+    if (!clean.startsWith('- ')) return wrapWords(clean, width);
+    const text = clean.slice(2);
+    if (!owner && !clock) return wrapWords(text, Math.max(1, width - 2)).map((row, index) => `${index ? '  ' : '- '}${row}`);
+    const time = clock ? color.dim(clock.padStart(clockColumn)) : '';
+    const shown = owner && clock ? `${owner}  ${time}` : owner ?? time;
+    // The time column is kept on a line without a time, so its owner still ends where the others do.
+    const metaWidth = owner ? Bun.stringWidth(owner) + (clockColumn ? 2 + clockColumn : 0) : clockColumn;
+    const room = width - 2 - metaWidth - 2;
+    if (room < MIN_BULLET_TEXT_COLUMNS) {
+      return [...wrapWords(text, Math.max(1, width - 2)).map((row, index) => `${index ? '  ' : '- '}${row}`),
+        `  ${owner && clock ? `${owner}  ${color.dim(clock)}` : owner ?? color.dim(clock!)}`];
+    }
+    return wrapWords(text, room).map((row, index) => index
+      ? `  ${row}`
+      : `- ${row}${' '.repeat(width - 2 - Bun.stringWidth(row) - metaWidth)}${shown}`);
   });
 }
 

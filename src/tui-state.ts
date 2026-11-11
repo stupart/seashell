@@ -1,3 +1,5 @@
+import wrapAnsi from 'wrap-ansi';
+import { stripVTControlCharacters } from 'util';
 import type { TranscriptLibraryEntry } from './transcript-library.ts';
 
 export interface TuiLayout {
@@ -87,6 +89,23 @@ export function fitColumns(text: string, columns: number): string {
     cut += character;
   }
   return `${cut}…${' '.repeat(Math.max(0, columns - 1 - width(cut)))}`;
+}
+
+/**
+ * Text wrapped at word breaks, with no stray space starting a line and no word alone on the
+ * last line: the line above gives up its last word when the two fit together.
+ */
+export function wrapWords(text: string, columns: number): string[] {
+  const width = Math.max(1, Math.floor(columns));
+  const lines = wrapAnsi(text, width, { hard: true, trim: true }).split('\n');
+  const last = lines.at(-1)!;
+  const above = lines.at(-2);
+  if (above === undefined || !last.trim() || /\s/u.test(stripVTControlCharacters(last).trim())) return lines;
+  const cut = above.lastIndexOf(' ');
+  if (cut <= 0) return lines;
+  const moved = `${above.slice(cut + 1)} ${last}`;
+  if (Bun.stringWidth(stripVTControlCharacters(moved)) > width) return lines;
+  return [...lines.slice(0, -2), above.slice(0, cut).trimEnd(), moved];
 }
 
 export function moveSelection(current: number, delta: number, count: number): number {

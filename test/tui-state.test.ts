@@ -9,9 +9,18 @@ import {
   moveTranscriptScroll,
   speakerColorIndex,
   tuiLayout,
+  wrapWords,
 } from '../src/tui-state.ts';
 
 describe('TUI navigation state', () => {
+  test('wraps words without leaving one alone on the last line', () => {
+    const text = 'Until you allow it, background meetings record other people but not you.';
+    expect(wrapWords(text, 70)).toEqual(['Until you allow it, background meetings record other people but', 'not you.']);
+    // Already two words on the last line, or one word in all: left as it is.
+    expect(wrapWords('One two three four', 10)).toEqual(['One two', 'three four']);
+    expect(wrapWords('Word', 10)).toEqual(['Word']);
+  });
+
   test('clamps sidebar selection and transcript scrolling', () => {
     expect(moveSelection(0, -1, 4)).toBe(0);
     expect(moveSelection(2, 1, 4)).toBe(3);

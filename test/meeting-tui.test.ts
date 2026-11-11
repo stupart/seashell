@@ -119,9 +119,26 @@ test("a template's wording of an action keeps the action's owner and due date", 
   expect(wide.map((row) => stripVTControlCharacters(row))).toContain(`- Send the security summary.${' '.repeat(70 - 28 - 16)}You · Fri  00:35`);
   expect(wide.find((row) => row.includes('security'))).toContain(`You · Fri  ${'\x1b[2m'}00:35`);
   expect(plainMeetingLines(lines)).toContain('- Send the security summary.  You · Fri  00:35');
-  // Narrow, as the transcript does, the time leads and the owner stays at the right.
+  // Narrow, the same layout: the text, then the owner, then the time.
   const narrow = wrappedMeetingRows(lines, 54).map((row) => stripVTControlCharacters(row));
-  expect(narrow).toContain(`00:35  Send the security summary.${' '.repeat(54 - 7 - 26 - 9)}You · Fri`);
+  expect(narrow).toContain(`- Send the security summary.${' '.repeat(54 - 28 - 16)}You · Fri  00:35`);
+});
+
+test('a long bullet wraps under itself, keeps its owner and time on its first row, and strands no word', () => {
+  const lines = [`- Hand onboarding to the support team after two weeks.${META}You${META}01:10`,
+    `- Kickoff the week of the tenth.${META}${META}01:17`, `- Not placed.${META}You · Fri${META}`];
+  const rows = wrappedMeetingRows(lines, 54).map((row) => stripVTControlCharacters(row));
+  expect(rows).toEqual([
+    `- Hand onboarding to the support team${' '.repeat(54 - 37 - 10)}You  01:10`,
+    '  after two weeks.',
+    `- Kickoff the week of the tenth.${' '.repeat(54 - 32 - 5)}01:17`,
+    // Without a time, the owner still ends where the others do.
+    `- Not placed.${' '.repeat(54 - 13 - 16)}You · Fri`,
+  ]);
+  // Too narrow for a column beside the text: owner and time go on the row under it, indented.
+  const narrow = wrappedMeetingRows(lines.slice(0, 1), 34).map((row) => stripVTControlCharacters(row));
+  expect(narrow).toEqual(['- Hand onboarding to the support', '  team after two weeks.', '  You  01:10']);
+  expect(narrow.some((row) => /^\s*\S+$/u.test(row) && !row.includes(':'))).toBe(false);
 });
 
 test('insights name each extractor once, label their fields, and leave out what the notes already say', () => {
