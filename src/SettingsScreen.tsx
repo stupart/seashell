@@ -95,6 +95,8 @@ export interface SetupActionProps {
   onOpenAI: () => void;
   /** Starting the recorder on a first run also writes the first settings. */
   onConfigChange?: (config: SeashellConfig) => void;
+  /** What just worked on the way here, such as choosing an AI: green in the key bar until the next key. */
+  notice?: string;
 }
 
 /** Starts the recorder the way `seashell setup` does on a first run, and restarts it after that. */
@@ -118,7 +120,7 @@ export interface SetupMessage {
  */
 export function useSetupActions(props: SetupActionProps & { onFinished?: () => void }) {
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState<SetupMessage>();
+  const [message, setMessage] = useState<SetupMessage | undefined>(props.notice ? { text: props.notice, tone: 'done' } : undefined);
   const request = useRef<AbortController | undefined>(undefined);
   useEffect(() => () => request.current?.abort(), []);
   const say = (tone: SetupMessage['tone']) => (text: string) => setMessage({ text, tone });

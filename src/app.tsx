@@ -241,6 +241,8 @@ export default function App(props: {
   const guideOffered = useRef(Boolean(props.guide));
   // Speakers and AI return to whatever opened them; the guide returns to Settings when started there.
   const [returnTo, setReturnTo] = useState<'settings' | 'guide'>();
+  /** What just worked in speaker or AI setup, for Settings or the guide to say when it opens again. */
+  const [subNotice, setSubNotice] = useState<string>();
   const [guideFromSettings, setGuideFromSettings] = useState(false);
   const [attention, setAttention] = useState<FeatureStatus[]>([]);
   /** Everything Settings checks, read once more whenever Settings or the guide closes. Speaker setup reads it too. */
@@ -1110,7 +1112,7 @@ export default function App(props: {
       .filter((handle): handle is MicrophoneCaptureHandle | SystemAudioCaptureHandle => Boolean(handle));
     if (wasListening) setListeningPaused(true);
     setError(null);
-    setProcessing({ label: finishLive ? 'Finishing capture…' : 'Preparing meeting enrichment…' });
+    setProcessing({ label: finishLive ? 'Finishing capture…' : 'Writing the notes…' });
     const onStatus = (label: string) => setProcessing({ label });
     // A meeting this window finished is ready, as one the background recorder finishes is:
     // extractors that fit it, then automations. Whatever fails is said; the notes stay.
@@ -2300,6 +2302,8 @@ export default function App(props: {
   const openAI = (from: 'settings' | 'guide') => {
     setSettingsOpen(false); setGuideOpen(false); setReturnTo(from); setAiSetupIntent(null); setAiSetupOpen(true);
   };
+  // Choosing an AI from Settings or the guide says so there, once, when it opens again.
+  useEffect(() => { if (subNotice && (settingsOpen || guideOpen)) setSubNotice(undefined); }, [subNotice, settingsOpen, guideOpen]);
   const closeSubSettings = () => {
     if (returnTo === 'settings') setSettingsOpen(true);
     if (returnTo === 'guide') setGuideOpen(true);
@@ -2311,6 +2315,7 @@ export default function App(props: {
     onConnectMeet: connectMeetReader,
     onEnableCalendar: enableCalendarTitles,
     onConfigChange: setConfig,
+    ...(subNotice ? { notice: subNotice } : {}),
   };
 
   if (settingsOpen) return <SettingsScreen {...setupActionProps} config={config} columns={terminal.columns} rows={terminal.rows}
@@ -2367,11 +2372,13 @@ export default function App(props: {
       setConfig((current) => ({ ...current, meeting: { ...saved.meeting,
         calendar: current.meeting?.calendar, automation: current.meeting?.automation,
       } }));
+      const names = [...new Set(Object.values(patch.routes ?? {}).flatMap((route) => route ? [providerName(route.backend)] : []))];
+      const done = `Notes and chat use ${names.join(' and ')}.`;
+      // Said wherever the person lands: Settings, the guide, or the meeting.
+      if (returnTo) setSubNotice(done); else setNotice(done);
       setAiSetupOpen(false);
       closeSubSettings();
       setError(null);
-      const names = [...new Set(Object.values(patch.routes ?? {}).flatMap((route) => route ? [providerName(route.backend)] : []))];
-      setNotice(`AI ready · ${names.join(' + ')}`);
     }} />;
 
   const consentPending = (watchOwnership === 'external' && backgroundWatch?.phase === 'awaiting-consent') || Boolean(automaticCandidate);

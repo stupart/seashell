@@ -98,6 +98,7 @@ export const JOURNEYS: Journey[] = [
       { title: 'Back to Settings', press: [ESC], keys: 'Esc', until: 'Settings' },
       { title: 'AI setup', press: Array(8).fill(DOWN).concat(ENTER), narrowPress: [ENTER], keys: '↓ × 8 Enter', until: 'AI for notes',
         note: 'Choosing what writes the notes.' },
+      { title: 'AI chosen', press: [ENTER], keys: 'Enter', until: 'Notes and chat use', note: 'Back in Settings, which says what changed.' },
     ],
   },
   {
@@ -556,7 +557,9 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
       { id: 'local-openai', ready: false, detail: 'No server', nextStep: 'Connect a local server' },
     ] }; },
     async discoverHumainModels() { return ['opus', 'sonnet', 'haiku'].map((id) => ({ id, name: id, description: '', efforts: ['low', 'medium', 'high'] })); },
-    async runHumainMeeting() { throw new Error('Journeys never call a model'); },
+    // Journeys never call a model: the notes stay "being written" until the window closes.
+    runHumainMeeting: (_action: string, _request: unknown, options: { signal?: AbortSignal }) => new Promise((_, reject) =>
+      options.signal?.addEventListener('abort', () => reject(new Error('Journeys never call a model')))),
     // A pretend test: Claude Code answers, Codex is signed out. No prompt is sent anywhere.
     async testMeetingAi(routes: Record<string, { backend: string; model: string }>) {
       await new Promise((resolve) => setTimeout(resolve, 600));

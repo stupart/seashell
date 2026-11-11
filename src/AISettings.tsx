@@ -16,25 +16,29 @@ import {
 type Providers = Awaited<ReturnType<typeof discoverHumainProviders>>['integrations'];
 type HomeEntry = 'use' | 'test' | 'another' | 'models';
 
-const ROLE_WORDS: Record<MeetingAiRole, string> = { observer: 'live analysis', reconciliation: 'final notes', chat: 'chat' };
+const ROLE_WORDS: Record<MeetingAiRole, string> = { observer: 'Live analysis', reconciliation: 'Final notes', chat: 'Chat' };
 
-/** Each AI the test tried: ✓ with how long it took, or ✗ with what to do. The models are under Models. */
+/**
+ * What the test found, in columns: each role, the AI it uses, then ✓ with how long it took or ✗. What to
+ * do about one that failed goes under it. The models are under Models.
+ */
 function ConnectionTest(props: { test: MeetingAiTest; width: number }) {
   if (!props.test.routes.length) {
     return <Paragraph width={props.width} color={props.test.engine.ready ? 'yellow' : 'red'}
       text={props.test.engine.ready ? 'No AI is chosen yet, so there is nothing to test.' : props.test.engine.detail ?? 'The AI engine is not installed.'} />;
   }
+  const roleWidth = Math.max(...props.test.routes.flatMap((route) => route.roles.map((role) => ROLE_WORDS[role].length)));
+  const nameWidth = Math.max(...props.test.routes.map((route) => providerName(route.backend).length));
   return <>{props.test.routes.map((route) => {
-    const name = providerName(route.backend);
-    const roles = route.roles.map((role) => ROLE_WORDS[role]).join(', ');
-    const timing = route.ok && route.latencyMs !== undefined ? `answered in ${(route.latencyMs / 1000).toFixed(1)} s` : '';
-    // What each AI does goes under it when the line has no room, rather than being cut.
-    const oneLine = Bun.stringWidth(`✓ ${name}  ${timing} · ${roles}`) <= props.width;
-    return <Box key={`${route.backend}-${route.model}-${roles}`} flexDirection="column" flexShrink={0}>
-      <Text wrap="truncate-end"><Text color={route.ok ? 'green' : 'red'}>{route.ok ? '✓' : '✗'}</Text> {name}
-        <Text dimColor>{'  '}{timing}{timing && oneLine ? ' · ' : ''}{oneLine || !timing ? roles : ''}</Text></Text>
-      {!oneLine && timing && <Text dimColor wrap="truncate-end">{'  '}{roles}</Text>}
-      {!route.ok && <Box paddingLeft={2}><Paragraph width={props.width - 2} color="red" text={route.reason ?? route.failure?.message ?? 'It did not answer.'} /></Box>}
+    const timing = route.ok && route.latencyMs !== undefined ? ` ${(route.latencyMs / 1000).toFixed(1)} s` : '';
+    return <Box key={`${route.backend}-${route.model}-${route.roles.join()}`} flexDirection="column" flexShrink={0}>
+      {route.roles.map((role) => <Text key={role} wrap="truncate-end">
+        {ROLE_WORDS[role].padEnd(roleWidth)}  {providerName(route.backend).padEnd(nameWidth)}  <Text color={route.ok ? 'green' : 'red'}>{route.ok ? '✓' : '✗'}</Text>
+        <Text dimColor>{timing}</Text>
+      </Text>)}
+      {!route.ok && <Box paddingLeft={roleWidth + 2}>
+        <Paragraph width={props.width - roleWidth - 2} color="red" text={route.reason ?? route.failure?.message ?? 'It did not answer.'} />
+      </Box>}
     </Box>;
   })}</>;
 }
@@ -63,7 +67,10 @@ export default function AISettings(props: {
 
   const propose = async (backend: HumainBackend, controller: AbortController) => {
     const models = await discoverHumainModels(backend, { signal: controller.signal });
-    if (!controller.signal.aborted) setProposal(recommendedMeetingSetup(props.current, backend, models));
+    if (controller.signal.aborted) return undefined;
+    const next = recommendedMeetingSetup(props.current, backend, models);
+    setProposal(next);
+    return next;
   };
   useEffect(() => {
     const controller = new AbortController(); request.current = controller;
@@ -84,12 +91,13 @@ export default function AISettings(props: {
     return () => { controller.abort(); request.current?.abort(); };
   }, [refresh]);
 
+  // Choosing an AI that is connected is the answer: it is used straight away, with no second question.
   const chooseProvider = (backend: HumainBackend) => {
     request.current?.abort();
     const controller = new AbortController(); request.current = controller;
     setBusy(true); setError(undefined); setProposal(undefined);
-    void propose(backend, controller).then(() => {
-      if (!controller.signal.aborted) { setScreen('home'); setIndex(0); }
+    void propose(backend, controller).then((next) => {
+      if (!controller.signal.aborted && next) props.onSave(next);
     }).catch((cause) => {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : String(cause));
     }).finally(() => { if (!controller.signal.aborted) setBusy(false); });
@@ -107,9 +115,8 @@ export default function AISettings(props: {
     ...(configured && !proposal ? [['test', 'Test connection'] as [HomeEntry, string]] : []),
     ['another', 'Choose another AI…'], ['models', 'Models…'],
   ];
-  const entries = screen === 'providers'
-    ? AI_PROVIDERS.map((provider) => `${provider.name} · ${providers?.find((item) => item.id === provider.id)?.ready ? 'Connected' : 'Not set up'}`)
-    : home.map(([, label]) => label);
+  const ready = (id: HumainBackend) => Boolean(providers?.find((item) => item.id === id)?.ready);
+  const entries = screen === 'providers' ? AI_PROVIDERS.map((provider) => provider.name) : home.map(([, label]) => label);
   const runTest = () => {
     request.current?.abort();
     const controller = new AbortController(); request.current = controller;
@@ -163,7 +170,10 @@ export default function AISettings(props: {
     <Text>{screen === 'providers' ? 'Connect once. Seashell chooses the models.' : busy ? 'Finding your connected AI…'
       : canUse ? `${proposal ? 'Write notes with' : 'Using'} ${providerNames}${proposal ? '?' : ''}` : 'No connected AI found. Recording still works.'}</Text>
     <Box flexDirection="column" marginTop={1}>
-      {entries.map((label, i) => <Text key={label} inverse={index === i} wrap="truncate-end">{index === i ? '› ' : '  '}{label}</Text>)}
+      {/* Each AI marked as Settings marks its rows: ✓ connected, – not set up. */}
+      {entries.map((label, i) => <Text key={label} inverse={index === i} wrap="truncate-end">{index === i ? '› ' : '  '}
+        {screen === 'providers' ? <><Text {...(index === i ? {} : { color: ready(AI_PROVIDERS[i]!.id) ? 'green' : 'gray' })}>
+          {ready(AI_PROVIDERS[i]!.id) ? '✓' : '–'}</Text> </> : null}{label}</Text>)}
     </Box>
     <Box flexDirection="column" marginTop={1}>
       {screen === 'home' && canUse && <Text dimColor>{backends.some((id) => id !== 'local-openai')
