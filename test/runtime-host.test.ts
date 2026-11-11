@@ -3,6 +3,7 @@ import type { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { embeddedHelperProtocol, inspectMeetingRuntimeHost, meetingRuntimeHostPath, prepareMeetingRuntimeHost, prepareMicrophoneRuntimeHelper, prepareRuntimeHelper, SCREEN_CAPTURE_RUNTIME_HELPER, type RuntimeHostOptions } from '../src/runtime-host.ts';
 
 const roots: string[] = [];
@@ -203,4 +204,10 @@ test('every launcher of computer audio runs one stable copy that answers for its
     const missing = join(root, 'missing');
     expect(defaultSystemAudioHelper({ bundled: missing, runtimeHost })).toBe(missing);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the screen recorder that never films the display instead replaces an installed copy that would', () => {
+  // Protocol 1 fell back to the main display and rejects --browser-bundle-id; the bump makes Seashell install the new one.
+  const plist = fileURLToPath(new URL('../native/macos-screen-capture-Info.plist', import.meta.url));
+  expect(embeddedHelperProtocol(plist, SCREEN_CAPTURE_RUNTIME_HELPER.identifier)).toBe(2);
 });

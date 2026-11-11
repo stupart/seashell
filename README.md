@@ -424,9 +424,16 @@ asks with a dialog, so it is answered even with no Seashell window open.
 While it records a call, Seashell also records the call's window: the browser
 window with the Meet in it, or the Zoom, Teams or FaceTime window. Whatever
 anyone shares in the call shows in that window, so it is in the video. The
-window is recorded even on another desktop or under other windows. When no
-window of the call's app fits, Seashell records the main display instead and
-says so.
+window is recorded even on another desktop or under other windows.
+
+Seashell never films your screen in place of the call. When the call's app has
+no window to film (minimized, still opening, or only a floating picture), the
+audio records alone and Seashell looks for the window again every 30 seconds.
+A browser window is filmed only while its tab looks like the call: Google Meet,
+Zoom, Teams, Webex, Whereby or Around, or the calendar event's title. Switch to
+another tab and filming pauses until the call's tab is back; the movie never
+shows the other tab. While a call records, Seashell's title line says what it
+films ("Filming the Google Meet window"), or that it is not filming.
 
 Video needs macOS Screen Recording access, once, for the helper named
 **Seashell Screen Capture**:
@@ -441,13 +448,18 @@ skipped. In Seashell, press **,** and choose **Video**: Enter asks macOS for
 Screen Recording, and Space turns video on or off.
 
 A recording you start yourself has video only when you ask for it. In Seashell,
-**Shift+V** records with video and **Space** records audio only. From a terminal:
+**Shift+V** records with video of the call's window and **Space** records audio
+only. From a terminal:
 
 ```bash
-seashell record --video                 # the call's window if one is open, otherwise the main display
+seashell record --video                 # the call's window, once one shows
 seashell record --video --window zoom   # one app's window, by id or name
 seashell record --video --display 2     # a whole display; 1 is the main display
 ```
+
+Only `--display` films a whole display. When it does, you get a notification,
+and the title line says "filming the whole screen" for the rest of the
+recording.
 
 Watch a meeting's video beside its transcript:
 
@@ -523,7 +535,7 @@ until it is closed.
 | `/` | Search titles, speakers and transcripts. `Enter` on a result opens it at the match |
 | `L` | Jump to the latest words of a live transcript |
 | `Space` | Record by hand, or stop the recording (it asks first). In a window that captures by itself, pause or resume |
-| `Shift+V` | Record by hand with video: the call's window if one is open, otherwise the main display |
+| `Shift+V` | Record by hand with video of the call's window. Never the whole screen: for that, `seashell record --video --display 1` |
 | `W` | Watch the meeting's video beside its transcript, from the line at the top. Shown only when there is video |
 | `F` | Import audio or video |
 | `Shift+F` | Import and run speaker diarization |

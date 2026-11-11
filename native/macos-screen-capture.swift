@@ -1,7 +1,11 @@
 // Seashell's screen recorder. While a meeting records, it records the call's
-// window (whatever is shared in the call shows there) or, when no window fits,
-// the main display. ScreenCaptureKit captures; AVAssetWriter encodes H.264 or
-// HEVC in hardware, at a low frame rate suited to slides and screen shares.
+// window (whatever is shared in the call shows there), or a whole display only
+// when asked for one by number. It never falls back to the display: with no
+// call window it exits, and Seashell looks again later. A browser's window is
+// filmed only while its title, which is its active tab's, looks like a call;
+// when the tab changes, filming pauses until a call shows again.
+// ScreenCaptureKit captures; AVAssetWriter encodes H.264 or HEVC in hardware,
+// at a low frame rate suited to slides and screen shares.
 //
 // Why native and separate: Screen Recording is a macOS permission, like the
 // microphone. As seashell-microphone does, this helper relaunches itself as its
@@ -14,7 +18,8 @@
 // transcript line up.
 //
 // Events go to stderr as JSON lines; the exit status is 0 when a video was
-// saved, 3 when no frame arrived, 77 without Screen Recording access.
+// saved, 3 when no frame arrived, 4 when no call window was open to film, 77
+// without Screen Recording access.
 
 import AVFoundation
 import CoreGraphics
@@ -29,10 +34,12 @@ import VideoToolbox
 private let disclaimedEnvironment = "SEASHELL_SCREEN_CAPTURE_RESPONSIBLE"
 private let permissionExitCode: Int32 = 77
 private let noFramesExitCode: Int32 = 3
+private let noWindowExitCode: Int32 = 4
 private let usage = """
 Usage: seashell-screen-capture --output FILE.mp4 [--sidecar FILE.json] [--session-origin-unix-ms MS]
          [--fps 1-30] [--quality low|medium|high] [--codec hevc|h264] [--seconds N]
-         [--pid PID] [--bundle-id ID]... [--app-name NAME] [--call-window-only] | [--display N]
+         [--pid PID] [--bundle-id ID]... [--app-name NAME] [--call-window-only]
+         [--browser-bundle-id ID]... [--call-title TITLE] | --display N
        seashell-screen-capture --status | --request-permission
        seashell-screen-capture --encode-check SECONDS --output FILE.mp4 [--fps N] [--quality Q] [--codec C]
 """
@@ -52,7 +59,8 @@ private func fail(_ message: String, code: Int32 = 1, kind: String = "failed") -
 private let arguments = Array(CommandLine.arguments.dropFirst())
 private let flags: Set<String> = ["--status", "--request-permission", "--no-disclaim", "--call-window-only"]
 private let valued: Set<String> = ["--output", "--sidecar", "--session-origin-unix-ms", "--fps", "--quality", "--codec",
-                                   "--seconds", "--pid", "--bundle-id", "--app-name", "--display", "--encode-check"]
+                                   "--seconds", "--pid", "--bundle-id", "--app-name", "--display", "--encode-check",
+                                   "--browser-bundle-id", "--call-title"]
 private var given: [String: [String]] = [:]
 do {
     var index = 0
@@ -341,7 +349,13 @@ private let wantedBundles = (given["--bundle-id"] ?? []).map { $0.lowercased() }
 private let wantedAppName = value("--app-name")?.lowercased()
 private let wantedDisplay = value("--display").flatMap(Int.init)
 private let callWindowOnly = has("--call-window-only")
+private let browserBundles = (given["--browser-bundle-id"] ?? []).map { $0.lowercased() }
+private let eventTitle = value("--call-title")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
 private let wantsWindow = wantedDisplay == nil && (wantedPid > 0 || !wantedBundles.isEmpty || wantedAppName != nil)
+// The whole display is filmed only when asked for by number.
+if !wantsWindow && wantedDisplay == nil {
+    FileHandle.standardError.write(Data((usage + "\n").utf8)); exit(2)
+}
 
 /// Browsers and some call apps run helpers under the app's bundle ID plus a
 /// suffix (com.google.Chrome.helper), so compare application families.
@@ -356,11 +370,39 @@ private func looksLikeCall(_ title: String) -> Bool {
     callTitle.firstMatch(in: title, range: NSRange(title.startIndex..., in: title)) != nil
 }
 
+/// A browser window's title is its active tab's. These are the tabs of a call:
+/// the service's name where it puts it, or the calendar event's own title.
+private let browserCallServices: [(name: String, pattern: NSRegularExpression)] = [
+    ("Google Meet", #"(?i:google meet|meet\.google\.com)|^Meet\b"#),
+    ("Zoom", #"^Zoom\b|(?:[-|–—:] )Zoom\b"#),
+    ("Microsoft Teams", #"(?i:microsoft teams)"#),
+    ("Webex", #"(?i:\bwebex\b)"#),
+    ("Whereby", #"(?i:\bwhereby\b)"#),
+    ("Around", #"^Around\b|(?:[-|–—:] )Around\b"#),
+].map { ($0.0, try! NSRegularExpression(pattern: $0.1)) }
+
+private func browserCallService(_ title: String) -> String? {
+    let range = NSRange(title.startIndex..., in: title)
+    if let service = browserCallServices.first(where: { $0.pattern.firstMatch(in: title, range: range) != nil }) { return service.name }
+    return eventTitle.count >= 3 && title.localizedCaseInsensitiveContains(eventTitle) ? "the call" : nil
+}
+
+private func isBrowser(_ bundle: String) -> Bool {
+    browserBundles.contains { sameFamily(bundle.lowercased(), $0) }
+}
+
+/// Whether a window may be filmed now: a browser's only while its tab is a call.
+private func filmable(title: String, bundle: String) -> Bool {
+    isBrowser(bundle) ? browserCallService(title) != nil : !callWindowOnly || looksLikeCall(title)
+}
+
 private struct Target {
     let filter: SCContentFilter
     let width: Double
     let height: Double
     let description: [String: Any]
+    /// A browser window, whose tab is checked before every frame.
+    var browserWindow: CGWindowID? = nil
 }
 
 private func pointPixelScale(_ filter: SCContentFilter) -> Double {
@@ -378,7 +420,7 @@ private func callWindow(in content: SCShareableContent) -> SCWindow? {
         let byApp = (wantedPid > 0 && app.processID == wantedPid) ||
             wantedBundles.contains { sameFamily(bundle, $0) } ||
             (wantedAppName.map { app.applicationName.lowercased() == $0 || bundle == $0 } ?? false)
-        return byApp && (!callWindowOnly || looksLikeCall(window.title ?? ""))
+        return byApp && filmable(title: window.title ?? "", bundle: bundle)
     }
     func rank(_ window: SCWindow) -> (Int, Double) {
         let title = window.title ?? ""
@@ -398,25 +440,34 @@ private func windowTarget(_ window: SCWindow) -> Target {
     // Independent of its desktop: it records on another Space or under other windows.
     let filter = SCContentFilter(desktopIndependentWindow: window)
     let scale = pointPixelScale(filter)
-    let description: [String: Any] = ["kind": "window", "title": window.title ?? "",
-                                      "app": window.owningApplication?.applicationName ?? "",
-                                      "bundleId": window.owningApplication?.bundleIdentifier ?? ""]
+    let bundle = window.owningApplication?.bundleIdentifier ?? ""
+    var description: [String: Any] = ["kind": "window", "title": window.title ?? "",
+                                      "app": window.owningApplication?.applicationName ?? "", "bundleId": bundle]
+    // What the call is, by its service's name: never the tab's title.
+    let browser = isBrowser(bundle)
+    if browser, let service = browserCallService(window.title ?? "") { description["call"] = service }
     return Target(filter: filter, width: window.frame.width * scale, height: window.frame.height * scale,
-                  description: description)
+                  description: description, browserWindow: browser ? window.windowID : nil)
 }
 
+/// The title a window has now, read without waiting: a browser's changes with its tab.
+private func currentTitle(_ window: CGWindowID) -> String? {
+    guard let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], window) as? [[String: Any]],
+          let entry = info.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == window }) else { return nil }
+    return entry[kCGWindowName as String] as? String ?? ""
+}
+
+/// The call's window, or the display asked for by number. Never a display in place of a window.
 private func resolveTarget(_ content: SCShareableContent) -> Target? {
-    if wantsWindow, let window = callWindow(in: content) { return windowTarget(window) }
+    if wantsWindow { return callWindow(in: content).map(windowTarget) }
     let displays = orderedDisplays(content)
     let index = (wantedDisplay ?? 1) - 1
     guard displays.indices.contains(index) else { return nil }
     let display = displays[index]
     let filter = SCContentFilter(display: display, excludingWindows: [])
     let scale = pointPixelScale(filter)
-    var description: [String: Any] = ["kind": "display", "display": index + 1]
-    if wantsWindow { description["note"] = "No window of that app fits, so the main display is recorded." }
     return Target(filter: filter, width: Double(display.width) * scale, height: Double(display.height) * scale,
-                  description: description)
+                  description: ["kind": "display", "display": index + 1])
 }
 
 private func shareableContent(_ completion: @escaping (SCShareableContent?, Error?) -> Void) {
@@ -471,9 +522,15 @@ private final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, !stopping, sampleBuffer.isValid,
+        // Frames still queued from a stream paused for another tab are dropped with it.
+        guard type == .screen, !stopping, stream === self.stream, sampleBuffer.isValid,
               let attachments = (CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]])?.first,
               let raw = attachments[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete else { return }
+        // A browser's tab is checked before each frame: another tab is never written, even once.
+        if let window = target.browserWindow, !(currentTitle(window).map { browserCallService($0) != nil } ?? false) {
+            pause("The browser is showing another tab, so the video is paused until the call shows again.")
+            return
+        }
         let time = sampleBuffer.presentationTimeStamp
         if firstFrame == nil {
             encoder.writer.startSession(atSourceTime: time)
@@ -505,6 +562,16 @@ private final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         guard !stopping else { return }
         stream = nil
         emit(["type": "warning", "message": message])
+        emit(["type": "waiting", "message": message])
+        queue.asyncAfter(deadline: .now() + 3) { self.reacquire() }
+    }
+
+    /// Stop filming what is on screen now, and keep the movie for when the call shows again.
+    private func pause(_ message: String) {
+        guard !stopping, let stream else { return }
+        self.stream = nil
+        stream.stopCapture { _ in }
+        emit(["type": "waiting", "message": message])
         queue.asyncAfter(deadline: .now() + 3) { self.reacquire() }
     }
 
@@ -624,7 +691,10 @@ shareableContent { content, error in
                  code: CGPreflightScreenCaptureAccess() ? 1 : permissionExitCode,
                  kind: CGPreflightScreenCaptureAccess() ? "failed" : "permission")
         }
-        guard let target = resolveTarget(content) else { fail("That display is not connected.", kind: "no-target") }
+        guard let target = resolveTarget(content) else {
+            if wantsWindow { fail("No call window is open to film.", code: noWindowExitCode, kind: "no-window") }
+            fail("That display is not connected.", kind: "no-target")
+        }
         let (width, height) = outputSize(width: target.width, height: target.height)
         let encoder: Encoder
         do { encoder = try makeEncoder(url: URL(fileURLWithPath: outputPath), width: width, height: height, realTime: true) }

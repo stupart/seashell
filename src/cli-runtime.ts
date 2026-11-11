@@ -98,7 +98,7 @@ import { setupDiarization } from './diarization-setup.ts';
 import { compareSavedSpeakers, renderSpeakerComparison } from './speaker-compare.ts';
 import { listVoiceprints } from './voiceprints.ts';
 import { initializeFirstInstall } from './first-install.ts';
-import { SCREEN_CAPTURE_HELPER, screenCapturePermission } from './video-capture.ts';
+import { SCREEN_CAPTURE_HELPER, screenCapturePermission, screenFilmedNotifier } from './video-capture.ts';
 import { clearVideoRequest, DEFAULT_MEETING_VIDEO, startRecordingWithVideo } from './video-recording.ts';
 import { openMeetingVideo } from './video-meeting.ts';
 import { testMeetingAi, type MeetingAiRole } from './humain-client.ts';
@@ -847,6 +847,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
     case 'watch': {
       const once = command.action.once;
       const notifyOneSided = oneSidedNotifier(notify);
+      const notifyScreenFilmed = screenFilmedNotifier(notify);
       const controller = new AbortController();
       const stop = () => controller.abort();
       process.once('SIGINT', stop);
@@ -887,7 +888,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
           ...(!once ? { dependencies: { askToRecord: askToRecordWithDialog } } : {}),
           onEvent: (event) => {
             // Like the dialog, the notice is for someone at the Mac, not a one-shot check.
-            if (!once) notifyOneSided(event);
+            if (!once) { notifyOneSided(event); notifyScreenFilmed(event); }
             // The same warning at most once per 10 minutes, with how often it recurred.
             let repeats = 0;
             if (event.type === 'watch.warning') {

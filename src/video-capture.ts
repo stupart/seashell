@@ -4,20 +4,27 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import type { CaptureVideoSegment, CaptureVideoSlot, CaptureVideoTarget } from './capture-session.ts';
 import { helperPermission, type HelperPermissionOptions, type HelperPermissionStatus } from './helper-permission.ts';
+import { meetingApps, sameApplicationFamily } from './meeting-automation.ts';
 import { prepareRuntimeHelper, SCREEN_CAPTURE_RUNTIME_HELPER } from './runtime-host.ts';
 
 export const SCREEN_CAPTURE_HELPER = join(dirname(fileURLToPath(import.meta.url)), '..', 'native', 'bin', 'seashell-screen-capture');
 /** The native helper's exit status when macOS Screen Recording access is off. */
 export const SCREEN_CAPTURE_PERMISSION_EXIT_CODE = 77;
 const NO_FRAMES_EXIT_CODE = 3;
+/** The helper's exit status when no call window is open to film. It never films the display instead. */
+export const NO_WINDOW_EXIT_CODE = 4;
+/** How often a recording with no call window looks for one again. */
+export const WINDOW_RETRY_MS = 30_000;
 
 export type VideoQuality = 'low' | 'medium' | 'high';
 export const VIDEO_QUALITIES: readonly VideoQuality[] = Object.freeze(['low', 'medium', 'high']);
-export type VideoState = 'starting' | 'recording' | 'stopped' | 'unavailable';
+/** waiting: no call window to film right now (none open, or a browser showing another tab); audio continues. */
+export type VideoState = 'starting' | 'recording' | 'waiting' | 'stopped' | 'unavailable';
 
 /**
  * What to record. A window is a meeting app's main window, found by its
- * process or bundle; when none fits, the helper records the main display.
+ * process or bundle; when none fits, nothing is filmed until one does. A
+ * display is filmed only when asked for by number.
  */
 export type VideoTarget =
   | {
@@ -27,6 +34,10 @@ export type VideoTarget =
       readonly appName?: string;
       /** Only windows whose titles look like a call (a recording started by hand). */
       readonly callWindowOnly?: boolean;
+      /** Browsers: their windows are filmed only while the active tab looks like a call. */
+      readonly browserBundleIds?: readonly string[];
+      /** The calendar event's title, which a call's tab may carry. */
+      readonly callTitle?: string;
     }
   | { readonly kind: 'display'; readonly display: number };
 
@@ -51,7 +62,16 @@ export interface VideoSegmentInfo {
 
 export type VideoCaptureResult =
   | { readonly saved: true; readonly segment: VideoSegmentInfo; readonly requestedStop: boolean }
-  | { readonly saved: false; readonly reason: 'permission' | 'no-frames' | 'failed'; readonly message: string; readonly requestedStop: boolean };
+  | {
+      readonly saved: false; readonly reason: 'permission' | 'no-frames' | 'no-window' | 'failed';
+      readonly message: string; readonly requestedStop: boolean;
+    };
+
+/** What is being filmed, in words for the recording status: "the Google Meet window", "display 1, the whole screen". */
+export interface VideoFilming {
+  readonly kind: 'window' | 'display';
+  readonly name: string;
+}
 
 export interface StartVideoCaptureOptions {
   readonly request: VideoCaptureRequest;
@@ -60,6 +80,10 @@ export interface StartVideoCaptureOptions {
   readonly sessionStartedAtUnixMs: number;
   readonly onFirstFrame?: (segment: VideoSegmentInfo) => void;
   readonly onWarning?: (message: string) => void;
+  /** What the helper is filming, each time it finds it (again). */
+  readonly onTarget?: (filming: VideoFilming) => void;
+  /** Filming paused: the window went away, or the browser shows another tab. */
+  readonly onWaiting?: (message: string) => void;
   /** Test/development override; production uses the stable runtime copy. */
   readonly command?: string;
   /** How long a stopping helper may take to finish its file before SIGKILL. */
@@ -113,8 +137,40 @@ export function screenCaptureArguments(options: Pick<StartVideoCaptureOptions, '
       ...(target.bundleIds ?? []).flatMap((id) => ['--bundle-id', id]),
       ...(target.appName ? ['--app-name', target.appName] : []),
       ...(target.callWindowOnly ? ['--call-window-only'] : []),
+      ...(target.browserBundleIds ?? []).flatMap((id) => ['--browser-bundle-id', id]),
+      ...(target.callTitle?.trim() ? ['--call-title', target.callTitle.trim()] : []),
     ]),
   ];
+}
+
+/** Said when a whole display is filmed: only ever because it was asked for, and never quietly. */
+export function screenFilmedNotice(filming: VideoFilming): string {
+  return `${SCREEN_FILMED} (${filming.name.replace(/, the whole screen$/u, '')}) for this recording, as asked: everything on it is in the video.`;
+}
+const SCREEN_FILMED = 'Seashell is filming your whole screen';
+
+/** A notification the first time a meeting films a whole display. */
+export function screenFilmedNotifier(notify: (message: string) => void): (event: { readonly type: string; readonly message?: string }) => void {
+  let said: string | undefined;
+  return (event) => {
+    if (event.type === 'meeting.started' || event.type === 'meeting.resumed') said = undefined;
+    else if (event.type === 'watch.warning' && event.message?.startsWith(SCREEN_FILMED) && said !== event.message) {
+      said = event.message;
+      notify(event.message);
+    }
+  };
+}
+
+/** In words: a browser window by the call it shows, an app's window by the app's own name, a display by number. */
+function filmingFrom(event: Record<string, unknown>): VideoFilming | undefined {
+  if (event.kind === 'display') return Number.isSafeInteger(event.display) ? { kind: 'display', name: `display ${event.display}, the whole screen` } : undefined;
+  if (event.kind !== 'window') return undefined;
+  // A browser tab names its service ("Google Meet"), or "the call" when it carries the event's title.
+  if (typeof event.call === 'string' && event.call) return { kind: 'window', name: event.call === 'the call' ? 'the call window' : `the ${event.call} window` };
+  const bundleId = typeof event.bundleId === 'string' ? event.bundleId : '';
+  const app = bundleId ? meetingApps().find((candidate) => candidate.bundleIds.some((id) => sameApplicationFamily(bundleId, id))) : undefined;
+  const name = app?.name ?? (typeof event.app === 'string' && event.app ? event.app : undefined);
+  return { kind: 'window', name: name ? `the ${name} window` : 'the call window' };
 }
 
 function plain(value: unknown): value is Record<string, unknown> {
@@ -191,7 +247,10 @@ export function startVideoCapture(options: StartVideoCaptureOptions): VideoCaptu
     const message = typeof event.message === 'string' ? event.message : undefined;
     if (event.type === 'target') {
       target = targetFrom(event);
-      if (typeof event.note === 'string') options.onWarning?.(event.note);
+      const filming = filmingFrom(event);
+      if (filming) options.onTarget?.(filming);
+    } else if (event.type === 'waiting') {
+      options.onWaiting?.(message ?? 'Video is paused.');
     } else if (event.type === 'first-frame' && Number.isSafeInteger(event.firstFrameUnixMs)) {
       options.onFirstFrame?.(Object.freeze({
         firstFrameUnixMs: event.firstFrameUnixMs as number,
@@ -232,11 +291,13 @@ export function startVideoCapture(options: StartVideoCaptureOptions): VideoCaptu
     }
     const permission = code === SCREEN_CAPTURE_PERMISSION_EXIT_CODE || failure?.code === 'permission';
     const noFrames = code === NO_FRAMES_EXIT_CODE || failure?.code === 'no-frames';
+    const noWindow = code === NO_WINDOW_EXIT_CODE || failure?.code === 'no-window';
     finish({
       saved: false,
       requestedStop,
-      reason: permission ? 'permission' : noFrames ? 'no-frames' : 'failed',
+      reason: permission ? 'permission' : noWindow ? 'no-window' : noFrames ? 'no-frames' : 'failed',
       message: permission ? PERMISSION_HELP
+        : noWindow ? 'No call window is open, so nothing is filmed; the audio is recording.'
         : noFrames ? 'No screen frames arrived, so no video was saved. The call window may have been minimized.'
           : failure?.message ?? `The screen recorder stopped (${signal ?? `exit ${code ?? 'unknown'}`}).`,
     });
@@ -263,10 +324,14 @@ export interface StartVideoTrackOptions {
   readonly onSegment: (segment: Omit<CaptureVideoSegment, 'recordedAt'>) => void | Promise<unknown>;
   readonly onState?: (state: VideoState) => void;
   readonly onWarning: (message: string) => void;
+  /** What is filmed, each time the helper finds it. */
+  readonly onTarget?: (filming: VideoFilming) => void;
   /** Test seam for one helper run. */
   readonly starter?: typeof startVideoCapture;
   readonly maxRestarts?: number;
   readonly restartDelayMs?: number;
+  /** How long to wait before looking for a call window again; WINDOW_RETRY_MS by default. */
+  readonly windowRetryMs?: number;
 }
 
 export interface VideoTrackHandle {
@@ -278,6 +343,8 @@ export interface VideoTrackHandle {
 /**
  * Keep video running for a whole meeting. A helper that dies mid-call starts
  * again into a new movie, a few times at most; the movies so far stay saved.
+ * With no call window open, the audio records alone and the helper looks
+ * again every 30 seconds, so a window that opens later is still filmed.
  * Missing permission or a closed display is a warning, never a retry loop.
  */
 export function startVideoTrack(options: StartVideoTrackOptions): VideoTrackHandle {
@@ -285,6 +352,8 @@ export function startVideoTrack(options: StartVideoTrackOptions): VideoTrackHand
   let stopped = false;
   let current: VideoCaptureHandle | undefined;
   let cancelDelay: (() => void) | undefined;
+  /** This helper run has written a frame, so a target found again means filming again. */
+  let filming = false;
   const state = (value: VideoState) => options.onState?.(value);
   const record = (segment: Omit<CaptureVideoSegment, 'recordedAt'>): Promise<void> => Promise.resolve()
     .then(async () => { await options.onSegment(segment); })
@@ -320,8 +389,14 @@ export function startVideoTrack(options: StartVideoTrackOptions): VideoTrackHand
       sidecarPath: slot.sidecarPath,
       sessionStartedAtUnixMs: options.sessionStartedAtUnixMs,
       // Listed at once, so a crash of Seashell itself still finds this movie.
-      onFirstFrame: (info) => { state('recording'); firstFrame = record(segment(info)); },
+      onFirstFrame: (info) => { filming = true; state('recording'); firstFrame = record(segment(info)); },
       onWarning: options.onWarning,
+      onTarget: (target) => {
+        options.onTarget?.(target);
+        // Found again after a pause: frames follow at once.
+        if (filming) state('recording');
+      },
+      onWaiting: () => state('waiting'),
     });
     if (stopped) current.stop();
     const result = await current.done;
@@ -329,11 +404,28 @@ export function startVideoTrack(options: StartVideoTrackOptions): VideoTrackHand
     if (result.saved) await record(segment(result.segment));
     return result;
   };
+  const wait = (milliseconds: number) => new Promise<void>((resolve) => {
+    const timer = setTimeout(() => { cancelDelay = undefined; resolve(); }, milliseconds);
+    cancelDelay = () => { clearTimeout(timer); cancelDelay = undefined; resolve(); };
+  });
   const done = (async () => {
     state('starting');
+    let saidNoWindow = false;
     for (let restarts = 0; ; restarts++) {
+      filming = false;
       const result = await attempt();
       if (result?.requestedStop) { state('stopped'); return; }
+      // No call window: audio only for now, and look again. Never the display instead.
+      if (result && !result.saved && result.reason === 'no-window') {
+        if (stopped) { state('stopped'); return; }
+        if (!saidNoWindow) options.onWarning(`${result.message} Seashell looks for the call window again every 30 seconds.`);
+        saidNoWindow = true;
+        state('waiting');
+        restarts--;
+        await wait(options.windowRetryMs ?? WINDOW_RETRY_MS);
+        if (stopped) { state('stopped'); return; }
+        continue;
+      }
       // A failure the helper hit by itself is reported even if a stop followed it.
       if (!result || (!result.saved && result.reason !== 'failed')) {
         if (result && !result.saved) options.onWarning(result.message);
@@ -349,10 +441,7 @@ export function startVideoTrack(options: StartVideoTrackOptions): VideoTrackHand
       }
       options.onWarning(`${why} Starting video again.`);
       state('starting');
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(() => { cancelDelay = undefined; resolve(); }, options.restartDelayMs ?? 2_000);
-        cancelDelay = () => { clearTimeout(timer); cancelDelay = undefined; resolve(); };
-      });
+      await wait(options.restartDelayMs ?? 2_000);
       if (stopped) { state('stopped'); return; }
     }
   })().catch((error: unknown) => {

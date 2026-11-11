@@ -19,7 +19,7 @@ import {
   type SystemAudioCaptureHandle,
   type SystemAudioCaptureState,
 } from './live-system-audio.ts';
-import { startVideoTrack, type VideoCaptureRequest, type VideoState, type VideoTrackHandle } from './video-capture.ts';
+import { screenFilmedNotice, startVideoTrack, type VideoCaptureRequest, type VideoState, type VideoTrackHandle } from './video-capture.ts';
 
 export interface DurableLiveCaptureStatus {
   readonly microphone: SystemAudioCaptureState;
@@ -88,6 +88,7 @@ export function startDurableLiveCapture(
   let captureFailure: Error | undefined;
   let audioSavedThroughMs = 0;
   const health = new CaptureHealthTracker({ microphone: options.microphone, systemAudio: options.systemAudio });
+  if (videoState) health.video(videoState);
   const healthWriter = new CaptureHealthWriter(store.root);
   let healthWriteFailed = false;
 
@@ -210,11 +211,18 @@ export function startDurableLiveCapture(
         sessionStartedAtUnixMs: store.manifest.startedAtUnixMs,
         nextSegment: () => store.nextVideoSegment(),
         onSegment: (segment) => store.recordVideoSegmentAsync(segment),
-        onState: (state) => { videoState = state; status(); },
+        onState: (state) => { videoState = state; health.video(state); status(); },
         onWarning: warn,
+        // What is filmed shows with the recording; a whole display is also said aloud, as a notice.
+        onTarget: (filming) => {
+          health.video(videoState ?? 'starting', filming);
+          if (filming.kind === 'display') warn(screenFilmedNotice(filming));
+          status();
+        },
       });
     } catch (error) {
       videoState = 'unavailable';
+      health.video('unavailable');
       warn(`Video was not recorded: ${error instanceof Error ? error.message : String(error)}`);
     }
   }

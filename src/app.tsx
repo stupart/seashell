@@ -2165,7 +2165,7 @@ export default function App(props: {
       } catch (cause) { setError(`Could not start recording: ${cause instanceof Error ? cause.message : String(cause)}`); }
       return;
     }
-    // V records by hand with video: the call's window if one is open, otherwise the screen.
+    // V records by hand with video of the call's window, never the screen.
     if (input === 'V') {
       if (watchOwnership !== 'external') { setCaution('Recording with video needs the background recorder. Press , to start it.'); return; }
       if (activeBackgroundEntry) { setCaution('Already recording. Video can only start with a new recording.'); return; }

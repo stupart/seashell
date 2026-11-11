@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import type { MeetingCandidate } from '../src/meeting-automation.ts';
+import { browserBundleIds, type MeetingCandidate } from '../src/meeting-automation.ts';
 import {
   consumeVideoRequest,
   meetingVideoRequest,
@@ -29,17 +29,23 @@ function candidate(overrides: Partial<MeetingCandidate>): MeetingCandidate {
     evidence: ['audio-input-process'], requiresConsent: false, ...overrides };
 }
 
+const browsers = browserBundleIds();
+
 test('a call records its own app window by default, at 2 fps and medium quality', () => {
   expect(meetingVideoRequest({}, candidate({}))).toEqual({
-    target: { kind: 'window', pid: 4242, bundleIds: ['us.zoom.xos', 'us.zoom.ZoomPhone'], appName: 'Zoom' },
+    target: { kind: 'window', pid: 4242, bundleIds: ['us.zoom.xos', 'us.zoom.ZoomPhone'], appName: 'Zoom', browserBundleIds: browsers },
     fps: 2, quality: 'medium',
   });
-  // Chrome's audio comes from a helper process; the window belongs to Chrome.
+  // Chrome's audio comes from a helper process; the window belongs to Chrome, and only a tab that looks like the call is filmed.
   expect(meetingVideoRequest({ meeting: { video: { fps: 5, quality: 'high' } } },
-    candidate({ appName: 'Google Meet', bundleId: 'com.google.Chrome.helper', pid: 0, kind: 'browser' }))).toEqual({
-    target: { kind: 'window', bundleIds: ['com.google.Chrome.helper', 'com.google.Chrome'], appName: 'Google Chrome' },
+    candidate({ appName: 'Google Meet', bundleId: 'com.google.Chrome.helper', pid: 0, kind: 'browser',
+      calendar: { provider: 'mac', eventId: 'e', title: ' Weekly sync ', startAt: '2026-11-11T09:00:00Z', endAt: '2026-11-11T09:30:00Z', attendees: [] } }))).toEqual({
+    target: { kind: 'window', bundleIds: ['com.google.Chrome.helper', 'com.google.Chrome'], appName: 'Google Chrome',
+      browserBundleIds: browsers, callTitle: 'Weekly sync' },
     fps: 5, quality: 'high',
   });
+  expect(browsers).toEqual(expect.arrayContaining(['com.google.Chrome', 'com.apple.Safari', 'org.mozilla.firefox']));
+  expect(browsers).not.toContain('us.zoom.xos');
 });
 
 test('video stays off when it is turned off, overall or for that app', () => {
@@ -59,8 +65,9 @@ test('naming a window finds a known app by id or name, and any other app by its 
   expect(videoTargetFor({ window: 'zoom' })).toEqual({ kind: 'window', appName: 'Zoom', bundleIds: ['us.zoom.xos', 'us.zoom.ZoomPhone'] });
   expect(videoTargetFor({ window: 'Google Chrome' })).toMatchObject({ appName: 'Google Chrome', bundleIds: ['com.google.Chrome'] });
   expect(videoTargetFor({ window: 'Keynote' })).toEqual({ kind: 'window', appName: 'Keynote' });
+  // Nothing named: the call's window, a browser's only while it shows the call; never a whole display.
   const auto = videoTargetFor({});
-  expect(auto).toMatchObject({ kind: 'window', callWindowOnly: true });
+  expect(auto).toMatchObject({ kind: 'window', callWindowOnly: true, browserBundleIds: browsers });
   expect(auto.kind === 'window' && auto.bundleIds).toContain('com.microsoft.teams2');
 });
 
