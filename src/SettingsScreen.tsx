@@ -654,11 +654,10 @@ export default function SettingsScreen(props: SetupActionProps & {
         {files.runs.map((run, i) => {
           const [symbol, color] = RUN_SYMBOL[run.status];
           const why = runFailure(run)?.text ?? run.detail ?? run.actions.find(action => action.status === run.status && action.detail)?.detail;
-          const again = run === retryRun ? ' r tries again.' : '';
           // What went wrong gets a line of its own, so it is never cut to make room for the meeting.
           return <Box key={`${run.at}-${i}`} flexDirection="column" flexShrink={0}>
             <Text wrap="truncate-end"><Text color={color}>{symbol}</Text> {run.automation}<Text dimColor> · {run.title} · {meetingWhen(run.at)}</Text></Text>
-            {run.status !== 'ok' && why ? <Box paddingLeft={2}><Paragraph width={width - 2} color={color} text={`${why}${again}`} /></Box> : null}
+            {run.status !== 'ok' && why ? <Box paddingLeft={2}><Paragraph width={width - 2} color={color} text={why} /></Box> : null}
           </Box>;
         })}
       </Box>}
@@ -703,18 +702,20 @@ export default function SettingsScreen(props: SetupActionProps & {
 
   const action = selected?.kind === 'status' ? selected.status.action : undefined;
   const video = selected?.kind === 'status' && selected.status.id === 'video' ? selected.status : undefined;
-  // One order everywhere: what Enter does, then moving, then r, then Esc.
+  // One order everywhere: what Enter does, then moving, then r, then Esc. Trying a failed run again
+  // is the fix, so it leads; on that row r only ever tries again, and recheck gives way.
   const hints: Hint[] = compact && !inDetail ? [['Enter', 'open'], ['↑↓', 'choose'], ['r', 'recheck'], ['Esc', 'back']]
     : inDetail && list === 'recording' ? [['←→', 'change'], ['↑↓', 'choose'], ['Esc', 'back']]
     : inDetail && list === 'prompts' ? [['Enter', 'edit'], ...(files.prompts[rowIndex]?.state !== 'default' ? [['d', 'undo edits'] as Hint] : []),
       ['↑↓', 'choose'], ['Esc', 'back']]
     : inDetail && list === 'voices' && listLength ? [['Enter', 'forget'], ['↑↓', 'choose'], ['Esc', 'back']]
     : [
+      ...(retryRun ? [['r', 'try again'] as Hint] : []),
       ...(selected?.kind === 'recording' ? [['Enter', 'change'] as Hint] : selected?.kind === 'guide' ? [['Enter', 'start'] as Hint]
         : video ? [['Enter', video.state === 'off' ? 'turn on' : 'turn off'] as Hint]
         : list === 'prompts' ? [['Enter', 'choose a prompt'] as Hint] : list === 'voices' && listLength ? [['Enter', 'choose someone'] as Hint]
         : action ? [['Enter', lowerFirst(FEATURE_ACTION_LABEL[action])] as Hint] : selected && testable(selected) ? [['Enter', 'test it now'] as Hint] : []),
-      ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ['r', retryRun ? 'try again' : 'recheck'], ['Esc', 'back'],
+      ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ...(retryRun ? [] : [['r', 'recheck'] as Hint]), ['Esc', 'back'],
     ];
   const failed = setup.message?.tone === 'failed' ? setup.message.text : undefined;
 

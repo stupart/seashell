@@ -2000,16 +2000,37 @@ export default function App(props: {
     }
     if (processing) return;
     if (input === 'i') { setAudioHelpOpen(true); return; }
-    if (watchOwnership === 'external' && (input === 'm' || input === 'x') && backgroundWatch?.phase === 'awaiting-consent') {
+    // A noticed call is a question like any other: y records it, n ignores it.
+    const answer = input.toLowerCase();
+    if (watchOwnership === 'external' && (answer === 'y' || answer === 'n') && backgroundWatch?.phase === 'awaiting-consent'
+        && backgroundApproval !== backgroundWatch.consentId) {
       const current = readBackgroundWatchStatus(libraryRoot);
       if (current?.phase !== 'awaiting-consent' || !current.consentId || current.consentId !== backgroundWatch.consentId) {
         refreshLibrary(); setCaution('The meeting request changed. Check its current status before recording.'); return;
       }
       try {
-        writeMeetingConsent(input === 'm' ? 'approve' : 'decline', undefined, Date.now(), current.consentId);
+        writeMeetingConsent(answer === 'y' ? 'approve' : 'decline', undefined, Date.now(), current.consentId);
         setBackgroundApproval(current.consentId);
-        setNotice(input === 'm' ? 'Start requested. Waiting for the recorder to confirm.' : 'Ignore requested.');
+        setNotice(answer === 'y' ? 'Start requested. Waiting for the recorder to confirm.' : 'Ignore requested.');
       } catch (cause) { setError(`Could not send the meeting decision: ${cause instanceof Error ? cause.message : String(cause)}`); }
+      return;
+    }
+    if (automaticCandidate && (answer === 'y' || answer === 'n')) {
+      if (answer === 'y') {
+        const approved = meetingAutomationController.current.approve();
+        setAutomationPhase(meetingAutomationController.current.state.phase);
+        setAutomaticCandidate(null);
+        if (approved) {
+          void beginAutomaticMeeting(approved).catch((automationError: unknown) => {
+            setError(automationError instanceof Error ? automationError.message : String(automationError));
+          });
+        }
+      } else {
+        meetingAutomationController.current.decline();
+        setAutomationPhase(meetingAutomationController.current.state.phase);
+        setAutomaticCandidate(null);
+        setNotice(`Ignored ${automaticCandidate.appName} for this detection window.`);
+      }
       return;
     }
     if (currentRecordBusy && ['r', 'd', 'g', 'a', 'e', 'm'].includes(input)) {
@@ -2056,25 +2077,7 @@ export default function App(props: {
       return;
     }
     if (input === 'm') {
-      if (automaticCandidate) {
-        const approved = meetingAutomationController.current.approve();
-        setAutomationPhase(meetingAutomationController.current.state.phase);
-        setAutomaticCandidate(null);
-        if (approved) {
-          void beginAutomaticMeeting(approved).catch((automationError: unknown) => {
-            setError(automationError instanceof Error ? automationError.message : String(automationError));
-          });
-        }
-      } else if (currentRecord?.transcript.length) {
-        markCurrentAsMeeting(view === 'live' ? calendarSuggestion ?? undefined : undefined);
-      }
-      return;
-    }
-    if (input === 'x' && automaticCandidate) {
-      meetingAutomationController.current.decline();
-      setAutomationPhase(meetingAutomationController.current.state.phase);
-      setAutomaticCandidate(null);
-      setNotice(`Ignored ${automaticCandidate.appName} for this detection window.`);
+      if (currentRecord?.transcript.length) markCurrentAsMeeting(view === 'live' ? calendarSuggestion ?? undefined : undefined);
       return;
     }
     // n only ever moves to the next match.
@@ -2554,7 +2557,7 @@ export default function App(props: {
     : confirmRewrite ? { text: 'Rewrite these notes? This replaces them.', short: 'Rewrite and replace these notes?', hints: [['y', 'rewrite'], ['n', 'keep']] }
     : confirmStop ? { text: 'Stop recording? Everything so far is kept.', short: 'Stop recording?', hints: [['y', 'stop'], ['n', 'keep recording']] }
     : consentPending && !approvalPending && consentTitle ? { text: `Record "${consentTitle}"?`, short: 'Record this call?',
-      hints: [['m', 'record'], ['x', 'ignore']] }
+      hints: [['y', 'record'], ['n', 'ignore']] }
     : undefined;
   const write: Hint[] = currentMeeting?.ai?.off ? [] : [['Enter', hasNotes ? 'rewrite notes' : 'write notes']];
   const sheetHints: Hint[] | undefined = notesSetup ? notesSetup.editing !== undefined ? [['Enter', 'save'], ['Esc', 'cancel']]
