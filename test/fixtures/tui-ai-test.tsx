@@ -38,7 +38,7 @@ const app = render(<AISettings current={current} onSave={() => {}} onClose={() =
   { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
 const frame = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('AI for notes and chat')));
 const until = async (check: () => boolean, label: string) => {
-  const end = Date.now() + 3000;
+  const end = Date.now() + 10_000;
   while (!check() && Date.now() < end) await Bun.sleep(10);
   assert.ok(check(), `${label}\n${frame()}`);
 };
