@@ -58,6 +58,7 @@ export const MEETINGS_MCP_INSTRUCTIONS = [
   'Find meetings with list_meetings, search_transcripts or query_notes before reading one; never invent meeting IDs or segment IDs.',
   'Quote with the segment ID and time, e.g. [s000123 12:04], so the user can check the source.',
   'Transcripts are machine-generated. "Microphone" is the user; "Remote speaker N" and "System audio" are other people unless renamed.',
+  'A speaker marked suggested (speakerSuggested on a line) was named by Seashell from a known voice and not yet confirmed by the user: treat that name as a guess.',
   'Reading is safe. Tools that change things (fixing a transcript line, naming a speaker, editing prompts, templates, extractors or automations, running an extractor) change the user\'s own files: use them only when the user asks.',
   'Ask the user before sending anything (email, Slack, Linear) based on a meeting.',
   'A meeting marked private has AI turned off by its owner: say so, and do not try to reach its content another way.',
@@ -254,7 +255,7 @@ export const MEETINGS_MCP_TOOLS: readonly Tool[] = [
     inputSchema: { type: 'object', additionalProperties: false, properties: {
       kind: { description: 'decisions, actions, risks, questions or follow-ups; one or a list (default: all five)',
         anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
-      person: string('Owner or speaker name contains this'), about: string('Words that must all appear in the note or the lines it cites'),
+      person: string('Who owns it, or said it when no owner was recorded: a name or the start of one ("dan" finds Dana, not Jordan). "me" finds the user\'s own'), about: string('Words that must all appear in the note or the lines it cites'),
       meeting: string('Words that must all appear in the meeting title'), since: string('Only meetings on or after this date'),
       until: string('Only meetings on or before this date'), limit: integer('Maximum items (default 50)') } },
     run: queryNotes },
@@ -371,7 +372,7 @@ export const MEETINGS_MCP_TOOLS: readonly Tool[] = [
       return editTranscriptSegment(libraryDir, record.id, text(args.segmentId, 'segmentId', true)!, text(args.text, 'text', true)!);
     } },
   { name: 'rename_speaker', title: 'Name a speaker', annotations: edits,
-    description: 'Give a speaker a name, by speaker ID or current label ("Remote speaker 1"). The old transcript is kept in the meeting\'s history. Notes keep their content; placeholders like "Remote speaker 1" in them take the name. Seashell does not learn the voice from a name an agent gives.',
+    description: 'Give a speaker a name, by speaker ID or current label ("Remote speaker 1"). The old transcript is kept in the meeting\'s history; the user can put it back with seashell meeting restore. Notes keep their content; placeholders like "Remote speaker 1" in them take the name. Renaming someone already named moves their actions, and their name where it is a whole word, to the new name, and marks the notes as possibly out of date. Seashell does not learn the voice from a name an agent gives.',
     inputSchema: { type: 'object', additionalProperties: false, required: ['id', 'speaker', 'name'], properties: {
       id: string('Meeting ID'), speaker: string('Speaker ID or current label'), name: string('Their name') } },
     run: (libraryDir, args) => {

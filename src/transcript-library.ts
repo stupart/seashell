@@ -165,14 +165,9 @@ export function loadTranscriptPath(path: string): TranscriptRecord {
   }
 }
 
+/** Where a transcript with this ID is saved, from the listing cache rather than parsing every transcript. */
 function existingRecordPath(libraryDir: string, id: string): string | undefined {
-  return transcriptJsonPaths(libraryDir).find((path) => {
-    try {
-      return loadTranscriptPath(path).id === id;
-    } catch {
-      return false;
-    }
-  });
+  return cachedTranscripts(libraryDir).find(({ cached }) => cached.summary?.id === id)?.path;
 }
 
 export function saveTranscriptRecord(
@@ -299,11 +294,17 @@ export function listTranscriptRecords(libraryDir: string): TranscriptLibraryEntr
     .toSorted((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
+/**
+ * One transcript by ID, read fresh from disk. The listing cache knows which
+ * file holds which ID, so only that file is parsed, not every transcript in
+ * the library: a loop over meetings that looks each one up stays linear.
+ */
 export function findTranscriptRecord(
   libraryDir: string,
   id: string,
 ): { path: string; record: TranscriptRecord } {
-  for (const path of transcriptJsonPaths(libraryDir)) {
+  for (const { path, cached } of cachedTranscripts(libraryDir)) {
+    if (cached.summary?.id !== id) continue;
     try {
       const record = loadTranscriptPath(path);
       if (record.id === id) return { path, record };

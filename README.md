@@ -632,6 +632,8 @@ seashell library open <id>
 seashell library trash <id> --confirm
 seashell library clean-phantoms --dry-run   # count lines heard in silence
 seashell library clean-phantoms [<id>...]   # remove them
+seashell meeting restore <id> --list        # earlier transcripts kept for a meeting
+seashell meeting restore <id> <file>        # put one back
 ```
 
 Trash is recoverable inside `<library>/_Trash`; Sea Shell does not permanently
@@ -641,10 +643,20 @@ Whisper sometimes writes "Thank you" or "Okay" over silence. New recordings
 drop those lines; `library clean-phantoms` does the same for meetings saved
 before, using each meeting's saved audio. A line goes only when there is no
 speech under it and no sound above a whisper on its own source (the microphone
-for "Microphone", computer audio for everyone else). The dry run reports how
+for "Microphone", computer audio for everyone else), and only where that source
+was recorded for the whole line: a line in a gap in the recording, or past its
+end, is unknown rather than silent, so it stays. The dry run reports how
 many lines each meeting would lose. A real run keeps the old transcript in the
 meeting's `history/transcripts` folder first, and keeps the notes, marked as
-possibly out of date.
+possibly out of date. A note whose only line was removed stays, marked "source
+line removed".
+
+Every change that keeps the notes (a corrected line, removed lines, a renamed
+speaker) keeps the transcript as it was in that folder first; the 20 most
+recent copies stay. `seashell meeting restore <id> --list` lists them, newest
+first, and `seashell meeting restore <id> <file>` puts one back: its lines and
+speaker names. The transcript it replaces is kept too, so a restore can be
+undone the same way, and the notes stay, marked as possibly out of date.
 
 ## Meeting mode
 
@@ -799,12 +811,18 @@ In Seashell, press **,** and choose **Prompts** to open or reset one.
 
 ```sh
 seashell query actions --person Dana            # what Dana owns, newest first
+seashell query actions --person me              # what you own
 seashell query decisions --about pricing --since 2026-10-01
 seashell query questions --meeting "hiring sync"
 ```
 
 Kinds are decisions, actions, risks, questions and follow-ups (all five when
-left out). Each line names its meeting and the transcript moment it came from;
+left out). `--person` matches whole names or their start, so `dan` finds Dana
+but not Jordan, and an action belongs to its owner, not whoever said it. `me`,
+`I` and `you` find your own, as does the name you gave your microphone. A date
+like `2026-10-01` is that day where you are, as the library's folders are; a
+full timestamp is that exact moment. Each line names its meeting and the
+transcript moment it came from;
 `--json` adds a quote. Seashell does not track whether an action was done.
 Private meetings never appear.
 
@@ -934,12 +952,13 @@ Tools that change your files, which the agent uses only when you ask:
 `update_template`, `create_extractor`, `update_extractor`, `delete_extractor`,
 `run_extractor`, `create_automation`, `update_automation` and
 `delete_automation`. A corrected line or a named speaker keeps the old
-transcript in the meeting's history and keeps the notes, marked as possibly out
-of date after a correction. A speaker an agent names doesn't teach Seashell
-their voice; only a name you give does. An automation an
-agent adds or changes stays off until you turn it on in its file, and still
-asks you before sending anything outside. Every tool refuses private meetings,
-and a meeting whose `meeting.json` can't be read counts as private.
+transcript in the meeting's history (`seashell meeting restore` puts it back)
+and keeps the notes, marked as possibly out of date after a correction. A
+speaker an agent names doesn't teach Seashell their voice; only a name you give
+does. An automation an agent adds or changes stays off until you turn it on in
+its file, and still asks you before sending anything outside. Every tool
+refuses private meetings, and a meeting whose `meeting.json` can't be read
+counts as private.
 
 ### Google Meet status
 

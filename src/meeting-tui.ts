@@ -1,5 +1,5 @@
 import type { MeetingArtifact, MeetingClaim, MeetingClaimType } from './meeting-artifact.ts';
-import { claimOwnerAndDue, transcriptSegmentId } from './meeting-artifact.ts';
+import { citedSegmentIds, claimOwnerAndDue, sourceLineRemoved, transcriptSegmentId } from './meeting-artifact.ts';
 import { compareMeetingEvidence, meetingEvidence } from './meeting-evidence.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 import { formatTuiClock } from './tui-state.ts';
@@ -53,8 +53,19 @@ function createStart(artifact: MeetingArtifact, record?: TranscriptRecord): (ids
   };
 }
 
+/** Words that say nothing about which point a line is: "send the contract to Acme" is send, contract, Acme. */
+const STOP_WORDS = new Set(`a an the and or but nor so to of in on at by for with from into onto about over as than then
+  is are was were be been being am will would shall should can could may might must do does did done have has had
+  it its this that these those there here i me my we us our you your he him his she her they them their who whom
+  what which when where how why if not no yes up out also just all any each some let lets s t d ll re ve m`.split(/\s+/u));
+
 function wordsOf(text: string): Set<string> {
   return new Set(text.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+}
+
+/** The words that tell one point from another. */
+function contentWords(text: string): Set<string> {
+  return new Set([...wordsOf(text)].filter((word) => !STOP_WORDS.has(word)));
 }
 
 /** Lines starting with this are headings; wrappedMeetingRows keeps them, the app makes them bold. */
@@ -115,7 +126,7 @@ export function meetingViewLines(
     }
     return artifact.chat.slice(-8).flatMap((message) => [
       `${message.role === 'user' ? 'You' : 'Seashell'}: ${message.text}`,
-      ...(message.role === 'assistant' ? sources(message.evidenceSegmentIds) : []),
+      ...(message.role === 'assistant' ? sources(citedSegmentIds(message)) : []),
     ]);
   }
 
@@ -128,12 +139,14 @@ export function meetingViewLines(
   }
 
   const start = createStart(artifact, record);
-  type Item = { text: string; ids: readonly string[]; owner?: string | undefined };
-  // The time is the citation: it finds the line in the transcript.
+  type Item = { text: string; ids: readonly string[]; owner?: string | undefined; removed?: boolean };
+  // The time is the citation: it finds the line in the transcript. A point
+  // whose every line was removed stays, and says so.
   const bullet = (item: Item) => {
     const said = start(item.ids);
     const clock = said === undefined ? '' : formatTuiClock(said);
-    return item.owner || clock ? `- ${item.text}${META}${item.owner ?? ''}${META}${clock}` : `- ${item.text}`;
+    const text = item.removed ? `${item.text} (source line removed)` : item.text;
+    return item.owner || clock ? `- ${text}${META}${item.owner ?? ''}${META}${clock}` : `- ${text}`;
   };
   // In the order they were said; anything Seashell cannot place keeps its place at the end.
   const inOrder = (items: Item[]) => items.map((item, index) => ({ item, index, at: start(item.ids) ?? Number.POSITIVE_INFINITY }))
@@ -151,28 +164,36 @@ export function meetingViewLines(
   // different point, and losing one is worse than reading it twice.
   const sections = artifact.analysis?.notes ?? [];
   type Said = { words: Set<string>; passages: Set<string> };
-  const saying = (text: string, ids: readonly string[]): Said => ({ words: wordsOf(text), passages: new Set(ids) });
+  const saying = (text: string, ids: readonly string[]): Said => ({ words: contentWords(text), passages: new Set(ids) });
+  // The same moment, and most of the words of the longer of the two, so a short
+  // line cannot stand in for a longer one that says more ("to Globex", "by Monday").
   const echoes = (line: Said, other: Said) => [...line.passages].some((id) => other.passages.has(id)) &&
-    [...line.words].filter((word) => other.words.has(word)).length >= Math.max(2, line.words.size * 0.7);
-  const said = sections.flatMap((section) => section.items.map((item) => saying(item.text, item.evidenceSegmentIds)));
-  const repeated = (claim: MeetingClaim) => said.some((other) => echoes(saying(claim.text, claim.evidenceSegmentIds), other));
+    [...line.words].filter((word) => other.words.has(word)).length >= Math.max(2, Math.max(line.words.size, other.words.size) * 0.7);
   // An action or follow-up says who and by when, as it was said.
   const ownerOf = (claim: MeetingClaim) =>
     claim.type === 'action_item' || claim.type === 'follow_up' ? claimOwnerAndDue(claim) : undefined;
-  // A template's wording of an action keeps the owner and due date the action itself recorded.
-  const ownerFor = (item: { text: string; evidenceSegmentIds: string[] }) => {
+  // A template's line restates at most one claim. It stands in for that claim, and
+  // shows the owner and due date the claim recorded, only when no other claim
+  // also matches it; otherwise every claim stays, with its own owner.
+  const restated = new Map(sections.flatMap((section) => section.items).map((item) => {
     const line = saying(item.text, item.evidenceSegmentIds);
-    const action = claims.find((claim) => ownerOf(claim) && echoes(saying(claim.text, claim.evidenceSegmentIds), line));
-    return action && ownerOf(action);
+    const matches = claims.filter((claim) => echoes(saying(claim.text, claim.evidenceSegmentIds), line));
+    return [item, { line, claim: matches.length === 1 ? matches[0] : undefined }] as const;
+  }));
+  const said = [...restated.values()].map(({ line }) => line);
+  const repeated = (claim: MeetingClaim) => [...restated.values()].some((line) => line.claim === claim);
+  const ownerFor = (item: (typeof sections)[number]['items'][number]) => {
+    const claim = restated.get(item)?.claim;
+    return claim && ownerOf(claim);
   };
   const shown = [...said];
   const fromClaims = (types: MeetingClaimType[]): Item[] => {
     const items = claims.filter((claim) => types.includes(claim.type) && !repeated(claim));
     shown.push(...items.map((claim) => saying(claim.text, claim.evidenceSegmentIds)));
-    return items.map((claim) => ({ text: claim.text, ids: claim.evidenceSegmentIds, owner: ownerOf(claim) }));
+    return items.map((claim) => ({ text: claim.text, ids: claim.evidenceSegmentIds, owner: ownerOf(claim), removed: sourceLineRemoved(claim) }));
   };
   const fromSection = (section: (typeof sections)[number]): Item[] =>
-    section.items.map((item) => ({ text: item.text, ids: item.evidenceSegmentIds, owner: ownerFor(item) }));
+    section.items.map((item) => ({ text: item.text, ids: item.evidenceSegmentIds, owner: ownerFor(item), removed: sourceLineRemoved(item) }));
   const groupOf = (heading: string) => LEADING_GROUPS.find(([, , names]) => names.test(heading.trim()));
   const stale = record && artifact.transcriptEvidence &&
     compareMeetingEvidence(artifact.transcriptEvidence, meetingEvidence(record)) !== 'same';
@@ -196,16 +217,18 @@ export function meetingViewLines(
   // already say is left out, and so is an empty field. A field's name is left off when
   // it is the only one left, or when the extractor's name already says it ("Customer pains" over "Pains").
   const insights = (artifact.insights ?? []).flatMap((insight) => {
-    if (!insight.fields.some((field) => field.items.length)) return [`${insight.extractor}: nothing found.`];
+    // Rewriting the notes does not run an extractor that only runs by hand, so each says when it may be stale.
+    const name = insight.outdated ? `${insight.extractor} (may be out of date)` : insight.extractor;
+    if (!insight.fields.some((field) => field.items.length)) return [`${name}: nothing found.`];
     const fields = insight.fields.map((field) => ({ field, items: field.items
       .filter((item) => !shown.some((other) => echoes(saying(item.text, item.evidenceSegmentIds), other))) }))
       .filter(({ items }) => items.length);
     const named = wordsOf(insight.extractor);
     const lines = fields.flatMap(({ field, items }) => {
       const label = fields.length > 1 && ![...wordsOf(field.name)].every((word) => named.has(word));
-      return items.map((item) => bullet({ text: label ? `${field.name}: ${item.text}` : item.text, ids: item.evidenceSegmentIds }));
+      return items.map((item) => bullet({ text: label ? `${field.name}: ${item.text}` : item.text, ids: item.evidenceSegmentIds, removed: sourceLineRemoved(item) }));
     });
-    return lines.length ? [`${SUBHEADING}${insight.extractor}`, ...lines] : [];
+    return lines.length ? [`${SUBHEADING}${name}`, ...lines] : [];
   });
   return [
     summary,

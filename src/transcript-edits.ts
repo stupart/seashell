@@ -1,15 +1,17 @@
 import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { readBackgroundMeetingState } from './background-meeting-status.ts';
 import { assembleCaptureTrack } from './capture-finalizer.ts';
-import { loadCaptureSession } from './capture-session.ts';
+import { loadCaptureSession, type CaptureSessionManifest, type CaptureTrackId } from './capture-session.ts';
 import { transcriptSegmentId } from './meeting-artifact.ts';
+import { meetingEvidence } from './meeting-evidence.ts';
 import { detectSpeechRegions, isPhantomUnit, readMonoPcm, type SpeechRegion } from './speech-gate.ts';
 import {
   findTranscriptRecord,
   listTranscriptRecords,
+  loadTranscriptPath,
   renameTranscriptSpeaker,
   saveTranscriptRecord,
 } from './transcript-library.ts';
@@ -30,13 +32,85 @@ function assertNotCapturing(directory: string): void {
   }
 }
 
-/** history/transcripts/<time>-<why>.json: the transcript exactly as it was before a change. */
+/** Copies kept per meeting; older ones are removed as new ones are kept. */
+export const TRANSCRIPT_HISTORY_LIMIT = 20;
+
+function historyFolder(directory: string): string {
+  return join(directory, 'history', 'transcripts');
+}
+
+/** The kept copies, oldest first: each name starts with the time it was kept. */
+function historyFiles(folder: string): string[] {
+  return existsSync(folder) ? readdirSync(folder).filter((name) => name.endsWith('.json') && !name.startsWith('.')).sort() : [];
+}
+
+/**
+ * history/transcripts/<time>-<why>.json: the transcript exactly as it was
+ * before a change. The 20 most recent copies stay.
+ */
 export function keepTranscriptHistory(directory: string, record: TranscriptRecord, why: string): string {
-  const folder = join(directory, 'history', 'transcripts');
+  const folder = historyFolder(directory);
   mkdirSync(folder, { recursive: true, mode: 0o700 });
   const path = join(folder, `${new Date().toISOString().replace(/[:.]/gu, '-')}-${why}-${randomUUID().slice(0, 8)}.json`);
   writeFileSync(path, `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+  const files = historyFiles(folder);
+  for (const old of files.slice(0, Math.max(0, files.length - TRANSCRIPT_HISTORY_LIMIT))) rmSync(join(folder, old), { force: true });
   return path;
+}
+
+export interface TranscriptHistoryCopy {
+  file: string;
+  /** When it was kept: just before the change named in `why`. */
+  savedAt: string;
+  why: string;
+  segments: number;
+}
+
+/** The copies kept of a meeting's transcript, newest first. */
+export function listTranscriptHistory(libraryDir: string, transcriptId: string): TranscriptHistoryCopy[] {
+  const folder = historyFolder(dirname(findTranscriptRecord(libraryDir, transcriptId).path));
+  return historyFiles(folder).reverse().flatMap((file) => {
+    let segments: number;
+    try { segments = loadTranscriptPath(join(folder, file)).transcript.length; } catch { return []; }
+    const named = /^(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3})Z-(.+)-[0-9a-f]{8}\.json$/u.exec(file);
+    return [{ file, segments,
+      savedAt: named ? `${named[1]}:${named[2]}:${named[3]}.${named[4]}Z` : statSync(join(folder, file)).mtime.toISOString(),
+      why: named?.[5] ?? 'unknown' }];
+  });
+}
+
+export const RESTORED_TRANSCRIPT = 'An earlier transcript was restored';
+
+/**
+ * Put back a copy from the meeting's history: its lines and speakers. The
+ * transcript as it is now is kept in history first, so a restore can be
+ * undone the same way. The notes stay, marked as possibly out of date, and
+ * cite again any line the copy brings back.
+ */
+export function restoreTranscript(
+  libraryDir: string, transcriptId: string, file: string,
+): { id: string; file: string; segments: number; restored: boolean } {
+  const { path, record } = findTranscriptRecord(libraryDir, transcriptId);
+  const directory = dirname(path);
+  assertNotCapturing(directory);
+  const folder = historyFolder(directory);
+  const wanted = file.endsWith('.json') ? file : `${file}.json`;
+  // Only a file the folder lists: never a path that leads out of it.
+  if (!historyFiles(folder).includes(wanted)) {
+    throw new Error(`No copy "${file}" in this meeting's history. See: seashell meeting restore ${record.id} --list`);
+  }
+  const copy = loadTranscriptPath(join(folder, wanted));
+  if (copy.id !== record.id) throw new Error(`${wanted} is a copy of another meeting's transcript.`);
+  const { speakerAnalysis: _current, ...kept } = record;
+  const restored: TranscriptRecord = { ...kept, transcript: copy.transcript, speakers: copy.speakers,
+    ...(copy.speakerAnalysis ? { speakerAnalysis: copy.speakerAnalysis } : {}), updatedAt: new Date().toISOString() };
+  if (meetingEvidence(restored).revision === meetingEvidence(record).revision &&
+      JSON.stringify(restored.speakers) === JSON.stringify(record.speakers)) {
+    return { id: record.id, file: wanted, segments: record.transcript.length, restored: false };
+  }
+  keepTranscriptHistory(directory, JSON.parse(readFileSync(path, 'utf8')) as TranscriptRecord, 'before-restore');
+  saveTranscriptRecord(libraryDir, restored, { keepNotes: RESTORED_TRANSCRIPT });
+  return { id: record.id, file: wanted, segments: restored.transcript.length, restored: true };
 }
 
 /**
@@ -126,6 +200,8 @@ export interface PhantomCleanup {
   /** Lines with no speech under them and no sound above a whisper. */
   phantoms: number;
   removed: boolean;
+  /** Lines with no recorded audio under them, in a gap or past the end: not known to be silent, so kept. */
+  unrecorded?: number;
   skipped?: string;
 }
 
@@ -139,11 +215,36 @@ export interface CleanPhantomsOptions {
   assemble?: typeof assembleCaptureTrack;
 }
 
+/** Chunks this close together are one stretch of audio: their times are rounded to the millisecond. */
+const CHUNK_JOIN_SECONDS = 0.1;
+
+/**
+ * When a track has audio, in seconds: its chunks, less any gap the capture
+ * reported inside them. The assembled track is digital silence everywhere
+ * else, which says nothing about what was said there.
+ */
+function recordedSpans(manifest: CaptureSessionManifest, trackId: CaptureTrackId): Array<{ start: number; end: number }> {
+  const spans: Array<{ start: number; end: number }> = [];
+  for (const chunk of manifest.chunks.filter((candidate) => candidate.trackId === trackId).toSorted((a, b) => a.startMs - b.startMs)) {
+    const [start, end] = [chunk.startMs / 1_000, chunk.endMs / 1_000];
+    const last = spans.at(-1);
+    if (last && start <= last.end + CHUNK_JOIN_SECONDS) last.end = Math.max(last.end, end);
+    else spans.push({ start, end });
+  }
+  return manifest.discontinuities.filter((gap) => gap.trackId === trackId).reduce((kept, gap) => {
+    const [from, to] = [gap.atMs / 1_000, (gap.atMs + gap.durationMs) / 1_000];
+    return kept.flatMap((span) => span.end <= from || span.start >= to ? [span]
+      : [...(span.start < from ? [{ start: span.start, end: from }] : []), ...(span.end > to ? [{ start: to, end: span.end }] : [])]);
+  }, spans);
+}
+
 /**
  * Find and remove phantom lines in saved meetings, with the same speech
  * detection and loudness check new recordings get. Each line is checked
  * against its own source: the microphone for "Microphone", computer audio for
- * everyone else. A line goes only when it is phantom as a whole.
+ * everyone else. A line goes only when it is phantom as a whole, and only
+ * where that source has recorded audio for all of it: a gap in the recording,
+ * or a line past its end, is unknown, not silent.
  */
 export async function cleanPhantoms(libraryDir: string, options: CleanPhantomsOptions = {}): Promise<PhantomCleanup[]> {
   const detect = options.detect ?? detectSpeechRegions;
@@ -171,29 +272,33 @@ export async function cleanPhantoms(libraryDir: string, options: CleanPhantomsOp
         microphone: assemble(manifestPath, manifest, 'microphone', join(scratch, 'microphone.wav'), { normalizeQuiet: true }),
         'system-audio': assemble(manifestPath, manifest, 'system-audio', join(scratch, 'system-audio.wav')),
       };
-      const checks = new Map<string, { regions: SpeechRegion[]; pcm: Int16Array } | undefined>();
+      const checks = new Map<string, { regions: SpeechRegion[]; pcm: Int16Array; recorded: Array<{ start: number; end: number }> } | undefined>();
       for (const [track, wav] of Object.entries(tracks)) {
         if (!wav) continue;
         const regions = await detect(wav);
         const pcm = regions ? readMonoPcm(readFileSync(wav)) : undefined;
-        checks.set(track, regions && pcm ? { regions, pcm } : undefined);
+        checks.set(track, regions && pcm ? { regions, pcm, recorded: recordedSpans(manifest, track as CaptureTrackId) } : undefined);
       }
       if ([...checks.values()].every((check) => check === undefined)) {
         results.push({ ...base, skipped: 'speech detection is not available' }); continue;
       }
       const { path, record } = findTranscriptRecord(libraryDir, entry.id);
+      let unrecorded = 0;
       const phantom = record.transcript.map((segment) => {
         const check = checks.get(segment.speaker === 'LOCAL' ? 'microphone' : 'system-audio');
-        return check ? isPhantomUnit(segment, check.regions, check.pcm) : false;
+        if (!check) return false;
+        if (!check.recorded.some((span) => span.start <= segment.start && segment.end <= span.end)) { unrecorded += 1; return false; }
+        return isPhantomUnit(segment, check.regions, check.pcm);
       });
       const phantoms = phantom.filter(Boolean).length;
-      if (options.dryRun || phantoms === 0) { results.push({ ...base, segments: record.transcript.length, phantoms }); continue; }
+      const counted = { phantoms, ...(unrecorded ? { unrecorded } : {}) };
+      if (options.dryRun || phantoms === 0) { results.push({ ...base, segments: record.transcript.length, ...counted }); continue; }
       keepTranscriptHistory(dirname(path), JSON.parse(readFileSync(path, 'utf8')) as TranscriptRecord, 'before-phantom-cleanup');
       pinSegmentIds(record);
       record.transcript = record.transcript.filter((_segment, index) => !phantom[index]);
       record.updatedAt = new Date().toISOString();
       saveTranscriptRecord(libraryDir, record, { keepNotes: REMOVED_SILENT_LINES });
-      results.push({ ...base, segments: record.transcript.length + phantoms, phantoms, removed: true });
+      results.push({ ...base, segments: record.transcript.length + phantoms, ...counted, removed: true });
     } catch (error) {
       results.push({ ...base, skipped: error instanceof Error ? error.message : String(error) });
     } finally {

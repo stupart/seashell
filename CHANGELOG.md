@@ -132,6 +132,36 @@ An outside review of rc33 found these. All are fixed.
 - Meet is checked only when a call is possible, not every few seconds all day.
 - The watch log no longer fills with the same warning.
 
+**Fixes**
+
+- After `library clean-phantoms`, rewriting notes, chat and extractors failed
+  for every cleaned meeting: the notes still cited the removed lines, and
+  agents saw those lines at 00:00. A note now keeps only the lines the
+  transcript still has. One whose only line was removed stays, marked "source
+  line removed", and is no longer sent to the AI. Meetings cleaned before this
+  heal by themselves.
+- Undoing a suggested name, or correcting a real one, left the old name in the
+  notes and as the action's owner. The name now changes there too, and the
+  notes say "Dana was renamed to Remote speaker 1". Agents see which names are
+  only Seashell's suggestion.
+- Notes no longer hide an action behind a similar line ("…to Acme" hid "…to
+  Globex"), or show it with someone else's name and date.
+- An extractor no longer saves what it found if the transcript changed while
+  it ran. Each insight says "may be out of date" until it runs again, even
+  after the notes are rewritten. `seashell query` and the meetings server say
+  when a note may be out of date.
+- `seashell query --person dan` no longer finds Jordan's actions, and an action
+  belongs to its owner, not whoever said it. `--person me` finds yours.
+- Dates in `seashell query` and the meetings server are your local day, as the
+  library's folders are.
+- The meetings server answers questions across the library about 35 times
+  faster at 200 meetings, and reading never changes a meeting.
+- `seashell meeting restore <id>` lists the transcripts kept in a meeting's
+  history, and puts one back. The notes stay. Each meeting keeps its 20 most
+  recent.
+- `library clean-phantoms` keeps lines with no recorded audio under them, in a
+  gap, a dropout or past the end, instead of treating them as silence.
+
 ## Unreleased — your side of the call, and no more phantom words
 
 - The microphone recorded digital silence whenever the input was a built-in Mac

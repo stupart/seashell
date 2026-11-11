@@ -14,6 +14,7 @@ import {
   type MeetingAnalysis,
   type MeetingArtifact,
   parseMeetingNotes,
+  type MeetingChatMessage,
   type MeetingClaim,
   type MeetingEnrichmentMode,
   type MeetingNoteSection,
@@ -107,6 +108,31 @@ export function meetingSegments(record: TranscriptRecord) {
       ? {}
       : { speakerLabel: speakerLabel(record, segment.speaker) as string }),
   }));
+}
+
+/**
+ * Claims as Humain takes them back: each citing only lines this transcript
+ * has, since Humain refuses a claim that cites any other. A claim whose every
+ * line was removed is left out: it stays in the notes, marked, but a point
+ * nobody can check no longer steers the AI. Unchanged claims are the same
+ * objects, so a request that needed no filtering keeps its idempotency key.
+ */
+export function claimsForHumain(claims: readonly MeetingClaim[], validIds: ReadonlySet<string>): MeetingClaim[] {
+  return claims.flatMap((claim) => {
+    const { removedEvidenceSegmentIds: removed, ...sent } = claim;
+    const evidence = sent.evidenceSegmentIds.filter((id) => validIds.has(id));
+    if (!removed && evidence.length === sent.evidenceSegmentIds.length) return [claim];
+    return evidence.length ? [{ ...sent, evidenceSegmentIds: evidence }] : [];
+  });
+}
+
+/** Earlier chat as Humain takes it back: answers cite only lines this transcript has. */
+export function conversationForHumain(messages: readonly MeetingChatMessage[], validIds: ReadonlySet<string>): MeetingChatMessage[] {
+  return messages.map((message) => {
+    const { removedEvidenceSegmentIds: removed, ...sent } = message;
+    if (!removed && (sent.evidenceSegmentIds ?? []).every((id) => validIds.has(id))) return message;
+    return { ...sent, ...(sent.evidenceSegmentIds ? { evidenceSegmentIds: sent.evidenceSegmentIds.filter((id) => validIds.has(id)) } : {}) };
+  });
 }
 
 function parseEnrichmentOutput(
@@ -261,6 +287,7 @@ export async function enrichMeeting(
           calendar: artifact.calendar ?? null,
           attendees: artifact.attendees,
         };
+        const priorClaims = claimsForHumain(artifact.provisionalClaims, validIds);
         const idempotencyKey = stableKey([
           transcriptId,
           'observe',
@@ -269,7 +296,7 @@ export async function enrichMeeting(
           window.segments,
           observerRoute,
           approvedContext,
-          artifact.provisionalClaims,
+          priorClaims,
           ...(instructions ? [instructions] : []),
         ]);
         const { runId, idempotencyKey: attemptKey } = retryableRun(storeDir,
@@ -278,7 +305,7 @@ export async function enrichMeeting(
           meetingId: artifact.meetingId,
           ...humainRouteRequest(observerRoute),
           segments: window.segments,
-          priorClaims: artifact.provisionalClaims,
+          priorClaims,
           context: approvedContext,
           ...(instructions ? { instructions } : {}),
           idempotencyKey: attemptKey,
@@ -325,11 +352,12 @@ export async function enrichMeeting(
         calendar: artifact.calendar ?? null,
         attendees: artifact.attendees,
       };
+      const provisionalClaims = claimsForHumain(artifact.provisionalClaims, validIds);
       const idempotencyKey = stableKey([
         transcriptId,
         'reconcile',
         segments,
-        artifact.provisionalClaims,
+        provisionalClaims,
         reconciliationRoute,
         approvedContext,
         ...(instructions ? [instructions] : []),
@@ -340,7 +368,7 @@ export async function enrichMeeting(
         meetingId: artifact.meetingId,
         ...humainRouteRequest(reconciliationRoute),
         segments,
-        provisionalClaims: artifact.provisionalClaims,
+        provisionalClaims,
         context: approvedContext,
         ...(instructions ? { instructions } : {}),
         idempotencyKey: attemptKey,
@@ -427,15 +455,16 @@ export async function chatWithMeeting(
   const approvedContext = {
     calendar: artifact.calendar ?? null,
     attendees: artifact.attendees,
-    priorConversation: artifact.chat.slice(-10),
+    priorConversation: conversationForHumain(artifact.chat.slice(-10), validIds),
   };
+  const finalClaims = claimsForHumain(artifact.analysis?.claims ?? artifact.provisionalClaims, validIds);
   const { instructions } = ownerInstructions(libraryDir, artifact, {}, 'chat');
   const idempotencyKey = stableKey([
     transcriptId,
     'chat',
     trimmed,
     segments,
-    artifact.analysis?.claims ?? artifact.provisionalClaims,
+    finalClaims,
     route,
     approvedContext,
     ...(instructions ? [instructions] : []),
@@ -447,7 +476,7 @@ export async function chatWithMeeting(
     ...humainRouteRequest(route),
     question: trimmed,
     segments,
-    finalClaims: artifact.analysis?.claims ?? artifact.provisionalClaims,
+    finalClaims,
     context: approvedContext,
     ...(instructions ? { instructions } : {}),
     idempotencyKey: attemptKey,

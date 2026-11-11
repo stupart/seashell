@@ -63,6 +63,7 @@ export type MeetingCommand = {
     | { kind: 'merge'; ids: string[]; auto: boolean; dryRun: boolean; maxGapMinutes?: number }
     | { kind: 'template'; id: string; template?: string }
     | { kind: 'note'; id: string; note?: string }
+    | { kind: 'restore'; id: string; file?: string }
     | { kind: 'meeting-ai'; id: string; off?: boolean }
     | { kind: 'watch'; once: boolean }
     | { kind: 'consent'; decision: 'approve' | 'decline' }
@@ -443,6 +444,7 @@ function parseMeeting(args: string[]): MeetingCommand {
   let once = false;
   let auto = false;
   let dryRun = false;
+  let list = false;
   let maxGapMinutes: number | undefined;
 
   for (let index = 2; index < args.length; index += 1) {
@@ -506,6 +508,7 @@ function parseMeeting(args: string[]): MeetingCommand {
       case '--once': once = true; break;
       case '--auto': auto = true; break;
       case '--dry-run': dryRun = true; break;
+      case '--list': list = true; break;
       case '--max-gap-minutes': {
         const value = Number(next());
         if (!Number.isSafeInteger(value) || value < 1) throw new Error('--max-gap-minutes must be a positive integer');
@@ -544,6 +547,13 @@ function parseMeeting(args: string[]): MeetingCommand {
         throw new Error('Usage: seashell meeting ai <id> [on|off]');
       }
       action = { kind: 'meeting-ai', id: positional[0], ...(positional[1] === undefined ? {} : { off: positional[1] === 'off' }) };
+      break;
+    case 'restore':
+      // With no copy named, list them: as `meeting template <id>` shows the choice before changing it.
+      if (!positional[0] || positional.length > 2 || (list && positional[1] !== undefined)) {
+        throw new Error('Usage: seashell meeting restore <id> [<history file> | --list]');
+      }
+      action = { kind: 'restore', id: positional[0], ...(positional[1] === undefined ? {} : { file: positional[1] }) };
       break;
     case 'note':
       if (!positional[0]) throw new Error('Usage: seashell meeting note <id> [text] (an empty text clears it)');
@@ -718,7 +728,7 @@ function parseMeeting(args: string[]): MeetingCommand {
             !automationMode && !browserWithoutCalendar && !once &&
             !observerBackend && !observerModel && !reconciliationBackend && !reconciliationModel &&
             !chatBackend && !chatModel;
-  if (!validForAction) throw new Error(`One or more options do not apply to meeting ${action.kind}`);
+  if (!validForAction || (list && action.kind !== 'restore')) throw new Error(`One or more options do not apply to meeting ${action.kind}`);
   return { kind: 'meeting', action, ...(libraryDir ? { libraryDir } : {}), json };
 }
 
@@ -1114,6 +1124,7 @@ Meeting actions:
   meeting merge --auto [--dry-run] [--max-gap-minutes 15]  Find and join split meetings
   meeting template <id> [<name>|none|auto]  Choose the notes template for one meeting (auto: from its title)
   meeting note <id> [text]                  Tell the AI what matters in this meeting ("" clears it)
+  meeting restore <id> [<file> | --list]    Put back a transcript kept in the meeting's history; the notes stay
   meeting ai <id> [on|off]                  No AI for one meeting: no notes or chat, hidden from agents
   meeting create <id> [--event-json <path>] [--mode streaming|post-session|hybrid]
   meeting enrich <id> [--mode <mode>] [--backend <backend>] [--model <exact-model>]

@@ -19,8 +19,10 @@ content somewhere, so only do that when the user asks.
 - When `get_meeting` notes carry `sections`, they follow the user's own notes
   template (for example "Goals and pain points", "Next steps"); prefer them
   for the layout of a summary or follow-up, and keep their citations.
-- `possiblyOutOfDate` means words changed after the notes were written (a
-  corrected line, removed silence). Check the transcript before relying on them.
+- `possiblyOutOfDate` means words or a name changed after the notes were
+  written (a corrected line, removed silence, "Dana was renamed to Remote
+  speaker 1"). Check the transcript before relying on them. Notes, each item
+  from `query_notes` and `list_action_items`, and each insight carry their own.
 - A meeting listed as `private` has AI turned off by the user. Tell them it is
   private rather than reading its files directly. Every tool refuses it.
 
@@ -28,8 +30,10 @@ content somewhere, so only do that when the user asks.
 - `query_notes` answers "what did Dana commit to", "decisions about pricing
   since October", "open questions from the hiring syncs": filter by `kind`
   (decisions, actions, risks, questions, follow-ups), `person`, `about`,
-  `meeting`, `since` and `until`. Seashell does not track whether an action
-  was done; say so rather than calling one open or closed.
+  `meeting`, `since` and `until`. `person` matches the owner (or the speaker
+  when no owner was recorded) by whole names or their start; use `me` for the
+  user's own items, which the notes record as "You". Seashell does not track
+  whether an action was done; say so rather than calling one open or closed.
 - `list_action_items` is the quick list of every action item.
 
 ## Insights and video
@@ -43,10 +47,16 @@ content somewhere, so only do that when the user asks.
 - "Microphone" is the user. "Remote speaker N", "System audio" and
   "Unknown remote speaker" are other people. Calendar attendees (in
   `get_meeting`) suggest who they are, but say when a name is a guess.
+- A speaker marked `suggested` (`speakerSuggested` on a transcript line) was
+  named by Seashell from a voice it knows, and the user has not confirmed it.
+  Say it is a guess.
 
 ## Always cite
 Quote or attribute with the segment ID and time, like `[s000123 12:04]`, so the
 user can jump to the source. If the transcript does not support an answer, say so.
+Evidence like `s000001 (no longer in the transcript)` cites a line that was
+removed (silence Whisper misheard): there is nothing to quote, so say the
+source is gone.
 
 ## Changing things (only when the user asks)
 These tools change the user's own files. Say what you changed.

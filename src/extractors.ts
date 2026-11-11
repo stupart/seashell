@@ -10,9 +10,10 @@ import {
   type MeetingArtifact,
   type MeetingInsight,
 } from './meeting-artifact.ts';
-import { meetingSegments, ownerInstructions, retryableRun, runSafeId, stableKey } from './meeting-enrichment.ts';
+import { claimsForHumain, meetingSegments, ownerInstructions, retryableRun, runSafeId, stableKey } from './meeting-enrichment.ts';
 import { meaningful, parseFrontmatter, phraseMatches } from './meeting-templates.ts';
 import { humainRouteRequest, olderHumainEngine, runHumainMeeting, type HumainMeetingRoute } from './humain-client.ts';
+import { meetingEvidence } from './meeting-evidence.ts';
 import { findTranscriptRecord } from './transcript-library.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 
@@ -292,11 +293,14 @@ export async function runExtractor(
     throw new Error(`No extractor named "${String(extractorName)}" in ${extractorsDirectory(libraryDir, options.env)}. See: seashell extractors`);
   }
   const { record, path } = findTranscriptRecord(libraryDir, transcriptId);
+  // The transcript this run reads: what it finds is saved only if that is still the transcript.
+  const revision = meetingEvidence(record).revision;
   const artifact = loadMeetingArtifact(libraryDir, record.id) ?? createMeetingArtifact(record);
   if (artifact.ai?.off) throw new MeetingAiOffError();
   const segments = meetingSegments(record);
   if (segments.length === 0) throw new Error('This meeting has no transcript text to read');
-  const finalClaims = artifact.analysis?.claims ?? artifact.provisionalClaims;
+  const validIds = new Set(segments.map((segment) => segment.id));
+  const finalClaims = claimsForHumain(artifact.analysis?.claims ?? artifact.provisionalClaims, validIds);
   const context = { calendar: artifact.calendar ?? null, attendees: artifact.attendees };
   // About me and the meeting's own note still apply; the template is for notes.
   const { instructions: owner } = ownerInstructions(libraryDir, artifact, {});
@@ -328,10 +332,13 @@ export async function runExtractor(
     extractor: extractor.name,
     createdAt: new Date().toISOString(),
     runId: result.runId,
-    ...parseExtractOutput(result.output, extractor, new Set(segments.map((segment) => segment.id))),
+    ...parseExtractOutput(result.output, extractor, validIds),
   };
   // Re-read: notes or chat may have been saved while this ran.
   const current = loadMeetingArtifact(libraryDir, record.id) ?? artifact;
+  if (current.transcriptEvidence?.revision !== revision) {
+    throw new Error(`The transcript changed while ${extractor.name} ran, so what it found was not saved. Run it again.`);
+  }
   saveMeetingArtifact(libraryDir, {
     ...current,
     insights: [...(current.insights ?? []).filter((saved) => saved.extractor !== extractor.name), insight],
