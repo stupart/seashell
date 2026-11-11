@@ -1,9 +1,11 @@
 import { spawn } from 'child_process';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { pcmS16leToWav } from './live-system-audio.ts';
 import { DEFAULT_VAD_MODEL_FILENAME } from './model-config.ts';
-import { trackChildProcess } from './process-lifecycle.ts';
+import { trackChildProcess, trackTempDirectory } from './process-lifecycle.ts';
 import type { TimedTranscriptUnit } from './transcript-types.ts';
 
 /**
@@ -30,6 +32,19 @@ const TOUCH_SECONDS = 0.03;
 const QUIET_DBFS = -38;
 const FRAME_SECONDS = 0.02;
 const SHORTEST_WINDOW_SECONDS = 0.2;
+/**
+ * Silero is a recurrent model, so a run uses one core however many threads it
+ * gets: 25 minutes took 3 to 4 seconds, and more threads only made it slower.
+ * A long track is cut into pieces of at least this length, read at once.
+ */
+const DETECTION_PIECE_SECONDS = 120;
+const MAX_DETECTION_PIECES = 4;
+/** Each cut goes at the quietest half second this close to an even split. */
+const CUT_SEARCH_SECONDS = 10;
+const CUT_WINDOW_SECONDS = 0.5;
+const CUT_STEP_SECONDS = 0.05;
+/** Silero reads 512-sample frames; a cut off that grid shifts every region after it. */
+const SILERO_FRAME_SAMPLES = 512;
 
 export interface SpeechRegion {
   readonly start: number;
@@ -53,15 +68,9 @@ export function parseSpeechRegions(output: string): SpeechRegion[] {
     .toSorted((left, right) => left.start - right.start);
 }
 
-/** Undefined when detection is unavailable or fails, which leaves the transcript alone. */
-export function detectSpeechRegions(
-  wavPath: string,
-  tool = SPEECH_TOOL,
-  model = SPEECH_MODEL,
-): Promise<SpeechRegion[] | undefined> {
-  if (!existsSync(tool) || !existsSync(model)) return Promise.resolve(undefined);
+function runSpeechTool(wavPath: string, tool: string, model: string): Promise<SpeechRegion[] | undefined> {
   return new Promise((resolve) => {
-    const child = spawn(tool, ['-f', wavPath, '-vm', model, '-np', '-t', '2', '-vspd', MIN_SPEECH_MS, '-vp', SPEECH_PAD_MS],
+    const child = spawn(tool, ['-f', wavPath, '-vm', model, '-np', '-t', '1', '-vspd', MIN_SPEECH_MS, '-vp', SPEECH_PAD_MS],
       { stdio: ['ignore', 'pipe', 'ignore'] });
     const stopTracking = trackChildProcess(child);
     const timer = setTimeout(() => child.kill('SIGKILL'), TOOL_TIMEOUT_MS);
@@ -71,6 +80,62 @@ export function detectSpeechRegions(
     child.once('error', () => finish(undefined));
     child.once('close', (code) => finish(code === 0 ? parseSpeechRegions(output) : undefined));
   });
+}
+
+/**
+ * Where to cut a track into pieces for detection, as sample offsets: the middle
+ * of the quietest half second near each even split, on Silero's frame grid, so
+ * a piece starts in silence as the whole track does. On a sparse 25-minute
+ * track the regions matched one long run's to the centisecond; on a busy AMI
+ * meeting a few edges moved, and the phantom check judged every word the same.
+ */
+export function quietCuts(pcm: Int16Array, sampleRate = 16_000): number[] {
+  const pieces = Math.min(MAX_DETECTION_PIECES, Math.floor(pcm.length / (DETECTION_PIECE_SECONDS * sampleRate)));
+  const window = Math.round(CUT_WINDOW_SECONDS * sampleRate);
+  const step = Math.round(CUT_STEP_SECONDS * sampleRate);
+  const search = Math.round(CUT_SEARCH_SECONDS * sampleRate);
+  const cuts: number[] = [];
+  for (let piece = 1; piece < pieces; piece += 1) {
+    const even = Math.round(pcm.length * piece / pieces);
+    let quietest = even, lowest = Infinity;
+    for (let first = even - search; first + window <= even + search; first += step) {
+      let energy = 0;
+      for (let index = first; index < first + window; index += 1) energy += pcm[index]! * pcm[index]!;
+      if (energy < lowest) { lowest = energy; quietest = first + window / 2; }
+    }
+    cuts.push(Math.round(quietest / SILERO_FRAME_SAMPLES) * SILERO_FRAME_SAMPLES);
+  }
+  return cuts;
+}
+
+/** Undefined when detection is unavailable or fails, which leaves the transcript alone. */
+export async function detectSpeechRegions(
+  wavPath: string,
+  tool = SPEECH_TOOL,
+  model = SPEECH_MODEL,
+): Promise<SpeechRegion[] | undefined> {
+  if (!existsSync(tool) || !existsSync(model)) return undefined;
+  let pcm: Int16Array | undefined;
+  try { pcm = readMonoPcm(readFileSync(wavPath)); } catch { pcm = undefined; }
+  const cuts = pcm ? quietCuts(pcm) : [];
+  if (!pcm || !cuts.length) return await runSpeechTool(wavPath, tool, model);
+  const audio = pcm;
+  const directory = mkdtempSync(join(tmpdir(), 'seashell-speech-'));
+  const stopTrackingTemp = trackTempDirectory(directory);
+  try {
+    const bounds = [0, ...cuts, audio.length];
+    const pieces = await Promise.all(bounds.slice(1).map(async (end, index) => {
+      const start = bounds[index]!;
+      const path = join(directory, `${index}.wav`);
+      writeFileSync(path, pcmS16leToWav(new Uint8Array(audio.buffer, audio.byteOffset + start * 2, (end - start) * 2)));
+      const regions = await runSpeechTool(path, tool, model);
+      return regions?.map((region) => ({ start: region.start + start / 16_000, end: region.end + start / 16_000 }));
+    }));
+    return pieces.some((regions) => regions === undefined) ? undefined : pieces.flatMap((regions) => regions ?? []);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+    stopTrackingTemp();
+  }
 }
 
 /** 16 kHz mono PCM from a WAV, or undefined for any other shape. */
