@@ -142,13 +142,17 @@ video { display: block; flex: none; height: auto; aspect-ratio: auto 16 / 10; bo
 video:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .status { margin-block: 0; color: var(--muted); font-size: 13px; }
 .status:empty { display: none; }
+.transcript { display: grid; grid-template-rows: minmax(0, 1fr); min-height: 0; background: var(--panel);
+  border-left: 1px solid var(--line); }
+/* The first line starts level with the video; lines fade out at the list's edges rather than being cut. */
 ol { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; align-content: start;
-  position: relative; margin: 0; padding: 8px 0; list-style: none; overflow-y: auto; overscroll-behavior: contain;
-  background: var(--panel); border-left: 1px solid var(--line);
-  mask-image: linear-gradient(transparent, #000 8px, #000 calc(100% - 8px), transparent); }
+  position: relative; min-height: 0; margin: 0; padding: var(--gutter) 0 8px; list-style: none; overflow-y: auto;
+  overscroll-behavior: contain; mask-image: linear-gradient(transparent, #000 8px, #000 calc(100% - 8px), transparent); }
 li { grid-column: 1 / -1; display: grid; grid-template-columns: 4em minmax(0, 1fr); grid-template-columns: subgrid;
   align-items: baseline; margin: 0 8px; padding: 8px 12px; border-radius: 8px; cursor: pointer; overflow-wrap: anywhere;
   text-wrap: pretty; }
+li > div { max-width: 66ch; }
+li.turn { margin-top: 8px; }
 @media (hover: hover) { li:hover { background: var(--hover); } }
 li.current { background: var(--current); }
 li.before { color: var(--muted); }
@@ -157,13 +161,12 @@ li:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 time { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 .speaker { display: block; font-size: 13px; font-weight: 600; }
 .speaker.unknown { color: var(--muted); }
-/* The same speaker again: read out, not shown. */
-.speaker.same { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @media (max-width: 860px) {
-  header { border-bottom: 0; }
+  header { padding-bottom: 0; border-bottom: 0; }
   main { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .stage { --fit: calc(45vh * var(--ratio, 1.6)); container-type: normal; }
-  ol { border-left: 0; border-top: 1px solid var(--line); }
+  .transcript { border-left: 0; border-top: 1px solid var(--line); }
+  ol { padding-top: 8px; }
 }
 </style>
 </head>
@@ -174,7 +177,7 @@ time { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums;
     <video controls playsinline preload="metadata" aria-label="Meeting video"></video>
     <p class="status" role="status"></p>
   </section>
-  <ol role="listbox" aria-label="Transcript"></ol>
+  <div class="transcript"><ol role="listbox" aria-label="Transcript"></ol></div>
 </main>
 <script type="application/json" id="meeting-data">${scriptJson(data)}</script>
 <script>
@@ -189,26 +192,31 @@ let movie = -1;
 let current = -1;
 let stop = null;
 let scrolledAt = 0;
+// In a meeting of an hour or more every time has hours, so the column keeps one width.
+const hours = data.lines.some((line) => line.start >= 3600);
 const clock = (seconds) => {
   const s = Math.max(0, Math.floor(seconds));
   const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, rest = String(s % 60).padStart(2, '0');
-  return h ? h + ':' + String(m).padStart(2, '0') + ':' + rest : m + ':' + rest;
+  return h || hours ? h + ':' + String(m).padStart(2, '0') + ':' + rest : m + ':' + rest;
 };
 // Video time = transcript time + offset. A later movie takes over once it has started.
 const movieAt = (t) => movies.reduce((found, entry, index) => (t + entry.offset >= 0 ? index : found), 0);
 const firstPicture = -movies[0].offset;
 let said = '';
-const items = data.lines.map((line) => {
+const items = data.lines.map((line, index) => {
   const item = document.createElement('li');
   item.setAttribute('role', 'option');
   item.tabIndex = -1;
   const time = document.createElement('time');
   time.textContent = clock(line.start);
+  // Read out whole, with its speaker, whether or not the name shows.
+  item.setAttribute('aria-label', time.textContent + (line.speaker ? ' ' + line.speaker + ': ' : ' ') + line.text);
   const body = document.createElement('div');
   // A name shows when the speaker changes; a line nobody was matched to after a named one says so.
-  if (line.speaker || said) {
+  if (line.speaker !== said) {
+    if (index) item.classList.add('turn');
     const who = document.createElement('span');
-    who.className = line.speaker ? (line.speaker === said ? 'speaker same' : 'speaker') : 'speaker unknown';
+    who.className = line.speaker ? 'speaker' : 'speaker unknown';
     who.textContent = line.speaker || 'Unknown';
     body.append(who);
   }

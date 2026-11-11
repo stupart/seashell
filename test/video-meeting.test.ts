@@ -282,7 +282,7 @@ test('the player page is labelled, themed, offline and small', () => {
   expect(shell.length).toBeLessThan(14_000);
 });
 
-test('a speaker is named when they start talking, and a line matched to nobody after a named one says so', () => {
+test('a speaker is named when they start talking, every line is read out with its speaker, and a line matched to nobody after a named one says so', () => {
   const said = ['SPEAKER_00', 'SPEAKER_00', 'SPEAKER_01', undefined, undefined, 'SPEAKER_01'];
   const record = createTranscriptRecord({
     transcript: said.map((speaker, index) => ({ start: index * 5, end: index * 5 + 4, text: `Line ${index}`, ...(speaker ? { speaker } : {}) })),
@@ -291,7 +291,21 @@ test('a speaker is named when they start talking, and a line matched to nobody a
   const page = playerHarness(renderVideoPlayerPage('/m', record, { ...movie(-1), segments: [movie(-1)] }));
   const names = page.items.map((item) => {
     const who = (item.children[1] as unknown as { children: { classes?: Set<string>; textContent: string }[] }).children[0]!;
-    return who.classes ? `${who.textContent}${who.classes.has('same') ? ' (read, not shown)' : ''}${who.classes.has('unknown') ? ' (muted)' : ''}` : '-';
+    return who.classes ? `${who.textContent}${who.classes.has('unknown') ? ' (muted)' : ''}` : '-';
   });
-  expect(names).toEqual(['Avery', 'Avery (read, not shown)', 'Rowan', 'Unknown (muted)', '-', 'Rowan']);
+  expect(names).toEqual(['Avery', '-', 'Rowan', 'Unknown (muted)', '-', 'Rowan']);
+  // A new speaker starts a new turn, set apart by a little more space.
+  expect(page.items.map((item) => item.classes.has('turn'))).toEqual([false, false, true, true, false, true]);
+  // Every line is read out with its speaker, shown or not.
+  expect(page.items.map((item) => item.getAttribute('aria-label'))).toEqual([
+    '0:00 Avery: Line 0', '0:05 Avery: Line 1', '0:10 Rowan: Line 2', '0:15 Line 3', '0:20 Line 4', '0:25 Rowan: Line 5']);
+});
+
+test('in a meeting of an hour or more every time has hours, so the time column keeps one width', () => {
+  const record = (ends: number) => createTranscriptRecord({
+    transcript: [{ start: 5, end: 9, text: 'Hello' }, { start: ends, end: ends + 4, text: 'Bye' }], speakers: [] }, { id: 'h', title: 'Hours' });
+  const times = (ends: number) => playerHarness(renderVideoPlayerPage('/m', record(ends), { ...movie(-1), segments: [movie(-1)] }))
+    .items.map((item) => (item.children[0] as unknown as { textContent: string }).textContent);
+  expect(times(3599)).toEqual(['0:05', '59:59']);
+  expect(times(3700)).toEqual(['0:00:05', '1:01:40']);
 });
