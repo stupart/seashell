@@ -410,6 +410,84 @@ Seashell cannot read the Meet page, which happens whenever Meet is full screen,
 on another desktop or in a background tab. When a call does need a yes, Seashell
 asks with a dialog, so it is answered even with no Seashell window open.
 
+### Meeting video
+
+While it records a call, Seashell also records the call's window: the browser
+window with the Meet in it, or the Zoom, Teams or FaceTime window. Whatever
+anyone shares in the call shows in that window, so it is in the video. The
+window is recorded even on another desktop or under other windows. When no
+window of the call's app fits, Seashell records the main display instead and
+says so.
+
+Video needs macOS Screen Recording access, once, for the helper named
+**Seashell Screen Capture**:
+
+```bash
+seashell meeting video setup      # macOS asks; turn on Seashell Screen Capture
+seashell meeting video --status   # check, without asking
+```
+
+Until then, calls still record their audio and Seashell warns that video was
+skipped.
+
+A recording you start yourself has video only when you ask for it:
+
+```bash
+seashell record --video                 # the call's window if one is open, otherwise the main display
+seashell record --video --window zoom   # one app's window, by id or name
+seashell record --video --display 2     # a whole display; 1 is the main display
+```
+
+Watch a meeting's video beside its transcript:
+
+```bash
+seashell meeting video <id>              # opens video.html from the meeting folder
+seashell meeting video <id> --at 12:34   # opens at that moment
+```
+
+Click a line to see that moment; the line being said is highlighted. The page
+works offline. The video has no sound of its own: the transcript carries the
+words.
+
+Turn video off, or off for one app:
+
+```bash
+seashell meeting video off
+seashell meeting video facetime off      # on or off, per app
+```
+
+In `config.json`, `meeting.video` holds `enabled`, `apps` (per app, by the ids
+of `seashell meeting apps`, `true` or `false`), `fps` (1 to 30, default 2) and
+`quality` (`low` 1280 px, `medium` 1920 px, the default, or `high` 2560 px):
+
+```json
+{ "meeting": { "video": { "enabled": true, "apps": { "facetime": false }, "fps": 2, "quality": "medium" } } }
+```
+
+**Where it lives.** Each meeting folder keeps its movies in `capture/video/`
+(`000001.mp4`, with a `.json` sidecar), and `video.json` beside the transcript
+points at them: video time = transcript time + `startOffsetSeconds`. A call
+that pauses and resumes, or a recorder that had to restart, adds a second movie,
+listed under `segments`. Movies are H.264, encoded in hardware and written in
+4-second fragments, so a crash loses only the last few seconds.
+
+**How big.** Measured on a synthetic screen share (slides changing every 30
+seconds, a moving pointer and a talking-head tile), per hour of meeting:
+
+| Setting | MB per hour |
+| --- | --- |
+| low, 2 fps | 44 |
+| medium, 2 fps (default) | 60 |
+| high, 2 fps | 73 |
+| medium, 5 fps | 73 |
+| medium, 15 fps | 106 |
+| medium, 30 fps | 156 |
+
+A still slide costs almost nothing. A screen that moves all the time, such as a
+shared video, costs up to the encoder's target: about 135 MB an hour at the
+default. For comparison, a meeting's own audio (two 16 kHz tracks) is about
+230 MB an hour.
+
 ## Terminal UI
 
 Sea Shell opens on the same simple, transcript-first screen used for live
@@ -1027,6 +1105,8 @@ seashell meeting show <id> --json
 - Default capture, transcription, durable chunks, and speaker inference stay
   local. Explicitly consented cloud transcription uploads the selected audio.
 - Roster and active-speaker evidence stays local in the built-in identity pass.
+- Meeting video, when on, records only the call's window (or the main display
+  when no window fits) and stays on this Mac.
 - Meeting enrichment sends only the selected transcript and explicitly supplied
   context to the configured Humain route. Codex/Claude Code subscription and
   OpenRouter routes are remote; use them when that data sharing is appropriate.

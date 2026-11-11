@@ -347,3 +347,36 @@ test('saved speaker identification creates an explicit library action', () => {
     kind: 'library', action: { kind: 'speakers-identify', id: 'meeting-1' }, json: true,
   });
 });
+
+describe('video CLI parsing', () => {
+  test('record --video names a window or a display, and either implies video', () => {
+    expect(parseCliArgs(['record'])).toEqual({ kind: 'record', command: 'start', json: false });
+    expect(parseCliArgs(['record', '--video', '--json'])).toEqual({ kind: 'record', command: 'start', json: true, video: {} });
+    expect(parseCliArgs(['record', '--video', '--window', 'Google Chrome'])).toEqual({
+      kind: 'record', command: 'start', json: false, video: { window: 'Google Chrome' } });
+    expect(parseCliArgs(['record', '--display', '2'])).toEqual({ kind: 'record', command: 'start', json: false, video: { display: 2 } });
+    expect(parseCliArgs(['record', 'stop', '--json'])).toEqual({ kind: 'record', command: 'stop', json: true });
+    for (const args of [['record', 'stop', '--video'], ['record', '--window', 'zoom', '--display', '1'],
+      ['record', '--display', '0'], ['record', '--window'], ['record', 'later']]) {
+      expect(() => parseCliArgs(args)).toThrow();
+    }
+  });
+
+  test('meeting video covers permission, settings and one meeting', () => {
+    const video = (...args: string[]) => (parseCliArgs(['meeting', 'video', ...args]) as { action: unknown }).action;
+    expect(video()).toEqual({ kind: 'video', operation: 'status' });
+    expect(video('--status', '--json')).toEqual({ kind: 'video', operation: 'status' });
+    expect(video('setup')).toEqual({ kind: 'video', operation: 'setup' });
+    expect(video('off')).toEqual({ kind: 'video', operation: 'off' });
+    expect(video('Zoom', 'on')).toEqual({ kind: 'video', operation: 'on', app: 'zoom' });
+    expect(video('meeting-20261110-ab12', '--at', '12:34')).toEqual({ kind: 'video', operation: 'open', id: 'meeting-20261110-ab12', atSeconds: 754 });
+    expect(video('meeting-1', '--at', '1:02:03')).toMatchObject({ atSeconds: 3723 });
+    expect(video('meeting-1', '--at', '90')).toMatchObject({ atSeconds: 90 });
+    expect(parseCliArgs(['meeting', 'video', 'meeting-1', '--library-dir', '/tmp/lib', '--json']))
+      .toMatchObject({ kind: 'meeting', libraryDir: '/tmp/lib', json: true });
+    for (const args of [['setup', '--status'], ['on', '--at', '1:00'], ['meeting-1', '--at', 'soon'], ['meeting-1', '--at', '1:2:3:4'],
+      ['a', 'b', 'c'], ['zoom', 'maybe'], ['--loud']]) {
+      expect(() => parseCliArgs(['meeting', 'video', ...args])).toThrow();
+    }
+  });
+});
