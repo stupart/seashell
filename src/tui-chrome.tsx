@@ -204,7 +204,7 @@ export const HELP_ROWS: ReadonlyArray<readonly [string, string]> = [
   ['Transcript', 't show/hide times · s show/hide speakers · l latest words · n next match'],
   ['When asked', 'y record · n ignore'],
   ['Recording', 'starts and stops with the call · + note this moment · a catch up on what you missed · space record or stop by hand · V record with video · i audio help'],
-  ['Next', 'b brief for your next meeting'],
+  ['Next', 'b meetings coming up, and their briefs'],
   ['Add', 'f import a file · F import and separate speakers'],
   ['Setup', ', settings: speakers, AI and more'],
 ];

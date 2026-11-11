@@ -44,6 +44,19 @@ export function meetingWhen(createdAt: string, now = new Date(), withTime = true
   return withTime ? `${day} ${clockTime(created)}` : day;
 }
 
+/**
+ * When a meeting coming up starts: "Today 6:31 pm", "Tomorrow 10:00 am", "Fri 9:00 am". In a sentence,
+ * today's is just its time and the day is lower case: "6:31 pm", "tomorrow 10:00 am".
+ */
+export function upcomingWhen(startsAt: string, now = new Date(), inSentence = false): string {
+  const at = new Date(startsAt);
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+  if (at.toDateString() === now.toDateString()) return inSentence ? clockTime(at) : `Today ${clockTime(at)}`;
+  const day = at.toDateString() === tomorrow.toDateString() ? 'Tomorrow' : at.toLocaleDateString('en-US', { weekday: 'short' });
+  return `${inSentence && day === 'Tomorrow' ? 'tomorrow' : day} ${clockTime(at)}`;
+}
+
 /** The list's date column: the time for today's meetings, the day for older ones. */
 export function listWhen(createdAt: string, now = new Date()): string {
   return meetingWhen(createdAt, now, false);

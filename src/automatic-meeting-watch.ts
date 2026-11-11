@@ -23,12 +23,14 @@ import {
 import {
   briefDue,
   briefKey,
+  COMING_UP_HOURS,
+  COMING_UP_LIMIT,
   findBrief,
   makeBrief,
-  nextCalendarMeeting,
   NoBriefHistoryError,
   recordBriefAttempt,
   relevantMeetings,
+  upcomingCalendarMeetings,
   upcomingFromEvent,
   writeNextMeeting,
 } from './briefs.ts';
@@ -351,7 +353,7 @@ export class AutomaticMeetingWatchService {
     if (!calendar?.enabled || (calendar.policy ?? 'ask') === 'off') return;
     if ((!this.#ahead || now.getTime() - this.#ahead.readAtUnixMs >= 5 * 60_000) && !this.#aheadRead &&
         now.getTime() >= this.#calendarRetryAtUnixMs) {
-      this.#aheadRead = this.#dependencies.readCalendar({ leadMinutes: 12 * 60, lookbackMinutes: 0, signal: this.#calendarAbort.signal })
+      this.#aheadRead = this.#dependencies.readCalendar({ leadMinutes: COMING_UP_HOURS * 60, lookbackMinutes: 0, signal: this.#calendarAbort.signal })
         .then((events) => {
           this.#ahead = { readAtUnixMs: this.#dependencies.now().getTime(), events };
           this.publishNext(this.#dependencies.now());
@@ -383,15 +385,21 @@ export class AutomaticMeetingWatchService {
     })().finally(() => { this.#briefing = undefined; });
   }
 
-  /** What the app shows as the next meeting: when it is, whether there is a brief, or past meetings to make one from. */
+  /**
+   * What the app lists as coming up, over the next 36 hours, the nearest first: when each is, whether
+   * there is a brief, or past meetings to make one from.
+   */
   private publishNext(now: Date): void {
     try {
-      const event = this.#ahead ? nextCalendarMeeting(this.#ahead.events, now) : undefined;
-      if (!event) { writeNextMeeting(this.#libraryDir, undefined); return; }
-      const upcoming = upcomingFromEvent(event);
-      const brief = findBrief(this.#libraryDir, upcoming);
-      writeNextMeeting(this.#libraryDir, { upcoming, history: brief ? brief.meetings.length : relevantMeetings(this.#libraryDir, upcoming).length,
-        ...(brief ? { brief: brief.path } : {}) }, now.getTime());
+      const events = this.#ahead ? upcomingCalendarMeetings(this.#ahead.events, now).slice(0, COMING_UP_LIMIT) : [];
+      const [nearest, ...later] = events.map((event) => {
+        const upcoming = upcomingFromEvent(event);
+        const brief = findBrief(this.#libraryDir, upcoming);
+        return { upcoming, history: brief ? brief.meetings.length : relevantMeetings(this.#libraryDir, upcoming).length,
+          ...(brief ? { brief: brief.path } : {}) };
+      });
+      if (!nearest) { writeNextMeeting(this.#libraryDir, undefined); return; }
+      writeNextMeeting(this.#libraryDir, { ...nearest, ...(later.length ? { later } : {}) }, now.getTime());
     } catch (error) {
       this.emit({ type: 'watch.warning', at: now.toISOString(), message: `Could not save the next meeting: ${errorMessage(error)}` });
     }

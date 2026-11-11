@@ -349,11 +349,14 @@ export const JOURNEYS: Journey[] = [
     id: 'brief', title: 'A brief before the next meeting', who: 'Someone with a meeting in 40 minutes who met these people before.',
     machine: 'ready', library: 'demo', narrow: true,
     steps: [
-      { title: 'The next meeting', world: ({ library }) => nextMeeting(library), until: 'Next:', note: 'The title line says what is next; b reads its brief.' },
-      { title: 'Writing the brief', press: ['b'], keys: 'B', until: '◐', note: 'From the past meetings with the same title or people. Esc stops it.' },
+      { title: 'The next meeting', world: ({ library }) => nextMeeting(library), until: 'Next:', note: 'The title line says what is next; b lists what is coming up.' },
+      { title: 'Coming up', press: ['b'], keys: 'B', until: 'Coming up', note: 'The next 36 hours, tomorrow morning included, and where each brief stands.' },
+      { title: 'Writing the brief', press: [ENTER], keys: 'Enter', until: '◐', note: 'From the past meetings with the same title or people. Esc stops it.' },
       { title: 'The brief', until: 'Still open', note: 'Each point says which meeting and when, dim on the right.' },
-      { title: 'Back', press: [ESC], keys: 'Esc' },
-      { title: 'Ready next time', press: ['b'], keys: 'B', until: 'Still open', note: 'Saved in the Briefs folder: the second time it opens at once.' },
+      { title: 'Back to the list', press: [ESC], keys: 'Esc', until: 'brief ready', note: 'It says the brief is ready.' },
+      { title: 'Ready next time', press: [ENTER], keys: 'Enter', until: 'Still open', note: 'Saved in the Briefs folder: the second time it opens at once.' },
+      { title: 'No history', press: [ESC, DOWN, DOWN, ENTER], keys: 'Esc ↓ ↓ Enter', until: 'Nothing to brief from',
+        note: 'A meeting with nobody met before has nothing to read, and says so.' },
     ],
   },
   {
@@ -548,13 +551,22 @@ function cannedAnswer(action: string, request: Record<string, any>): unknown {
   return undefined;
 }
 
-/** What the recorder says comes next on the calendar, with past meetings to brief from. */
+/** What the recorder says is coming up on the calendar: the next meeting, with past meetings to brief from, then tomorrow's. */
 async function nextMeeting(library: string) {
   const { writeNextMeeting } = await import('../src/briefs.ts');
   const startsAt = new Date(Date.now() + 40 * 60_000);
   startsAt.setSeconds(0, 0);
+  const tomorrow = (hour: number, minute: number) => {
+    const at = new Date(Date.now() + 86_400_000);
+    at.setHours(hour, minute, 0, 0);
+    return at.toISOString();
+  };
   writeNextMeeting(library, { upcoming: { title: 'Roadmap review', startsAt: startsAt.toISOString(), eventId: 'demo-roadmap-series',
-    attendees: [{ name: 'Dana Whitfield', email: 'dana@example.com' }] }, history: 1 });
+    attendees: [{ name: 'Dana Whitfield', email: 'dana@example.com' }] }, history: 1, later: [
+    { upcoming: { title: 'Acme check-in', startsAt: tomorrow(10, 0), eventId: 'demo-acme-check-in',
+      attendees: [{ name: 'Priya', email: 'priya@acme.example' }] }, history: 1 },
+    { upcoming: { title: 'Lunch with Sam', startsAt: tomorrow(12, 30), eventId: 'demo-lunch', attendees: [{ name: 'Sam', email: 'sam@example.com' }] }, history: 0 },
+  ] });
 }
 
 async function liveMeeting(library: string, background: Background, options: { microphoneDown?: boolean; bundle?: boolean } = {}) {

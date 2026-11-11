@@ -9,6 +9,7 @@ import {
   makeBrief,
   NoBriefHistoryError,
   ownerKeys,
+  readComingUp,
   readNextMeeting,
   recordBriefAttempt,
   relevantMeetings,
@@ -121,6 +122,9 @@ test('a brief is asked for with the contract\'s shape, saved as Markdown with ci
   expect(markdown).toContain('- Send the security summary. _(Acme discovery call, Nov 5, 00:04)_');
   expect(markdown).toContain('(acme-call)');
   expect(findBrief(root, next, env)?.path).toBe(brief.path);
+  // Coming up says it is ready at once, before the recorder next looks at the calendar.
+  writeNextMeeting(root, { upcoming: next, history: 1 });
+  expect(readComingUp(root, new Date(), env)[0]?.brief).toBe(brief.path);
 });
 
 test('nothing to read is said plainly, and an older engine is told to update before anything is sent', async () => {
@@ -162,6 +166,11 @@ test('the recorder makes a brief once, about 15 minutes ahead, and the app learn
   expect(readNextMeeting(root, now)).toMatchObject({ history: 2, upcoming: { title: 'Weekly sync' } });
   // Stale once the recorder stops saying it, or long after it started.
   expect(readNextMeeting(root, new Date(now.getTime() + 20 * 60_000))).toBeUndefined();
+  // Later meetings follow the nearest, soonest first; one that has started long since drops off.
+  const later = (title: string, minutes: number) => ({ upcoming: { ...due!, title, startsAt: new Date(now.getTime() + minutes * 60_000).toISOString() }, history: 0 });
+  writeNextMeeting(root, { upcoming: due!, history: 2, later: [later('Tomorrow', 20 * 60), later('Long started', -11), later('Tonight', 6 * 60)] }, now.getTime());
+  expect(readComingUp(root, now).map((meeting) => meeting.upcoming.title)).toEqual(['Weekly sync', 'Tonight', 'Tomorrow']);
+  expect(readNextMeeting(root, now)?.later?.map((meeting) => meeting.upcoming.title)).toEqual(['Tonight', 'Tomorrow']);
 });
 
 /** A fake Humain that drafts a short follow-up citing the meeting. */
