@@ -1,5 +1,6 @@
 import React from 'react';
 import { Box, Text, useStdout } from 'ink';
+import wrapAnsi from 'wrap-ansi';
 
 export type Hint = readonly [key: string, label: string];
 
@@ -18,10 +19,12 @@ export function fitHints(hints: readonly Hint[], columns: number, always: readon
   return [...fitted, ...pinned];
 }
 
-/** The only key bar. Prompts and toasts take this row; nothing else adds one. */
+/** The only key bar. Prompts and toasts take this row; nothing else adds one.
+ * Without help, the way back is the hint that is never dropped. */
 export function KeyBar(props: { hints: readonly Hint[]; columns: number; help?: boolean }) {
+  const always = props.help === false ? props.hints.filter(([key]) => key === 'Esc') : ALWAYS;
   return <Text wrap="truncate-end">
-    {fitHints(props.hints, props.columns, props.help === false ? [] : ALWAYS).map(([key, label], index) => <React.Fragment key={key}>
+    {fitHints(props.hints, props.columns, always).map(([key, label], index) => <React.Fragment key={key}>
       {index > 0 ? '  ' : ''}<Text bold>{key}</Text><Text dimColor> {label}</Text>
     </React.Fragment>)}
   </Text>;
@@ -46,13 +49,22 @@ export function Sheet(props: { title: string; children: React.ReactNode }) {
   </Box>;
 }
 
-/** Wraps under its own column, so nothing is lost on a narrow window. */
+/** Wraps under its own column a whole item at a time, so nothing is lost on a narrow window. */
 export function HelpRow(props: { group: string; keys: string }) {
   return <Box flexShrink={0}>
     <Box width={12} flexShrink={0}><Text bold>{props.group}</Text></Box>
-    <Box flexGrow={1} minWidth={0} flexWrap="wrap">
-      {props.keys.split(' · ').map((item) => <Box key={item} marginRight={2}><Text>{item}</Text></Box>)}
+    <Box flexGrow={1} minWidth={0} flexWrap="wrap" columnGap={2}>
+      {props.keys.split(' · ').map((item) => <Text key={item}>{item}</Text>)}
     </Box>
+  </Box>;
+}
+
+/** Text wrapped at word breaks with no stray space starting a line, which Ink's own wrapping leaves. */
+export function Paragraph(props: { text: string; width: number; color?: 'red' | 'yellow' | 'green' | 'cyan'; dimColor?: boolean; bold?: boolean }) {
+  const { text, width, ...style } = props;
+  return <Box flexDirection="column" flexShrink={0}>
+    {wrapAnsi(text, Math.max(8, width), { hard: true, trim: true }).split('\n')
+      .map((line, index) => <Text key={index} {...style}>{line || ' '}</Text>)}
   </Box>;
 }
 

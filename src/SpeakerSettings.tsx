@@ -83,10 +83,11 @@ export default function SpeakerSettings(props: {
     }
   });
   const selected = entries[Math.min(index, entries.length - 1)]!;
+  const labelWidth = Math.max(...entries.map(([, label]) => label.length)) + 2;
   return <Box flexDirection="column" paddingX={1} {...(props.rows ? { height: props.rows } : {})} overflow="hidden">
     <ScreenTitle name="Speaker names" />
     {entries.map(([id, label, value], i) => <Text key={id} inverse={i === index} wrap="truncate-end">
-      {i === index ? '› ' : '  '}{label.padEnd(32)}{value}
+      {i === index ? '› ' : '  '}{label.padEnd(labelWidth)}<Text dimColor={i !== index}>{value}</Text>
     </Text>)}
     <Box flexDirection="column" flexGrow={1} marginTop={1} overflow="hidden">
       {(selected[0] === 'meet' || selected[0] === 'meet-off') && <>

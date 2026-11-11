@@ -148,7 +148,7 @@ export default function AIProviderPicker(props: {
     {screen === 'effort' && <Text>{chosen?.name} · reasoning effort</Text>}
     <Box flexDirection="column" marginTop={1}>
       {screen === 'custom' ? <><Text>Model: {custom}█</Text><Text dimColor>Custom IDs use provider-default effort.</Text></>
-        : entries.slice(offset, offset + 7).map((label, i) => <Text key={offset + i} color={offset + i === index ? 'cyan' : undefined}>{offset + i === index ? '›' : ' '} {label}</Text>)}
+        : entries.slice(offset, offset + 7).map((label, i) => <Text key={offset + i} inverse={offset + i === index} wrap="truncate-end">{offset + i === index ? '› ' : '  '}{label}</Text>)}
     </Box>
     {entries.length > 7 && screen !== 'custom' && <Text dimColor>{index + 1}/{entries.length} · ↑↓ or PgUp/PgDn</Text>}
     <Box flexDirection="column" marginTop={1}>
