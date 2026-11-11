@@ -16,7 +16,7 @@ import { isPrivate, readListed } from './meeting-memory.ts';
 import { loadProfile } from './meeting-templates.ts';
 import { listTranscriptRecords } from './transcript-library.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
-import { formatTuiClock } from './tui-state.ts';
+import { sentenceClock } from './tui-state.ts';
 import { loadVocabulary } from './vocabulary.ts';
 
 /**
@@ -208,7 +208,7 @@ export function briefCitation(brief: Pick<Brief, 'meetings'>, source: BriefSourc
   if (!meeting) return '';
   const times = source.evidenceSegmentIds.flatMap((id) => meeting.moments[id] === undefined ? [] : [meeting.moments[id]!])
     .sort((a, b) => a - b);
-  return `${meeting.title}, ${day(meeting.startedAt)}${times.length ? `, ${formatTuiClock(times[0]!)}` : ''}`;
+  return `${meeting.title}, ${day(meeting.startedAt)}${times.length ? `, ${sentenceClock(times[0]!)}` : ''}`;
 }
 
 export function briefMarkdown(brief: Omit<Brief, 'path'>): string {

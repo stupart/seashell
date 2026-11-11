@@ -36,7 +36,7 @@ import { carryCaptureNotes, meetingOwnerNotes, ownerNotesForAi } from './owner-n
 import { loadVocabulary } from './vocabulary.ts';
 import { findTranscriptRecord } from './transcript-library.ts';
 import { speakerLabel } from './transcript-renderer.ts';
-import { speakerDisplayName } from './tui-state.ts';
+import { sentenceClock, speakerDisplayName } from './tui-state.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 
 /** A little longer than Humain's own per-role limits (3, 15 and 5 minutes), so
@@ -623,14 +623,9 @@ export const CATCH_UP_SECONDS = 5 * 60;
  */
 export function catchUpQuestion(nowSeconds: number, lastLookedSeconds?: number): { question: string; from: number } {
   const from = Math.max(0, Math.min(nowSeconds - CATCH_UP_SECONDS, lastLookedSeconds ?? Infinity));
-  const clock = (seconds: number) => {
-    const whole = Math.max(0, Math.floor(seconds));
-    const minutes = `${Math.floor(whole % 3600 / 60)}`.padStart(whole >= 3600 ? 2 : 1, '0');
-    return `${whole >= 3600 ? `${Math.floor(whole / 3600)}:` : ''}${minutes}:${String(whole % 60).padStart(2, '0')}`;
-  };
   return {
     from,
-    question: `What did I miss? Cover what was said from ${clock(from)} to ${clock(nowSeconds)} on the transcript clock: ` +
+    question: `What did I miss? Cover what was said from ${sentenceClock(from)} to ${sentenceClock(nowSeconds)} on the transcript clock: ` +
       'anything decided, anything asked of me or still waiting on me, and anything I should answer, most important first. Keep it short.',
   };
 }

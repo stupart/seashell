@@ -354,7 +354,7 @@ test('a brief for an agent comes from the calendar\'s next meeting, saved, then 
   expect(brief.meeting.title).toBe('Weekly sync');
   expect(brief.sections[0].items[0]).toEqual({ text: 'Dana writes the launch email.',
     // The day is the meeting's own, in local time.
-    sources: [{ meetingId: 'weekly-sync', segmentIds: ['s000002'], cite: expect.stringMatching(/^Weekly sync, (Sep 30|Oct 1), 01:05$/u) }] });
+    sources: [{ meetingId: 'weekly-sync', segmentIds: ['s000002'], cite: expect.stringMatching(/^Weekly sync, (Sep 30|Oct 1), 1:05$/u) }] });
   expect(existsSync(brief.path)).toBe(true);
   expect((await call(root, 'get_brief', { title: 'weekly' }, deps)).value.path).toBe(brief.path);
   expect(runs).toBe(1);

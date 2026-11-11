@@ -120,7 +120,7 @@ test('a brief is asked for with the contract\'s shape, saved as Markdown with ci
   expect(brief.path).toBe(join(env.SEASHELL_BRIEFS_DIR!, `${new Date(next.startsAt).getFullYear()}-11-20 ${String(new Date(next.startsAt).getHours()).padStart(2, '0')}00 Acme pilot kickoff.md`));
   const markdown = readFileSync(brief.path, 'utf8');
   expect(markdown).toContain('# Brief: Acme pilot kickoff');
-  expect(markdown).toContain('- Send the security summary. _(Acme discovery call, Nov 5, 00:04)_');
+  expect(markdown).toContain('- Send the security summary. _(Acme discovery call, Nov 5, 0:04)_');
   expect(markdown).toContain('(acme-call)');
   expect(findBrief(root, next, env)?.path).toBe(brief.path);
   // Coming up says it is ready at once, before the recorder next looks at the calendar.

@@ -104,6 +104,7 @@ import {
   moveSelection,
   moveTranscriptScroll,
   formatTuiClock,
+  sentenceClock,
   speakerDisplayName,
   tuiLayout,
   upcomingWhen,
@@ -1789,7 +1790,7 @@ export default function App(props: {
     const at = meetingView === 'transcript' ? timedRows[visibleTranscriptScroll]?.start : undefined;
     try {
       openMeetingVideo(libraryRoot, selectedRecord.id, at === undefined ? {} : { atSeconds: at });
-      setNotice(at === undefined ? 'Opened the video.' : `Opened the video at ${formatTuiClock(at)}.`);
+      setNotice(at === undefined ? 'Opened the video.' : `Opened the video at ${sentenceClock(at)}.`);
     } catch (videoError) {
       setError(videoError instanceof Error ? videoError.message : String(videoError));
     }
@@ -1837,7 +1838,7 @@ export default function App(props: {
         if (meeting) commitMeetingState(meeting);
       }
       setNotesVersion((value) => value + 1);
-      const where = saved.at === undefined ? 'Noted.' : `Noted at ${formatTuiClock(saved.at)}.`;
+      const where = saved.at === undefined ? 'Noted.' : `Noted at ${sentenceClock(saved.at)}.`;
       setNotice(!recordingInView && currentMeeting?.analysis?.final && !currentMeeting.ai?.off ? `${where} Press g to rewrite the notes with it.` : where);
       return true;
     } catch (cause) { setError(failureText(cause)); return false; }
@@ -1851,7 +1852,7 @@ export default function App(props: {
     const catchUp = catchUpQuestion((Date.now() - recordingInView.startedAtUnixMs) / 1000, (lookedAtUnixMs - recordingInView.startedAtUnixMs) / 1000);
     const abort = new AbortController();
     setLiveAnswer({ abort, scroll: 0, catchUp: !typed,
-      shown: typed || (catchUp.from > 0 ? `What did I miss since ${formatTuiClock(catchUp.from)}?` : 'What did I miss?') });
+      shown: typed || (catchUp.from > 0 ? `What did I miss since ${sentenceClock(catchUp.from)}?` : 'What did I miss?') });
     if (recordingInView.own) { try { saveTranscriptRecord(libraryRoot, liveRecordRef.current); } catch { /* The saved draft so far is asked about. */ } }
     void askDuringCall(libraryRoot, recordingInView.id, typed || catchUp.question, route, { signal: abort.signal })
       .then((answer) => setLiveAnswer((current) => current?.abort === abort ? { ...current, answer } : current))
@@ -1923,7 +1924,7 @@ export default function App(props: {
       ...(draft.result.subject ? [{ text: `Subject: ${draft.result.subject}`, bold: true }, '' as const] : []),
       ...draft.result.paragraphs.flatMap((paragraph, index) => {
         const times = paragraph.evidenceSegmentIds.flatMap((id) => draft.result!.moments[id] === undefined ? [] : [draft.result!.moments[id]!])
-          .sort((a, b) => a - b).map(formatTuiClock);
+          .sort((a, b) => a - b).map(sentenceClock);
         return [...(index ? ['' as const] : []), { text: paragraph.text },
           ...(draft.sources && times.length ? [{ text: `  ${[...new Set(times)].join(', ')}`, dim: true }] : [])];
       }),
@@ -2911,8 +2912,8 @@ export default function App(props: {
   // Questions and typed answers take the key bar's row. Their keys are never cut.
   const suggested = speakerPickerOpen ? currentRecord?.speakers[speakerSelection]?.suggestion ? currentRecord.speakers[speakerSelection] : undefined : undefined;
   const noteClock = noteInput?.typedAtUnixMs !== undefined && recordingInView
-    ? formatTuiClock((noteInput.typedAtUnixMs - recordingInView.startedAtUnixMs) / 1000)
-    : noteInput?.at !== undefined ? formatTuiClock(noteInput.at) : undefined;
+    ? sentenceClock((noteInput.typedAtUnixMs - recordingInView.startedAtUnixMs) / 1000)
+    : noteInput?.at !== undefined ? sentenceClock(noteInput.at) : undefined;
   const prompt: Omit<React.ComponentProps<typeof Prompt>, 'columns'> | undefined = chatInputState
     ? { text: 'Ask:', input: chatInputState.input,
       hints: chatInputState.live && !chatInputState.input ? [['Enter', 'what did I miss?'], ['Esc', 'cancel']] : [['Enter', 'send'], ['Esc', 'cancel']] }

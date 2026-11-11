@@ -39,7 +39,7 @@ test('meeting answers and claims expose the exact cited passage, without unrelat
   artifact.chat = [{ id: 'a1', role: 'assistant', text: 'Monday.',
     evidenceSegmentIds: ['s2', 's1'], createdAt: new Date().toISOString() }];
   const chat = meetingViewLines(artifact, 'chat', record).join('\n');
-  expect(chat).toContain('Source 00:05–00:09: “We agreed to release on Monday.”');
+  expect(chat).toContain('Source 0:05–0:09: “We agreed to release on Monday.”');
   expect(chat).not.toContain('Unrelated');
   artifact.provisionalClaims = [{ id: 'd1', type: 'decision', text: 'Release Monday.',
     evidenceSegmentIds: ['s1', 's2'], confidence: 0.9 }];

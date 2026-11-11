@@ -34,7 +34,7 @@ import {
 import { findBrief, makeBrief, nextCalendarMeeting, upcomingFromEvent, type UpcomingMeeting } from './briefs.ts';
 import { draftFollowUp, draftText } from './drafts.ts';
 import { ensureVocabularyFile, loadVocabulary } from './vocabulary.ts';
-import { formatTuiClock } from './tui-state.ts';
+import { sentenceClock } from './tui-state.ts';
 import { parseCalendarEvents, readMacCalendarEventsAsync } from './calendar.ts';
 import {
   findTranscriptRecord,
@@ -1471,7 +1471,7 @@ async function executeMeetingIntelligence(command: MeetingIntelligenceCommand): 
         const note = addMeetingNote(libraryDir, command.meeting, command.text, command.atSeconds === undefined ? {} : { at: command.atSeconds });
         const { record } = findTranscriptRecord(libraryDir, command.meeting);
         print(command.json ? JSON.stringify(note, null, 2)
-          : `Added a note to ${record.title}${note.at === undefined ? '' : ` at ${formatTuiClock(note.at)}`}. It is used the next time its notes are written.`);
+          : `Added a note to ${record.title}${note.at === undefined ? '' : ` at ${sentenceClock(note.at)}`}. It is used the next time its notes are written.`);
         return 0;
       }
       const watch = readBackgroundWatchStatus(libraryDir);
@@ -1487,7 +1487,7 @@ async function executeMeetingIntelligence(command: MeetingIntelligenceCommand): 
       const at = bundle ? noteAtMoment(bundle, typedAt) : undefined;
       const taken = !existsSync(path);
       print(command.json ? JSON.stringify({ kept: taken, ...(at === undefined ? {} : { at }) })
-        : taken ? `Noted${at === undefined ? '' : ` at ${formatTuiClock(at)}`}${watch.candidate?.title ? ` in ${watch.candidate.title}` : ''}.`
+        : taken ? `Noted${at === undefined ? '' : ` at ${sentenceClock(at)}`}${watch.candidate?.title ? ` in ${watch.candidate.title}` : ''}.`
         : 'The recorder has not picked the note up yet. It keeps it for 10 minutes; check seashell status.');
       return taken ? 0 : 1;
     }

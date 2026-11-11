@@ -2,7 +2,7 @@ import type { MeetingArtifact, MeetingClaim, MeetingClaimType, OwnerNote } from 
 import { citedSegmentIds, claimOwnerAndDue, sourceLineRemoved, transcriptSegmentId } from './meeting-artifact.ts';
 import { compareMeetingEvidence, meetingEvidence } from './meeting-evidence.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
-import { formatTuiClock } from './tui-state.ts';
+import { formatTuiClock, sentenceClock } from './tui-state.ts';
 
 export type MeetingView = 'notes' | 'transcript' | 'chat';
 
@@ -29,13 +29,9 @@ function createSources(artifact: MeetingArtifact, record?: TranscriptRecord): (i
         previous.text += ` ${segment.text}`;
       } else groups.push({ last: index, start: segment.start, end: segment.end, text: segment.text });
     });
-    const clock = (seconds: number) => {
-      const total = Math.max(0, Math.floor(seconds));
-      return `${Math.floor(total / 60).toString().padStart(2, '0')}:${(total % 60).toString().padStart(2, '0')}`;
-  };
   const lines = groups.slice(0, 3).map((group) => {
     const text = group.text.replace(/\s+/gu, ' ').trim();
-    return `  Source ${clock(group.start)}–${clock(Math.ceil(group.end))}: “${text.length > 100 ? text.slice(0, 99) + '…' : text}”`;
+    return `  Source ${sentenceClock(group.start)}–${sentenceClock(Math.ceil(group.end))}: “${text.length > 100 ? text.slice(0, 99) + '…' : text}”`;
   });
   if (groups.length > 3) lines.push(`  + ${groups.length - 3} more passages in the saved meeting evidence.`);
   if (wanted.size) lines.push('  Some cited passages are unavailable.');

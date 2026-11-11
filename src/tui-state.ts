@@ -181,7 +181,18 @@ export function speakerDisplayName(id: string | undefined, label: string): strin
   return label.replace(/^Remote speaker (\d+)$/u, 'Speaker $1');
 }
 
-/** Compact media-relative clock for the TUI; exports retain millisecond detail. */
+/**
+ * A time on the meeting's clock as a sentence says it: "2:01", "0:07", "1:02:03". Only an aligned
+ * column pads it ("02:01"), with formatTuiClock.
+ */
+export function sentenceClock(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(whole % 3600 / 60);
+  const hours = Math.floor(whole / 3600);
+  return `${hours ? `${hours}:${String(minutes).padStart(2, '0')}` : minutes}:${String(whole % 60).padStart(2, '0')}`;
+}
+
+/** Compact media-relative clock for the TUI's aligned columns; exports retain millisecond detail. */
 export function formatTuiClock(seconds: number): string {
   const totalSeconds = Math.max(0, Math.floor(seconds));
   const second = totalSeconds % 60;
