@@ -136,6 +136,7 @@ main { display: grid; grid-template-columns: minmax(0, 1fr) clamp(360px, 32vw, 4
 .stage { --fit: calc((100cqh - 38px) * var(--ratio, 1.6)); display: flex; flex-direction: column; gap: 10px;
   padding: var(--gutter); min-height: 0; container-type: size; }
 video, .status { width: 100%; max-width: var(--fit); margin-inline: auto; }
+@media (min-width: 861px) { .stage:has(.status:empty) { --fit: calc(100cqh * var(--ratio, 1.6)); } }
 /* The clip rounds WebKit's paused overlay too; the ring keeps a white slide's edge on a light page. */
 video { display: block; flex: none; height: auto; aspect-ratio: auto 16 / 10; border-radius: 8px;
   box-shadow: 0 0 0 1px var(--line); clip-path: inset(-1px round 9px); }
@@ -144,15 +145,17 @@ video:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .status:empty { display: none; }
 .transcript { display: grid; grid-template-rows: minmax(0, 1fr); min-height: 0; background: var(--panel);
   border-left: 1px solid var(--line); }
-/* The first line starts level with the video; lines fade out at the list's edges rather than being cut. */
-ol { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 12px; align-content: start;
-  position: relative; min-height: 0; margin: 0; padding: var(--gutter) 0 8px; list-style: none; overflow-y: auto;
-  overscroll-behavior: contain; mask-image: linear-gradient(transparent, #000 8px, #000 calc(100% - 8px), transparent); }
+/* The first line starts level with the video; lines fade out over the list's padding rather than being cut. */
+ol { --top: var(--gutter); display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 12px;
+  align-content: start; position: relative; min-height: 0; margin: 0; padding: var(--top) 0 8px; list-style: none;
+  overflow-y: auto; overscroll-behavior: contain;
+  mask-image: linear-gradient(transparent, #000 var(--top), #000 calc(100% - 8px), transparent); }
 li { grid-column: 1 / -1; display: grid; grid-template-columns: 4em minmax(0, 1fr); grid-template-columns: subgrid;
   align-items: baseline; margin: 0 8px; padding: 8px 12px; border-radius: 8px; cursor: pointer; overflow-wrap: anywhere;
   text-wrap: pretty; }
 li > div { max-width: 66ch; }
-li.turn { margin-top: 8px; }
+li.turn { margin-top: 12px; }
+@media (pointer: coarse) { li { min-height: 44px; padding-block: 11px; } }
 @media (hover: hover) { li:hover { background: var(--hover); } }
 li.current { background: var(--current); }
 li.before { color: var(--muted); }
@@ -166,12 +169,12 @@ time { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums;
   main { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
   .stage { --fit: calc(45vh * var(--ratio, 1.6)); container-type: normal; }
   .transcript { border-left: 0; border-top: 1px solid var(--line); }
-  ol { padding-top: 8px; }
+  ol { --top: 8px; }
 }
 </style>
 </head>
 <body>
-<header><h1>${title}</h1></header>
+<header><h1 title="${title}">${title}</h1></header>
 <main>
   <section class="stage">
     <video controls playsinline preload="metadata" aria-label="Meeting video"></video>
@@ -236,17 +239,24 @@ function tabStop(item) {
   item.tabIndex = 0;
 }
 // Scroll the transcript, never the page. 'follow' moves only once the line nears
-// the bottom (or is above the top), and then brings it to a quarter of the way down.
+// the bottom (or is above the top), and then brings it to a quarter of the way down,
+// starting the view on a whole line rather than through one.
 function reveal(item, how) {
   const view = list.clientHeight, top = item.offsetTop, bottom = top + item.offsetHeight, at = list.scrollTop;
+  const pad = parseFloat(getComputedStyle(list).paddingTop);
   let target;
   if (how === 'nearest') {
-    if (top < at + 8) target = top - 8;
+    if (top < at + pad) target = top - pad;
     else if (bottom > at + view - 8) target = bottom - view + 8;
     else return;
   } else {
-    if (how === 'follow' && top >= at + 8 && bottom <= at + view * 0.8) return;
-    target = top - Math.max(8, Math.min(view * 0.25, view - (bottom - top) - 8));
+    if (how === 'follow' && top >= at + pad && bottom <= at + view * 0.8) return;
+    target = Math.max(0, top - Math.max(pad, Math.min(view * 0.25, view - (bottom - top) - 8)));
+    const cut = items.find((entry) => entry.offsetTop + entry.offsetHeight > target + pad);
+    if (cut && cut !== item && cut.offsetTop < target + pad) {
+      const after = items[items.indexOf(cut) + 1];
+      target = target - (cut.offsetTop - pad) <= view * 0.25 || !after ? cut.offsetTop - pad : after.offsetTop - pad;
+    }
   }
   const smooth = how === 'follow' && motion.matches && Math.abs(target - at) < view * 2;
   list.scrollTo({ top: Math.max(0, target), behavior: smooth ? 'smooth' : 'auto' });
@@ -288,7 +298,7 @@ function highlight(how = 'follow') {
 function say() {
   const notes = [];
   if (items.some((item) => item.classList.contains('before'))) notes.push('The video starts at ' + clock(firstPicture) + '; earlier lines have no picture.');
-  if (movies.length > 1) notes.push('Part ' + (movie + 1) + ' of ' + movies.length + ', from ' + clock(-movies[movie].offset) + '.');
+  if (movies.length > 1) notes.push('Video ' + (movie + 1) + ' of ' + movies.length + ', from ' + clock(-movies[movie].offset) + '.');
   status.textContent = notes.join(' ');
 }
 function choose(item) {

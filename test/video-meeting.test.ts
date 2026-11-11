@@ -144,7 +144,7 @@ test('movie paths with spaces and symbols are URL-encoded relative to the page',
 });
 
 /** Run the player's inline script against a small fake DOM: enough to drive its keys, clicks and seeks. */
-function playerHarness(html: string) {
+function playerHarness(html: string, view = 400) {
   type Listener = { fn: (event: FakeEvent) => void; once?: boolean };
   type FakeEvent = { type: string; key?: string; target: unknown; defaultPrevented: boolean; preventDefault(): void; metaKey: boolean; ctrlKey: boolean; altKey: boolean };
   const documentListeners: Record<string, Listener[]> = {};
@@ -169,7 +169,8 @@ function playerHarness(html: string) {
     closest(selector: string) { const tags = selector.split(',').map((tag) => tag.trim().toUpperCase()); for (let el: El | null = this; el; el = el.parent) if (tags.includes(el.tagName)) return el; return null; }
     contains(node: unknown) { for (let el = node as El | null; el; el = el.parent) if (el === this) return true; return false; }
     focus() { doc.activeElement = this; dispatch(this, 'focusin'); }
-    get offsetTop() { return (this.parent?.children.indexOf(this) ?? 0) * 40; }
+    // Lines are 40px tall under the list's 20px top padding.
+    get offsetTop() { return 20 + (this.parent?.children.indexOf(this) ?? 0) * 40; }
     get offsetHeight() { return 40; }
   }
   function dispatch(target: El, type: string, key?: string) {
@@ -179,7 +180,7 @@ function playerHarness(html: string) {
     return event;
   }
   const body = new El('body');
-  const list = Object.assign(new El('ol'), { clientHeight: 400, scrollTop: 0, scrollTo({ top }: { top: number }) { this.scrollTop = top; } });
+  const list = Object.assign(new El('ol'), { clientHeight: view, scrollTop: 0, scrollTo({ top }: { top: number }) { this.scrollTop = top; } });
   const status = new El('p');
   let source = '';
   const video = Object.assign(new El('video'), {
@@ -201,8 +202,8 @@ function playerHarness(html: string) {
     addEventListener: (type: string, fn: (event: FakeEvent) => void) => { (documentListeners[type] ??= []).push({ fn }); },
   };
   const script = /<script>\n([\s\S]*?)<\/script>/u.exec(html)![1]!;
-  new Function('document', 'matchMedia', 'getSelection', 'location', 'Element', script)(
-    doc, () => ({ matches: true }), () => ({ isCollapsed: true }), { hash: '' }, El);
+  new Function('document', 'matchMedia', 'getSelection', 'getComputedStyle', 'location', 'Element', script)(
+    doc, () => ({ matches: true }), () => ({ isCollapsed: true }), () => ({ paddingTop: '20px' }), { hash: '' }, El);
   const items = list.children as El[];
   return {
     video, list, status, stage, items, doc,
@@ -263,7 +264,7 @@ test('the player says when the video starts late and which part of a resumed cal
   expect(late.items.filter((item) => item.classes.has('before')).length).toBe(4);
   const resumed = playerHarness(renderVideoPlayerPage('/m', record,
     { ...movie(-1), segments: [movie(-1), movie(-70, '/m/capture/video/000002.mp4')] }, 75));
-  expect(resumed.status.textContent).toBe('Part 2 of 2, from 1:10.');
+  expect(resumed.status.textContent).toBe('Video 2 of 2, from 1:10.');
   expect((resumed.video as unknown as { src: string }).src).toBe('capture/video/000002.mp4');
   expect(resumed.stage.style.properties['--ratio']).toBe(String(1920 / 1200));
 });
@@ -308,4 +309,17 @@ test('in a meeting of an hour or more every time has hours, so the time column k
     .items.map((item) => (item.children[0] as unknown as { textContent: string }).textContent);
   expect(times(3599)).toEqual(['0:05', '59:59']);
   expect(times(3700)).toEqual(['0:00:05', '1:01:40']);
+});
+
+test('opening deep in a meeting starts the view on a whole line, with the line being said in view', () => {
+  const many = Array.from({ length: 60 }, (_, index) => ({ start: index * 10, end: index * 10 + 8, text: `Line ${index}` }));
+  const page = playerHarness(renderVideoPlayerPage('/m', createTranscriptRecord({ transcript: many, speakers: [] }, { id: 'd', title: 'Deep' }),
+    { ...movie(-1), segments: [movie(-1)] }, 301), 410);
+  expect(page.current()).toBe(30);
+  const top = page.list.scrollTop + 20;
+  // The first line below the fade starts exactly at its edge: no line is cut through.
+  expect(page.items.some((item) => item.offsetTop === top)).toBe(true);
+  const current = page.items[30]!;
+  expect(current.offsetTop).toBeGreaterThanOrEqual(top);
+  expect(current.offsetTop + current.offsetHeight).toBeLessThanOrEqual(page.list.scrollTop + 410 * 0.8);
 });
