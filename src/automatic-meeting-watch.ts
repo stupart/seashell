@@ -121,6 +121,13 @@ export function watchRestartReason(options: { readonly configPath: string; reado
   };
 }
 
+/** A browser that was in front this recently may still hold a call joined just before switching away. */
+const BROWSER_RECENT_MS = 5 * 60_000;
+/** How often a video call on the calendar is checked for, whatever is in front. */
+const CALENDAR_CALL_CHECK_MS = 30_000;
+/** How close to a video call on the calendar, before its start or after its end, it is checked for. */
+const CALENDAR_CALL_WINDOW_MINUTES = 15;
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -157,6 +164,8 @@ export class AutomaticMeetingWatchService {
   #consentId?: string;
   #asking?: AbortController;
   #lastNowUnixMs = Date.now();
+  #browserFrontAtUnixMs = Number.NEGATIVE_INFINITY;
+  #meetCheckedAtUnixMs = Number.NEGATIVE_INFINITY;
 
   constructor(options: AutomaticMeetingWatchOptions = {}) {
     this.#config = options.config ?? loadConfig();
@@ -206,6 +215,7 @@ export class AutomaticMeetingWatchService {
       snapshot = { schemaVersion: 1, capturedAtUnixMs: now.getTime(), supported: false, inputProcesses: [] };
     }
     const skipMeet = Boolean(browser && browser !== 'off') && !this.meetCallPossible(snapshot, now);
+    if (browser && browser !== 'off' && !skipMeet) this.#meetCheckedAtUnixMs = now.getTime();
     const meet = browser && browser !== 'off' && !skipMeet
       ? await this.#dependencies.readMeet(browser, this.#calendarAbort.signal).catch(() => ({
         state: 'unavailable' as const, detail: 'Could not check Google Meet. Check the connection in Speakers.',
@@ -325,18 +335,35 @@ export class AutomaticMeetingWatchService {
   /**
    * Checking Meet spawns a helper that walks Safari's and Chrome's Accessibility
    * trees, which is wasted work every few seconds while nothing call-like is
-   * happening. Check when a browser is in front (a muted call can be joined
-   * there with no microphone in use) or holds the microphone, while a call is
-   * being confirmed, recorded or held for resume, or when a video call is on
-   * the calendar. If the signals cannot say what is in front, check anyway.
+   * happening. Check every poll while a browser is in front (a muted call can be
+   * joined there with no microphone in use) and for five minutes after, since a
+   * call joined just before switching away is still running; while a browser
+   * holds the microphone; and while a call is being confirmed, recorded or held
+   * for resume. A video call on the calendar within 15 minutes is checked at
+   * least every 30 s, whatever is in front: it is often joined in a background
+   * tab or full screen on another desktop. If the signals cannot say what is in
+   * front, check anyway.
    */
   private meetCallPossible(snapshot: MeetingSignalSnapshot, now: Date): boolean {
     if (this.#shuttingDown) return false;
     if (!snapshot.supported || snapshot.frontmostBundleId === undefined) return true;
+    if (isBrowserApplication(snapshot.frontmostBundleId)) this.#browserFrontAtUnixMs = now.getTime();
     if (this.#active || this.#parked || this.#controller.state.phase !== 'watching') return true;
-    if (isBrowserApplication(snapshot.frontmostBundleId) ||
+    if (now.getTime() - this.#browserFrontAtUnixMs < BROWSER_RECENT_MS ||
         snapshot.inputProcesses.some((process) => isBrowserApplication(process.bundleId))) return true;
-    return isVideoCallEvent(this.currentCalendar(now));
+    return now.getTime() - this.#meetCheckedAtUnixMs >= CALENDAR_CALL_CHECK_MS && this.videoCallNearby(now);
+  }
+
+  /** A video call on the calendar starts within 15 minutes, is running, or ended under 15 minutes ago. */
+  private videoCallNearby(now: Date): boolean {
+    const calendar = this.#config.meeting?.calendar;
+    // Keeps the cached events fresh; they are only read while the calendar is on.
+    this.currentCalendar(now);
+    if (!calendar?.enabled || (calendar.policy ?? 'ask') === 'off' || !this.#calendarCache) return false;
+    return suggestCalendarMeeting(this.#calendarCache.events.filter((event) => isVideoCallEvent(event)), {
+      policy: calendar.policy ?? 'ask', selectedCalendars: calendar.selectedCalendars,
+      leadMinutes: CALENDAR_CALL_WINDOW_MINUTES, graceMinutes: CALENDAR_CALL_WINDOW_MINUTES, now,
+    }) !== undefined;
   }
 
   private currentCalendar(now: Date) {
@@ -347,7 +374,9 @@ export class AutomaticMeetingWatchService {
           (!this.#calendarCache || now.getTime() - this.#calendarCache.readAtUnixMs >= 30_000) &&
           !this.#calendarRead) {
         this.#calendarRead = this.#dependencies.readCalendar({
-          leadMinutes: calendar.leadMinutes,
+          // Far enough either side to see a video call coming up or just ended (videoCallNearby).
+          leadMinutes: Math.max(calendar.leadMinutes ?? CALENDAR_CALL_WINDOW_MINUTES, CALENDAR_CALL_WINDOW_MINUTES),
+          lookbackMinutes: CALENDAR_CALL_WINDOW_MINUTES,
           signal: this.#calendarAbort.signal,
         })
           .then((events) => {
