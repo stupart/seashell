@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { dirname, join } from 'path';
 import {
   humainRouteRequest,
-  NEWER_ENGINE,
   olderHumainEngine,
+  OlderEngineError,
   olderThanRevision4,
   runHumainMeeting,
   type HumainMeetingRoute,
@@ -310,7 +310,7 @@ export async function makeBrief(libraryDir: string, upcoming: UpcomingMeeting, o
   const env = options.env ?? process.env;
   const found = relevantMeetings(libraryDir, upcoming);
   if (!found.length) throw new NoBriefHistoryError(upcoming.title);
-  if (await olderThanRevision4(engineCheck(options))) throw new Error(`This AI engine cannot write briefs yet. ${NEWER_ENGINE}`);
+  if (await olderThanRevision4(engineCheck(options))) throw new OlderEngineError('This AI engine cannot write briefs yet.');
   // Privacy again, just before anything leaves: checking the engine can take 20 seconds,
   // and a meeting made private meanwhile, or whose settings stopped reading, is not sent.
   const chosen = found.filter((meeting) => !meetingIsPrivateAt(meeting.directory));
@@ -354,7 +354,7 @@ export async function makeBrief(libraryDir: string, upcoming: UpcomingMeeting, o
       timeoutMs: BRIEF_TIMEOUT_MS })
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
-      throw olderHumainEngine(message) ? new Error(`This AI engine cannot write briefs yet. ${NEWER_ENGINE}`) : error;
+      throw olderHumainEngine(message) ? new OlderEngineError('This AI engine cannot write briefs yet.') : error;
     });
   const output = parseBriefOutput(result.output, sent);
   const brief: Omit<Brief, 'path'> = {

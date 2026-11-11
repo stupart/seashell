@@ -72,6 +72,10 @@ function contentWords(text: string): Set<string> {
 export const HEADING = '# ';
 /** A heading under a heading: an extractor's name under Insights. */
 export const SUBHEADING = '## ';
+/** Lines starting with this are something to look at, in yellow; wrappedMeetingRows keeps it on every row they wrap to. */
+export const CAUTION = '! ';
+/** Under your notes when the engine that wrote the notes could not read them; the key bar leads with AI settings. */
+export const OWNER_NOTES_UNREAD = "Written without your notes: this AI can't read them yet.";
 /**
  * Splits a bullet from what sits against the right edge: who owns it and by when, then when it was said.
  * A bullet with either reads `- text META owner META clock`, with an empty part where one is unknown.
@@ -95,6 +99,7 @@ export function plainMeetingLines(lines: readonly string[]): string[] {
   return lines.map((line) => {
     if (line.startsWith(SUBHEADING)) return line.slice(SUBHEADING.length);
     if (line.startsWith(HEADING)) return line.slice(HEADING.length);
+    if (line.startsWith(CAUTION)) return line.slice(CAUTION.length);
     const { body, owner, clock } = bulletParts(line);
     return [body, owner, clock].filter(Boolean).join('  ');
   });
@@ -258,7 +263,7 @@ export function meetingViewLines(
     ...sections.flatMap((section) => section.items.flatMap((item) => item.ownerNoteIds ?? []))]);
   const unused = ownerNotes.filter((note) => !used.has(note.id));
   const yours = unused.length ? ['', `${HEADING}Your notes`, ...unused.map(noteBullet),
-    ...(artifact.analysis?.ownerNotesUnread ? ['The AI engine that wrote these notes could not read yours. Install a newer AI engine: seashell ai install <humain-package.tgz>'] : [])] : [];
+    ...(artifact.analysis?.ownerNotesUnread ? [`${CAUTION}${OWNER_NOTES_UNREAD}`] : [])] : [];
   return [
     summary,
     ...yours,

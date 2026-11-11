@@ -79,6 +79,8 @@ interface Journey {
   firstRun?: boolean;
   /** Settings to start from, instead of the machine's. */
   config?: object;
+  /** The AI engine is older than this Seashell: it cannot read your notes, write briefs or follow-ups. */
+  oldEngine?: boolean;
   narrow?: boolean;
   steps: Step[];
 }
@@ -325,7 +327,17 @@ export const JOURNEYS: Journey[] = [
       { title: 'The email', until: 'Subject', note: 'Copy it, or open it in Mail as a draft. Nothing is sent.' },
       { title: 'Where it came from', press: ['t'], keys: 'T', until: 'hide times', note: 'Times are there when you want them.' },
       { title: 'Notes the engine could not read', press: [ESC, 'h', DOWN, DOWN, DOWN, DOWN, ENTER], keys: 'Esc H ↓ ↓ ↓ ↓ Enter', until: 'Board',
-        note: 'An older AI engine wrote these notes, so yours are listed as written, with what to do.' },
+        note: 'An older AI engine wrote these notes, so yours are listed as written, with one yellow line and the key that helps.' },
+    ],
+  },
+  {
+    id: 'old-engine', title: 'An AI engine older than Seashell', who: 'Someone whose notes left out what they typed.',
+    machine: 'ready', library: 'demo', narrow: true, oldEngine: true,
+    steps: [
+      { title: 'History', history: true, until: 'Board' },
+      { title: 'Notes without yours', press: [...Array(6).fill(UP), DOWN, DOWN, DOWN, DOWN, ENTER], keys: '↑ × 6 ↓ × 4 Enter', until: 'Board',
+        note: 'One yellow line under your notes; the key bar leads with AI settings.' },
+      { title: 'AI settings', press: [','], narrowPress: [ENTER], keys: ',', until: 'too old', note: 'Settings opens on AI notes, which says what to do in plain words.' },
     ],
   },
   {
@@ -573,8 +585,10 @@ async function endMeeting(library: string, background: Background) {
 /** The pretend Mac: what is set up, which the setup actions change. */
 interface Mac { recorder: boolean; microphone: boolean; meet: boolean; calendar: boolean; screen: boolean; fresh: boolean; micSilent: boolean }
 
-function dependencies(mac: Mac): FeatureStatusDependencies {
+function dependencies(mac: Mac, oldEngine = false): FeatureStatusDependencies {
   return {
+    // What the pretend engine can do, read from its usage line as the real check does: no prompt.
+    engine: async () => new Set(['observe', 'reconcile', 'chat', 'extract', ...(oldEngine ? [] : ['brief', 'draft'])]),
     launchAtLogin: () => ({ enabled: mac.recorder, loaded: mac.recorder, label: 'demo', plistPath: '/demo', command: [] }),
     watchStatus: () => (mac.recorder ? { schemaVersion: 1, phase: 'watching', pid: 1, updatedAtUnixMs: Date.now() } : undefined) as never,
     meetConnection: async () => (mac.meet
@@ -665,7 +679,7 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
   mock.module('../src/meeting-consent.ts', () => ({ writeMeetingConsent: () => undefined }));
   const features = { ...await import('../src/feature-status.ts') };
   mock.module('../src/feature-status.ts', () => ({ ...features,
-    readFeatureStatuses: (options: object) => features.readFeatureStatuses({ ...options, dependencies: dependencies(mac) } as never) }));
+    readFeatureStatuses: (options: object) => features.readFeatureStatuses({ ...options, dependencies: dependencies(mac, journey.oldEngine) } as never) }));
   const client = { ...await import('../src/humain-client.ts') };
   mock.module('../src/humain-client.ts', () => ({ ...client,
     async discoverHumainProviders() { return { integrations: [
@@ -681,8 +695,8 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
       const output = cannedAnswer(action, request);
       if (output) setTimeout(() => resolve({ runId: `journey-${action}`, compiledRunId: 'journey', status: 'succeeded', receipt: {}, output }), 700);
     }),
-    // The pretend engine knows briefs, drafts, your notes and vocabulary.
-    meetingEngineActions: async () => new Set(['observe', 'reconcile', 'chat', 'extract', 'brief', 'draft']),
+    // The pretend engine knows briefs, drafts, your notes and vocabulary, unless the journey's is older.
+    meetingEngineActions: async () => new Set(['observe', 'reconcile', 'chat', 'extract', ...(journey.oldEngine ? [] : ['brief', 'draft'])]),
     // A pretend test: Claude Code answers, Codex is signed out. No prompt is sent anywhere.
     async testMeetingAi(routes: Record<string, { backend: string; model: string }>) {
       await new Promise((resolve) => setTimeout(resolve, 600));

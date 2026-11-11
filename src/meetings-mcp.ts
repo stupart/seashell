@@ -21,7 +21,7 @@ import {
   type ExtractorDefinition,
   type ExtractorField,
 } from './extractors.ts';
-import type { HumainMeetingRoute, MeetingEngineCheck, runHumainMeeting } from './humain-client.ts';
+import { withNewerEngine, type HumainMeetingRoute, type MeetingEngineCheck, type runHumainMeeting } from './humain-client.ts';
 import { readMacCalendarEventsAsync } from './calendar.ts';
 import { briefCitation, briefReadsPrivate, findBrief, listBriefs, makeBrief, nextCalendarMeeting, upcomingFromEvent, type Brief, type UpcomingMeeting } from './briefs.ts';
 import { draftFollowUp } from './drafts.ts';
@@ -522,7 +522,7 @@ export async function handleMeetingsMcpMessage(
         return reply({ content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] });
       } catch (cause) {
         // Tool failures are results the model can read and correct, not protocol errors.
-        return reply({ isError: true, content: [{ type: 'text', text: cause instanceof Error ? cause.message : String(cause) }] });
+        return reply({ isError: true, content: [{ type: 'text', text: withNewerEngine(cause) }] });
       }
     }
     default:

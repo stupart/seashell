@@ -739,12 +739,11 @@ export default function SettingsScreen(props: SetupActionProps & {
       <Text color={FEATURE_STATE_COLOR[selected.status.state]} wrap="truncate-end">{FEATURE_STATE_SYMBOL[selected.status.state]} {selected.status.summary}</Text>)}
     <Box flexDirection="column" flexShrink={1} overflow="hidden">
       <Box marginTop={1} flexShrink={0}><Paragraph width={width} text={selected.status.detail} /></Box>
-      {/* Yellow only when something needs doing; on a row that works, it is a note. */}
+      {/* Yellow only when something needs doing; on a row that works, it is a note. Never a command:
+          those are for `seashell status`, and the key bar has the key that fixes it. */}
       {selected.status.fix && <Box marginTop={1} flexShrink={0}>{selected.status.state === 'ok'
         ? <Paragraph width={width} text={selected.status.fix} />
         : <Paragraph width={width} color="yellow" text={`Next: ${selected.status.fix}`} />}</Box>}
-      {!selected.status.action && selected.status.state !== 'ok' && selected.status.command
-        ? <Paragraph width={width} text={`Run: ${selected.status.command}`} /> : null}
       {['prompts', 'voices', 'extractors', 'automations'].includes(selected.status.id) &&
         <Box flexDirection="column" marginTop={1} flexShrink={0}>{filesBody(selected.status.id)}</Box>}
     </Box>

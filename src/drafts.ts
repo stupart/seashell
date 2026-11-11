@@ -2,8 +2,8 @@ import { dirname, join } from 'path';
 import { ownerKeys } from './briefs.ts';
 import {
   humainRouteRequest,
-  NEWER_ENGINE,
   olderHumainEngine,
+  OlderEngineError,
   olderThanRevision4,
   runHumainMeeting,
   type HumainMeetingRoute,
@@ -101,7 +101,7 @@ export async function draftFollowUp(
   if (!segments.length) throw new Error('This meeting has no transcript text to write from.');
   const ask = options.ask?.replace(/\s+/gu, ' ').trim();
   if (ask && ask.length > ASK_LIMIT) throw new Error(`Keep the extra ask under ${ASK_LIMIT.toLocaleString('en-US')} characters.`);
-  if (await olderThanRevision4(engineCheck(options))) throw new Error(`This AI engine cannot write follow-ups yet. ${NEWER_ENGINE}`);
+  if (await olderThanRevision4(engineCheck(options))) throw new OlderEngineError('This AI engine cannot write follow-ups yet.');
   const people = recipients(libraryDir, artifact);
   const audience = options.audience?.trim() || (people.names.length ? people.names.join(', ') : undefined);
   const { instructions } = ownerInstructions(libraryDir, artifact, {}, 'chat');
@@ -127,7 +127,7 @@ export async function draftFollowUp(
     timeoutMs: DRAFT_TIMEOUT_MS })
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
-      throw olderHumainEngine(message) ? new Error(`This AI engine cannot write follow-ups yet. ${NEWER_ENGINE}`) : error;
+      throw olderHumainEngine(message) ? new OlderEngineError('This AI engine cannot write follow-ups yet.') : error;
     });
   const output = parseDraftOutput(result.output, kind, new Set(segments.map((segment) => segment.id)));
   const cited = new Set(output.paragraphs.flatMap((paragraph) => paragraph.evidenceSegmentIds));

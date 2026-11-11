@@ -6,7 +6,7 @@ import { CaptureSessionStore } from '../src/capture-session.ts';
 import type { runHumainMeeting } from '../src/humain-client.ts';
 import { createMeetingArtifact, loadMeetingArtifact, MeetingAiOffError, saveMeetingArtifact } from '../src/meeting-artifact.ts';
 import { askDuringCall, catchUpQuestion, chatWithMeeting, claimsForHumain, enrichMeeting } from '../src/meeting-enrichment.ts';
-import { FROM_YOUR_NOTES, meetingViewLines } from '../src/meeting-tui.ts';
+import { CAUTION, FROM_YOUR_NOTES, meetingViewLines } from '../src/meeting-tui.ts';
 import {
   addMeetingNote,
   addRecordingNote,
@@ -157,11 +157,14 @@ test('an engine before revision 4 is sent no notes and no vocabulary, and the no
     const artifact = await enrichMeeting(root, record.id, { mode: 'post-session', route, runner: older.runner, engine: rev3, onStatus: (status) => statuses.push(status) });
     expect(older.requests[0].ownerNotes).toBeUndefined();
     expect(older.requests[0].instructions?.vocabulary).toBeUndefined();
-    expect(statuses).toContain('Your notes are kept, but this AI engine cannot read them. Install a newer AI engine: seashell ai install <humain-package.tgz>');
+    // Said in plain words: no command inside the app.
+    expect(statuses).toContain("Writing the notes without yours: this AI can't read them yet.");
+    expect(statuses.join('\n')).not.toContain('seashell');
     expect(artifact.analysis?.ownerNotesUnread).toBe(true);
     const lines = meetingViewLines(artifact, 'notes', record);
+    // One yellow line in context, under the notes it left out.
     expect(lines.slice(lines.indexOf('# Your notes'))).toEqual(['# Your notes', '- Dana sounded unsure\t\t00:01',
-      'The AI engine that wrote these notes could not read yours. Install a newer AI engine: seashell ai install <humain-package.tgz>']);
+      `${CAUTION}Written without your notes: this AI can't read them yet.`]);
     // A current engine gets both.
     const current = fake(() => ({ summary: 'S', claims: [] }));
     await enrichMeeting(root, record.id, { mode: 'post-session', route, runner: current.runner, engine: rev4 });

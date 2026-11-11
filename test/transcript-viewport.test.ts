@@ -65,3 +65,13 @@ test('a line cut at the top of the view keeps its time and speaker', () => {
   expect(plain(transcriptWindow(columns, 1, 2))[0]).toMatch(/^00:00  You {8}\S/u);
   expect(lastTranscriptScroll(columns, 2)).toBe(columns.length - 2);
 });
+
+test('something to look at in the notes stays marked on every row it wraps to, so all of it is yellow', async () => {
+  const { wrappedMeetingRows } = await import('../src/transcript-viewport.ts');
+  const { CAUTION, OWNER_NOTES_UNREAD, plainMeetingLines } = await import('../src/meeting-tui.ts');
+  const rows = wrappedMeetingRows([`${CAUTION}${OWNER_NOTES_UNREAD}`], 30);
+  expect(rows.length).toBeGreaterThan(1);
+  expect(rows.every((row) => row.startsWith(CAUTION))).toBe(true);
+  expect(rows.map((row) => row.slice(CAUTION.length)).join(' ')).toBe(OWNER_NOTES_UNREAD);
+  expect(plainMeetingLines([`${CAUTION}${OWNER_NOTES_UNREAD}`])).toEqual([OWNER_NOTES_UNREAD]);
+});

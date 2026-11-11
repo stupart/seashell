@@ -16,7 +16,7 @@ import {
   type UpcomingMeeting,
 } from '../src/briefs.ts';
 import { draftFollowUp, draftText, mailtoUrl } from '../src/drafts.ts';
-import type { runHumainMeeting } from '../src/humain-client.ts';
+import { OlderEngineError, withNewerEngine, type runHumainMeeting } from '../src/humain-client.ts';
 import { createMeetingArtifact, MeetingAiOffError, saveMeetingArtifact, type MeetingAttendee } from '../src/meeting-artifact.ts';
 import { findTranscriptRecord, saveTranscriptRecord } from '../src/transcript-library.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
@@ -129,7 +129,11 @@ test('nothing to read is said plainly, and an older engine is told to update bef
   add('acme-call', 'Acme discovery call', 5, [you, dana]);
   const humain = fakeBrief();
   await expect(makeBrief(root, upcoming('Acme pilot', [dana]), { route, runner: humain.runner, engine: rev3, env }))
-    .rejects.toThrow('This AI engine cannot write briefs yet. Install a newer AI engine: seashell ai install <humain-package.tgz>');
+    .rejects.toThrow(new OlderEngineError('This AI engine cannot write briefs yet.'));
+  // The command line and agents are told how to install a newer one; the app never shows a command.
+  const refused = await makeBrief(root, upcoming('Acme pilot', [dana]), { route, runner: humain.runner, engine: rev3, env }).catch((error) => error);
+  expect(refused).toBeInstanceOf(OlderEngineError);
+  expect(withNewerEngine(refused)).toBe('This AI engine cannot write briefs yet. Install a newer AI engine: seashell ai install <humain-package.tgz>');
   expect(humain.requests).toEqual([]);
   // An engine that cannot say prints its usage instead: the same plain answer.
   const usage: typeof runHumainMeeting = async () => { throw new Error('Humain failed: Usage: humain meeting observe|reconcile|chat|extract <request.json>'); };
@@ -208,7 +212,7 @@ test('a follow-up from a private meeting, or with an older engine, sends nothing
   const humain = fakeDraft();
   await expect(draftFollowUp(root, 'private', 'email', route, { runner: humain.runner, engine: rev4 })).rejects.toThrow(MeetingAiOffError);
   await expect(draftFollowUp(root, 'acme-call', 'email', route, { runner: humain.runner, engine: rev3 }))
-    .rejects.toThrow('This AI engine cannot write follow-ups yet. Install a newer AI engine');
+    .rejects.toThrow(new OlderEngineError('This AI engine cannot write follow-ups yet.'));
   expect(humain.requests).toEqual([]);
 });
 

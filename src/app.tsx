@@ -42,7 +42,7 @@ import { addMeetingNote, addRecordingNote, meetingOwnerNotes, recordingBundle } 
 import { briefCitation, findBrief, makeBrief, NoBriefHistoryError, readNextMeeting, type Brief, type NextMeeting } from './briefs.ts';
 import { draftFollowUp, draftText, mailtoUrl, type DraftKind, type FollowUpDraft } from './drafts.ts';
 import { Chalk } from 'chalk';
-import { HEADING, META, meetingViewLines, plainMeetingLines, SUBHEADING, type MeetingView } from './meeting-tui.ts';
+import { CAUTION, HEADING, META, meetingViewLines, OWNER_NOTES_UNREAD, plainMeetingLines, SUBHEADING, type MeetingView } from './meeting-tui.ts';
 import { FROM_YOUR_NOTES_HELP, HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
 import { lastTranscriptScroll, timedTranscriptRows, transcriptWindow, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
@@ -1479,14 +1479,16 @@ export default function App(props: {
     if (!currentRecord || !currentMeeting) return [];
     try { return meetingOwnerNotes(libraryRoot, currentRecord.id, currentMeeting); } catch { return currentMeeting.ownerNotes ?? []; }
   }, [libraryRoot, currentRecord?.id, currentMeeting, notesVersion, currentEntry?.updatedAt]);
-  const cautionRows = useMemo(() => yourSide && view === 'record' && meetingView === 'notes'
-    ? wrappedMeetingRows([yourSide], contentColumns) : [], [yourSide, view, meetingView, contentColumns]);
+  const meetingLines = useMemo(() => currentMeeting && meetingView !== 'transcript'
+    ? meetingViewLines(currentMeeting, meetingView, currentRecord ?? undefined, ownerNotes, recordingNow) : [],
+  [currentMeeting, meetingView, currentRecord, ownerNotes, recordingNow]);
+  // The notes left out what you typed: the line under your notes says so, and the key bar leads with AI settings.
+  const notesUnread = meetingLines.includes(`${CAUTION}${OWNER_NOTES_UNREAD}`);
   const auxiliaryMeetingLines = useMemo(() => (
     currentMeeting && meetingView !== 'transcript'
-      ? [...cautionRows, ...(cautionRows.length ? [''] : []),
-        ...wrappedMeetingRows(meetingViewLines(currentMeeting, meetingView, currentRecord ?? undefined, ownerNotes, recordingNow), contentColumns)]
+      ? wrappedMeetingRows([...(yourSide && view === 'record' && meetingView === 'notes' ? [`${CAUTION}${yourSide}`, ''] : []), ...meetingLines], contentColumns)
       : []
-  ), [currentMeeting, meetingView, currentRecord, contentColumns, cautionRows, ownerNotes, recordingNow]);
+  ), [currentMeeting, meetingView, contentColumns, yourSide, view, meetingLines]);
   const visibleAuxiliaryMeetingLines = auxiliaryMeetingLines.slice(
     transcriptScroll,
     transcriptScroll + visibleRows,
@@ -2305,7 +2307,7 @@ export default function App(props: {
     // Speaker setup and AI are rows in Settings, so they have no keys of their own here.
     if (input === ',') {
       const fixing = shownSlot.current;
-      setSettingsFocus(fixing?.fix?.[0] === ',' ? fixing.focus : undefined);
+      setSettingsFocus(fixing?.fix?.[0] === ',' ? fixing.focus : notesUnread && meetingView === 'notes' ? 'ai-notes' : undefined);
       setSettingsOpen(true);
       return;
     }
@@ -2699,6 +2701,7 @@ export default function App(props: {
     : meetingView === 'notes' ? [
       // A call where your side was missing says what to do next, first.
       ...(yourSide ? [['i', 'check your mic'] as Hint] : []),
+      ...(notesUnread ? [[',', 'AI settings'] as Hint] : []),
       ...(hasNotes ? [['a', 'ask'], ['h', 'meetings'], ...brief, ...watch, ...followUp, ...note, ['g', 'rewrite notes'], ['c', 'copy'], ['↑↓', 'scroll']] as Hint[]
         : [['g', 'write notes'], ['h', 'meetings'], ...brief, ...watch, ...note] as Hint[])]
     : meetingView === 'chat' ? [['a', 'ask'], ['h', 'meetings'], ...brief, ...followUp, ['c', 'copy'], ['↑↓', 'scroll']]
@@ -2787,7 +2790,7 @@ export default function App(props: {
       <Box ref={transcriptPaneRef} flexGrow={1} minHeight={2} flexDirection="column" overflow="hidden" aria-label="Transcript reader">
         {currentMeeting && meetingView !== 'transcript' ? visibleAuxiliaryMeetingLines.map((line, index) => (
           <Box key={`${meetingView}-${index}`} flexShrink={0} height={1}>
-            {transcriptScroll + index < cautionRows.length ? <Text color="yellow" wrap="truncate-end">{line}</Text>
+            {line.startsWith(CAUTION) ? <Text color="yellow" wrap="truncate-end">{line.slice(CAUTION.length)}</Text>
               : line.startsWith(HEADING) ? <Text bold color="cyan" wrap="truncate-end">{line.slice(HEADING.length)}</Text>
               : line.startsWith(SUBHEADING) ? <Text bold wrap="truncate-end">{line.slice(SUBHEADING.length)}</Text>
               : <Text wrap="truncate-end">{line || ' '}</Text>}

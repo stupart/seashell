@@ -345,8 +345,26 @@ export function olderHumainEngine(message: string): boolean {
   return /usage: humain|unknown (?:command|subcommand|option)|is not supported/iu.test(message);
 }
 
-/** What to do about an engine too old for something, in the words every surface uses. */
+/** How to get a newer engine, for the command line and agents only. The app says it in plain words and opens AI settings. */
 export const NEWER_ENGINE = 'Install a newer AI engine: seashell ai install <humain-package.tgz>';
+
+/**
+ * Something the installed engine is too old to do, said in plain words: "This AI
+ * engine cannot write briefs yet." The command line and the meetings server add
+ * NEWER_ENGINE; the app never shows a command.
+ */
+export class OlderEngineError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'OlderEngineError';
+  }
+}
+
+/** An error's message, with how to install a newer engine when that is what it needs: for the command line and agents. */
+export function withNewerEngine(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return error instanceof OlderEngineError ? `${message} ${NEWER_ENGINE}` : message;
+}
 
 /** The meeting actions an engine lists in its usage line: "humain meeting observe|reconcile|chat|extract <request.json>". */
 export function parseMeetingActions(message: string): ReadonlySet<string> | undefined {
@@ -426,7 +444,7 @@ export async function probeHumainRoute(
     return { ok: false, backend: route.backend, model: route.model, failure: message === 'Humain run timed out'
       ? { kind: 'timeout', message: `Humain itself did not answer within ${Math.round(timeoutMs / 1000) + 15} seconds.` }
       : olderHumainEngine(message)
-        ? { kind: 'provider-error', message: 'This Humain version cannot test connections yet. Install a newer engine: seashell ai install <humain-package.tgz>' }
+        ? { kind: 'provider-error', message: 'This AI engine is too old to test connections. Install a newer one.' }
         : { kind: 'provider-error', message: message.slice(0, 500) } };
   }
 }

@@ -9,7 +9,7 @@ import { captureCoverage, type CaptureCoverage } from './capture-health.ts';
 import { loadCaptureSession } from './capture-session.ts';
 import type { SeashellConfig } from './config.ts';
 import { diarizationStatus } from './diarization-environment.ts';
-import { meetingEngineActions, NEWER_ENGINE, olderThanRevision4, resolveHumainExecutable, type MeetingEngineCheck } from './humain-client.ts';
+import { meetingEngineActions, olderThanRevision4, resolveHumainExecutable, type MeetingEngineCheck } from './humain-client.ts';
 import { briefsEnabled } from './config.ts';
 import { loadVocabulary, vocabularyPath } from './vocabulary.ts';
 import { meetingLaunchAtLoginStatus } from './launch-at-login.ts';
@@ -328,20 +328,23 @@ export async function readFeatureStatuses(options: {
   const backends = [...new Set(Object.values(routes).flatMap(route => route ? [route.backend] : []))];
   // Until an AI is chosen, that is what is missing: choosing one is the next step whether or not the engine is in yet.
   const aiDetail = 'Writes notes, decisions and action items after each meeting and answers questions about it.';
+  // The engine says what it can do from its usage line, never a prompt, so reading it costs nothing.
+  const older = engine && aiConfigured ? await olderThanRevision4(deps.engine ?? meetingEngineActions) : false;
   statuses.push({
     id: 'ai-notes', label: 'AI notes, summary & chat', optional: true,
     ...(!aiConfigured ? { state: 'off', summary: 'Not chosen', action: 'open-ai', detail: aiDetail,
       fix: 'Choose which AI writes your notes.', command: engine ? 'seashell ai setup' : 'seashell ai install <package.tgz>' } as const
     : !engine ? { state: 'off', summary: 'Not installed', action: 'open-ai', detail: `${aiDetail} The AI engine is not installed.`,
       fix: 'Install the AI engine.', command: 'seashell ai install <package.tgz>' } as const
+    // Older than this Seashell: the notes still come, without what you typed, and briefs and follow-ups do not.
+    : older ? { state: 'attention', summary: 'AI engine too old', action: 'open-ai',
+      detail: `${aiDetail} The AI engine is older than this Seashell, so notes leave out what you typed, and it cannot write briefs or follow-ups.`,
+      fix: 'Install a newer AI engine, then press r to recheck.', command: 'seashell ai install <package.tgz>' } as const
     : { state: 'ok', summary: `Using ${backends.map(providerName).join(' + ')}`, action: 'open-ai', detail: aiDetail } as const),
   });
 
   statuses.push(templatesStatus(options.libraryDir));
   const vocabulary = loadVocabulary(options.libraryDir);
-  // Asked only when something waits on it: the engine says what it can do from its usage line, never a prompt.
-  const older = engine && aiConfigured && (vocabulary.terms.length > 0 || briefsEnabled(options.config))
-    ? await olderThanRevision4(deps.engine ?? meetingEngineActions) : false;
   statuses.push(promptsStatus(options.libraryDir), vocabularyStatus(options.libraryDir, vocabulary, older),
     extractorsStatus(options.libraryDir), automationsStatus(options.libraryDir),
     briefsStatus(options.config, { calendarOn, aiConfigured: aiConfigured && engine, older }));
@@ -376,7 +379,7 @@ function vocabularyStatus(libraryDir: string, vocabulary: ReturnType<typeof load
     fix: 'Open it and add the names and words you use, one per line.' };
   // Transcription still uses them; only the notes cannot.
   return older ? { ...base, state: 'attention', summary: `${count} · AI engine too old`,
-    fix: `Transcription uses them; the AI engine is too old to. ${NEWER_ENGINE}` }
+    fix: 'Transcription uses them, but this AI engine is too old to. AI notes says what to do.', command: 'seashell ai install <package.tgz>' }
     : { ...base, state: 'ok', summary: count };
 }
 
@@ -390,7 +393,8 @@ function briefsStatus(config: SeashellConfig, ready: { calendarOn: boolean; aiCo
   if (!ready.calendarOn) return { ...base, state: 'off', summary: 'On · needs calendar titles', fix: 'Turn on calendar titles, under Extras.',
     command: 'seashell meeting calendar setup' };
   if (!ready.aiConfigured) return { ...base, state: 'off', summary: 'On · needs AI notes', fix: 'Choose an AI under AI notes.', command: 'seashell ai setup' };
-  if (ready.older) return { ...base, state: 'attention', summary: 'On · AI engine too old', fix: NEWER_ENGINE };
+  if (ready.older) return { ...base, state: 'attention', summary: 'On · AI engine too old',
+    fix: 'This AI engine is too old to write briefs. AI notes says what to do.', command: 'seashell ai install <package.tgz>' };
   return { ...base, state: 'ok', summary: 'On · 15 minutes before', command: 'seashell brief next' };
 }
 

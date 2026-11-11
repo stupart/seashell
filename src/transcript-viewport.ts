@@ -3,7 +3,7 @@ import { stripVTControlCharacters } from 'util';
 import { coalesceTranscriptSegments, speakerLabel } from './transcript-renderer.ts';
 import type { StructuredTranscript } from './transcript-types.ts';
 import { formatTuiClock, speakerColors, speakerDisplayName, wrapWords, YOUR_SPEAKER_ID } from './tui-state.ts';
-import { bulletParts } from './meeting-tui.ts';
+import { bulletParts, CAUTION } from './meeting-tui.ts';
 
 const color = new Chalk({ level: 1 });
 const MAX_NAME_COLUMN = 18;
@@ -104,6 +104,8 @@ export function wrappedMeetingRows(lines: readonly string[], columns: number): s
   const clockColumn = Math.max(0, ...parts.map(({ body, clock }) => body.startsWith('- ') && clock ? clock.length : 0));
   return parts.flatMap(({ body, owner, clock }) => {
     const clean = stripVTControlCharacters(body) || ' ';
+    // Something to look at stays marked on every row, so all of it is yellow.
+    if (clean.startsWith(CAUTION)) return wrapWords(clean.slice(CAUTION.length), width).map((row) => `${CAUTION}${row}`);
     if (!clean.startsWith('- ')) return wrapWords(clean, width);
     const text = clean.slice(2);
     if (!owner && !clock) return wrapWords(text, Math.max(1, width - 2)).map((row, index) => `${index ? '  ' : '- '}${row}`);

@@ -27,7 +27,6 @@ import { rolePrompt, type PromptRole } from './prompts.ts';
 import {
   humainRouteRequest,
   meetingEngineActions,
-  NEWER_ENGINE,
   olderThanRevision4,
   runHumainMeeting,
   type HumainMeetingRoute,
@@ -113,6 +112,9 @@ export function retryableRun(storeDir: string, runId: string, idempotencyKey: st
   }
   throw new Error('This meeting step failed too many times. Check the AI provider in Settings (,).');
 }
+
+/** Said while an engine too old to read the owner's notes writes the notes: they are kept, and listed as written. */
+export const OWNER_NOTES_UNREAD_STATUS = "Writing the notes without yours: this AI can't read them yet.";
 
 export function meetingSegments(record: TranscriptRecord) {
   return record.transcript.map((segment, index) => ({
@@ -392,7 +394,7 @@ export async function enrichMeeting(
       // The owner's own account of the meeting. An engine before revision 4 would ignore them, so it is not sent them.
       const written = meetingOwnerNotes(libraryDir, transcriptId, artifact);
       const ownerNotes = older ? [] : ownerNotesForAi(artifact, written);
-      if (older && written.length) options.onStatus?.(`Your notes are kept, but this AI engine cannot read them. ${NEWER_ENGINE}`);
+      if (older && written.length) options.onStatus?.(OWNER_NOTES_UNREAD_STATUS);
       artifact = { ...artifact, status: 'reconciling', mode };
       saveMeetingArtifact(libraryDir, artifact);
       options.onStatus?.('Writing the notes…');
@@ -426,7 +428,7 @@ export async function enrichMeeting(
       const output = parseEnrichmentOutput(result.output, validIds, new Set(ownerNotes.map((note) => note.id)));
       if (instructions?.template && output.notes === undefined) {
         // An engine from before templates ignores them and returns plain claims.
-        options.onStatus?.('This Humain version does not write templated notes yet; run `seashell ai install` with a newer engine.');
+        options.onStatus?.('This AI engine cannot follow templates yet, so the notes use none.');
       }
       const analysis: MeetingAnalysis = {
         final: true,
