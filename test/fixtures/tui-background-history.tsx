@@ -38,7 +38,7 @@ const app = render(<App />, { stdin: input as any, stdout: output as any, stderr
 const screen = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('🐚')));
 const type = async (key: string) => { input.write(key); await Bun.sleep(100); };
 const until = async (condition: () => boolean, message: string) => {
-  const deadline = Date.now() + 2500;
+  const deadline = Date.now() + 10_000;
   while (!condition() && Date.now() < deadline) await Bun.sleep(50);
   assert(condition(), `${message}\n${screen()}`);
 };

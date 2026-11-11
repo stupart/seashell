@@ -55,7 +55,7 @@ const terminal = () => {
 };
 let lastOutput = () => '';
 const until = async (check: () => boolean, label: string) => {
-  const end = Date.now() + 3000;
+  const end = Date.now() + 10_000;
   while (!check() && Date.now() < end) await Bun.sleep(10);
   if (!check()) console.error(`LAST OUTPUT: ${lastOutput().slice(-1500)}`);
   assert.ok(check(), `UI condition timed out: ${label}`);

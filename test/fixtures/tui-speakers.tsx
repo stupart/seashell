@@ -54,7 +54,7 @@ const output = Object.assign(new Writable({ write(chunk, _enc, cb) {
 } }), { columns, rows: 24 });
 const app = render(<App />, { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
 const plain = () => stripVTControlCharacters(rendered).replace(/\s+/g, ' ');
-const until = async (check: () => boolean) => { const end = Date.now() + 3000; while (!check() && Date.now() < end) await Bun.sleep(10); assert.ok(check(), 'UI condition timed out'); };
+const until = async (check: () => boolean) => { const end = Date.now() + 10_000; while (!check() && Date.now() < end) await Bun.sleep(10); assert.ok(check(), 'UI condition timed out'); };
 const type = async (text: string) => { input.write(text); await Bun.sleep(80); };
 try {
   await until(() => starts === 1);

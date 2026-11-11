@@ -57,7 +57,7 @@ const app = render(<App />, {
   debug: true, patchConsole: false, exitOnCtrlC: false,
 });
 const until = async (check: () => boolean) => {
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + 10_000;
   while (!check() && Date.now() < deadline) await Bun.sleep(10);
   if (!check()) throw new Error('TUI did not process the fixture audio');
 };

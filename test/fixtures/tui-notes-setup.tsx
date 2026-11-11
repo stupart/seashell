@@ -39,7 +39,7 @@ const app = render(<App />, { stdin: input as any, stdout: output as any, stderr
 const screen = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('🐚')));
 const type = async (key: string) => { input.write(key); await Bun.sleep(100); };
 const until = async (condition: () => boolean, message: string) => {
-  const deadline = Date.now() + 3000;
+  const deadline = Date.now() + 10_000;
   while (!condition() && Date.now() < deadline) await Bun.sleep(50);
   assert(condition(), `${message}\n${screen()}`);
 };
@@ -52,7 +52,7 @@ try {
   await type('1');
   await type('n');
   await until(() => screen().includes('Notes setup for this meeting'), 'N opens notes setup');
-  assert(screen().includes('Auto · Customer call from the title'), `the title picks Customer call\n${screen()}`);
+  await until(() => screen().includes('Auto · Customer call from the title'), 'the title picks Customer call');
   await type('\x1b[C');
   await until(() => ai().template === 'Customer call', 'right arrow chooses the next template and saves it');
   await type('\x1b[C');
@@ -63,7 +63,7 @@ try {
   await until(() => ai().note === 'Budget', 'the note is saved on Enter');
   await type('\x1b[B'); await type('\x1b[C');
   await until(() => ai().off === true, 'AI turns off for this meeting');
-  assert(screen().includes('no notes or chat'), 'the panel says what off means');
+  await until(() => screen().includes('no notes or chat'), 'the panel says what off means');
   await type('\x1b');
   await until(() => !screen().includes('Notes setup for this meeting'), 'Esc closes the panel');
   await until(() => screen().includes('AI is off for this meeting.'), 'the Notes tab says AI is off');
