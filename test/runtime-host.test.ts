@@ -3,7 +3,7 @@ import type { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { embeddedHelperProtocol, inspectMeetingRuntimeHost, meetingRuntimeHostPath, prepareMeetingRuntimeHost, prepareMicrophoneRuntimeHelper, type RuntimeHostOptions } from '../src/runtime-host.ts';
+import { embeddedHelperProtocol, inspectMeetingRuntimeHost, meetingRuntimeHostPath, prepareMeetingRuntimeHost, prepareMicrophoneRuntimeHelper, prepareRuntimeHelper, SCREEN_CAPTURE_RUNTIME_HELPER, type RuntimeHostOptions } from '../src/runtime-host.ts';
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -168,4 +168,17 @@ test('a file that is not the microphone helper is replaced, never trusted', () =
     prepareMicrophoneRuntimeHelper(helperBinary(root, 'real', helperPlist(1), 'real'), options);
     expect(readFileSync(installed, 'latin1')).toContain('real');
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the screen recorder keeps its own stable copy, named for Privacy & Security', () => {
+  const h = fixture();
+  const helper = join(h.root, 'seashell-screen-capture');
+  writeFileSync(helper, '<plist><string>com.humain.seashell.screen-capture</string><key>SeashellHelperProtocol</key><string>1</string></plist>', { mode: 0o700 });
+  const path = prepareRuntimeHelper(helper, SCREEN_CAPTURE_RUNTIME_HELPER, h.options);
+  expect(path).toBe(join(h.options.hostDirectory!, 'Seashell Screen Capture'));
+  expect(embeddedHelperProtocol(path, SCREEN_CAPTURE_RUNTIME_HELPER.identifier)).toBe(1);
+  // Rebuilt bytes with the same protocol keep the copy macOS already allowed.
+  writeFileSync(helper, '<plist><string>com.humain.seashell.screen-capture</string><key>SeashellHelperProtocol</key><string>1</string></plist> rebuilt');
+  prepareRuntimeHelper(helper, SCREEN_CAPTURE_RUNTIME_HELPER, h.options);
+  expect(readFileSync(path, 'utf8')).not.toContain('rebuilt');
 });

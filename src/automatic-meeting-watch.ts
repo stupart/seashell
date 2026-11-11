@@ -53,6 +53,7 @@ import { acquireMeetingWatchLock } from './watch-lock.ts';
 import { buildMeetingContext } from './meeting-context.ts';
 import { consumeMeetingConsent, writeMeetingConsent } from './meeting-consent.ts';
 import { consumeMeetingCommand } from './meeting-command.ts';
+import { meetingVideoRequest } from './video-recording.ts';
 
 export type AutomaticMeetingWatchEvent =
   | { readonly type: 'watch.ready'; readonly at: string }
@@ -416,6 +417,8 @@ export class AutomaticMeetingWatchService {
       ...(resumed ? { sessionId: resumed.capture.sessionId } : {}),
       speakerBrowser: meetBrowserMatchesApp(this.#config.meeting?.speakerBrowser, candidate.bundleId)
         ? this.#config.meeting?.speakerBrowser : 'off',
+      // The call's window, or what `seashell record --video` asked for.
+      video: meetingVideoRequest(this.#config, candidate),
       onStatus,
       onCommittedChunk: (chunk) => {
         if (draft) draft.enqueue(chunk);

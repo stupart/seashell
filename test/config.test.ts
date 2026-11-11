@@ -143,3 +143,27 @@ test('transcription routing config requires an exact consent-bearing cloud route
   }));
   expect(() => loadConfig(path)).toThrow('uploadConsent must be a boolean');
 });
+
+test('meeting video settings are validated, and on/off keeps the rest', () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-config-video-'));
+  roots.push(root);
+  const path = join(root, 'config.json');
+  writeFileSync(path, JSON.stringify({ meeting: { video: { enabled: true, apps: { zoom: false, chrome: true }, fps: 5, quality: 'low' } } }));
+  expect(loadConfig(path).meeting?.video).toEqual({ enabled: true, apps: { zoom: false, chrome: true }, fps: 5, quality: 'low' });
+  expect(updateMeetingConfig({ video: { enabled: false } }, path).meeting?.video)
+    .toEqual({ enabled: false, apps: { zoom: false, chrome: true }, fps: 5, quality: 'low' });
+  for (const [video, message] of [
+    [{ fps: 0 }, 'meeting.video.fps must be a whole number from 1 to 30'],
+    [{ fps: 31 }, 'meeting.video.fps must be a whole number from 1 to 30'],
+    [{ fps: 2.5 }, 'meeting.video.fps must be a whole number from 1 to 30'],
+    [{ quality: 'ultra' }, 'meeting.video.quality must be low, medium, high'],
+    [{ enabled: 'yes' }, 'meeting.video.enabled must be a boolean'],
+    [{ apps: { skype: false } }, 'meeting.video.apps maps'],
+    [{ apps: { zoom: 'off' } }, 'meeting.video.apps maps'],
+    [{ codec: 'hevc' }, 'meeting.video.codec is not supported'],
+    [[], 'meeting.video must be an object'],
+  ] as const) {
+    writeFileSync(path, JSON.stringify({ meeting: { video } }));
+    expect(() => loadConfig(path)).toThrow(message);
+  }
+});

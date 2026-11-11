@@ -56,7 +56,8 @@ const service = new AutomaticMeetingWatchService({
   libraryDir: library,
   // Each cycle is a separate meeting of the same synthetic call a few seconds
   // apart; without this they would correctly resume into one entry.
-  config: { meeting: { automation: { enabled: true, mode: 'automatic',
+  // The soak drives synthetic audio only; it must never film the real screen.
+  config: { meeting: { video: { enabled: false }, automation: { enabled: true, mode: 'automatic',
     confirmationPolls: 2, endGraceSeconds: 1, cooldownSeconds: 1, resumeWindowSeconds: 0 } } },
   onEvent(event) {
     if (event.type === 'meeting.started') started++;

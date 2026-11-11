@@ -14,6 +14,7 @@ import {
   pcmS16leToWav,
   type StartSystemAudioOptions,
 } from '../src/live-system-audio.ts';
+import { startVideoTrack, type VideoCaptureRequest, type VideoCaptureResult } from '../src/video-capture.ts';
 
 const roots: string[] = [];
 
@@ -253,4 +254,99 @@ test('a resumed meeting reopens its capture bundle and continues on the original
   expect(first.chunks[0]!.startMs).toBeGreaterThanOrEqual(59_000);
   expect(later[0]!.startMs).toBeGreaterThanOrEqual(firstEnd);
   for (const chunk of chunks) readVerifiedCaptureChunk(join(libraryDir, '_Capture', 'resumed-call', 'manifest.json'), chunk);
+});
+
+const videoRequest: VideoCaptureRequest = { target: { kind: 'window', bundleIds: ['us.zoom.xos'] }, fps: 2, quality: 'medium' };
+
+function microphoneWithOneChunk(sources: string) {
+  return (options: StartMicrophoneOptions) => {
+    options.onChunk({
+      path: fixture(sources, 'mic.wav'), startSeconds: 0, endSeconds: 1, sequence: 1, source: 'microphone', audible: true,
+      level: { rms: 0.1, peak: 0.2, rmsDbfs: -20 },
+      clock: { kind: 'process-start-estimate', originUnixMs: Date.now(), sampleRate: 16_000, uncertaintyMs: 2 },
+    });
+    return { process: {} as ChildProcess, done: Promise.resolve(), stop() {} };
+  };
+}
+
+test('video records beside audio: listed at its first frame, final at stop, on the session clock', async () => {
+  const libraryDir = mkdtempSync(join(tmpdir(), 'seashell-durable-video-'));
+  roots.push(libraryDir);
+  const startedAt = new Date(1_800_000_000_000);
+  const statuses: DurableLiveCaptureStatus[] = [];
+  const handle = startDurableLiveCapture({
+    libraryDir, sessionId: 'with-video', startedAt, systemAudio: false,
+    microphoneStarter: microphoneWithOneChunk(libraryDir),
+    video: videoRequest,
+    videoStarter: (options) => startVideoTrack({ ...options, starter: (run) => {
+      writeFileSync(run.outputPath, Buffer.alloc(32, 1));
+      run.onFirstFrame?.({ firstFrameUnixMs: startedAt.getTime() + 2_500, finished: false });
+      let finish: (result: VideoCaptureResult) => void = () => {};
+      return {
+        done: new Promise((resolve) => { finish = resolve; }),
+        stop: () => {
+          finish({ saved: true, requestedStop: true, segment: { firstFrameUnixMs: startedAt.getTime() + 2_500,
+            durationMs: 30_000, bytes: 32, codec: 'h264', finished: true } });
+        },
+      };
+    } }),
+    onStatus: (status) => statuses.push(status),
+  });
+  // Listed while still recording, so a crash of Seashell itself would find it.
+  const deadline = Date.now() + 5_000;
+  while (!handle.store.manifest.video && Date.now() < deadline) await Bun.sleep(10);
+  expect(handle.store.manifest.video?.segments[0]).toMatchObject({ id: 'video.000001', firstFrameMs: 2_500, finished: false });
+  const manifest = await handle.stop();
+  expect(manifest.status).toBe('captured');
+  expect(manifest.video?.segments).toEqual([expect.objectContaining({
+    id: 'video.000001', relativePath: 'video/000001.mp4', firstFrameMs: 2_500, durationMs: 30_000,
+    bytes: 32, codec: 'h264', fps: 2, quality: 'medium', finished: true,
+  })]);
+  expect(statuses.map((status) => status.video)).toContain('recording');
+  expect(statuses.at(-1)?.video).toBe('stopped');
+});
+
+test('video that cannot start is only a warning: audio is captured and stop succeeds', async () => {
+  const libraryDir = mkdtempSync(join(tmpdir(), 'seashell-durable-video-fail-'));
+  roots.push(libraryDir);
+  const warnings: string[] = [];
+  const statuses: DurableLiveCaptureStatus[] = [];
+  const thrown = startDurableLiveCapture({
+    libraryDir, sessionId: 'video-throws', systemAudio: false,
+    microphoneStarter: microphoneWithOneChunk(libraryDir),
+    video: videoRequest,
+    videoStarter: () => { throw new Error('helper missing'); },
+    onError: (error) => warnings.push(error.message),
+    onStatus: (status) => statuses.push(status),
+  });
+  expect((await thrown.stop()).status).toBe('captured');
+  expect(warnings).toEqual(['Video was not recorded: helper missing']);
+  expect(statuses.at(-1)?.video).toBe('unavailable');
+
+  // No audio source either: the failure that surfaces is never the video's.
+  const denied = startDurableLiveCapture({
+    libraryDir, sessionId: 'video-denied', microphone: false, systemAudio: false,
+    video: videoRequest,
+    videoStarter: (options) => startVideoTrack({ ...options, starter: () => ({
+      done: Promise.resolve({ saved: false, reason: 'permission', message: 'Screen Recording is off.', requestedStop: false }),
+      stop() {},
+    }) }),
+    onError: (error) => warnings.push(error.message),
+  });
+  const manifest = await denied.stop();
+  expect(manifest.status).toBe('captured');
+  expect(manifest.video).toBeUndefined();
+  expect(warnings.at(-1)).toBe('Screen Recording is off.');
+});
+
+test('without a video request no video starts', async () => {
+  const libraryDir = mkdtempSync(join(tmpdir(), 'seashell-durable-no-video-'));
+  roots.push(libraryDir);
+  let started = false;
+  const statuses: DurableLiveCaptureStatus[] = [];
+  const handle = startDurableLiveCapture({ libraryDir, systemAudio: false, microphoneStarter: microphoneWithOneChunk(libraryDir),
+    videoStarter: () => { started = true; throw new Error('unexpected'); }, onStatus: (status) => statuses.push(status) });
+  await handle.stop();
+  expect(started).toBe(false);
+  expect(statuses.every((status) => status.video === undefined)).toBe(true);
 });

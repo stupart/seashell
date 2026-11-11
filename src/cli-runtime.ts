@@ -17,6 +17,7 @@ import type {
   CliCommand,
   LibraryCommand,
   MeetingCommand,
+  MeetingVideoAction,
   TranscribeCommandOptions,
 } from './cli-args.ts';
 import {
@@ -89,6 +90,9 @@ import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { setupDiarization } from './diarization-setup.ts';
 import { compareSavedSpeakers, renderSpeakerComparison } from './speaker-compare.ts';
 import { initializeFirstInstall } from './first-install.ts';
+import { SCREEN_CAPTURE_HELPER, screenCapturePermission } from './video-capture.ts';
+import { clearVideoRequest, DEFAULT_MEETING_VIDEO, startRecordingWithVideo } from './video-recording.ts';
+import { openMeetingVideo } from './video-meeting.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const PROJECT_ROOT = join(dirname(__filename), '..');
@@ -439,6 +443,12 @@ export function doctorChecks(options: {
       false,
       'Run ./install.sh; optional Meet names use macOS Accessibility. Set up access with seashell meeting speakers setup.',
     ),
+    fileCheck(
+      'screen-capture-helper',
+      SCREEN_CAPTURE_HELPER,
+      false,
+      'Run ./install.sh; meeting video uses macOS Screen Recording. Set up access with seashell meeting video setup.',
+    ),
   ];
 }
 
@@ -501,6 +511,8 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
   const config = loadConfig();
   const libraryDir = resolveLibraryDir(command.libraryDir, process.env, config);
   switch (command.action.kind) {
+    case 'video':
+      return executeMeetingVideo(command.action, command.json, libraryDir, config);
     case 'merge': {
       const groups = command.action.auto
         ? planMeetingMerges(libraryDir, { maxGapMinutes: command.action.maxGapMinutes })
@@ -846,6 +858,53 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
   }
 }
 
+async function executeMeetingVideo(
+  action: MeetingVideoAction,
+  json: boolean,
+  libraryDir: string,
+  config: ReturnType<typeof loadConfig>,
+): Promise<number> {
+  if (action.operation === 'open') {
+    const { page, video } = openMeetingVideo(libraryDir, action.id, {
+      ...(action.atSeconds === undefined ? {} : { atSeconds: action.atSeconds }),
+    });
+    print(json ? JSON.stringify({ page, video }, null, 2) : page);
+    return 0;
+  }
+  if (action.operation === 'on' || action.operation === 'off') {
+    const enabled = action.operation === 'on';
+    if (action.app) {
+      const apps = meetingApps();
+      const app = apps.find((candidate) => candidate.id === action.app || candidate.name.toLocaleLowerCase() === action.app);
+      if (!app) throw new Error(`Unknown app. Choose one of: ${apps.map((candidate) => candidate.id).join(', ')}`);
+      updateMeetingConfig({ video: { apps: { ...config.meeting?.video?.apps, [app.id]: enabled } } });
+    } else updateMeetingConfig({ video: { enabled } });
+  }
+  const permission = await screenCapturePermission({ request: action.operation === 'setup' });
+  if (action.operation === 'setup' && permission.authorization !== 'authorized') {
+    spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'], { stdio: 'ignore', timeout: 5_000 });
+  }
+  const video = loadConfig().meeting?.video;
+  const enabled = video?.enabled ?? DEFAULT_MEETING_VIDEO.enabled;
+  const fps = video?.fps ?? DEFAULT_MEETING_VIDEO.fps;
+  const quality = video?.quality ?? DEFAULT_MEETING_VIDEO.quality;
+  const off = meetingApps().filter((app) => video?.apps?.[app.id] === false).map((app) => app.name);
+  print(json ? JSON.stringify({ enabled, fps, quality, apps: video?.apps ?? {}, permission }, null, 2) : [
+    `Meeting video · ${enabled ? 'on' : 'off'} · Screen Recording ${permission.authorization}`,
+    enabled
+      ? `Calls record their app's window at ${fps} fps, ${quality} quality${off.length ? `, except ${off.join(', ')}` : ''}.`
+      : 'Calls record audio only. Turn video on with: seashell meeting video on',
+    'Each meeting keeps its video in its folder, under capture/video. Sizes are in the README.',
+    permission.detail,
+    ...(permission.executable ? [`Permission belongs to: ${permission.executable}`] : []),
+    ...(action.operation === 'setup' && permission.authorization !== 'authorized'
+      ? ['Turn on Seashell Screen Capture in the window that opened, then check with: seashell meeting video --status'] : []),
+  ].join('\n'));
+  return action.operation === 'setup' || action.operation === 'status'
+    ? permission.authorization === 'authorized' ? 0 : 2
+    : 0;
+}
+
 async function executeCapture(
   command: Extract<Exclude<CliCommand, { kind: 'tui' | 'help' | 'ai-setup' }>, { kind: 'capture' }>,
 ): Promise<number> {
@@ -1012,10 +1071,18 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
       }
       if (command.command === 'start' && before.phase === 'recording') {
         print(command.json ? JSON.stringify({ recording: true, title: before.candidate?.title })
-          : `Already recording${before.candidate?.title ? ` ${before.candidate.title}` : ''}.`);
+          : `Already recording${before.candidate?.title ? ` ${before.candidate.title}` : ''}.${command.video ? ' Video can only start with a new recording.' : ''}`);
         return 0;
       }
-      writeMeetingCommand(command.command);
+      if (command.video) {
+        const permission = await screenCapturePermission();
+        if (permission.authorization !== 'authorized') process.stderr.write(`No video yet: ${permission.detail}\n`);
+        startRecordingWithVideo(command.video);
+      } else {
+        // A request left by an unanswered --video must not film this recording.
+        if (command.command === 'start') clearVideoRequest();
+        writeMeetingCommand(command.command);
+      }
       // The recorder picks commands up on its next check, every few seconds.
       const deadline = Date.now() + 12_000;
       let now = before;
@@ -1028,7 +1095,7 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
       const done = command.command === 'start' ? recording : !recording;
       print(command.json ? JSON.stringify({ recording, title: now.candidate?.title })
         : !done ? 'The recorder has not answered yet. Check seashell status in a moment.'
-        : recording ? `Recording${now.candidate?.title ? ` ${now.candidate.title}` : ''}. Stop with: seashell record stop`
+        : recording ? `Recording${now.candidate?.title ? ` ${now.candidate.title}` : ''}${command.video ? ' with video' : ''}. Stop with: seashell record stop`
         : 'Stopped. The transcript and notes are being written.');
       return done ? 0 : 1;
     }

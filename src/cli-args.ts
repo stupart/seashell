@@ -7,6 +7,7 @@ import type {
   BrowserMeetingPolicy,
   MeetingAutomationMode,
 } from './meeting-automation.ts';
+import type { VideoChoice } from './video-recording.ts';
 
 export interface TranscribeCommandOptions extends DiarizeFileOptions {
   format: TranscriptFormat;
@@ -65,10 +66,17 @@ export type MeetingCommand = {
     | { kind: 'watch'; once: boolean }
     | { kind: 'consent'; decision: 'approve' | 'decline' }
     | { kind: 'apps'; app?: string; policy?: 'off' | 'ask' | 'automatic' }
-    | { kind: 'autostart'; operation: 'enable' | 'disable' | 'status' };
+    | { kind: 'autostart'; operation: 'enable' | 'disable' | 'status' }
+    | MeetingVideoAction;
   libraryDir?: string;
   json: boolean;
 };
+
+/** `seashell meeting video …`: permission, settings, or one meeting's player page. */
+export type MeetingVideoAction =
+  | { kind: 'video'; operation: 'status' | 'setup' }
+  | { kind: 'video'; operation: 'on' | 'off'; app?: string }
+  | { kind: 'video'; operation: 'open'; id: string; atSeconds?: number };
 
 export type LibraryAction =
   | { kind: 'list' }
@@ -114,7 +122,7 @@ export type CliCommand =
   | { kind: 'status'; json: boolean }
   | { kind: 'mcp'; action: 'serve' | 'install'; json: boolean }
   | { kind: 'templates'; json: boolean }
-  | { kind: 'record'; command: 'start' | 'stop'; json: boolean }
+  | { kind: 'record'; command: 'start' | 'stop'; json: boolean; video?: VideoChoice }
   | { kind: 'speaker-compare'; ids: string[]; last?: number; open: boolean; json: boolean }
   | { kind: 'speaker-use'; engine: 'native' | 'nemotron3'; json: boolean }
   | { kind: 'setup'; autostart: boolean; json: boolean }
@@ -676,6 +684,51 @@ function parseMeeting(args: string[]): MeetingCommand {
   return { kind: 'meeting', action, ...(libraryDir ? { libraryDir } : {}), json };
 }
 
+/** `90`, `1:30` or `1:02:03`, in seconds. */
+export function clockSeconds(flag: string, raw: string): number {
+  const parts = raw.trim().split(':');
+  if (parts.length > 3 || parts.some((part) => !/^\d+(\.\d+)?$/u.test(part))) {
+    throw new Error(`${flag} takes a time like 12:34 or 1:02:03`);
+  }
+  return parts.reduce((total, part) => total * 60 + Number(part), 0);
+}
+
+function parseMeetingVideo(args: string[]): MeetingCommand {
+  const usage = 'Usage: seashell meeting video [setup | --status | on | off | <app> on|off | <id> [--at 12:34]] [--json]';
+  const positional: string[] = [];
+  let libraryDir: string | undefined;
+  let atSeconds: number | undefined;
+  let status = false;
+  let json = false;
+  for (let index = 2; index < args.length; index += 1) {
+    const arg = args[index]!;
+    const next = () => {
+      const [value, consumedIndex] = takeValue(args, index, arg);
+      index = consumedIndex;
+      return value;
+    };
+    if (arg === '--json') json = true;
+    else if (arg === '--status') status = true;
+    else if (arg === '--library-dir') libraryDir = next();
+    else if (arg === '--at') atSeconds = clockSeconds(arg, next());
+    else if (arg.startsWith('-')) throw new Error(`Unknown meeting video option: ${arg}`);
+    else positional.push(arg);
+  }
+  const [first, second] = positional;
+  let action: MeetingVideoAction;
+  if (positional.length === 0 || (positional.length === 1 && (first === 'check' || first === 'status'))) {
+    action = { kind: 'video', operation: 'status' };
+  } else if (positional.length === 1 && (first === 'setup' || first === 'on' || first === 'off')) {
+    action = { kind: 'video', operation: first };
+  } else if (positional.length === 2 && (second === 'on' || second === 'off')) {
+    action = { kind: 'video', operation: second, app: first!.toLocaleLowerCase() };
+  } else if (positional.length === 1) {
+    action = { kind: 'video', operation: 'open', id: first!, ...(atSeconds === undefined ? {} : { atSeconds }) };
+  } else throw new Error(usage);
+  if ((status && action.operation !== 'status') || (atSeconds !== undefined && action.operation !== 'open')) throw new Error(usage);
+  return { kind: 'meeting', action, ...(libraryDir ? { libraryDir } : {}), json };
+}
+
 function parseCapture(args: string[]): CaptureCommand {
   const actionName = args[1] ?? 'list';
   const positional: string[] = [];
@@ -771,11 +824,32 @@ export function parseCliArgs(args: string[]): CliCommand {
     return { kind: 'templates', json: args.includes('--json') };
   }
   if (args[0] === 'record') {
-    const rest = args.slice(1).filter((arg) => arg !== '--json');
-    if (rest.length > 1 || (rest[0] !== undefined && rest[0] !== 'stop' && rest[0] !== 'start')) {
-      throw new Error('Usage: seashell record [stop] [--json]');
+    const usage = 'Usage: seashell record [stop] [--json] | seashell record --video [--window <app name> | --display <n>] [--json]';
+    const rest: string[] = [];
+    let video = false;
+    let window: string | undefined;
+    let display: number | undefined;
+    for (let index = 1; index < args.length; index += 1) {
+      const arg = args[index]!;
+      if (arg === '--json') continue;
+      if (arg === '--video') video = true;
+      else if (arg === '--window') [window, index] = takeValue(args, index, arg);
+      else if (arg === '--display') {
+        const [value, consumedIndex] = takeValue(args, index, arg);
+        display = positiveInteger(arg, value);
+        index = consumedIndex;
+      } else rest.push(arg);
     }
-    return { kind: 'record', command: rest[0] === 'stop' ? 'stop' : 'start', json: args.includes('--json') };
+    // Naming a window or a display asks for video too.
+    video ||= window !== undefined || display !== undefined;
+    if (rest.length > 1 || (rest[0] !== undefined && rest[0] !== 'stop' && rest[0] !== 'start') ||
+        (window !== undefined && display !== undefined) || (video && rest[0] === 'stop')) {
+      throw new Error(usage);
+    }
+    return {
+      kind: 'record', command: rest[0] === 'stop' ? 'stop' : 'start', json: args.includes('--json'),
+      ...(video ? { video: { ...(window === undefined ? {} : { window }), ...(display === undefined ? {} : { display }) } } : {}),
+    };
   }
   if (args[0] === 'speakers') {
     const usage = 'Usage: seashell speakers compare [<id> ...] [--last <n>] [--open] [--json] | seashell speakers use <nemotron3|community-1> [--json]';
@@ -839,6 +913,7 @@ export function parseCliArgs(args: string[]): CliCommand {
     return { kind: 'update', check: args.includes('--check'), json: args.includes('--json') };
   }
   if (args[0] === 'capture') return parseCapture(args);
+  if (args[0] === 'meeting' && args[1] === 'video') return parseMeetingVideo(args);
   if (args[0] === 'meeting') return parseMeeting(args);
   if (args[0] === 'library') return parseLibrary(args);
   return parseTranscribe(args, args[0] === 'transcribe');
@@ -866,6 +941,9 @@ Usage:
   seashell mcp install [--json]             Add that server and its skill to Claude Code and Codex
   seashell templates [--json]               Your notes templates and "About me", in an editable folder
   seashell record [stop]                    Record now, by hand, or stop the recording
+  seashell record --video [--window <app> | --display <n>]  Record by hand with video of a call, app or screen
+  seashell meeting video <id> [--at 12:34]  Watch a meeting's video beside its transcript
+  seashell meeting video on|off             Record the call's window with each call (or: <app> on|off)
   seashell meeting apps [<app> on|off|ask]  Which apps record by themselves, ask first, or never
   seashell speakers compare [--last <n>]    Try Nemotron 3 on past calls and listen where the engines disagree
   seashell speakers use <engine>            Separate voices with nemotron3 or community-1
@@ -924,6 +1002,8 @@ Meeting actions:
   meeting speakers [auto|chrome|safari|off|check] [--json]  Configure/check without permission prompts
   meeting microphone setup [--json]         Ask macOS once for background microphone access
   meeting microphone [check] [--json]       Check background microphone access without a prompt
+  meeting video setup [--json]              Ask macOS once for Screen Recording, for meeting video
+  meeting video [--status] [--json]         Check Screen Recording access and video settings without a prompt
   meeting merge <id> <id>... [--json]       Join pieces of one meeting into one entry (pieces go to _Trash)
   meeting merge --auto [--dry-run] [--max-gap-minutes 15]  Find and join split meetings
   meeting template <id> [<name>|none|auto]  Choose the notes template for one meeting (auto: from its title)
