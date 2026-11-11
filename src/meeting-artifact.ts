@@ -903,7 +903,15 @@ export function synchronizeMeetingTranscript(
     return updated;
   }
   if (change === 'revised' || artifact.analysis?.final || artifact.chat.length) retainMeetingRevision(directory, artifact);
-  const updated: MeetingArtifact = {
+  const updated = resetForTranscript(artifact, evidence, change);
+  atomicWrite(path, `${JSON.stringify(updated, null, 2)}\n`);
+  writeMeetingProjections(directory, updated, record);
+  return updated;
+}
+
+/** What a meeting keeps when its transcript grew or changed in a way its notes cannot follow. */
+function resetForTranscript(artifact: MeetingArtifact, evidence: MeetingEvidence, change: 'append' | 'revised'): MeetingArtifact {
+  return {
     ...artifact,
     transcriptEvidence: evidence,
     status: 'base-only',
@@ -922,9 +930,27 @@ export function synchronizeMeetingTranscript(
     chat: [],
     failure: undefined,
   };
-  atomicWrite(path, `${JSON.stringify(updated, null, 2)}\n`);
-  writeMeetingProjections(directory, updated, record);
-  return updated;
+}
+
+/**
+ * A meeting as loadMeetingArtifact would leave it, from a folder already in
+ * hand, without writing anything: for readers such as agents, which must
+ * never change what they read, and which list the library once rather than
+ * search it for every meeting.
+ */
+export function readMeetingArtifact(directory: string, record: TranscriptRecord): MeetingArtifact | undefined {
+  const path = join(directory, 'meeting.json');
+  if (!existsSync(path)) return undefined;
+  let artifact: MeetingArtifact;
+  try {
+    artifact = parseMeetingArtifact(JSON.parse(readFileSync(path, 'utf8')), path);
+  } catch (error) {
+    if (error instanceof SyntaxError) throw new Error(`${path} contains malformed JSON`);
+    throw error;
+  }
+  const evidence = meetingEvidence(record);
+  const change = compareMeetingEvidence(artifact.transcriptEvidence, evidence);
+  return withCurrentCitations(change === 'same' ? artifact : resetForTranscript(artifact, evidence, change), record);
 }
 
 export function appendProvisionalOverlay(

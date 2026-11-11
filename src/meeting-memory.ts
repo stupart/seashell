@@ -2,13 +2,13 @@ import { existsSync, readFileSync } from 'fs';
 import { dirname, isAbsolute, join, resolve } from 'path';
 import {
   citedSegmentIds,
-  loadMeetingArtifact,
   readMeetingAiSettingsAt,
+  readMeetingArtifact,
   type MeetingArtifact,
   type MeetingClaim,
   type MeetingClaimType,
 } from './meeting-artifact.ts';
-import { findTranscriptRecord, listTranscriptRecords, loadTranscriptPath } from './transcript-library.ts';
+import { findTranscriptRecord, listTranscriptRecords, loadTranscriptPath, type TranscriptLibraryEntry } from './transcript-library.ts';
 import { videoMapIn } from './video-meeting.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 
@@ -16,7 +16,8 @@ import type { TranscriptRecord } from './transcript-types.ts';
  * Seashell's memory: reads and queries over the meeting library, with no
  * transport. The MCP server is one way in; anything else that wants to ask the
  * library questions (an Atlas connector, the CLI) calls these directly. Every
- * function refuses or hides meetings the owner turned AI off for.
+ * function refuses or hides meetings the owner turned AI off for, and none
+ * writes: each reads a meeting's folder once, as the listing found it.
  */
 
 export type Arguments = Record<string, unknown>;
@@ -98,7 +99,13 @@ export function isPrivate(directory: string): boolean {
 export function loadMeeting(libraryDir: string, id: unknown) {
   const found = findTranscriptRecord(libraryDir, text(id, 'id', true)!);
   if (isPrivate(dirname(found.path))) throw new Error(PRIVATE_MEETING);
-  return { ...found, directory: dirname(found.path), artifact: loadMeetingArtifact(libraryDir, found.record.id) };
+  return { ...found, directory: dirname(found.path), artifact: readMeetingArtifact(dirname(found.path), found.record) };
+}
+
+/** A listed meeting's transcript and notes, from the folder the listing found. */
+function readListed(entry: TranscriptLibraryEntry): { record: TranscriptRecord; artifact: MeetingArtifact | undefined } {
+  const record = loadTranscriptPath(join(entry.directory, 'transcript.json'));
+  return { record, artifact: readMeetingArtifact(entry.directory, record) };
 }
 
 /**
@@ -133,10 +140,9 @@ export function listMeetings(libraryDir: string, args: Arguments = {}) {
       }
       continue;
     }
-    const artifact = loadMeetingArtifact(libraryDir, entry.id);
+    const { record, artifact } = readListed(entry);
     const summary = artifact?.analysis?.summary;
     if (query) {
-      const record = loadTranscriptPath(`${entry.directory}/transcript.json`);
       const haystack = [entry.title, summary ?? '', ...record.transcript.map(segment => segment.text)].join('\n').toLocaleLowerCase();
       if (!query.split(/\s+/u).every(word => haystack.includes(word))) continue;
     }
@@ -232,7 +238,7 @@ export function listActionItems(libraryDir: string, args: Arguments = {}) {
   for (const entry of listTranscriptRecords(libraryDir)) {
     if (since !== undefined && Date.parse(entry.createdAt) < since.start) continue;
     if (isPrivate(entry.directory)) continue;
-    const artifact = loadMeetingArtifact(libraryDir, entry.id);
+    const { artifact } = readListed(entry);
     for (const claim of claimsOf(artifact)) {
       if (claim.type !== 'action_item') continue;
       items.push({ meetingId: entry.id, title: entry.title, startedAt: entry.createdAt, text: claim.text,
@@ -307,11 +313,9 @@ export function queryNotes(libraryDir: string, args: Arguments = {}) {
     if ((since !== undefined && started < since.start) || (until !== undefined && started > until.end)) continue;
     if (meeting && !meeting.every(word => entry.title.toLocaleLowerCase().includes(word))) continue;
     if (isPrivate(entry.directory)) continue;
-    const artifact = loadMeetingArtifact(libraryDir, entry.id);
+    const { record, artifact } = readListed(entry);
     const claims = claimsOf(artifact).filter(claim => kinds.includes(claim.type));
     if (!claims.length) continue;
-    let record: TranscriptRecord;
-    try { record = loadTranscriptPath(`${entry.directory}/transcript.json`); } catch { continue; }
     const names = labels(record);
     const said = new Map(record.transcript.map((segment, index) => [segmentId(record, index), segment.text]));
     const cite = citer(record);
