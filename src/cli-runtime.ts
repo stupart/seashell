@@ -331,10 +331,12 @@ async function executeCleanPhantoms(libraryDir: string, ids: string[], dryRun: b
   const found = results.filter((result) => result.phantoms > 0);
   const problems = results.filter((result) => result.skipped && result.skipped !== 'no saved audio');
   const total = found.reduce((sum, result) => sum + result.phantoms, 0);
+  const unrecorded = results.reduce((sum, result) => sum + (result.unrecorded ?? 0), 0);
   print([
     ...found.map((result) => `${result.title} (${result.id}): ${result.phantoms} of ${result.segments} lines ${dryRun ? 'heard in silence' : 'removed'}`),
     ...problems.map((result) => `${result.title} (${result.id}): skipped, ${result.skipped}`),
     `${results.length - results.filter((result) => result.skipped).length} meetings checked; ${total} lines ${dryRun ? 'heard in silence' : 'removed'}.`,
+    ...(unrecorded ? [`${unrecorded} lines have no recorded audio under them, so they are kept.`] : []),
     ...(dryRun && total ? ['Dry run: nothing changed. Remove them: seashell library clean-phantoms'] : []),
     ...(!dryRun && total ? ['Each old transcript is in its meeting\'s history folder. Notes were kept and marked as possibly out of date.'] : []),
   ].join('\n'));

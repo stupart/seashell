@@ -167,3 +167,40 @@ test('a meeting keeps its 20 most recent transcript copies', () => {
   expect(kept[0]).toStartWith('2026-10-03T09-05-00-000Z-change-5-');
   expect(kept.at(-1)).toStartWith('2026-10-03T09-24-00-000Z-change-24-');
 });
+
+test('clean-phantoms keeps a line with no recorded audio under it: a gap, a dropout, or past the end', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'seashell-edits-gaps-'));
+  roots.push(home);
+  const root = join(home, 'Transcripts');
+  mkdirSync(root);
+  const record = createTranscriptRecord({
+    transcript: [
+      { start: 2, end: 3, text: 'Okay.', speaker: 'REMOTE_SPEAKER_00' },
+      { start: 6, end: 7, text: 'Sure.', speaker: 'REMOTE_SPEAKER_00' },
+      { start: 8.5, end: 9, text: 'Right.', speaker: 'REMOTE_SPEAKER_00' },
+      { start: 12, end: 13, text: 'Bye.', speaker: 'REMOTE_SPEAKER_00' },
+    ],
+    speakers: [{ id: 'REMOTE_SPEAKER_00', label: 'Remote speaker 1' }],
+  }, { id: 'gappy', now: new Date('2026-10-02T09:00:00Z'), title: 'Gappy call' });
+  saveTranscriptRecord(root, record);
+  const directory = dirname(findTranscriptRecord(root, record.id).path);
+  // Computer audio, silent wherever it was recorded: 0-5 s and 7.5-10 s, with a dropout reported at 8-9 s.
+  const silence = (name: string, seconds: number) => {
+    const path = join(home, name);
+    writeFileSync(path, pcmS16leToWav(Buffer.alloc(16_000 * 2 * seconds)));
+    return path;
+  };
+  const store = new CaptureSessionStore({ libraryDir: root, sessionId: record.id, startedAtUnixMs: 1 });
+  store.commitChunk({ sourcePath: silence('a.wav', 5), trackId: 'system-audio', startSeconds: 0, endSeconds: 5, audible: false });
+  store.commitChunk({ sourcePath: silence('b.wav', 2.5), trackId: 'system-audio', startSeconds: 7.5, endSeconds: 10, audible: false });
+  store.recordDiscontinuity({ trackId: 'system-audio', atSeconds: 8, durationSeconds: 1, reason: 'capture-overrun' });
+  store.setStatus('completed', 'test');
+  store.attachTo(directory);
+  const detect = async () => [];
+
+  expect(await cleanPhantoms(root, { dryRun: true, detect })).toEqual([
+    { id: record.id, title: 'Gappy call', segments: 4, phantoms: 1, unrecorded: 3, removed: false }]);
+  await cleanPhantoms(root, { detect });
+  // Only the line over recorded silence goes; nothing is known about the others.
+  expect(findTranscriptRecord(root, record.id).record.transcript.map((segment) => segment.text)).toEqual(['Sure.', 'Right.', 'Bye.']);
+});

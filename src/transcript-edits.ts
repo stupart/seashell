@@ -4,7 +4,7 @@ import { tmpdir } from 'os';
 import { dirname, join } from 'path';
 import { readBackgroundMeetingState } from './background-meeting-status.ts';
 import { assembleCaptureTrack } from './capture-finalizer.ts';
-import { loadCaptureSession } from './capture-session.ts';
+import { loadCaptureSession, type CaptureSessionManifest, type CaptureTrackId } from './capture-session.ts';
 import { transcriptSegmentId } from './meeting-artifact.ts';
 import { meetingEvidence } from './meeting-evidence.ts';
 import { detectSpeechRegions, isPhantomUnit, readMonoPcm, type SpeechRegion } from './speech-gate.ts';
@@ -166,6 +166,8 @@ export interface PhantomCleanup {
   /** Lines with no speech under them and no sound above a whisper. */
   phantoms: number;
   removed: boolean;
+  /** Lines with no recorded audio under them, in a gap or past the end: not known to be silent, so kept. */
+  unrecorded?: number;
   skipped?: string;
 }
 
@@ -179,11 +181,36 @@ export interface CleanPhantomsOptions {
   assemble?: typeof assembleCaptureTrack;
 }
 
+/** Chunks this close together are one stretch of audio: their times are rounded to the millisecond. */
+const CHUNK_JOIN_SECONDS = 0.1;
+
+/**
+ * When a track has audio, in seconds: its chunks, less any gap the capture
+ * reported inside them. The assembled track is digital silence everywhere
+ * else, which says nothing about what was said there.
+ */
+function recordedSpans(manifest: CaptureSessionManifest, trackId: CaptureTrackId): Array<{ start: number; end: number }> {
+  const spans: Array<{ start: number; end: number }> = [];
+  for (const chunk of manifest.chunks.filter((candidate) => candidate.trackId === trackId).toSorted((a, b) => a.startMs - b.startMs)) {
+    const [start, end] = [chunk.startMs / 1_000, chunk.endMs / 1_000];
+    const last = spans.at(-1);
+    if (last && start <= last.end + CHUNK_JOIN_SECONDS) last.end = Math.max(last.end, end);
+    else spans.push({ start, end });
+  }
+  return manifest.discontinuities.filter((gap) => gap.trackId === trackId).reduce((kept, gap) => {
+    const [from, to] = [gap.atMs / 1_000, (gap.atMs + gap.durationMs) / 1_000];
+    return kept.flatMap((span) => span.end <= from || span.start >= to ? [span]
+      : [...(span.start < from ? [{ start: span.start, end: from }] : []), ...(span.end > to ? [{ start: to, end: span.end }] : [])]);
+  }, spans);
+}
+
 /**
  * Find and remove phantom lines in saved meetings, with the same speech
  * detection and loudness check new recordings get. Each line is checked
  * against its own source: the microphone for "Microphone", computer audio for
- * everyone else. A line goes only when it is phantom as a whole.
+ * everyone else. A line goes only when it is phantom as a whole, and only
+ * where that source has recorded audio for all of it: a gap in the recording,
+ * or a line past its end, is unknown, not silent.
  */
 export async function cleanPhantoms(libraryDir: string, options: CleanPhantomsOptions = {}): Promise<PhantomCleanup[]> {
   const detect = options.detect ?? detectSpeechRegions;
@@ -211,29 +238,33 @@ export async function cleanPhantoms(libraryDir: string, options: CleanPhantomsOp
         microphone: assemble(manifestPath, manifest, 'microphone', join(scratch, 'microphone.wav'), { normalizeQuiet: true }),
         'system-audio': assemble(manifestPath, manifest, 'system-audio', join(scratch, 'system-audio.wav')),
       };
-      const checks = new Map<string, { regions: SpeechRegion[]; pcm: Int16Array } | undefined>();
+      const checks = new Map<string, { regions: SpeechRegion[]; pcm: Int16Array; recorded: Array<{ start: number; end: number }> } | undefined>();
       for (const [track, wav] of Object.entries(tracks)) {
         if (!wav) continue;
         const regions = await detect(wav);
         const pcm = regions ? readMonoPcm(readFileSync(wav)) : undefined;
-        checks.set(track, regions && pcm ? { regions, pcm } : undefined);
+        checks.set(track, regions && pcm ? { regions, pcm, recorded: recordedSpans(manifest, track as CaptureTrackId) } : undefined);
       }
       if ([...checks.values()].every((check) => check === undefined)) {
         results.push({ ...base, skipped: 'speech detection is not available' }); continue;
       }
       const { path, record } = findTranscriptRecord(libraryDir, entry.id);
+      let unrecorded = 0;
       const phantom = record.transcript.map((segment) => {
         const check = checks.get(segment.speaker === 'LOCAL' ? 'microphone' : 'system-audio');
-        return check ? isPhantomUnit(segment, check.regions, check.pcm) : false;
+        if (!check) return false;
+        if (!check.recorded.some((span) => span.start <= segment.start && segment.end <= span.end)) { unrecorded += 1; return false; }
+        return isPhantomUnit(segment, check.regions, check.pcm);
       });
       const phantoms = phantom.filter(Boolean).length;
-      if (options.dryRun || phantoms === 0) { results.push({ ...base, segments: record.transcript.length, phantoms }); continue; }
+      const counted = { phantoms, ...(unrecorded ? { unrecorded } : {}) };
+      if (options.dryRun || phantoms === 0) { results.push({ ...base, segments: record.transcript.length, ...counted }); continue; }
       keepTranscriptHistory(dirname(path), JSON.parse(readFileSync(path, 'utf8')) as TranscriptRecord, 'before-phantom-cleanup');
       pinSegmentIds(record);
       record.transcript = record.transcript.filter((_segment, index) => !phantom[index]);
       record.updatedAt = new Date().toISOString();
       saveTranscriptRecord(libraryDir, record, { keepNotes: REMOVED_SILENT_LINES });
-      results.push({ ...base, segments: record.transcript.length + phantoms, phantoms, removed: true });
+      results.push({ ...base, segments: record.transcript.length + phantoms, ...counted, removed: true });
     } catch (error) {
       results.push({ ...base, skipped: error instanceof Error ? error.message : String(error) });
     } finally {

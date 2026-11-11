@@ -627,7 +627,9 @@ Whisper sometimes writes "Thank you" or "Okay" over silence. New recordings
 drop those lines; `library clean-phantoms` does the same for meetings saved
 before, using each meeting's saved audio. A line goes only when there is no
 speech under it and no sound above a whisper on its own source (the microphone
-for "Microphone", computer audio for everyone else). The dry run reports how
+for "Microphone", computer audio for everyone else), and only where that source
+was recorded for the whole line: a line in a gap in the recording, or past its
+end, is unknown rather than silent, so it stays. The dry run reports how
 many lines each meeting would lose. A real run keeps the old transcript in the
 meeting's `history/transcripts` folder first, and keeps the notes, marked as
 possibly out of date.
