@@ -71,8 +71,10 @@ try {
   // One status slot, most urgent first: the microphone outranks the observer's warning.
   assert(screen().includes('● Recording'), 'confirmed audio capture continues');
   if (columns >= 80) assert(screen().includes('Audio saved through 1:50'), 'saved duration comes from committed audio');
-  await type('i'); assert(screen().includes('Audio help'), `audio help is reachable\n${screen()}`);
-  await type('\x1b'); assert(!screen().includes('Audio help'), 'Escape closes audio help without quitting');
+  // With the mic the problem, help is about the mic and leads with what Seashell found.
+  await type('i'); assert(screen().includes('Mic help') && screen().replace(/\s+/gu, ' ').includes('Your mic has sent nothing since the call started.'),
+    `audio help is reachable\n${screen()}`);
+  await type('\x1b'); assert(!screen().includes('Mic help'), 'Escape closes audio help without quitting');
   const transcript = Array.from({ length: 200 }, (_, i) => ({ id: `s${i}`, start: i, end: i + 1, text: `Live sentence ${String(i).padStart(3, '0')}.`, speaker: 'LOCAL' }));
   saveTranscriptRecord(library, { ...first, transcript }, { provisional: true });
   await until(() => screen().includes('Live sentence 199.'), 'draft text appears while recording, not just after finalization');

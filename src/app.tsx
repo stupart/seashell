@@ -40,7 +40,7 @@ import {
 import { chatWithMeeting, enrichMeeting } from './meeting-enrichment.ts';
 import { Chalk } from 'chalk';
 import { HEADING, meetingViewLines, plainMeetingLines, SUBHEADING, type MeetingView } from './meeting-tui.ts';
-import { HELP_ROWS, HelpRow, KeyBar, Prompt, ScreenTitle, Sheet, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
+import { HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
 import { timedTranscriptRows, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
   renderText,
@@ -84,7 +84,7 @@ import { readBackgroundWatchStatus, type BackgroundWatchStatus } from './backgro
 import { writeMeetingConsent } from './meeting-consent.ts';
 import { writeMeetingCommand } from './meeting-command.ts';
 import { CaptureHealthTracker, readMeetingCoverage, yourSideNotice, type CaptureHealthSnapshot } from './capture-health.ts';
-import { captureRecordingMode, recordingSummary, type RecordingMode } from './RecordingStatus.tsx';
+import { captureRecordingMode, recordingSummary, sourceFinding, type RecordingMode } from './RecordingStatus.tsx';
 import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { runHumainTranscription } from './humain-client.ts';
@@ -232,6 +232,8 @@ export default function App(props: {
   const shownSlot = useRef<TitleStatus & { focus?: FeatureId }>(undefined);
   const [guideOpen, setGuideOpen] = useState(Boolean(props.guide));
   const [guideProgress, setGuideProgress] = useState<GuideProgress>();
+  /** A test of one source from its Settings row, rather than the whole guide. */
+  const [guideTest, setGuideTest] = useState<'microphone' | 'computer'>();
   // The guide offers itself once, on a first run that still needs it.
   const guideOffered = useRef(Boolean(props.guide));
   // Speakers and AI return to whatever opened them; the guide returns to Settings when started there.
@@ -1956,8 +1958,8 @@ export default function App(props: {
 
     if (audioHelpOpen) {
       if (input === 'i' || key.escape) { setAudioHelpOpen(false); return; }
-      // u, not p: p opens AI everywhere else.
-      if (input === 'o' || input === 'u') {
+      // The same keys as the guided setup: o for Sound settings, p for Privacy.
+      if (input === 'o' || input === 'p') {
         const target = input === 'o' ? 'x-apple.systempreferences:com.apple.preference.sound?input'
           : 'x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone';
         const opened = spawnSync('/usr/bin/open', [target], { stdio: 'ignore' });
@@ -2272,8 +2274,9 @@ export default function App(props: {
       : DEFAULT_LEVEL_SOURCES.computer,
   }, [props.levels, listenerDisabled, systemAudioDisabled]);
 
-  const openGuide = (fromSettings: boolean) => {
+  const openGuide = (fromSettings: boolean, test?: 'microphone' | 'computer') => {
     setGuideProgress(undefined);
+    setGuideTest(test);
     setGuideFromSettings(fromSettings);
     setSettingsOpen(false);
     setGuideOpen(true);
@@ -2313,6 +2316,7 @@ export default function App(props: {
     onOpenSpeakers={() => openSpeakers('settings')}
     onOpenAI={() => openAI('settings')}
     onOpenGuide={() => openGuide(true)}
+    onTest={(source) => openGuide(true, source)}
     onClose={() => setSettingsOpen(false)} />;
 
   if (guideOpen) return <Onboarding {...setupActionProps} config={config} columns={terminal.columns} rows={terminal.rows}
@@ -2322,6 +2326,7 @@ export default function App(props: {
     onOpenSpeakers={() => openSpeakers('guide')}
     onOpenAI={() => openAI('guide')}
     fromSettings={guideFromSettings}
+    {...(guideTest ? { test: guideTest } : {})}
     onClose={() => { setGuideOpen(false); if (guideFromSettings) setSettingsOpen(true); }} />;
 
   const separation = featureStatuses?.find((status) => status.id === 'speaker-separation');
@@ -2391,9 +2396,11 @@ export default function App(props: {
       ...latest, ['h', 'meetings'], ['i', 'audio help'], ['↑↓', 'scroll']]
     : !currentRecord?.transcript.length ? [...byHand, ['h', 'meetings'], ['f', 'import']]
     : !currentMeeting ? [...watch, ['h', 'meetings'], ['r', 'name speakers'], ['m', 'make it a meeting'], ['c', 'copy'], ['↑↓', 'scroll']]
-    : meetingView === 'notes' ? hasNotes
-      ? [['a', 'ask'], ['h', 'meetings'], ...watch, ['g', 'rewrite notes'], ['c', 'copy'], ['↑↓', 'scroll']]
-      : [['g', 'write notes'], ['h', 'meetings'], ...watch]
+    : meetingView === 'notes' ? [
+      // A call where your side was missing says what to do next, first.
+      ...(yourSide ? [['i', 'check your mic'] as Hint] : []),
+      ...(hasNotes ? [['a', 'ask'], ['h', 'meetings'], ...watch, ['g', 'rewrite notes'], ['c', 'copy'], ['↑↓', 'scroll']] as Hint[]
+        : [['g', 'write notes'], ['h', 'meetings'], ...watch] as Hint[])]
     : meetingView === 'chat' ? [['a', 'ask'], ['h', 'meetings'], ['c', 'copy'], ['↑↓', 'scroll']]
     : [...nextMatch, ...watch, ['h', 'meetings'], ['r', 'name speakers'], ['a', 'ask'], ['e', 'export'], ['c', 'copy'], ['↑↓', 'scroll']];
 
@@ -2534,12 +2541,6 @@ export default function App(props: {
   const helpSheet = helpMode ? <Sheet title="Keys">
     {HELP_ROWS.map(([group, keys]) => <HelpRow key={group} group={group} keys={keys} />)}
   </Sheet> : null;
-  const audioSheet = audioHelpOpen ? <Sheet title="Audio help">
-    <Text>1. Quiet can just mean you are muted or nobody is speaking.</Text>
-    <Text>2. Check the right microphone is chosen and its level moves.</Text>
-    <Text>3. Check Seashell Microphone is allowed in Privacy & Security.</Text>
-  </Sheet> : null;
-  const sheet = helpSheet ?? audioSheet ?? notesSheet ?? speakerSheet;
 
   // Questions and typed answers take the key bar's row. Their keys are never cut.
   const suggested = speakerPickerOpen ? currentRecord?.speakers[speakerSelection]?.suggestion ? currentRecord.speakers[speakerSelection] : undefined : undefined;
@@ -2561,7 +2562,7 @@ export default function App(props: {
     : speakerPickerOpen ? suggested ? [['y', 'keep'], ['n', `not ${suggested.label}`], ['Enter', 'rename'], ['↑↓', 'choose'], ['Esc', 'back']]
       : [['Enter', 'name'], ['↑↓', 'choose'], ['Esc', 'back']]
     : helpMode ? [['Esc', 'back']]
-    : audioHelpOpen ? [['o', 'Sound'], ['u', 'Privacy'], ['Esc', 'back']]
+    : audioHelpOpen ? [['o', 'Sound settings'], ['p', 'Privacy'], ['Esc', 'back']]
     : undefined;
 
   const statusProps = showBackgroundStatus ? {
@@ -2628,6 +2629,32 @@ export default function App(props: {
     : standing;
   shownSlot.current = slot;
   const toast = error ? { text: error, color: 'red' as const } : copied ? { text: 'Copied.', color: 'green' as const } : notice ?? undefined;
+
+  // Audio help leads with what Seashell found: during a call, what the source sent and since when;
+  // after one, that your side was missing; at home, what the last meeting heard.
+  const startedAt = showBackgroundStatus ? backgroundEntry ? Date.parse(backgroundEntry.createdAt) : undefined
+    : liveSessionStartedAt.current ?? undefined;
+  const silentSetup = attention.find((status) => (status.id === 'microphone' || status.id === 'computer-audio') && status.summary.includes('silent'));
+  const live = summary?.alert && statusProps?.mode !== 'ready' && statusProps?.mode !== 'processing'
+    ? sourceFinding(statusProps?.health, startedAt, statusNow) : undefined;
+  const finding: { text: string; source: 'microphone' | 'computer'; color: 'red' | 'yellow' } | undefined = live
+    ? { ...live, color: summary!.alert!.color }
+    : yourSide && view === 'record' ? { text: yourSide, source: 'microphone', color: 'yellow' }
+    : silentSetup ? { text: silentSetup.detail, source: silentSetup.id === 'microphone' ? 'microphone' : 'computer', color: 'yellow' }
+    : undefined;
+  const sheetWidth = terminal.columns - 2;
+  // Each step's wrapped lines hang under its words, not its number.
+  const step = (number: number, text: string) => <Box key={number} flexShrink={0}>
+    <Box width={3} flexShrink={0}><Text>{number}.</Text></Box>
+    <Paragraph text={text} width={sheetWidth - 3} />
+  </Box>;
+  const audioSheet = audioHelpOpen ? <Sheet title={finding?.source === 'microphone' ? 'Mic help' : 'Audio help'}>
+    {finding && <Box flexShrink={0} marginBottom={1}><Paragraph text={finding.text} width={sheetWidth} color={finding.color} /></Box>}
+    {step(1, 'Quiet can just mean you are muted or nobody is speaking.')}
+    {step(2, 'Check the right microphone is chosen and its level moves.')}
+    {step(3, 'Check Seashell Microphone is allowed in Privacy & Security.')}
+  </Sheet> : null;
+  const sheet = helpSheet ?? audioSheet ?? notesSheet ?? speakerSheet;
 
   return (
     <Box flexDirection="column" paddingX={1} height={terminal.rows} overflow="hidden">

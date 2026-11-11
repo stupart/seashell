@@ -54,6 +54,33 @@ function sourceLabel(source: CaptureSourceHealth | undefined, finished: boolean,
   if (source.state === 'quiet') return 'quiet — check if speaking';
   return source.lastSignalAtUnixMs === undefined ? 'waiting for sound' : 'sound detected';
 }
+/**
+ * What audio help leads with during a call: what Seashell observed from the source that needs a look,
+ * and from when in the call. "Your mic has sent silence since 1:12."
+ */
+export function sourceFinding(health: CaptureHealthSnapshot | undefined, startedAtUnixMs: number | undefined, nowUnixMs = Date.now()):
+  { text: string; source: 'microphone' | 'computer' } | undefined {
+  if (!health) return undefined;
+  const at = (unixMs?: number) => unixMs === undefined || startedAtUnixMs === undefined ? undefined
+    : recordingClock(Math.max(0, unixMs - startedAtUnixMs) / 1000);
+  const describe = (source: CaptureSourceHealth, name: string, silent: string) => {
+    if (source.state === 'disabled') return undefined;
+    if (source.state === 'unavailable' || source.state === 'stopped' || source.state === 'receiving' && stalePcm(source, nowUnixMs)) {
+      const last = at(source.lastPcmAtUnixMs);
+      return last ? `${name} stopped at ${last}.` : `${name} has sent nothing since the call started.`;
+    }
+    if (oneSided(source) || source.state === 'quiet') {
+      const last = at(source.lastSignalAtUnixMs);
+      return last ? `${name} ${silent} since ${last}.` : `${name} ${silent} since the call started.`;
+    }
+    return undefined;
+  };
+  const mic = describe(health.microphone, 'Your mic', 'has sent silence');
+  if (mic) return { text: mic, source: 'microphone' };
+  const computer = describe(health.systemAudio, 'Computer audio', 'has been silent');
+  return computer ? { text: computer, source: 'computer' } : undefined;
+}
+
 export function recordingNeedsAttention(health?: CaptureHealthSnapshot, finished = false, nowUnixMs = Date.now()): boolean {
   if (!health) return false;
   if (finished && health.coverage?.yourSideMissing) return true;

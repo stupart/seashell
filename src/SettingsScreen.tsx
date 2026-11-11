@@ -375,6 +375,8 @@ export default function SettingsScreen(props: SetupActionProps & {
   columns: number;
   rows?: number;
   onOpenGuide?: () => void;
+  /** Listens to one source on its own, as Enter on a working Microphone or Computer audio row does. */
+  onTest?: (source: 'microphone' | 'computer') => void;
   onClose: () => void;
   dependencies?: FeatureStatusDependencies;
   /** Open on this row, as a fix in the app's title line asks; otherwise on what needs the person. */
@@ -545,12 +547,15 @@ export default function SettingsScreen(props: SetupActionProps & {
     else if (key.return && selected?.kind === 'status' && selected.status.id === 'video') switchVideo(selected.status.state !== 'off');
     else if (key.return && selected?.kind === 'status' && selected.status.action) void setup.run(selected.status.action);
     // Only hearing it proves a microphone or the Mac's sound works, and the guide listens.
-    else if (key.return && selected && testable(selected)) props.onOpenGuide?.();
+    else if (key.return && selected?.kind === 'status' && testable(selected)) {
+      const source = selected.status.id === 'microphone' ? 'microphone' : 'computer';
+      if (props.onTest) props.onTest(source); else props.onOpenGuide?.();
+    }
   });
 
   function testable(item: MenuItem): boolean {
     return item.kind === 'status' && !item.status.action && (item.status.id === 'microphone' || item.status.id === 'computer-audio')
-      && Boolean(props.onOpenGuide);
+      && Boolean(props.onTest ?? props.onOpenGuide);
   }
   const summaryOf = (item: MenuItem) => item.kind === 'recording' ? recordingSummary(config)
     : item.kind === 'guide' ? 'Test mic and computer audio' : item.status.summary;
