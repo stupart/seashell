@@ -192,6 +192,7 @@ export default function AISettings(props: {
     <Box flexGrow={1} />
     <Box flexShrink={0}>{testing ? <Prompt text="◐ Testing…" dimColor hints={[['Esc', 'cancel']]} columns={(stdout?.columns ?? 80) - 2} />
       : <KeyBar help={false} columns={(stdout?.columns ?? 80) - 2}
-        hints={[['Enter', screen === 'home' && home[index]?.[0] === 'test' ? test ? 'test again' : 'test' : 'continue'], ['↑↓', 'choose'], ['Esc', 'back']]} />}</Box>
+        hints={[['Enter', screen === 'providers' ? ready(AI_PROVIDERS[index]!.id) ? 'use it' : 'how to connect'
+          : home[index]?.[0] === 'test' ? test ? 'test again' : 'test' : 'continue'], ['↑↓', 'choose'], ['Esc', 'back']]} />}</Box>
   </Box>;
 }
