@@ -117,7 +117,8 @@ export interface TitleStatus {
  * the mark and the screen's name, its status on the right, then a rule.
  */
 export function ScreenTitle(props: { name: string; color?: Tone; bold?: boolean; detail?: string; status?: TitleStatus | undefined;
-  /** How much of the name must stay in view, such as "Saved · audio needs review" before a meeting's title. */
+  /** How much of the name must stay in view, such as "Saved · audio needs review" before a meeting's title.
+   * A screen's own name stays whole unless told otherwise; its status gives way instead. */
   keep?: number }) {
   const { stdout } = useStdout();
   const columns = stdout?.columns ?? 80;
@@ -126,7 +127,7 @@ export function ScreenTitle(props: { name: string; color?: Tone; bold?: boolean;
   // The status gives way to its short form, then to a short screen name: a long meeting title is cut before it.
   const fits = (text?: string) => text !== undefined && 2 + nameWidth + 2 + width(text) <= room;
   // One more column for the … that ends a cut name.
-  const statusRoom = room - 2 - Math.min(nameWidth, 3 + (props.keep ?? 24)) - 2;
+  const statusRoom = room - 2 - Math.min(nameWidth, 3 + (props.keep ?? width(props.name))) - 2;
   const statusText = !props.status ? undefined : fits(props.status.text) ? props.status.text : fits(props.status.short) ? props.status.short
     : statusRoom >= 8 ? cutEnd(props.status.short ?? props.status.text, statusRoom) : undefined;
   const statusWidth = statusText ? 2 + width(statusText) : 0;

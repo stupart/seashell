@@ -2561,7 +2561,8 @@ export default function App(props: {
   const heading: { text: string; color?: 'red' | 'yellow' | 'cyan'; keep?: number } = settingUp ? { text: "Can't record yet", color: 'yellow' }
     // Narrow, the meeting's title gives way before what is happening to it.
     : summary && !quietlyDone ? { text: summary.headline, ...(summary.color ? { color: summary.color } : {}), keep: Bun.stringWidth(summary.label) }
-    : recordHeading ?? { text: '' };
+    // A long meeting title is cut before a warning beside it.
+    : recordHeading ? { ...recordHeading, keep: 24 } : { text: '' };
   // Says the recorder is on, so a quiet screen never reads as a stopped one.
   const standing = watchOwnership === 'external' && backgroundWatch?.phase === 'watching' && statusProps?.mode !== 'watching'
     && !(summary && !quietlyDone) ? { text: 'Watching for calls', short: 'Watching' }
