@@ -632,7 +632,8 @@ was recorded for the whole line: a line in a gap in the recording, or past its
 end, is unknown rather than silent, so it stays. The dry run reports how
 many lines each meeting would lose. A real run keeps the old transcript in the
 meeting's `history/transcripts` folder first, and keeps the notes, marked as
-possibly out of date.
+possibly out of date. A note whose only line was removed stays, marked "source
+line removed".
 
 Every change that keeps the notes (a corrected line, removed lines, a renamed
 speaker) keeps the transcript as it was in that folder first; the 20 most

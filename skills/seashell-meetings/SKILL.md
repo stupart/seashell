@@ -54,6 +54,9 @@ content somewhere, so only do that when the user asks.
 ## Always cite
 Quote or attribute with the segment ID and time, like `[s000123 12:04]`, so the
 user can jump to the source. If the transcript does not support an answer, say so.
+Evidence like `s000001 (no longer in the transcript)` cites a line that was
+removed (silence Whisper misheard): there is nothing to quote, so say the
+source is gone.
 
 ## Changing things (only when the user asks)
 These tools change the user's own files. Say what you changed.
