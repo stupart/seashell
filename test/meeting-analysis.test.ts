@@ -114,3 +114,37 @@ test('agents read owners and due dates, and query notes across meetings by kind,
   saveMeetingArtifact(root, { ...loadMeetingArtifact(root, hiring.id)!, ai: { off: true } });
   expect(queryNotes(root, { person: 'dana' }).items.map((item) => item.meetingId)).toEqual([pricing.id]);
 });
+
+test('a person is found by whole names, by the owner before the speaker, and "me" finds the user', () => {
+  const { root } = library();
+  const ops = createTranscriptRecord({
+    transcript: [
+      { start: 1, end: 4, text: 'Jordan will write the brief.', speaker: 'REMOTE_SPEAKER_00' },
+      { start: 5, end: 8, text: 'I will send the numbers.', speaker: 'LOCAL' },
+      { start: 9, end: 11, text: 'I can book a room.', speaker: 'LOCAL' },
+      { start: 12, end: 15, text: 'Let me share the deck.', speaker: 'REMOTE_SPEAKER_00' },
+    ],
+    speakers: [{ id: 'LOCAL', label: 'Microphone' }, { id: 'REMOTE_SPEAKER_00', label: 'Dana' }],
+  }, { id: 'ops-sync', now: new Date('2026-10-12T09:00:00Z'), title: 'Ops sync' });
+  saveTranscriptRecord(root, ops);
+  saveMeetingArtifact(root, { ...createMeetingArtifact(ops), status: 'ready', analysis: {
+    final: true, summary: 'Ops.', runId: 'r3', createdAt: '2026-10-12T10:00:00Z', claims: [
+      claim('o1', 'action_item', 'Write the brief.', 's000001', { person: 'Jordan', speakerId: 'REMOTE_SPEAKER_00' }),
+      claim('o2', 'action_item', 'Send the numbers.', 's000002', { person: 'You', speakerId: 'LOCAL' }),
+      claim('o3', 'action_item', 'Book a room.', 's000003', { speakerId: 'LOCAL' }),
+      claim('o4', 'action_item', 'Share the deck.', 's000004', { speakerId: 'REMOTE_SPEAKER_00' }),
+    ],
+  } });
+  const owners = (person: string) => queryNotes(root, { kind: 'actions', meeting: 'ops', person }).items.map((item) => item.text);
+  // Dana said Jordan's action, so it is Jordan's; "dan" is not inside "Jordan".
+  expect(owners('Dana')).toEqual(['Share the deck.']);
+  expect(owners('dan')).toEqual(['Share the deck.']);
+  expect(owners('Jordan')).toEqual(['Write the brief.']);
+  for (const me of ['me', 'I', 'you', 'You']) expect(owners(me)).toEqual(['Send the numbers.', 'Book a room.']);
+  // Without a name for the user, "Tyler" is just another name, until they give it to their microphone.
+  expect(owners('Tyler')).toEqual([]);
+  const record = findTranscriptRecord(root, ops.id).record;
+  saveTranscriptRecord(root, { ...record, speakers: [{ id: 'LOCAL', label: 'Tyler' }, record.speakers[1]!] }, { namesOnly: { from: 'Microphone', to: 'Tyler' } });
+  expect(owners('Tyler')).toEqual(['Send the numbers.', 'Book a room.']);
+  expect(owners('me')).toEqual(['Send the numbers.', 'Book a room.']);
+});

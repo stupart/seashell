@@ -30,8 +30,10 @@ content somewhere, so only do that when the user asks.
 - `query_notes` answers "what did Dana commit to", "decisions about pricing
   since October", "open questions from the hiring syncs": filter by `kind`
   (decisions, actions, risks, questions, follow-ups), `person`, `about`,
-  `meeting`, `since` and `until`. Seashell does not track whether an action
-  was done; say so rather than calling one open or closed.
+  `meeting`, `since` and `until`. `person` matches the owner (or the speaker
+  when no owner was recorded) by whole names or their start; use `me` for the
+  user's own items, which the notes record as "You". Seashell does not track
+  whether an action was done; say so rather than calling one open or closed.
 - `list_action_items` is the quick list of every action item.
 
 ## Insights and video

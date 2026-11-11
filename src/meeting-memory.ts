@@ -252,15 +252,36 @@ function noteKinds(value: unknown): MeetingClaimType[] {
   }))];
 }
 
+/** A name's words, lowercase and without accents: "Zoë Lee" is zoe, lee. */
+function nameWords(name: string): string[] {
+  return name.normalize('NFKD').replace(/\p{M}/gu, '').toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+}
+
+/**
+ * How the user is named in their own notes. Humain writes their actions as
+ * "You"; Seashell has no setting for the user's name, so "me" and "I" ask for
+ * them too, and so does the name they gave their microphone in that meeting.
+ */
+const SELF = new Set(['you', 'me', 'i', 'myself']);
+
+/** Each word asked for starts a word of the name: "dan" finds Dana, not Jordan. */
+function namedAs(wanted: string[], name: string | undefined): boolean {
+  const words = name ? nameWords(name) : [];
+  return wanted.length > 0 && wanted.every(word => words.some(candidate => candidate.startsWith(word)));
+}
+
 /**
  * Notes across meetings, from the claims each meeting's notes stored: "action
  * items for Dana", "decisions about pricing since October". A topic matches the
- * note's words or the transcript lines it cites; a person matches the owner
- * or the speaker. Seashell does not track whether an action was done.
+ * note's words or the transcript lines it cites; a person matches the note's
+ * owner, or who said it when it has no owner. Seashell does not track whether
+ * an action was done.
  */
 export function queryNotes(libraryDir: string, args: Arguments = {}) {
   const kinds = noteKinds(args.kind);
-  const person = text(args.person, 'person')?.toLocaleLowerCase();
+  const person = text(args.person, 'person');
+  const wanted = person === undefined ? undefined : nameWords(person);
+  const asksForSelf = Boolean(wanted?.length && wanted.every(word => SELF.has(word)));
   const about = text(args.about, 'about')?.toLocaleLowerCase().split(/\s+/u);
   const meeting = text(args.meeting, 'meeting')?.toLocaleLowerCase().split(/\s+/u);
   const since = date(args.since, 'since');
@@ -280,9 +301,19 @@ export function queryNotes(libraryDir: string, args: Arguments = {}) {
     const names = labels(record);
     const said = new Map(record.transcript.map((segment, index) => [segmentId(record, index), segment.text]));
     const cite = citer(record);
+    // The user's own name, when they gave it to their microphone in this meeting.
+    const mine = names.get('LOCAL')!.label === 'Microphone' ? undefined : names.get('LOCAL')!.label;
     for (const claim of claims) {
-      const speaker = claim.speakerId ? names.get(claim.speakerId)?.label : undefined;
-      if (person && ![claim.person, speaker].some(name => name?.toLocaleLowerCase().includes(person))) continue;
+      if (wanted) {
+        // The owner, when one was recorded: Dana saying "Jordan will" makes it Jordan's.
+        const owner = claim.person ?? (claim.speakerId ? names.get(claim.speakerId)?.label : undefined);
+        const ownerIsSelf = claim.person
+          ? nameWords(claim.person).some(word => SELF.has(word))
+            || (mine !== undefined && (namedAs(nameWords(mine), claim.person) || namedAs(nameWords(claim.person), mine)))
+          : claim.speakerId === 'LOCAL';
+        const matches = asksForSelf ? ownerIsSelf : namedAs(wanted, owner) || (ownerIsSelf && namedAs(wanted, mine));
+        if (!matches) continue;
+      }
       const quotes = claim.evidenceSegmentIds.flatMap(id => said.get(id) ?? []);
       const haystack = [claim.text, ...quotes].join('\n').toLocaleLowerCase();
       if (about && !about.every(word => haystack.includes(word))) continue;

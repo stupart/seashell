@@ -783,12 +783,16 @@ In Seashell, press **,** and choose **Prompts** to open or reset one.
 
 ```sh
 seashell query actions --person Dana            # what Dana owns, newest first
+seashell query actions --person me              # what you own
 seashell query decisions --about pricing --since 2026-10-01
 seashell query questions --meeting "hiring sync"
 ```
 
 Kinds are decisions, actions, risks, questions and follow-ups (all five when
-left out). Each line names its meeting and the transcript moment it came from;
+left out). `--person` matches whole names or their start, so `dan` finds Dana
+but not Jordan, and an action belongs to its owner, not whoever said it. `me`,
+`I` and `you` find your own, as does the name you gave your microphone. Each
+line names its meeting and the transcript moment it came from;
 `--json` adds a quote. Seashell does not track whether an action was done.
 Private meetings never appear.
 

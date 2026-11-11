@@ -242,7 +242,7 @@ export const MEETINGS_MCP_TOOLS: readonly Tool[] = [
     inputSchema: { type: 'object', additionalProperties: false, properties: {
       kind: { description: 'decisions, actions, risks, questions or follow-ups; one or a list (default: all five)',
         anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }] },
-      person: string('Owner or speaker name contains this'), about: string('Words that must all appear in the note or the lines it cites'),
+      person: string('Who owns it, or said it when no owner was recorded: a name or the start of one ("dan" finds Dana, not Jordan). "me" finds the user\'s own'), about: string('Words that must all appear in the note or the lines it cites'),
       meeting: string('Words that must all appear in the meeting title'), since: string('Only meetings on or after this date'),
       until: string('Only meetings on or before this date'), limit: integer('Maximum items (default 50)') } },
     run: queryNotes },
