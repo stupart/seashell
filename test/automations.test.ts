@@ -18,6 +18,7 @@ import {
   type AutomationApprovalRequest,
 } from '../src/automations.ts';
 import { automationState } from '../src/SettingsScreen.tsx';
+import { isPublicAddress, postWebhook } from '../src/webhook-post.ts';
 import { ensureExtractorsDirectory } from '../src/extractors.ts';
 import type { runHumainMeeting } from '../src/humain-client.ts';
 import { createMeetingArtifact, loadMeetingArtifact, saveMeetingArtifact } from '../src/meeting-artifact.ts';
@@ -70,7 +71,7 @@ calendar: Work
       { kind: 'shell', command: './file.sh --today' }, { kind: 'webhook', url: 'https://hooks.example.com/x' }] });
   expect(() => parseAutomation('---\nwhen: daily\n---\n- write: x', '/x/a.md')).toThrow('only trigger');
   expect(() => parseAutomation('---\n---\nsend it somewhere', '/x/a.md')).toThrow('line 1 is not an action');
-  expect(() => parseAutomation('---\n---\n- webhook: file:///etc/passwd', '/x/a.md')).toThrow('http or https');
+  expect(() => parseAutomation('---\n---\n- webhook: file:///etc/passwd', '/x/a.md')).toThrow('webhooks must be https');
   expect(() => parseAutomation('---\nname: Nothing\n---\n', '/x/a.md')).toThrow('has no actions');
 });
 
@@ -258,4 +259,40 @@ test('an automation an agent made reads as off until its owner turns it on in th
   expect(automationState(made)).toBe('Off: made by an agent; turn on in the file');
   expect(automationState({ ...made, enabled: true })).toBe('On');
   expect(automationState({ enabled: false })).toBe('Off');
+});
+
+test('a webhook goes only to the address in the file: no redirects, https, and nothing local unless written so', async () => {
+  const { root, record, env } = library();
+  const received: string[] = [];
+  const elsewhere = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: async (request) => { received.push(await request.text()); return new Response('ok'); } });
+  const hook = Bun.serve({ hostname: '127.0.0.1', port: 0,
+    fetch: () => new Response(null, { status: 307, headers: { location: `http://127.0.0.1:${elsewhere.port}/stolen` } }) });
+  try {
+    // Plain http reaches this Mac only when the file says so; the server's redirect is an answer, not followed.
+    automation(env, 'post.md', `---\nname: Post to the CRM\n---\n- webhook: http://127.0.0.1:${hook.port}/hook\n`);
+    const [run] = await runAutomations(root, record.id, { env, trigger: 'manual', ask: async () => 'allow' });
+    expect(runFailure(run!)).toEqual({ text: 'The CRM refused it (307).', retry: false });
+    expect(run!.actions[0]!.detail).toStartWith('the server refused it (307)');
+    expect(received).toEqual([]);
+  } finally { hook.stop(true); elsewhere.stop(true); }
+
+  // A name that resolves to this Mac or the local network is refused before anything is sent.
+  for (const address of ['127.0.0.1', '10.1.2.3', '::1', 'fd00::5', '::ffff:192.168.1.4']) {
+    const post = postWebhook(async () => [{ address, family: address.includes(':') ? 6 : 4 }]);
+    await expect(post('https://hooks.example.test/x', { method: 'POST', body: '{}' })).rejects.toThrow('on this Mac or the local network');
+  }
+  for (const [url, ok] of [['http://hooks.example.com/x', false], ['ftp://hooks.example.com/x', false], ['http://localhost:8080/x', true],
+    ['http://[::1]:9000/x', true], ['https://192.168.1.20/x', true], ['https://hooks.example.com/x', true]] as const) {
+    const parse = () => parseAutomation(`---\nname: Hook\n---\n- webhook: ${url}\n`, '/x/hook.md');
+    if (ok) parse(); else expect(parse).toThrow('webhooks must be https');
+  }
+});
+
+test('only internet addresses count as public', () => {
+  for (const address of ['8.8.8.8', '1.1.1.1', '2606:4700:4700::1111', '::ffff:8.8.8.8']) expect(isPublicAddress(address)).toBe(true);
+  for (const address of ['127.0.0.1', '10.0.0.1', '172.16.5.4', '192.168.0.1', '169.254.169.254', '100.64.0.1', '0.0.0.0', '224.0.0.1',
+    '255.255.255.255', '::', '::1', 'fe80::1', 'fc00::1', 'fd12:3456::1', 'ff02::1', '::ffff:127.0.0.1', '64:ff9b::a00:1', '2002:c0a8:101::1',
+    '2001:db8::1', 'not an address']) {
+    expect(isPublicAddress(address)).toBe(false);
+  }
 });

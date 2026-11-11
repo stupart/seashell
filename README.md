@@ -857,7 +857,10 @@ link: when a file is already there, or you changed the one Seashell wrote, the
 notes go beside it as `… (2).md`. Only you can read the files it writes.
 `shell` runs a command with the meeting's JSON on stdin, and
 `SEASHELL_MEETING_ID` and `SEASHELL_MEETING_DIR` set. `webhook` posts the same
-JSON.
+JSON to an `https` address, and only there: Seashell never follows a redirect,
+and never posts to this Mac or your local network unless the file names that
+address itself (`http://localhost:8080/hook` or `https://192.168.1.20/hook`).
+A name that turns out to point at a local address is refused.
 
 Anything sent outside Seashell asks first. The first time a `shell` or
 `webhook` action would run, or a `write` to a folder outside the Sea Shell

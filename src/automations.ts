@@ -15,6 +15,7 @@ import { HEADING, meetingViewLines, plainMeetingLines, SUBHEADING } from './meet
 import { findTranscriptRecord } from './transcript-library.ts';
 import { renderText, speakerLabel } from './transcript-renderer.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
+import { postWebhook, webhookAddressProblem } from './webhook-post.ts';
 
 /**
  * Automations: Markdown files in ~/Documents/Sea Shell/Automations that do
@@ -142,7 +143,8 @@ function parseAction(line: string, name: string, number: number): AutomationActi
   if (kind === 'webhook') {
     let url: URL;
     try { url = new URL(value); } catch { throw new Error(`"${name}": ${value} is not a web address`); }
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error(`"${name}": webhooks must be http or https addresses`);
+    const problem = webhookAddressProblem(url);
+    if (problem) throw new Error(`"${name}": ${problem}`);
     return { kind, url: url.toString() };
   }
   return kind === 'extract' ? { kind, extractor: value } : kind === 'write' ? { kind, target: value } : { kind, command: value };
@@ -579,6 +581,7 @@ export interface RunAutomationsOptions {
   /** For extract actions: the final-notes route. */
   route?: HumainMeetingRoute;
   runner?: typeof runHumainMeeting;
+  /** Posts webhooks; postWebhook() unless a test stands in. */
   fetch?: typeof fetch;
   shell?: typeof runShellAction;
   env?: NodeJS.ProcessEnv;
@@ -661,13 +664,16 @@ export async function runAutomations(libraryDir: string, transcriptId: string, o
             { SEASHELL_MEETING_ID: record.id, SEASHELL_MEETING_DIR: directory }, directory);
           result(outcome.code === 0 ? 'ok' : 'failed', outcome.detail);
         } else {
-          const response = await (options.fetch ?? fetch)(action.url, {
+          // Only to the address in the file: a redirect is an answer, never followed.
+          const response = await (options.fetch ?? postWebhook())(action.url, {
             method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': 'Seashell' }, body: payload,
-            signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
+            redirect: 'error', signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
           });
           // In words, with the code for whoever runs the server: never just "HTTP 502".
           result(response.ok ? 'ok' : 'failed', response.ok ? `sent (${response.status})`
-            : response.status >= 500 ? `the server failed (${response.status})` : `the server refused it (${response.status})`);
+            : response.status >= 500 ? `the server failed (${response.status})`
+            : response.status >= 300 && response.status < 400 ? `the server refused it (${response.status}): it asked for the meeting to go to another address, and Seashell never follows that`
+            : `the server refused it (${response.status})`);
         }
       } catch (error) {
         result('failed', (error instanceof Error ? error.message : String(error)).slice(0, 300));
