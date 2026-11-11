@@ -38,9 +38,19 @@ try {
   await tick();
   assert.equal(mics.length, 1); assert.equal(systems.length, 1);
   assert(screen().includes('Starting recording'), 'opening capture is not confirmed recording');
+  // Stopping a recording this window started is never one stray key away: Enter and space ask, n keeps it.
+  for (const key of ['\r', ' ']) {
+    input.write(key); await tick();
+    assert(screen().includes('Stop recording?') && screen().includes('y stop') && screen().includes('n keep recording'),
+      `${JSON.stringify(key)} asks before it stops`);
+    assert.equal(stops, 0, 'asking stops nothing');
+    input.write('n'); await tick();
+    assert.equal(stops, 0, 'n keeps recording');
+    assert(!screen().includes('Stop recording?'), 'the question goes once answered');
+  }
   mics[0]!.onState({ state: 'unavailable' }); systems[0]!.onState({ state: 'unavailable' }); await tick();
   assert(screen().includes('Audio unavailable · not capturing'), 'all-source failure must not say Recording');
-  input.write(' '); await tick(); input.write(' '); await tick();
+  input.write(' '); await tick(); input.write('y'); await tick(); input.write(' '); await tick();
   assert.equal(mics.length, 2); assert.equal(systems.length, 2);
   mics[0]!.onState({ state: 'stopped' }); systems[0]!.onState({ state: 'stopped' });
   mics[0]!.onLevel?.(level); systems[0]!.onLevel?.(level); await tick();

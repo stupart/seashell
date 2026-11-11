@@ -77,14 +77,18 @@ try {
     input.write('y');
   } else input.write(' ');
   await until(() => starts.length === 2);
-  // A pause after capture begins retains the original meeting clock.
+  // A pause after capture begins retains the original meeting clock. Stopping asks first.
   input.write(' ');
+  await settle();
+  input.write('y');
   await settle();
   now += 60_000;
   input.write(' ');
   await until(() => starts.length === 4);
   // Clearing a paused session must also defer the next clock until recording.
   input.write(' ');
+  await settle();
+  input.write('y');
   await settle();
   input.write('\x7f');
   await settle();

@@ -356,7 +356,8 @@ export default function App(props: {
   const [renameState, setRenameState] = useState<RenameState | null>(null);
   const [speakerPickerOpen, setSpeakerPickerOpen] = useState(false);
   const [confirmRewrite, setConfirmRewrite] = useState(false);
-  const [confirmStop, setConfirmStop] = useState(false);
+  /** Stopping a recording asks first, whichever recorder runs it: this window, or the background recorder. */
+  const [confirmStop, setConfirmStop] = useState<{ own: boolean; title?: string } | null>(null);
   /** Opened from a search: which match is at the top of the transcript; n moves to the next. */
   const [searchHit, setSearchHit] = useState<number | null>(null);
   const [exportMode, setExportMode] = useState(false);
@@ -2118,13 +2119,13 @@ export default function App(props: {
     }
 
     if (confirmStop) {
-      setConfirmStop(false);
-      if (input.toLowerCase() === 'y') {
-        try {
-          writeMeetingCommand('stop');
-          setNotice('Stopping. The transcript and notes are written next.');
-        } catch (cause) { setError(`Could not stop recording: ${cause instanceof Error ? cause.message : String(cause)}`); }
-      }
+      setConfirmStop(null);
+      if (input.toLowerCase() !== 'y') return;
+      if (confirmStop.own) { setListeningPaused(true); return; }
+      try {
+        writeMeetingCommand('stop');
+        setNotice('Stopping. The transcript and notes are written next.');
+      } catch (cause) { setError(`Could not stop recording: ${cause instanceof Error ? cause.message : String(cause)}`); }
       return;
     }
 
@@ -2426,7 +2427,7 @@ export default function App(props: {
     }
     // With the background recorder, Space records by hand and stops any recording.
     if (input === ' ' && watchOwnership === 'external') {
-      if (activeBackgroundEntry) { setConfirmStop(true); return; }
+      if (activeBackgroundEntry) { setConfirmStop({ own: false, title: activeBackgroundEntry.title }); return; }
       try {
         // Plain Space is audio only, even if an earlier request for video was never picked up.
         clearVideoRequest();
@@ -2452,6 +2453,8 @@ export default function App(props: {
       return;
     }
     if ((input === ' ' || key.return) && view === 'live' && !historyOpen) {
+      // Stopping is never one stray key away: it asks first, as stopping the background recorder does.
+      if (!pausedRef.current) { setConfirmStop({ own: true, ...(/^Live \d/u.test(liveRecordRef.current.title) ? {} : { title: liveRecordRef.current.title }) }); return; }
       if (pausedRef.current && automaticCandidate) {
         meetingAutomationController.current.decline();
         setAutomationPhase(meetingAutomationController.current.state.phase);
@@ -2866,7 +2869,8 @@ export default function App(props: {
     : confirmTrashId ? { text: `Move "${selectedRecord?.title ?? 'this meeting'}" to the Trash?`, short: 'Move it to the Trash?',
       hints: [['y', 'move'], ['n', 'keep']] }
     : confirmRewrite ? { text: 'Rewrite these notes? This replaces them.', short: 'Rewrite and replace these notes?', hints: [['y', 'rewrite'], ['n', 'keep']] }
-    : confirmStop ? { text: 'Stop recording? Everything so far is kept.', short: 'Stop recording?', hints: [['y', 'stop'], ['n', 'keep recording']] }
+    : confirmStop ? { text: confirmStop.title ? `Stop recording "${confirmStop.title}"?` : 'Stop recording?', short: 'Stop recording?',
+      hints: [['y', 'stop'], ['n', 'keep recording']] }
     : consentPending && !approvalPending && consentTitle ? { text: `Record "${consentTitle}"?`, short: 'Record this call?',
       hints: [['y', 'record'], ['n', 'ignore']] }
     : undefined;
