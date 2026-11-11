@@ -356,15 +356,16 @@ const RUN_SYMBOL: Record<AutomationRun['status'], [string, 'green' | 'red' | 'ye
 
 /**
  * The title's status: whether recording works, counted from the same rows the list marks,
- * then the extras that need a look. Narrow, it says the same in fewer words.
+ * then how many optional rows to check. Never "extras", which is the name of one group.
+ * Narrow, it says the same in fewer words.
  */
 export function settingsStatus(statuses: readonly FeatureStatus[], room: number): TitleStatus {
   const fixes = statuses.filter(status => !status.optional && status.state !== 'ok').length;
   const extras = statuses.filter(status => status.optional && (status.state === 'broken' || status.state === 'attention')).length;
   const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
-  const full = [fixes ? `Recording needs ${plural(fixes, 'fix', 'fixes')}` : 'Recording works',
-    ...(extras ? [`${plural(extras, 'extra needs', 'extras need')} a look`] : [])].join(' · ');
-  const short = [fixes ? `${fixes} to fix` : 'Recording works', ...(extras ? [`${plural(extras, 'extra', 'extras')} to check`] : [])].join(' · ');
+  const check = extras ? [`${extras} to check`] : [];
+  const full = [fixes ? `Recording needs ${plural(fixes, 'fix', 'fixes')}` : 'Recording works', ...check].join(' · ');
+  const short = [fixes ? `${fixes} to fix` : 'Recording works', ...check].join(' · ');
   return { text: Bun.stringWidth(full) <= room ? full : short, color: fixes || extras ? 'yellow' : 'green' };
 }
 
@@ -558,8 +559,9 @@ export default function SettingsScreen(props: SetupActionProps & {
   const menuRow = (item: MenuItem, i: number) => {
     // While its rows are being changed, an item keeps its place without a second selection.
     const chosen = index === i && !(inDetail && item === selected && list !== undefined);
+    // Every row keeps the glyph's column, so all the names start in one place.
     const symbol = item.kind === 'status' ? <><Text color={chosen ? undefined : FEATURE_STATE_COLOR[item.status.state]}>
-      {FEATURE_STATE_SYMBOL[item.status.state]}</Text> </> : null;
+      {FEATURE_STATE_SYMBOL[item.status.state]}</Text> </> : '  ';
     const label = labelOf(item);
     const key = item.kind === 'status' ? item.status.id : item.kind;
     if (!compact) return <Text key={key} inverse={chosen} bold={index === i && !chosen} wrap="truncate-end">
@@ -568,7 +570,7 @@ export default function SettingsScreen(props: SetupActionProps & {
     const room = Math.max(1, props.columns - 2 - 23);
     const summary = summaryOf(item);
     return <Text key={key} inverse={chosen} wrap="truncate-end">
-      {chosen ? '› ' : '  '}{symbol}{label.padEnd(item.kind === 'status' ? 19 : 21)}
+      {chosen ? '› ' : '  '}{symbol}{label.padEnd(19)}
       <Text dimColor={!chosen}>{(summary.length > room ? `${summary.slice(0, room - 1)}…` : summary).padEnd(room)}</Text>
     </Text>;
   };
@@ -582,17 +584,35 @@ export default function SettingsScreen(props: SetupActionProps & {
     }
     lines.push({ key: `item-${i}`, node: menuRow(item, i), item: i });
   });
-  // A short window scrolls with the selection, so every row stays reachable.
+  // A short window scrolls with the selection, so every row stays reachable, and a dim line
+  // at either edge says how many rows are out of view that way.
   const height = props.rows ? Math.max(4, props.rows - 3) : lines.length + 1;
   const selectedLine = Math.max(0, lines.findIndex(line => line.item === index));
-  const top = lines.length <= height ? 0 : Math.max(0, Math.min(selectedLine - height + 2, lines.length - height));
-  const shown = lines.slice(top, top + height);
-  // A heading never sits alone at the bottom edge, cut off from its rows.
+  let top = 0;
+  let room = height;
+  if (lines.length > height) {
+    room = height - 1;
+    if (selectedLine > room - 2) {
+      room = height - 2;
+      top = Math.max(1, Math.min(selectedLine - room + 2, lines.length - room));
+      // At the end there is nothing below to count.
+      if (top + room >= lines.length) { room = height - 1; top = lines.length - room; }
+    }
+  }
+  const shown = lines.slice(top, top + room);
+  // A heading never sits alone at the bottom edge, cut off from its rows, nor a blank at the top.
   while (shown.length && shown.at(-1)!.item === undefined && top + shown.length < lines.length) shown.pop();
+  if (top > 0 && shown[0]?.key.startsWith('gap-')) { shown.shift(); top += 1; }
+  const hidden = (from: number, to: number) => lines.slice(from, to).filter(line => line.item !== undefined).length;
+  const above = hidden(0, top);
+  const below = hidden(top + shown.length, lines.length);
   const menu = <Box flexDirection="column" flexShrink={0} {...(compact ? {} : { width: MENU_WIDTH, paddingRight: 1,
     borderStyle: 'single' as const, borderTop: false, borderBottom: false, borderLeft: false, borderDimColor: true })}>
-    {statuses ? shown.map(line => line.node)
-      : <Text dimColor>  {loadError ?? 'Checking what works…'}</Text>}
+    {statuses ? <>
+      {above > 0 && <Text dimColor>  ↑ {above} more</Text>}
+      {shown.map(line => line.node)}
+      {below > 0 && <Text dimColor>  ↓ {below} more</Text>}
+    </> : <Text dimColor>  {loadError ?? 'Checking what works…'}</Text>}
   </Box>;
 
   // The detail never shrinks its heading: the body below it gives way, and is cut, first.
@@ -648,12 +668,12 @@ export default function SettingsScreen(props: SetupActionProps & {
     <Box flexDirection="column" flexShrink={1} overflow="hidden" marginTop={1}>
       {rows.map((row, i) => {
         const chosen = inDetail && i === rowIndex;
-        // An app that follows Calls is left blank, so the ones set apart stand out.
-        const value = chosen ? `‹ ${POLICY_WORDS[row.value]} ›` : row.value === 'default' ? '' : POLICY_WORDS[row.value];
+        // An app that follows Calls shows what that means, dim, so the ones set apart stand out.
+        const value = chosen ? `‹ ${POLICY_WORDS[row.value]} ›` : row.value === 'default' ? undefined : POLICY_WORDS[row.value];
         return <React.Fragment key={row.id}>
           {i === 2 && <Text dimColor>  Apps</Text>}
           <Text inverse={chosen} wrap="truncate-end">{chosen ? '› ' : '  '}{row.label.padEnd(compact ? 22 : 24)}
-            <Text>{value}</Text></Text>
+            {value === undefined ? <Text dimColor>{POLICY_WORDS[rows[0]!.value]}</Text> : <Text>{value}</Text>}</Text>
         </React.Fragment>;
       })}
     </Box>
