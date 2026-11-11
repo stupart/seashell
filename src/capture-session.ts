@@ -77,6 +77,49 @@ export interface CaptureDiscontinuity {
   readonly recordedAt: string;
 }
 
+/** Where a movie came from. Window titles stay in the movie's sidecar. */
+export interface CaptureVideoTarget {
+  readonly kind: 'window' | 'display';
+  readonly app?: string;
+  readonly bundleId?: string;
+  readonly display?: number;
+}
+
+/**
+ * One movie of the optional video track. It is listed at its first frame, so a
+ * crash still finds it, and again when final. Its first frame sits at
+ * firstFrameMs on the session clock: transcript time t is movie time
+ * t - firstFrameMs / 1000.
+ */
+export interface CaptureVideoSegment {
+  readonly id: string;
+  readonly sequence: number;
+  readonly relativePath: string;
+  readonly sidecarRelativePath: string;
+  readonly firstFrameMs: number;
+  readonly durationMs?: number;
+  readonly frames?: number;
+  readonly bytes?: number;
+  readonly codec?: string;
+  readonly width?: number;
+  readonly height?: number;
+  readonly fps: number;
+  readonly quality: string;
+  readonly target?: CaptureVideoTarget;
+  readonly finished: boolean;
+  readonly recordedAt: string;
+}
+
+/** Paths reserved for the next movie in a capture bundle. */
+export interface CaptureVideoSlot {
+  readonly id: string;
+  readonly sequence: number;
+  readonly relativePath: string;
+  readonly sidecarRelativePath: string;
+  readonly path: string;
+  readonly sidecarPath: string;
+}
+
 export interface CaptureSessionManifest {
   readonly schemaVersion: '0.1';
   readonly sessionId: string;
@@ -98,12 +141,15 @@ export interface CaptureSessionManifest {
   readonly tracks: readonly CaptureTrack[];
   readonly chunks: readonly CaptureChunk[];
   readonly discontinuities: readonly CaptureDiscontinuity[];
+  /** Present once a movie of the call's window or screen has been recorded. */
+  readonly video?: { readonly segments: readonly CaptureVideoSegment[] };
 }
 
 type CaptureSessionEvent =
   | { readonly type: 'session.started'; readonly at: string; readonly manifest: CaptureSessionManifest }
   | { readonly type: 'chunk.committed'; readonly at: string; readonly chunk: CaptureChunk }
   | { readonly type: 'capture.discontinuity'; readonly at: string; readonly discontinuity: CaptureDiscontinuity }
+  | { readonly type: 'video.segment'; readonly at: string; readonly segment: CaptureVideoSegment }
   | {
       readonly type: 'session.status';
       readonly at: string;
@@ -233,6 +279,35 @@ function assertChunk(chunk: CaptureChunk, root: string): void {
   }
 }
 
+function assertVideoSegment(segment: CaptureVideoSegment, root: string): void {
+  const count = (value: unknown) => value === undefined || (Number.isSafeInteger(value) && Number(value) >= 0);
+  if (
+    !plainRecord(segment) ||
+    typeof segment.id !== 'string' || !segment.id ||
+    !Number.isSafeInteger(segment.sequence) || segment.sequence < 1 ||
+    typeof segment.relativePath !== 'string' || typeof segment.sidecarRelativePath !== 'string' ||
+    !Number.isSafeInteger(segment.firstFrameMs) ||
+    !count(segment.durationMs) || !count(segment.frames) || !count(segment.bytes) ||
+    !Number.isSafeInteger(segment.fps) || segment.fps < 1 || segment.fps > 30 ||
+    typeof segment.quality !== 'string' ||
+    typeof segment.finished !== 'boolean' ||
+    typeof segment.recordedAt !== 'string' ||
+    (segment.target !== undefined && segment.target.kind !== 'window' && segment.target.kind !== 'display')
+  ) throw new Error('Capture manifest contains an invalid video segment');
+  for (const path of [segment.relativePath, segment.sidecarRelativePath]) {
+    if (!resolve(root, path).startsWith(`${resolve(root)}/`)) throw new Error('Capture video path escapes its session');
+  }
+}
+
+/** Replace a movie's earlier listing, or add it. */
+function withVideoSegment(manifest: CaptureSessionManifest, segment: CaptureVideoSegment): CaptureSessionManifest {
+  const segments = (manifest.video?.segments ?? []).filter((entry) => entry.id !== segment.id);
+  return {
+    ...manifest,
+    video: { segments: [...segments, segment].toSorted((left, right) => left.sequence - right.sequence) },
+  };
+}
+
 export function parseCaptureSessionManifest(value: unknown, root: string): CaptureSessionManifest {
   if (!plainRecord(value) || value.schemaVersion !== CAPTURE_SESSION_SCHEMA_VERSION) {
     throw new Error('Capture session manifest schemaVersion must be 0.1');
@@ -270,11 +345,20 @@ export function parseCaptureSessionManifest(value: unknown, root: string): Captu
   }
   const ids = manifest.chunks.map((chunk) => chunk.id);
   if (new Set(ids).size !== ids.length) throw new Error('Capture manifest has duplicate chunk IDs');
+  if (manifest.video !== undefined) {
+    if (!plainRecord(manifest.video) || !Array.isArray(manifest.video.segments)) {
+      throw new Error('Capture manifest video must list segments');
+    }
+    for (const segment of manifest.video.segments) assertVideoSegment(segment, root);
+  }
   return Object.freeze({
     ...manifest,
     tracks: Object.freeze(manifest.tracks.map((entry) => Object.freeze({ ...entry }))),
     chunks: Object.freeze(manifest.chunks.map((entry) => Object.freeze({ ...entry }))),
     discontinuities: Object.freeze(manifest.discontinuities.map((entry) => Object.freeze({ ...entry }))),
+    ...(manifest.video === undefined ? {} : {
+      video: Object.freeze({ segments: Object.freeze(manifest.video.segments.map((entry) => Object.freeze({ ...entry }))) }),
+    }),
   });
 }
 
@@ -302,6 +386,9 @@ export function loadCaptureSession(path: string): CaptureSessionManifest {
         updatedAt: event.at,
         discontinuities: [...manifest.discontinuities, event.discontinuity],
       };
+    } else if (event.type === 'video.segment') {
+      assertVideoSegment(event.segment, root);
+      manifest = { ...withVideoSegment(manifest, event.segment), updatedAt: event.at };
     } else if (event.type === 'session.status') {
       manifest = {
         ...manifest,
@@ -584,6 +671,41 @@ export class CaptureSessionStore {
     return task;
   }
 
+  /** Reserve paths for the next movie. Numbers are never reused while files remain. */
+  nextVideoSegment(): CaptureVideoSlot {
+    const directory = join(this.root, 'video');
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const used = readdirSync(directory).flatMap((name) => /^(\d{6})\./u.exec(name)?.[1] ?? []).map(Number);
+    const listed = (this.manifestValue.video?.segments ?? []).map((segment) => segment.sequence);
+    const sequence = Math.max(0, ...used, ...listed) + 1;
+    const name = String(sequence).padStart(6, '0');
+    const relativePath = join('video', `${name}.mp4`);
+    const sidecarRelativePath = join('video', `${name}.json`);
+    return Object.freeze({
+      id: `video.${name}`,
+      sequence,
+      relativePath,
+      sidecarRelativePath,
+      path: join(this.root, relativePath),
+      sidecarPath: join(this.root, sidecarRelativePath),
+    });
+  }
+
+  /** List a movie (again): at its first frame, then when it is final. */
+  recordVideoSegmentAsync(details: Omit<CaptureVideoSegment, 'recordedAt'>): Promise<CaptureVideoSegment> {
+    const task = this.commitTail.then(async () => {
+      const recordedAt = new Date().toISOString();
+      const segment: CaptureVideoSegment = Object.freeze({ ...details, recordedAt });
+      assertVideoSegment(segment, this.root);
+      await appendDurablyAsync(this.journalPath, { type: 'video.segment', at: recordedAt, segment });
+      this.manifestValue = Object.freeze({ ...withVideoSegment(this.manifestValue, segment), updatedAt: recordedAt });
+      await atomicWriteAsync(this.manifestPath, `${JSON.stringify(this.manifestValue, null, 2)}\n`);
+      return segment;
+    });
+    this.commitTail = task.then(() => {}, () => {});
+    return task;
+  }
+
   setStatus(status: CaptureSessionStatus, reason?: string): CaptureSessionManifest {
     const at = new Date().toISOString();
     const endedAtUnixMs = status === 'captured' || status === 'completed' || status === 'interrupted'
@@ -608,11 +730,25 @@ export class CaptureSessionStore {
 
   attachTo(transcriptDirectory: string): string {
     const destination = join(resolve(transcriptDirectory), 'capture');
-    if (resolve(destination) === resolve(this.root)) return destination;
+    if (resolve(destination) === resolve(this.root)) {
+      this.publishVideo(transcriptDirectory, destination);
+      return destination;
+    }
     if (existsSync(destination)) throw new Error(`Transcript already has a capture bundle: ${destination}`);
     mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
     renameSync(this.root, destination);
+    this.publishVideo(transcriptDirectory, destination);
     return destination;
+  }
+
+  /** The movies now have their final home: tell the meeting where they are. */
+  private publishVideo(transcriptDirectory: string, bundleRoot: string): void {
+    const map = captureVideoMap(this.manifestValue, bundleRoot);
+    if (!map) return;
+    // Best effort: the transcript is saved either way, and meetingVideo()
+    // rebuilds this map from the bundle when it is missing.
+    try { atomicWrite(join(resolve(transcriptDirectory), MEETING_VIDEO_FILE), `${JSON.stringify(map, null, 2)}\n`); }
+    catch {}
   }
 
   /** Remove only this exact completed capture bundle (used by the signal test). */
@@ -628,6 +764,45 @@ export class CaptureSessionStore {
   private project(): void {
     atomicWrite(this.manifestPath, `${JSON.stringify(this.manifestValue, null, 2)}\n`);
   }
+}
+
+export const MEETING_VIDEO_FILE = 'video.json';
+
+/** One movie on the transcript's timeline: video time = transcript time + startOffsetSeconds. */
+export interface MeetingVideoSegment {
+  readonly file: string;
+  readonly startOffsetSeconds: number;
+  readonly durationSeconds?: number;
+}
+
+/**
+ * video.json in a meeting folder. `file` and `startOffsetSeconds` describe the
+ * first movie, which is usually the only one; `segments` lists every movie in
+ * order (a resumed call or a restarted recorder adds one). Other readers rely
+ * on this shape: add fields, never rename them.
+ */
+export interface MeetingVideoMap extends MeetingVideoSegment {
+  readonly target?: CaptureVideoTarget;
+  readonly segments: readonly MeetingVideoSegment[];
+}
+
+export function captureVideoMap(manifest: CaptureSessionManifest, bundleRoot: string): MeetingVideoMap | undefined {
+  const root = resolve(bundleRoot);
+  const listed = manifest.video?.segments ?? [];
+  const segments = listed.flatMap((segment): MeetingVideoSegment[] => {
+    const file = resolve(root, segment.relativePath);
+    if (!file.startsWith(`${root}/`) || !existsSync(file)) return [];
+    return [Object.freeze({
+      file,
+      // Rounded to the millisecond; `+ 0` keeps -0 out of the JSON.
+      startOffsetSeconds: Math.round(-segment.firstFrameMs) / 1_000 + 0,
+      ...(segment.durationMs === undefined ? {} : { durationSeconds: segment.durationMs / 1_000 }),
+    })];
+  });
+  const first = segments[0];
+  if (!first) return undefined;
+  const target = listed.find((segment) => resolve(root, segment.relativePath) === first.file)?.target;
+  return Object.freeze({ ...first, ...(target ? { target } : {}), segments: Object.freeze(segments) });
 }
 
 export function captureChunkPath(manifestPath: string, chunk: CaptureChunk): string {
