@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import { basename, dirname, join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { computerAudioConfirmed, forgetAudioCheck, readAudioChecks, type AudioChecks } from './audio-checks.ts';
-import { terminateManagedChild } from './process-lifecycle.ts';
+import { onChildSettled, terminateManagedChild } from './process-lifecycle.ts';
 import {
   prepareRuntimeHelper,
   SYSTEM_AUDIO_RUNTIME_HELPER,
@@ -640,7 +640,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
     if (requestedStop || lastDataAt === undefined || Date.now() - lastDataAt < stalledTimeoutMs) return;
     lastDataAt = undefined;
     nativeError = { type: 'error', code: 'system_audio_stalled', message: 'Computer audio stopped arriving.' };
-    void terminateManagedChild(child);
+    void terminateManagedChild(child, undefined, { group: true });
   }, Math.max(10, Math.min(1_000, stalledTimeoutMs / 4)));
   watchdog.unref();
 
@@ -680,7 +680,9 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
     ...(options.helperArgs ?? []),
     '--sample-rate', String(LIVE_CAPTURE_SAMPLE_RATE),
     '--chunk-ms', '100',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    // Its own process group: the helper relaunches itself, and only a group
+    // signal reaches that copy once its proxy can no longer forward one.
+  ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
 
   child.stdout?.on('data', (data: Buffer) => {
     if (nativeError?.code !== 'system_audio_stalled') lastDataAt = Date.now();
@@ -697,7 +699,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
         code: 'chunk_failed',
         message: error instanceof Error ? error.message : String(error),
       };
-      child.kill('SIGTERM');
+      void terminateManagedChild(child, undefined, { group: true });
     }
   });
 
@@ -785,7 +787,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
   child.on('error', (error) => {
     nativeError = { type: 'error', code: 'spawn_failed', message: error.message };
   });
-  child.on('close', (code, signal) => {
+  onChildSettled(child, (code, signal) => {
     clearInterval(watchdog);
     if (stderr.trim()) consumeEventLine(stderr);
     const final = chunker.flush();
@@ -808,7 +810,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
       message: permissionMessage(failure),
     });
     resolveDone();
-  });
+  }, { group: true });
 
   return {
     process: child,
@@ -816,7 +818,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
     stop() {
       if (requestedStop) return;
       requestedStop = true;
-      void terminateManagedChild(child);
+      void terminateManagedChild(child, undefined, { group: true });
     },
   };
 }

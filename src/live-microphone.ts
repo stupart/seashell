@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import { existsSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
-import { terminateManagedChild } from './process-lifecycle.ts';
+import { onChildSettled, terminateManagedChild } from './process-lifecycle.ts';
 import { prepareMicrophoneRuntimeHelper } from './runtime-host.ts';
 import {
   hasAudiblePcmSignal,
@@ -181,7 +181,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
     settleStartup();
     options.onState({ state: 'starting', code: 'microphone_no_audio',
       message: failure });
-    void terminateManagedChild(child);
+    void terminateManagedChild(child, undefined, { group: true });
   }, options.startupTimeoutMs ?? 8_000);
   startupTimer.unref();
   const watchdog = setInterval(() => {
@@ -191,7 +191,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
       endingForFailure = true;
       failureReason = 'stalled';
       failure = 'Microphone stopped delivering audio. Check Sound → Input and reconnect your microphone.';
-      void terminateManagedChild(child);
+      void terminateManagedChild(child, undefined, { group: true });
     } else if (!quietWarning && now - lastAudibleAt >= (options.quietWarningMs ?? 30000)) {
       quietWarning = true;
       options.onState({ state: 'active', code: 'microphone_quiet',
@@ -233,7 +233,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
       failure = error instanceof Error ? error.message : String(error);
       failureReason = 'chunk-error';
       endingForFailure = true;
-      void terminateManagedChild(child);
+      void terminateManagedChild(child, undefined, { group: true });
     }
   };
 
@@ -242,7 +242,9 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
     ? { command: options.command, args: options.commandArgs ?? SOX_ARGUMENTS }
     : defaultMicrophoneRecorder();
   const child = spawn(recorder.command, [...recorder.args], {
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // Its own process group: the helper relaunches itself, and only a group
+    // signal reaches that copy once its proxy can no longer forward one.
+    stdio: ['ignore', 'pipe', 'pipe'], detached: true,
   });
 
   let stderr = '';
@@ -270,7 +272,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
     for (const chunk of chunker.append(data)) publish(chunk);
   });
   child.on('error', (error) => { failure = error.message; failureReason = 'spawn-error'; });
-  child.on('close', (code, signal) => {
+  onChildSettled(child, (code, signal) => {
     clearTimeout(startupTimer);
     clearInterval(watchdog);
     settleStartup();
@@ -298,7 +300,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
           }),
     });
     resolveDone();
-  });
+  }, { group: true });
 
   return {
     process: child,
@@ -311,7 +313,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
       clearInterval(watchdog);
       child.kill('SIGINT');
       const terminate = setTimeout(() => {
-        void terminateManagedChild(child);
+        void terminateManagedChild(child, undefined, { group: true });
       }, 1_500);
       terminate.unref();
       void done.then(() => clearTimeout(terminate));
