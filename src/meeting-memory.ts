@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from 'fs';
 import { dirname, isAbsolute, join, resolve } from 'path';
 import {
+  citedSegmentIds,
   loadMeetingArtifact,
   readMeetingAiSettingsAt,
   type MeetingArtifact,
@@ -76,10 +77,15 @@ export function loadMeeting(libraryDir: string, id: unknown) {
   return { ...found, directory: dirname(found.path), artifact: loadMeetingArtifact(libraryDir, found.record.id) };
 }
 
-/** "s000002 01:05": a citation an agent can quote and a person can find. */
+/**
+ * "s000002 01:05": a citation an agent can quote and a person can find. A line
+ * no longer in the transcript (a phantom line cleaned away) says so, rather
+ * than pointing at the start of the meeting.
+ */
 function citer(record: TranscriptRecord) {
   const starts = new Map(record.transcript.map((segment, index) => [segmentId(record, index), segment.start]));
-  return (ids: string[]) => ids.map(id => `${id} ${clock(starts.get(id) ?? 0)}`);
+  return (item: { evidenceSegmentIds?: string[]; removedEvidenceSegmentIds?: string[] }) => citedSegmentIds(item)
+    .map(id => { const start = starts.get(id); return start === undefined ? `${id} (no longer in the transcript)` : `${id} ${clock(start)}`; });
 }
 
 function claimsOf(artifact: MeetingArtifact | undefined): MeetingClaim[] {
@@ -143,14 +149,14 @@ export function getMeeting(libraryDir: string, args: Arguments) {
         type: claim.type, text: claim.text,
         ...(claim.person ? { person: claim.person } : {}),
         ...(claim.due ? { due: claim.due } : {}),
-        evidence: cite(claim.evidenceSegmentIds),
+        evidence: cite(claim),
       })),
       // The notes in the owner's template, section by section, each point cited.
       ...(artifact?.analysis?.notes ? {
         template: artifact.analysis.template,
         sections: artifact.analysis.notes.map(section => ({
           heading: section.heading,
-          items: section.items.map(item => ({ text: item.text, evidence: cite(item.evidenceSegmentIds) })),
+          items: section.items.map(item => ({ text: item.text, evidence: cite(item) })),
         })),
       } : {}),
     },
@@ -272,7 +278,7 @@ export function queryNotes(libraryDir: string, args: Arguments = {}) {
       const quote = quotes[0]?.replace(/\s+/gu, ' ').trim();
       items.push({ meetingId: entry.id, title: entry.title, startedAt: entry.createdAt, type: claim.type, text: claim.text,
         ...(claim.person ? { person: claim.person } : {}), ...(claim.due ? { due: claim.due } : {}),
-        evidence: cite(claim.evidenceSegmentIds),
+        evidence: cite(claim),
         ...(quote ? { quote: quote.length > 200 ? `${quote.slice(0, 199)}…` : quote } : {}),
         final: Boolean(artifact?.analysis?.final) });
       if (items.length >= limit) return { items, truncated: true };
@@ -293,7 +299,7 @@ export function getInsights(libraryDir: string, args: Arguments) {
       ...(insight.summary ? { summary: insight.summary } : {}),
       fields: insight.fields.map(field => ({
         name: field.name,
-        items: field.items.map(item => ({ text: item.text, evidence: cite(item.evidenceSegmentIds) })),
+        items: field.items.map(item => ({ text: item.text, evidence: cite(item) })),
       })),
     }));
   if (wanted && !insights.length) throw new Error(`No insights from "${String(args.extractor)}" for this meeting yet. Run it with run_extractor.`);

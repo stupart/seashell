@@ -60,6 +60,8 @@ export interface MeetingClaim {
   type: MeetingClaimType;
   text: string;
   evidenceSegmentIds: string[];
+  /** Lines this cited that are no longer in the transcript. See withCurrentCitations. */
+  removedEvidenceSegmentIds?: string[];
   confidence: number;
   speakerId?: string;
   /** Who owns an action or follow-up, as said. */
@@ -72,6 +74,8 @@ export interface MeetingClaim {
 export interface MeetingNoteItem {
   text: string;
   evidenceSegmentIds: string[];
+  /** Lines this cited that are no longer in the transcript. See withCurrentCitations. */
+  removedEvidenceSegmentIds?: string[];
 }
 
 /** A template heading and what the meeting said under it; empty when it did not come up. */
@@ -135,6 +139,8 @@ export interface MeetingChatMessage {
   text: string;
   createdAt: string;
   evidenceSegmentIds?: string[];
+  /** Lines this cited that are no longer in the transcript. See withCurrentCitations. */
+  removedEvidenceSegmentIds?: string[];
   runId?: string;
 }
 
@@ -251,6 +257,15 @@ function optionalString(value: unknown, label: string): string | undefined {
   return value === undefined ? undefined : string(value, label);
 }
 
+/** A saved list of cited lines no longer in the transcript; absent when there are none. */
+function parseRemovedEvidence(value: unknown, label: string): { removedEvidenceSegmentIds?: string[] } {
+  if (value === undefined) return {};
+  if (!Array.isArray(value) || value.some((id) => typeof id !== 'string' || !id.trim())) {
+    throw new Error(`${label} removedEvidenceSegmentIds must be strings`);
+  }
+  return value.length ? { removedEvidenceSegmentIds: [...value] as string[] } : {};
+}
+
 function parseAttendees(value: unknown): MeetingAttendee[] {
   if (!Array.isArray(value)) throw new Error('meeting attendees must be an array');
   return value.map((raw, index) => {
@@ -297,6 +312,7 @@ export function parseMeetingClaim(value: unknown, label = 'meeting claim'): Meet
     type: claim.type as MeetingClaimType,
     text: string(claim.text, `${label} text`),
     evidenceSegmentIds: [...claim.evidenceSegmentIds] as string[],
+    ...parseRemovedEvidence(claim.removedEvidenceSegmentIds, label),
     confidence: claim.confidence,
     ...(optionalString(claim.speakerId, `${label} speakerId`) === undefined
       ? {}
@@ -358,7 +374,10 @@ function parseAnalysis(value: unknown): MeetingAnalysis | undefined {
   };
 }
 
-/** A cited point: notes, insights. Every one must rest on at least one segment. */
+/**
+ * A cited point: notes, insights. Every one must rest on at least one segment,
+ * or record the lines it rested on that were since removed.
+ */
 export function parseMeetingNoteItems(value: unknown, label: string): MeetingNoteItem[] {
   if (!Array.isArray(value)) throw new Error(`${label} items must be an array`);
   return value.map((item, itemIndex) => {
@@ -366,13 +385,15 @@ export function parseMeetingNoteItems(value: unknown, label: string): MeetingNot
       throw new Error(`${label} item ${itemIndex} is invalid`);
     }
     const note = item as Record<string, unknown>;
-    if (!Array.isArray(note.evidenceSegmentIds) || note.evidenceSegmentIds.length === 0 ||
+    const removed = parseRemovedEvidence(note.removedEvidenceSegmentIds, `${label} item ${itemIndex}`);
+    if (!Array.isArray(note.evidenceSegmentIds) || (note.evidenceSegmentIds.length === 0 && !removed.removedEvidenceSegmentIds) ||
         note.evidenceSegmentIds.some((id) => typeof id !== 'string' || !id.trim())) {
       throw new Error(`${label} item ${itemIndex} must cite transcript segments`);
     }
     return {
       text: string(note.text, `${label} item ${itemIndex} text`),
       evidenceSegmentIds: [...note.evidenceSegmentIds] as string[],
+      ...removed,
     };
   });
 }
@@ -536,6 +557,7 @@ export function parseMeetingArtifact(value: unknown, path = 'meeting.json'): Mee
               message.evidenceSegmentIds.every((id) => typeof id === 'string' && id.trim())
             ? { evidenceSegmentIds: [...message.evidenceSegmentIds] as string[] }
             : (() => { throw new Error(`chat message ${index} evidence is invalid`); })()),
+        ...parseRemovedEvidence(message.removedEvidenceSegmentIds, `chat message ${index}`),
         ...(optionalString(message.runId, `chat message ${index} runId`) === undefined
           ? {}
           : { runId: message.runId as string }),
@@ -559,11 +581,62 @@ export function loadMeetingArtifact(
   const path = join(dirname(found.path), 'meeting.json');
   if (!existsSync(path)) return undefined;
   try {
-    return synchronizeMeetingTranscript(dirname(path), found.record);
+    const artifact = synchronizeMeetingTranscript(dirname(path), found.record);
+    return artifact && withCurrentCitations(artifact, found.record);
   } catch (error) {
     if (error instanceof SyntaxError) throw new Error(`${path} contains malformed JSON`);
     throw error;
   }
+}
+
+type Cited = Pick<MeetingNoteItem, 'removedEvidenceSegmentIds'> & { evidenceSegmentIds?: string[] };
+
+/** Every line a point cited, those still in the transcript first. */
+export function citedSegmentIds(item: Cited): string[] {
+  return [...(item.evidenceSegmentIds ?? []), ...(item.removedEvidenceSegmentIds ?? [])];
+}
+
+/** A point that cited lines, none of which the transcript still has. */
+export function sourceLineRemoved(item: Cited): boolean {
+  return !item.evidenceSegmentIds?.length && Boolean(item.removedEvidenceSegmentIds?.length);
+}
+
+/**
+ * Every citation split into the lines the transcript has now and the lines
+ * removed from it: a phantom line cleaned away, or an older transcript
+ * restored without it. A point whose every line is gone stays, marked, rather
+ * than vanishing or pointing at nothing; one whose lines come back cites them
+ * again. Notes, insights and chat answers saved before this split heal the
+ * next time they are read. Returns the same object when nothing changed.
+ */
+export function withCurrentCitations(artifact: MeetingArtifact, record: TranscriptRecord): MeetingArtifact {
+  const current = new Set(record.transcript.map((_segment, index) => transcriptSegmentId(record, index)));
+  let changed = false;
+  const cite = <T extends Cited>(item: T): T => {
+    const evidence = item.evidenceSegmentIds ?? [];
+    const removed = item.removedEvidenceSegmentIds ?? [];
+    if (evidence.every((id) => current.has(id)) && !removed.some((id) => current.has(id))) return item;
+    changed = true;
+    const all = [...new Set([...evidence, ...removed])];
+    const gone = all.filter((id) => !current.has(id));
+    const { removedEvidenceSegmentIds: _removed, ...rest } = item;
+    return { ...rest, evidenceSegmentIds: all.filter((id) => current.has(id)), ...(gone.length ? { removedEvidenceSegmentIds: gone } : {}) } as T;
+  };
+  const next: MeetingArtifact = {
+    ...artifact,
+    provisionalClaims: artifact.provisionalClaims.map(cite),
+    ...(artifact.analysis ? { analysis: { ...artifact.analysis, claims: artifact.analysis.claims.map(cite),
+      ...(artifact.analysis.notes ? { notes: artifact.analysis.notes.map((section) => ({ ...section, items: section.items.map(cite) })) } : {}) } } : {}),
+    ...(artifact.insights ? { insights: artifact.insights.map((insight) => ({ ...insight,
+      fields: insight.fields.map((field) => ({ ...field, items: field.items.map(cite) })) })) } : {}),
+    chat: artifact.chat.map(cite),
+  };
+  return changed ? next : artifact;
+}
+
+/** The lines a point cites, for the Markdown copies of the notes. */
+function citationText(item: Cited): string {
+  return sourceLineRemoved(item) ? 'source line removed' : (item.evidenceSegmentIds ?? []).join(', ');
 }
 
 /** "Dana · by Friday": who owns an action or follow-up and when it is due, as said. */
@@ -575,7 +648,7 @@ function markdownList(claims: MeetingClaim[]): string {
   return claims.length > 0
     ? claims.map((claim) => {
       const owner = claim.type === 'action_item' || claim.type === 'follow_up' ? claimOwnerAndDue(claim) : undefined;
-      return `- ${claim.text}${owner ? ` (${owner})` : ''} _(${claim.evidenceSegmentIds.join(', ')})_`;
+      return `- ${claim.text}${owner ? ` (${owner})` : ''} _(${citationText(claim)})_`;
     }).join('\n')
     : '- None captured.';
 }
@@ -590,7 +663,7 @@ function documentFor(artifact: MeetingArtifact, type: MeetingClaimType, title: s
 export function templatedNotesMarkdown(title: string, analysis: MeetingAnalysis): string {
   const sections = (analysis.notes ?? []).map((section) => `## ${section.heading}\n\n${
     section.items.length
-      ? section.items.map((item) => `- ${item.text} _(${item.evidenceSegmentIds.join(', ')})_`).join('\n')
+      ? section.items.map((item) => `- ${item.text} _(${citationText(item)})_`).join('\n')
       : '- Not discussed.'
   }`);
   return `# ${title}\n\n${analysis.template ? `_${analysis.template} notes_\n\n` : ''}${analysis.summary}\n\n${sections.join('\n\n')}\n`;
@@ -604,7 +677,7 @@ export function insightFileName(extractor: string): string {
 
 export function insightMarkdown(title: string, insight: MeetingInsight): string {
   const fields = insight.fields.map((field) => `## ${field.name}\n\n${field.items.length
-    ? field.items.map((item) => `- ${item.text} _(${item.evidenceSegmentIds.join(', ')})_`).join('\n')
+    ? field.items.map((item) => `- ${item.text} _(${citationText(item)})_`).join('\n')
     : '- Not covered.'}`);
   return `# ${insight.extractor}\n\n_${title}_\n\n${insight.summary ? `${insight.summary}\n\n` : ''}${fields.join('\n\n')}\n`;
 }
@@ -683,6 +756,7 @@ export function saveMeetingArtifact(
   if (change === 'append' && (artifact.analysis?.final || artifact.chat.length)) {
     throw new Error('Transcript grew while meeting analysis was running. Retry with the current transcript.');
   }
+  Object.assign(artifact, withCurrentCitations(artifact, record));
   artifact.transcriptEvidence = evidence;
   artifact.updatedAt = new Date().toISOString();
   atomicWrite(join(directory, 'meeting.json'), `${JSON.stringify(artifact, null, 2)}\n`);
@@ -750,11 +824,12 @@ export function synchronizeMeetingTranscript(
   }
   // A corrected word or a removed phantom line leaves the meeting's notes
   // mostly right, so they are kept and marked rather than thrown away. Segment
-  // IDs do not move, so every citation still points at the same moment.
+  // IDs do not move, so every citation still points at the same moment, and
+  // a citation of a removed line moves aside, marked (withCurrentCitations).
   if (options.keepNotes) {
-    const updated: MeetingArtifact = { ...artifact, transcriptEvidence: evidence, updatedAt: new Date().toISOString(),
+    const updated: MeetingArtifact = withCurrentCitations({ ...artifact, transcriptEvidence: evidence, updatedAt: new Date().toISOString(),
       ...(artifact.analysis || artifact.provisionalClaims.length || artifact.chat.length || artifact.insights?.length
-        ? { notesOutdated: { at: new Date().toISOString(), reason: options.keepNotes } } : {}) };
+        ? { notesOutdated: { at: new Date().toISOString(), reason: options.keepNotes } } : {}) }, record);
     atomicWrite(path, `${JSON.stringify(updated, null, 2)}\n`);
     writeMeetingProjections(directory, updated, record);
     return updated;

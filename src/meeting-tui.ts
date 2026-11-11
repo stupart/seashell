@@ -1,5 +1,5 @@
 import type { MeetingArtifact, MeetingClaim, MeetingClaimType } from './meeting-artifact.ts';
-import { claimOwnerAndDue, transcriptSegmentId } from './meeting-artifact.ts';
+import { citedSegmentIds, claimOwnerAndDue, sourceLineRemoved, transcriptSegmentId } from './meeting-artifact.ts';
 import { compareMeetingEvidence, meetingEvidence } from './meeting-evidence.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 import { formatTuiClock } from './tui-state.ts';
@@ -115,7 +115,7 @@ export function meetingViewLines(
     }
     return artifact.chat.slice(-8).flatMap((message) => [
       `${message.role === 'user' ? 'You' : 'Seashell'}: ${message.text}`,
-      ...(message.role === 'assistant' ? sources(message.evidenceSegmentIds) : []),
+      ...(message.role === 'assistant' ? sources(citedSegmentIds(message)) : []),
     ]);
   }
 
@@ -128,12 +128,14 @@ export function meetingViewLines(
   }
 
   const start = createStart(artifact, record);
-  type Item = { text: string; ids: readonly string[]; owner?: string | undefined };
-  // The time is the citation: it finds the line in the transcript.
+  type Item = { text: string; ids: readonly string[]; owner?: string | undefined; removed?: boolean };
+  // The time is the citation: it finds the line in the transcript. A point
+  // whose every line was removed stays, and says so.
   const bullet = (item: Item) => {
     const said = start(item.ids);
     const clock = said === undefined ? '' : formatTuiClock(said);
-    return item.owner || clock ? `- ${item.text}${META}${item.owner ?? ''}${META}${clock}` : `- ${item.text}`;
+    const text = item.removed ? `${item.text} (source line removed)` : item.text;
+    return item.owner || clock ? `- ${text}${META}${item.owner ?? ''}${META}${clock}` : `- ${text}`;
   };
   // In the order they were said; anything Seashell cannot place keeps its place at the end.
   const inOrder = (items: Item[]) => items.map((item, index) => ({ item, index, at: start(item.ids) ?? Number.POSITIVE_INFINITY }))
@@ -169,10 +171,10 @@ export function meetingViewLines(
   const fromClaims = (types: MeetingClaimType[]): Item[] => {
     const items = claims.filter((claim) => types.includes(claim.type) && !repeated(claim));
     shown.push(...items.map((claim) => saying(claim.text, claim.evidenceSegmentIds)));
-    return items.map((claim) => ({ text: claim.text, ids: claim.evidenceSegmentIds, owner: ownerOf(claim) }));
+    return items.map((claim) => ({ text: claim.text, ids: claim.evidenceSegmentIds, owner: ownerOf(claim), removed: sourceLineRemoved(claim) }));
   };
   const fromSection = (section: (typeof sections)[number]): Item[] =>
-    section.items.map((item) => ({ text: item.text, ids: item.evidenceSegmentIds, owner: ownerFor(item) }));
+    section.items.map((item) => ({ text: item.text, ids: item.evidenceSegmentIds, owner: ownerFor(item), removed: sourceLineRemoved(item) }));
   const groupOf = (heading: string) => LEADING_GROUPS.find(([, , names]) => names.test(heading.trim()));
   const stale = record && artifact.transcriptEvidence &&
     compareMeetingEvidence(artifact.transcriptEvidence, meetingEvidence(record)) !== 'same';
@@ -203,7 +205,7 @@ export function meetingViewLines(
     const named = wordsOf(insight.extractor);
     const lines = fields.flatMap(({ field, items }) => {
       const label = fields.length > 1 && ![...wordsOf(field.name)].every((word) => named.has(word));
-      return items.map((item) => bullet({ text: label ? `${field.name}: ${item.text}` : item.text, ids: item.evidenceSegmentIds }));
+      return items.map((item) => bullet({ text: label ? `${field.name}: ${item.text}` : item.text, ids: item.evidenceSegmentIds, removed: sourceLineRemoved(item) }));
     });
     return lines.length ? [`${SUBHEADING}${insight.extractor}`, ...lines] : [];
   });
