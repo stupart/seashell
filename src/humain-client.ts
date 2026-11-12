@@ -347,6 +347,8 @@ export function olderHumainEngine(message: string): boolean {
 
 /** How to get a newer engine, for the command line and agents only. The app says it in plain words and opens AI settings. */
 export const NEWER_ENGINE = 'Install a newer AI engine: seashell ai install <humain-package.tgz>';
+/** The same next step as the app says it, after "This AI engine cannot write follow-ups yet.": never a command. */
+export const NEWER_ENGINE_PLAIN = 'Install a newer AI engine, then try again.';
 
 /**
  * Something the installed engine is too old to do, said in plain words: "This AI

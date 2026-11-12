@@ -94,7 +94,7 @@ import { ALLOW_MIC, captureRecordingMode, recordingClock, recordingSummary, sour
 import { allowMicrophone, MICROPHONE_PRIVACY_OPENING } from './microphone-permission.ts';
 import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
-import { runHumainTranscription } from './humain-client.ts';
+import { NEWER_ENGINE_PLAIN, OlderEngineError, runHumainTranscription } from './humain-client.ts';
 import {
   DEFAULT_WHISPER_MODEL_FILENAME,
 } from './model-config.ts';
@@ -1846,7 +1846,9 @@ export default function App(props: {
   // b lists what is coming up when any of it has a brief to read or make; the nearest is the title's "Next:".
   const briefable = comingUp.some(canBrief);
   const nearest = briefable ? comingUp[0] : undefined;
-  const failureText = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
+  // An engine too old for a follow-up or a brief says what to do next in plain words; the command is for the command line.
+  const failureText = (cause: unknown) => cause instanceof OlderEngineError ? `${cause.message} ${NEWER_ENGINE_PLAIN}`
+    : cause instanceof Error ? cause.message : String(cause);
 
   /** A note, durable before it is confirmed: beside the recording's audio, or in the meeting. Says whether it was kept. */
   const saveNote = (note: NonNullable<typeof noteInput>): boolean => {
