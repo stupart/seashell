@@ -30,8 +30,8 @@ import {
 import { createTranscriptRecord } from './transcript-record.ts';
 import { loadMeetingTemplates, meetingInstructions, NO_TEMPLATE } from './meeting-templates.ts';
 import {
-  createChatMessage,
   claimOwnerAndDue,
+  createChatMessage,
   createMeetingArtifact,
   loadMeetingArtifact,
   saveMeetingArtifact,
@@ -105,13 +105,13 @@ import {
   VIDEO_MARK,
   moveSelection,
   moveTranscriptScroll,
+  fitColumns,
   formatTuiClock,
   sentenceClock,
   speakerDisplayName,
   tuiLayout,
   upcomingWhen,
   wrapWords,
-  fitColumns,
 } from './tui-state.ts';
 import {
   DEFAULT_MEETING_AUTOMATION,
@@ -377,16 +377,15 @@ export default function App(props: {
   const [noteInput, setNoteInput] = useState<{ input: string; typedAtUnixMs?: number; at?: number } | null>(null);
   /** Bumped when a note is saved, so the notes read again. */
   const [notesVersion, setNotesVersion] = useState(0);
-  /** [a] during a call: a question over what has been said so far, answered in a sheet. Esc stops waiting. */
-  /** `saved`: + kept the answer as one of your notes, so it is not offered twice. */
+  /** [a] during a call: a question over what has been said so far, answered in a sheet. Esc stops waiting.
+   * `saved`: + kept the answer as one of your notes, so it is not offered twice. */
   const [liveAnswer, setLiveAnswer] = useState<{ shown: string; catchUp: boolean; answer?: LiveAnswer; error?: string; saved?: boolean; abort: AbortController; scroll: number } | null>(null);
   /** When a key was last pressed here: "What did I miss?" covers at least the time since. */
   const lastLookedAt = useRef(Date.now());
-  /** [u] A follow-up: its kind, then anything to add, at the key bar; the draft in a sheet. */
+  /** [u] A follow-up: its kind, then anything to add, at the key bar; the draft in a sheet. Its `ask` is what
+   * was typed at "Anything to add?", so writing it again starts from it. */
   const [draftPrompt, setDraftPrompt] = useState<{ kind?: DraftKind; input: string } | null>(null);
-  /** `ask` is what was typed at "Anything to add?", so writing it again starts from it. */
   const [draft, setDraft] = useState<{ kind: DraftKind; ask: string; result?: FollowUpDraft; error?: string; sources: boolean; abort: AbortController; scroll: number } | null>(null);
-  /** [b] The brief for the next meeting on the calendar, as the recorder last saw it. */
   /** [b] The meetings coming up in the next 36 hours, as the recorder last saw them; the list's chosen row while it is open. */
   const [comingUp, setComingUp] = useState<ComingUpMeeting[]>([]);
   const [comingUpRow, setComingUpRow] = useState<number | null>(null);
@@ -2119,7 +2118,10 @@ export default function App(props: {
       } else if (briefSheet?.brief && input === 'o') {
         try { openTextFile(briefSheet.brief.path); } catch (cause) { setError(failureText(cause)); }
       } else if (briefSheet?.brief && input === 'c') {
-        const text = readFileSync(briefSheet.brief.path, 'utf8').replace(/^---[\s\S]*?---\n/u, '').trim();
+        // The brief as its file has it, without the lines at the top that are for agents.
+        let text: string;
+        try { text = readFileSync(briefSheet.brief.path, 'utf8').replace(/^---[\s\S]*?---\n/u, '').trim(); }
+        catch (cause) { setError(failureText(cause)); return; }
         const copied = spawnSync('pbcopy', [], { input: text, encoding: 'utf8' });
         if (copied.error || copied.status !== 0) setError('Copy failed'); else setNotice('Copied.');
       } else if (briefSheet?.brief && key.return) {
