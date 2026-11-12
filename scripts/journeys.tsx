@@ -371,7 +371,7 @@ export const JOURNEYS: Journey[] = [
       { title: 'Ready next time', press: [ENTER], keys: 'Enter', until: 'Still open', note: 'Saved in the Briefs folder: the second time it opens at once.' },
       { title: 'Choosing a point', press: [DOWN], keys: '↓', note: 'Who owns it sits on the right, as in the notes.' },
       { title: 'Where it was said', press: [ENTER], keys: 'Enter', until: '2 Transcript', note: 'The past meeting, at the line the point cites.' },
-      { title: 'No history', press: ['b', DOWN, DOWN, ENTER], keys: 'B ↓ ↓ Enter', until: 'Nothing to brief from',
+      { title: 'No history', press: ['b', DOWN, DOWN, ENTER], keys: 'B ↓ ↓ Enter', until: 'No past meetings',
         note: 'A meeting with nobody met before has nothing to read, and says so.' },
     ],
   },

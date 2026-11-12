@@ -75,7 +75,7 @@ try {
   await type('\x1b');
   await until(() => screen().includes('Coming up') && screen().includes('brief ready'), 'Esc goes back to the list, which says the brief is ready');
   await type('\x1b[B'); await type('\r');
-  await until(() => screen().includes('Nothing to brief from yet'), 'a meeting with no history says so');
+  await until(() => screen().includes('No past meetings with these people or this title.'), 'a meeting with no history says so, in one row');
   await type('\x1b[A'); await type('\r');
   await until(() => screen().includes('Brief · Roadmap review') && screen().includes('Enter where it was said'), 'a saved brief opens at once');
   await type('\r');

@@ -1903,7 +1903,8 @@ export default function App(props: {
   const openBrief = (meeting: ComingUpMeeting) => {
     const saved = findBrief(libraryRoot, meeting.upcoming);
     if (saved) { setBriefSheet({ meeting, brief: saved, scroll: 0 }); return; }
-    if (!canBrief(meeting)) { setCaution(new NoBriefHistoryError(meeting.upcoming.title).message); return; }
+    // Said in the key bar's one row; the meeting is the row it was chosen from, so its title is not repeated.
+    if (!canBrief(meeting)) { setCaution(NO_PAST_MEETINGS); return; }
     const route = configuredMeetingRoutes.reconciliation;
     if (!route) { setAiSetupIntent(null); setAiSetupOpen(true); return; }
     const abort = new AbortController();
@@ -3204,6 +3205,9 @@ function Highlighted(props: { text: string; query: string }) {
 function searchHeading(count: number, query: string): string {
   return `${count === 0 ? 'No meeting mentions' : count === 1 ? '1 meeting mentions' : `${count} meetings mention`} "${query}"`;
 }
+
+/** Why a meeting coming up has no brief, in the key bar's one row. */
+const NO_PAST_MEETINGS = 'No past meetings with these people or this title.';
 
 /** A meeting coming up has a brief to read, or past meetings to make one from. */
 function canBrief(meeting: ComingUpMeeting): boolean {
