@@ -193,7 +193,11 @@ export function writeMeetingTemplate(
 export function loadProfile(libraryDir: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
   const path = join(templatesDirectory(libraryDir, env), PROFILE_FILE);
   if (!existsSync(path)) return undefined;
-  const profile = meaningful(parseFrontmatter(readFileSync(path, 'utf8')).body);
+  const { fields, body } = parseFrontmatter(readFileSync(path, 'utf8'));
+  const text = meaningful(body);
+  // A `name:` line says who "You" is in every meeting, and what a follow-up is signed with, so the AI is told it.
+  const name = typeof fields.name === 'string' ? fields.name.trim() : '';
+  const profile = name && !text.includes(name) ? [`My name is ${name}.`, text].filter(Boolean).join('\n') : text;
   return profile || undefined;
 }
 

@@ -173,11 +173,14 @@ export function speakerColors(ids: Iterable<string>): Map<string, (typeof SPEAKE
 }
 
 /**
- * A speaker as the screen names them: "You" for your own microphone, "Speaker 1" for a voice
- * Seashell numbered. The saved label, which agents and exports read, is left as it is.
+ * A speaker as the screen names them, and as the meeting AI is told them: "You" for your own
+ * microphone, "Speaker 1" for a voice Seashell numbered, never a raw id such as REMOTE_01 or
+ * SPEAKER_00, which count from zero. The saved label, which agents and exports read, is left as it is.
  */
 export function speakerDisplayName(id: string | undefined, label: string): string {
-  if (id === 'LOCAL' && label === 'Microphone') return 'You';
+  if (id === YOUR_SPEAKER_ID && (label === 'Microphone' || label === YOUR_SPEAKER_ID)) return 'You';
+  const raw = /^(?:REMOTE_)?(?:SPEAKER|REMOTE)_(\d+)$/u.exec(label);
+  if (raw) return `Speaker ${Number(raw[1]) + 1}`;
   return label.replace(/^Remote speaker (\d+)$/u, 'Speaker $1');
 }
 

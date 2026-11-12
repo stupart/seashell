@@ -248,6 +248,27 @@ test('during the call, the Notes view lists your notes and says when the notes c
     .toEqual(['Notes are written when the call ends.', '', '# Your notes', '- Dana sounded unsure\t\t00:03']);
 });
 
+test('every request names your side "You" and each other voice as the screen does, never "Microphone" or a raw id', async () => {
+  const { root } = library();
+  const record = createTranscriptRecord({ transcript: [
+    { start: 0, end: 4, speaker: 'LOCAL', text: "I'll send the security questionnaire to Marcus by Friday." },
+    { start: 4, end: 8, speaker: 'REMOTE_00', text: 'Then I need it back by Friday.' },
+    { start: 8, end: 12, speaker: 'REMOTE_01', text: 'And I will check it with IT.' },
+    { start: 12, end: 16, speaker: 'SPEAKER_02', text: 'I joined late.' },
+  ], speakers: [{ id: 'LOCAL', label: 'Microphone' }, { id: 'REMOTE_00', label: 'Remote speaker 1' }, { id: 'SPEAKER_02', label: 'SPEAKER_02' }] },
+  { id: 'labels', title: 'Labels', now: new Date('2026-11-10T16:00:00Z') });
+  saveTranscriptRecord(root, record);
+  saveMeetingArtifact(root, createMeetingArtifact(record));
+  const humain = fake((request) => request.question ? { answer: 'Friday.', evidenceSegmentIds: ['s000001'] }
+    : { summary: 'You send the questionnaire.', claims: [] });
+  await enrichMeeting(root, record.id, { mode: 'hybrid', route, runner: humain.runner, engine: rev4, instructions: null, minimumNewSegments: 1 });
+  await chatWithMeeting(root, record.id, 'When?', route, undefined, humain.runner, rev4);
+  expect(humain.requests.map((request) => request.action)).toEqual(['observe', 'reconcile', 'chat']);
+  for (const request of humain.requests) {
+    expect(request.segments.map((segment: { speakerLabel?: string }) => segment.speakerLabel)).toEqual(['You', 'Speaker 1', 'Speaker 2', 'Speaker 3']);
+  }
+});
+
 test('a question during the call reads the transcript so far, is marked partial, and saves nothing', async () => {
   const { root, record } = library();
   const humain = fake(() => ({ answer: 'They want to start in November.', evidenceSegmentIds: ['s000001'] }));

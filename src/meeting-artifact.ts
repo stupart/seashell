@@ -16,6 +16,7 @@ import { basename, dirname, join } from 'path';
 import { findTranscriptRecord } from './transcript-library.ts';
 import { renderSrt, renderText, renderVtt } from './transcript-renderer.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
+import { speakerDisplayName } from './tui-state.ts';
 import { compareMeetingEvidence, meetingEvidence, parseMeetingEvidence, type MeetingEvidence } from './meeting-evidence.ts';
 import { forgetMeetingVoices } from './voiceprints.ts';
 
@@ -936,7 +937,8 @@ function renamedInNotes(
   artifact: MeetingArtifact, rename: { from: string; to: string }, speakers: TranscriptRecord['speakers'],
 ): { artifact: MeetingArtifact; outdated?: string } {
   if (/^(?:Remote speaker \d+|SPEAKER_\d+)$/u.test(rename.from)) {
-    const pattern = new RegExp(`\\b${rename.from}\\b`, 'gu');
+    // The AI is told the name the screen shows, "Speaker 1", so the notes may say either.
+    const pattern = new RegExp(`\\b(?:${rename.from}|${speakerDisplayName(undefined, rename.from)})\\b`, 'gu');
     const renamed = <T>(value: T): T => JSON.parse(JSON.stringify(value), (_key, item: unknown) =>
       (typeof item === 'string' ? item.replace(pattern, rename.to) : item)) as T;
     return { artifact: {

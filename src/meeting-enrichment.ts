@@ -117,17 +117,23 @@ export function retryableRun(storeDir: string, runId: string, idempotencyKey: st
 /** Said while an engine too old to read the owner's notes writes the notes: they are kept, and listed as written. */
 export const OWNER_NOTES_UNREAD_STATUS = "Writing the notes without yours: this AI can't read them yet.";
 
+/**
+ * The transcript as every meeting AI request carries it, each line under the name the screen
+ * shows: "You" for your own microphone, never "Microphone", and "Speaker 2", never a raw id. The
+ * notes then say "you", and an action you took on is yours, in the same word everywhere.
+ */
 export function meetingSegments(record: TranscriptRecord) {
-  return record.transcript.map((segment, index) => ({
-    id: transcriptSegmentId(record, index),
-    start: segment.start,
-    end: segment.end,
-    text: segment.text,
-    ...(segment.speaker === undefined ? {} : { speakerId: segment.speaker }),
-    ...(speakerLabel(record, segment.speaker) === undefined
-      ? {}
-      : { speakerLabel: speakerLabel(record, segment.speaker) as string }),
-  }));
+  return record.transcript.map((segment, index) => {
+    const label = speakerLabel(record, segment.speaker);
+    return {
+      id: transcriptSegmentId(record, index),
+      start: segment.start,
+      end: segment.end,
+      text: segment.text,
+      ...(segment.speaker === undefined ? {} : { speakerId: segment.speaker }),
+      ...(label === undefined ? {} : { speakerLabel: speakerDisplayName(segment.speaker, label) }),
+    };
+  });
 }
 
 /**
@@ -514,10 +520,8 @@ async function askHumain(
   if (artifact?.ai?.off) throw new MeetingAiOffError();
   const trimmed = question.trim();
   if (!trimmed) throw new Error('Meeting question cannot be empty');
-  // During the call the answer is shown beside the lines it quotes, under the names the transcript shows,
-  // so it is asked under those names: "You" and "Speaker 2", never "Microphone" and "Remote speaker 2".
-  const segments = options.partial ? meetingSegments(record).map((segment) => segment.speakerLabel === undefined ? segment
-    : { ...segment, speakerLabel: speakerDisplayName(segment.speakerId, segment.speakerLabel) }) : meetingSegments(record);
+  // Asked under the names the transcript shows, so an answer during the call reads as the lines it quotes.
+  const segments = meetingSegments(record);
   if (options.partial && !segments.length) throw new Error('Nothing has been said yet.');
   const validIds = new Set(segments.map((segment) => segment.id));
   const approvedContext = {
