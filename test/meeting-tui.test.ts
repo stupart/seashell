@@ -3,6 +3,7 @@ import { createMeetingArtifact } from '../src/meeting-artifact.ts';
 import { META, meetingViewLines, plainMeetingLines, SUBHEADING, whosWhoNames } from '../src/meeting-tui.ts';
 import { wrappedMeetingRows } from '../src/transcript-viewport.ts';
 import { stripVTControlCharacters } from 'util';
+import { readFileSync } from 'fs';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 
 test('meeting views stay concise and show only relevant artifact layers', () => {
@@ -228,4 +229,74 @@ test('Who\'s who names the speakers who have no name yet, only when it is unambi
   expect(whosWhoNames([who('Speaker 1 is Dana.'), who('Speaker 1 is Sam.')], speakers).size).toBe(0);
   expect(whosWhoNames([who('Speaker 1 is Dana.'), who('Speaker 2 is Dana.')], speakers).size).toBe(0);
   expect(whosWhoNames([who('Speaker 1 is Priya.')], speakers).size).toBe(0);
+});
+
+/** The made-up Acme kickoff from the rc35 acceptance run, as the real AI wrote its notes with the Customer call template. */
+function acmeKickoff() {
+  const fixture = JSON.parse(readFileSync(new URL('./fixtures/acme-kickoff-notes.json', import.meta.url), 'utf8'));
+  const record = createTranscriptRecord({ transcript: fixture.transcript, speakers: fixture.speakers }, { id: '20261103T150000-acmekick', title: 'Acme pilot kickoff' });
+  const artifact = createMeetingArtifact(record);
+  artifact.analysis = { final: true, summary: fixture.summary, runId: 'r', createdAt: '2026-11-03T21:00:00Z',
+    template: fixture.template, claims: fixture.claims, notes: fixture.notes };
+  artifact.ownerNotes = fixture.ownerNotes.map((note: object) => ({ ...note, addedAt: '2026-11-03T20:40:00Z' }));
+  return { record, artifact, lines: meetingViewLines(artifact, 'notes', record) };
+}
+const section = (lines: string[], heading: string) => {
+  const start = lines.indexOf(`# ${heading}`);
+  const end = lines.indexOf('', start);
+  return plainMeetingLines(lines.slice(start + 1, end === -1 ? undefined : end));
+};
+
+test("an action the template's next steps say again is one row: the one that says who and by when, ✎ if either came from your notes", () => {
+  const { lines, artifact } = acmeKickoff();
+  expect(section(lines, 'Actions')).toEqual([
+    // The template said "Us: send … by Friday, November 6"; the AI's action has the date in its column, and your note.
+    '- Send the completed security questionnaire to Marcus.  by this Friday, November 6  ✎ 01:24',
+    '- Put together the list of pilot users and share it.  Dana Whitfield · by Monday  01:48',
+    // The template's line names an owner the AI's action left out, so the line is kept.
+    '- Us: check with engineering on the Salesforce integration.  03:12',
+    '- Ask legal whether a separate data processing agreement is needed for the pilot.  03:48',
+    '- Set up and run a training session of about 30 minutes for the support team.  the week of the 17th  04:00',
+    '- Us: create an admin account on the Seashell dashboard for Marcus.  04:36',
+    // "Next week, same time" says when; "Send the invite for the weekly sync" does not.
+    '- Weekly sync next week, same time. We send the invite.  05:00',
+    '- Confirm the IT approval timeline once the security questionnaire comes in.  Marcus Okafor  05:24',
+    "- Owner's note: Ask Dana whether Acme's Berlin office should join the pilot later.  ✎",
+  ]);
+  // Every action the AI found is there, once, in its words or the template's.
+  const actions = artifact.analysis!.claims.filter((claim) => claim.type === 'action_item' || claim.type === 'follow_up');
+  expect(actions).toHaveLength(8);
+  expect(section(lines, 'Actions')).toHaveLength(9);
+});
+
+test('decisions and open questions always show what the notes found, and a template line may say one again where it fits', () => {
+  const { lines } = acmeKickoff();
+  expect(section(lines, 'Decisions')).toEqual([
+    '- The pilot starts on November 17 with the twenty support people.  01:00',
+    '- Meet again next week at the same time for a weekly progress sync.  05:00',
+  ]);
+  expect(section(lines, 'Open questions')).toEqual([
+    '- Is the Salesforce integration in scope for the pilot? Left open for now.  03:00',
+    '- Is a separate data processing agreement needed for the pilot? Nobody on the call could answer.  03:36',
+  ]);
+  // The template's own headings still say them in context.
+  expect(section(lines, 'Budget, timeline and decision')[0]).toBe('- Pilot starts November 17 with the twenty support people (agreed).  01:00');
+  expect(section(lines, 'Concerns')).toContain('- Not yet known if the Salesforce integration is in scope. Left open for now.  03:00');
+});
+
+test('a line and an action with a different owner or due date are two points, however alike', () => {
+  const record = createTranscriptRecord({ transcript: [{ start: 12, end: 18, text: 'Dana sends the list by Monday; Marcus checks it.' }], speakers: [] }, { id: 'owners' });
+  const artifact = createMeetingArtifact(record);
+  const action = (person: string, due: string) => ({ id: person, type: 'action_item' as const, text: 'Send the pilot user list.', person, due,
+    evidenceSegmentIds: ['s000001'], confidence: 0.9 });
+  const notes = (text: string) => [{ heading: 'Next steps', items: [{ text, evidenceSegmentIds: ['s000001'] }] }];
+  artifact.analysis = { final: true, summary: 'Lists.', runId: 'r', createdAt: new Date().toISOString(),
+    claims: [action('Dana Whitfield', 'by Monday')], notes: notes('Marcus: send the pilot user list.') };
+  expect(section(meetingViewLines(artifact, 'notes', record), 'Actions')).toEqual([
+    '- Marcus: send the pilot user list.  00:12', '- Send the pilot user list.  Dana Whitfield · by Monday  00:12']);
+  artifact.analysis.notes = notes('Dana: send the pilot user list by Wednesday.');
+  expect(section(meetingViewLines(artifact, 'notes', record), 'Actions')).toHaveLength(2);
+  // The same owner, in fewer words, and the same day: one point.
+  artifact.analysis.notes = notes('Dana: send the pilot user list by Monday.');
+  expect(section(meetingViewLines(artifact, 'notes', record), 'Actions')).toEqual(['- Send the pilot user list.  Dana Whitfield · by Monday  00:12']);
 });

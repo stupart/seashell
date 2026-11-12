@@ -159,6 +159,89 @@ export function whosWhoNames(
     && !names.some(([other, otherName]) => other !== id && otherName.toLocaleLowerCase() === name.toLocaleLowerCase())));
 }
 
+/** A line of a template's section: its words and the lines of the transcript, or your notes, it rests on. */
+type TemplateLine = { text: string; evidenceSegmentIds: string[]; removedEvidenceSegmentIds?: string[]; ownerNoteIds?: string[] };
+
+/** Words for you as a line or a claim may name you: the notes call you "You"; a template may say "Us". */
+const YOU = /^(?:you|i|me|we|us|our side|our team|my side)$/iu;
+
+/** Who a template's line says will do it, before a colon: "Dana: share the list", "You: send it". */
+function lineOwner(text: string): string | undefined {
+  const named = /^([^:]{1,40}):\s/u.exec(text.trim())?.[1]?.trim();
+  return named && (YOU.test(named) || PERSON.exec(named)?.[1] === named) ? named : undefined;
+}
+
+/** "Dana" and "Dana Whitfield" are one person; "Us" and "You" are both you. */
+function sameOwner(left: string, right: string): boolean {
+  if (YOU.test(left.trim()) || YOU.test(right.trim())) return YOU.test(left.trim()) && YOU.test(right.trim());
+  const [a, b] = [[...wordsOf(left)], [...wordsOf(right)]];
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  return shorter.length > 0 && shorter.every((word, index) => word === longer[index]);
+}
+
+/** Words that say when: "Friday", "November", "week", "17th". */
+const WHEN = new Set(`monday tuesday wednesday thursday friday saturday sunday january february march april june july august
+  september october november december jan feb mar apr jun jul aug sep sept oct nov dec today tonight tomorrow week weekend
+  month quarter eod eow eom`.split(/\s+/u));
+function whenWords(text: string): string[] {
+  return [...wordsOf(text)].filter((word) => WHEN.has(word) || /^\d+(?:st|nd|rd|th)$/u.test(word));
+}
+
+/** When a line says it is due that its claim, which has no due date, does not say: "by Friday". */
+function addsWhen(line: TemplateLine, claim: MeetingClaim): boolean {
+  const said = wordsOf(claim.text);
+  return !claim.due && whenWords(line.text).some((word) => !said.has(word));
+}
+
+/** A line and a claim that name different owners, or different dates, are two points, however alike. */
+function differ(line: TemplateLine, claim: MeetingClaim): boolean {
+  if (claim.type !== 'action_item' && claim.type !== 'follow_up') return false;
+  const owner = lineOwner(line.text);
+  if (owner && claim.person && !sameOwner(owner, claim.person)) return true;
+  const due = wordsOf(`${claim.due ?? ''} ${claim.text}`);
+  return Boolean(claim.due) && whenWords(line.text).some((word) => !due.has(word));
+}
+
+/**
+ * Which of a typed group's claims each template line says again. The lines cited come first: a
+ * line and a claim resting on the same or overlapping lines of the transcript, or on the same note
+ * of yours, are one point. The words come second: they must share more than half of the shorter
+ * one's words, and when a line could be several claims, the one it shares most with is it, or,
+ * tied, none is. A line and a claim with a different owner or due date stay two points.
+ */
+export function samePoints<L extends TemplateLine>(lines: readonly L[], claims: readonly MeetingClaim[]): Map<L, MeetingClaim> {
+  const pairs = new Map<L, MeetingClaim>();
+  const taken = new Set<MeetingClaim>();
+  for (const line of lines) {
+    const cited = new Set([...citedSegmentIds(line), ...(line.ownerNoteIds ?? []).map((id) => `note:${id}`)]);
+    const words = contentWords(line.text);
+    const scored = claims.flatMap((claim) => {
+      const sources = [...citedSegmentIds(claim), ...(claim.ownerNoteIds ?? []).map((id) => `note:${id}`)];
+      if (taken.has(claim) || !sources.some((id) => cited.has(id)) || differ(line, claim)) return [];
+      const other = contentWords(claim.text);
+      const shared = [...words].filter((word) => other.has(word)).length / Math.max(1, Math.min(words.size, other.size));
+      return shared > 0.5 ? [{ claim, shared }] : [];
+    }).sort((left, right) => right.shared - left.shared);
+    const [best, next] = scored;
+    if (best && (!next || best.shared > next.shared)) {
+      pairs.set(line, best.claim);
+      taken.add(best.claim);
+    }
+  }
+  return pairs;
+}
+
+/**
+ * Of a point said twice, the row to keep: the one that says who and by when. The claim, with its
+ * owner and due date in their column, unless the line names an owner or a date the claim lacks.
+ */
+export function linePreferred(line: TemplateLine, claim: MeetingClaim): boolean {
+  const action = claim.type === 'action_item' || claim.type === 'follow_up';
+  const claimSays = (claim.person ? 1 : 0) + (claim.due ? 1 : 0);
+  const lineSays = action ? (lineOwner(line.text) ? 1 : 0) + (addsWhen(line, claim) ? 1 : 0) : 0;
+  return lineSays > claimSays;
+}
+
 export function meetingViewLines(
   artifact: MeetingArtifact,
   view: Exclude<MeetingView, 'transcript'>,
@@ -216,12 +299,15 @@ export function meetingViewLines(
       : recording ? claims.length ? 'Notes so far. The final notes are written when the call ends.' : 'Notes are written when the call ends.'
       : claims.length ? 'Notes so far. Press g for final notes.' : 'No notes yet. Press g to write them.'
   );
-  // Actions and decisions lead, so they are never a scroll away. A template is
-  // the layout the owner chose, so its other sections follow. A claim goes only when a
-  // section says the same thing about the same moment: either alone can be a
-  // different point, and losing one is worse than reading it twice.
+  // Actions and decisions lead, so they are never a scroll away. Decisions, actions, open
+  // questions and risks always show what the notes found of each kind; a template's section
+  // may say one again where it fits the template. A template is the layout the owner chose,
+  // so its other sections follow. Anything else goes only when a section says the same thing
+  // about the same moment: either alone can be a different point, and losing one is worse
+  // than reading it twice.
   const sections = artifact.analysis?.notes ?? [];
   type Said = { words: Set<string>; passages: Set<string> };
+  type Line = (typeof sections)[number]['items'][number];
   const saying = (text: string, ids: readonly string[]): Said => ({ words: contentWords(text), passages: new Set(ids) });
   // The same moment, and most of the words of the longer of the two, so a short
   // line cannot stand in for a longer one that says more ("to Globex", "by Monday").
@@ -230,9 +316,8 @@ export function meetingViewLines(
   // An action or follow-up says who and by when, as it was said.
   const ownerOf = (claim: MeetingClaim) =>
     claim.type === 'action_item' || claim.type === 'follow_up' ? claimOwnerAndDue(claim) : undefined;
-  // A template's line restates at most one claim. It stands in for that claim, and
-  // shows the owner and due date the claim recorded, only when no other claim
-  // also matches it; otherwise every claim stays, with its own owner.
+  // A template's line restates at most one claim. It shows the owner and due date
+  // the claim recorded only when no other claim also matches it.
   const restated = new Map(sections.flatMap((section) => section.items).map((item) => {
     const line = saying(item.text, item.evidenceSegmentIds);
     const matches = claims.filter((claim) => echoes(saying(claim.text, claim.evidenceSegmentIds), line));
@@ -240,7 +325,7 @@ export function meetingViewLines(
   }));
   const said = [...restated.values()].map(({ line }) => line);
   const repeated = (claim: MeetingClaim) => [...restated.values()].some((line) => line.claim === claim);
-  const ownerFor = (item: (typeof sections)[number]['items'][number]) => {
+  const ownerFor = (item: Line) => {
     const claim = restated.get(item)?.claim;
     return claim && ownerOf(claim);
   };
@@ -249,21 +334,38 @@ export function meetingViewLines(
   // "Also said". Your note stays under Your notes, in your words, unless another point already uses it.
   const onlyYours = (claim: MeetingClaim) => claim.type === 'note' && !claim.evidenceSegmentIds.length &&
     !claim.removedEvidenceSegmentIds?.length && Boolean(claim.ownerNoteIds?.length);
+  const ofKind = (types: MeetingClaimType[]) => claims.filter((claim) => types.includes(claim.type) && !onlyYours(claim));
+  const fromClaim = (claim: MeetingClaim): Item => ({ text: claim.text, ids: claim.evidenceSegmentIds, owner: ownerOf(claim),
+    removed: sourceLineRemoved(claim), notes: claim.ownerNoteIds });
+  const fromLine = (item: Line, owner?: string): Item => ({ text: item.text, ids: item.evidenceSegmentIds, owner,
+    removed: sourceLineRemoved(item), notes: item.ownerNoteIds });
+  // The rest of what the notes found goes where a template's line has not already said it.
   const fromClaims = (types: MeetingClaimType[]): Item[] => {
-    const items = claims.filter((claim) => types.includes(claim.type) && !repeated(claim) && !onlyYours(claim));
+    const items = ofKind(types).filter((claim) => !repeated(claim));
     shown.push(...items.map((claim) => saying(claim.text, claim.evidenceSegmentIds)));
-    return items.map((claim) => ({ text: claim.text, ids: claim.evidenceSegmentIds, owner: ownerOf(claim),
-      removed: sourceLineRemoved(claim), notes: claim.ownerNoteIds }));
+    return items.map(fromClaim);
   };
-  const fromSection = (section: (typeof sections)[number]): Item[] =>
-    section.items.map((item) => ({ text: item.text, ids: item.evidenceSegmentIds, owner: ownerFor(item),
-      removed: sourceLineRemoved(item), notes: item.ownerNoteIds }));
   const groupOf = (heading: string) => LEADING_GROUPS.find(([, , names]) => names.test(heading.trim()));
   const stale = record && artifact.transcriptEvidence &&
     compareMeetingEvidence(artifact.transcriptEvidence, meetingEvidence(record)) !== 'same';
+  // A template's "Next steps" joins Actions, and its line of an action the notes also found is that
+  // action said twice: one row, the one that says who and by when (onePoint).
   const leading = LEADING_GROUPS.flatMap(([title, types]) => {
     const joined = sections.filter((section) => groupOf(section.heading)?.[0] === title);
-    const items = inOrder([...joined.flatMap(fromSection), ...fromClaims(types)]);
+    const lines = joined.flatMap((section) => section.items);
+    const kinds = ofKind(types);
+    shown.push(...kinds.map((claim) => saying(claim.text, claim.evidenceSegmentIds)));
+    const pairs = samePoints(lines, kinds);
+    const items = inOrder([
+      ...lines.map((line) => {
+        const claim = pairs.get(line);
+        if (!claim) return fromLine(line);
+        const kept = linePreferred(line, claim) ? fromLine(line) : fromClaim(claim);
+        const notes = [...new Set([...line.ownerNoteIds ?? [], ...claim.ownerNoteIds ?? []])];
+        return { ...kept, notes: notes.length ? notes : undefined };
+      }),
+      ...kinds.filter((claim) => ![...pairs.values()].includes(claim)).map(fromClaim),
+    ]);
     // A section the template asks for says so when the meeting never got to it.
     if (!items.length) return joined.length ? ['', `${HEADING}${title}`, '- Not discussed.'] : [];
     return ['', `${HEADING}${title}`, ...items.map(bullet)];
@@ -271,7 +373,7 @@ export function meetingViewLines(
   const template = sections.filter((section) => !groupOf(section.heading)).flatMap((section) => [
     '',
     `${HEADING}${section.heading}`,
-    ...(section.items.length ? fromSection(section).map(bullet) : ['- Not discussed.']),
+    ...(section.items.length ? section.items.map((item) => bullet(fromLine(item, ownerFor(item)))) : ['- Not discussed.']),
   ]);
   const trailing = TRAILING_GROUPS.flatMap(([title, types]) => {
     const items = fromClaims(types);

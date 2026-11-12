@@ -1,0 +1,636 @@
+{
+ "_note": "Made-up meeting from the rc35 acceptance run: fake people, fake company. The final notes the real AI wrote for it, with the Customer call template.",
+ "speakers": [
+  {
+   "id": "LOCAL",
+   "label": "Microphone"
+  },
+  {
+   "id": "REMOTE_00",
+   "label": "Dana Whitfield"
+  },
+  {
+   "id": "REMOTE_01",
+   "label": "Marcus Okafor"
+  }
+ ],
+ "transcript": [
+  {
+   "id": "s000001",
+   "start": 0,
+   "end": 10,
+   "speaker": "LOCAL",
+   "text": "Thanks for joining, Dana and Marcus. Today I'd like to agree how the Seeshell pilot runs at Acme."
+  },
+  {
+   "id": "s000002",
+   "start": 12,
+   "end": 22,
+   "speaker": "REMOTE_00",
+   "text": "Great. We have twenty people lined up from the support team for the pilot."
+  },
+  {
+   "id": "s000003",
+   "start": 24,
+   "end": 34,
+   "speaker": "REMOTE_01",
+   "text": "On my side, IT needs to approve the install before anyone gets it."
+  },
+  {
+   "id": "s000004",
+   "start": 36,
+   "end": 46,
+   "speaker": "LOCAL",
+   "text": "Understood. How long does an IT approval usually take?"
+  },
+  {
+   "id": "s000005",
+   "start": 48,
+   "end": 58,
+   "speaker": "REMOTE_01",
+   "text": "About a week, if the security questionnaire is complete."
+  },
+  {
+   "id": "s000006",
+   "start": 60,
+   "end": 70,
+   "speaker": "REMOTE_00",
+   "text": "So let's decide now: the pilot starts on November 17 with the twenty support people."
+  },
+  {
+   "id": "s000007",
+   "start": 72,
+   "end": 82,
+   "speaker": "LOCAL",
+   "text": "Agreed, November 17 it is."
+  },
+  {
+   "id": "s000008",
+   "start": 84,
+   "end": 94,
+   "speaker": "REMOTE_01",
+   "text": "Then I need the security questionnaire back by this Friday, November 6."
+  },
+  {
+   "id": "s000009",
+   "start": 96,
+   "end": 106,
+   "speaker": "LOCAL",
+   "text": "I'll send the completed security questionnaire to Marcus by Friday."
+  },
+  {
+   "id": "s000010",
+   "start": 108,
+   "end": 118,
+   "speaker": "REMOTE_00",
+   "text": "I'll put together the list of pilot users and share it by Monday."
+  },
+  {
+   "id": "s000011",
+   "start": 120,
+   "end": 130,
+   "speaker": "LOCAL",
+   "text": "Perfect. Seeshell records locally, so no audio leaves the laptops."
+  },
+  {
+   "id": "s000012",
+   "start": 132,
+   "end": 142,
+   "speaker": "REMOTE_01",
+   "text": "That's the main thing our legal team will ask about."
+  },
+  {
+   "id": "s000013",
+   "start": 144,
+   "end": 154,
+   "speaker": "REMOTE_00",
+   "text": "One worry: our support team is on calls back to back, so they may forget to start recordings."
+  },
+  {
+   "id": "s000014",
+   "start": 156,
+   "end": 166,
+   "speaker": "LOCAL",
+   "text": "Seeshell can start recording by itself when a call begins, so that should help."
+  },
+  {
+   "id": "s000015",
+   "start": 168,
+   "end": 178,
+   "speaker": "REMOTE_00",
+   "text": "Good, but if adoption is low in the first week the pilot could stall."
+  },
+  {
+   "id": "s000016",
+   "start": 180,
+   "end": 190,
+   "speaker": "REMOTE_01",
+   "text": "What about the Salesforce integration, is that in scope for the pilot?"
+  },
+  {
+   "id": "s000017",
+   "start": 192,
+   "end": 202,
+   "speaker": "LOCAL",
+   "text": "I don't know yet. I need to check with our engineering team."
+  },
+  {
+   "id": "s000018",
+   "start": 204,
+   "end": 214,
+   "speaker": "REMOTE_00",
+   "text": "Let's leave that open for now."
+  },
+  {
+   "id": "s000019",
+   "start": 216,
+   "end": 226,
+   "speaker": "REMOTE_01",
+   "text": "Also, do we need a separate data processing agreement for the pilot?"
+  },
+  {
+   "id": "s000020",
+   "start": 228,
+   "end": 238,
+   "speaker": "REMOTE_00",
+   "text": "Nobody here can answer that today. Let's ask legal."
+  },
+  {
+   "id": "s000021",
+   "start": 240,
+   "end": 250,
+   "speaker": "LOCAL",
+   "text": "I'll set up a training session for the support team the week of the 17th."
+  },
+  {
+   "id": "s000022",
+   "start": 252,
+   "end": 262,
+   "speaker": "REMOTE_00",
+   "text": "Great. Who runs the training?"
+  },
+  {
+   "id": "s000023",
+   "start": 264,
+   "end": 274,
+   "speaker": "LOCAL",
+   "text": "I'll run it myself. About thirty minutes."
+  },
+  {
+   "id": "s000024",
+   "start": 276,
+   "end": 286,
+   "speaker": "REMOTE_01",
+   "text": "I'll need admin access to the Seeshell dashboard for IT."
+  },
+  {
+   "id": "s000025",
+   "start": 288,
+   "end": 298,
+   "speaker": "LOCAL",
+   "text": "Sure, I'll create an admin account for you."
+  },
+  {
+   "id": "s000026",
+   "start": 300,
+   "end": 310,
+   "speaker": "REMOTE_00",
+   "text": "Let's meet again next week, same time, to check progress."
+  },
+  {
+   "id": "s000027",
+   "start": 312,
+   "end": 322,
+   "speaker": "LOCAL",
+   "text": "Sounds good. I'll send the invite for the weekly sync."
+  },
+  {
+   "id": "s000028",
+   "start": 324,
+   "end": 334,
+   "speaker": "REMOTE_01",
+   "text": "And I'll confirm the IT approval timeline once I see the questionnaire."
+  },
+  {
+   "id": "s000029",
+   "start": 336,
+   "end": 346,
+   "speaker": "REMOTE_00",
+   "text": "Thanks both. This was really useful."
+  },
+  {
+   "id": "s000030",
+   "start": 348,
+   "end": 358,
+   "speaker": "LOCAL",
+   "text": "Thanks, talk next week."
+  }
+ ],
+ "ownerNotes": [
+  {
+   "id": "n2500a3ec53",
+   "text": "I own the security questionnaire for Marcus, due Fri Nov 6",
+   "at": 96
+  },
+  {
+   "id": "ncac546cfb9",
+   "text": "Ask Dana whether Acme's Berlin office should join the pilot later"
+  }
+ ],
+ "summary": "Kickoff call with Dana and Marcus from Acme about the Seashell pilot. Everyone agreed the pilot starts on November 17 with twenty people from Acme's support team. IT has to approve the install first, which usually takes about a week once the security questionnaire is complete, so Marcus needs the questionnaire by Friday, November 6. Dana will share the list of pilot users by Monday. Our side will set up and run a 30-minute training the week of the 17th, create an admin account on the dashboard for Marcus, and send the invite for a weekly sync. Dana is worried that busy agents may forget to record and that low adoption in the first week could stall the pilot. Two questions are still open: whether the Salesforce integration is in scope, and whether a separate data processing agreement is needed.",
+ "template": "Customer call",
+ "claims": [
+  {
+   "id": "c1",
+   "type": "fact",
+   "text": "Acme has twenty people from the support team lined up for the pilot.",
+   "evidenceSegmentIds": [
+    "s000002"
+   ],
+   "confidence": 0.95,
+   "speakerId": "REMOTE_00"
+  },
+  {
+   "id": "c2",
+   "type": "fact",
+   "text": "IT must approve the install before anyone gets it. Approval usually takes about a week if the security questionnaire is complete.",
+   "evidenceSegmentIds": [
+    "s000003",
+    "s000005"
+   ],
+   "confidence": 0.95,
+   "speakerId": "REMOTE_01"
+  },
+  {
+   "id": "c3",
+   "type": "decision",
+   "text": "The pilot starts on November 17 with the twenty support people.",
+   "evidenceSegmentIds": [
+    "s000006",
+    "s000007"
+   ],
+   "confidence": 0.96
+  },
+  {
+   "id": "c4",
+   "type": "action_item",
+   "text": "Send the completed security questionnaire to Marcus.",
+   "evidenceSegmentIds": [
+    "s000008",
+    "s000009"
+   ],
+   "confidence": 0.95,
+   "speakerId": "LOCAL",
+   "due": "by this Friday, November 6",
+   "ownerNoteIds": [
+    "n2500a3ec53"
+   ]
+  },
+  {
+   "id": "c5",
+   "type": "action_item",
+   "text": "Put together the list of pilot users and share it.",
+   "evidenceSegmentIds": [
+    "s000010"
+   ],
+   "confidence": 0.93,
+   "speakerId": "REMOTE_00",
+   "person": "Dana Whitfield",
+   "due": "by Monday"
+  },
+  {
+   "id": "c6",
+   "type": "fact",
+   "text": "Seashell records locally, so no audio leaves the laptops. This is the main thing Acme's legal team will ask about.",
+   "evidenceSegmentIds": [
+    "s000011",
+    "s000012"
+   ],
+   "confidence": 0.88
+  },
+  {
+   "id": "c7",
+   "type": "risk",
+   "text": "The support team is on back-to-back calls and may forget to start recordings. If adoption is low in the first week, the pilot could stall.",
+   "evidenceSegmentIds": [
+    "s000013",
+    "s000015"
+   ],
+   "confidence": 0.88,
+   "speakerId": "REMOTE_00"
+  },
+  {
+   "id": "c8",
+   "type": "fact",
+   "text": "Seashell can start recording by itself when a call begins.",
+   "evidenceSegmentIds": [
+    "s000014"
+   ],
+   "confidence": 0.9,
+   "speakerId": "LOCAL"
+  },
+  {
+   "id": "c9",
+   "type": "open_question",
+   "text": "Is the Salesforce integration in scope for the pilot? Left open for now.",
+   "evidenceSegmentIds": [
+    "s000016",
+    "s000017",
+    "s000018"
+   ],
+   "confidence": 0.92
+  },
+  {
+   "id": "c10",
+   "type": "action_item",
+   "text": "Check with the engineering team whether the Salesforce integration can be part of the pilot.",
+   "evidenceSegmentIds": [
+    "s000017"
+   ],
+   "confidence": 0.85,
+   "speakerId": "LOCAL"
+  },
+  {
+   "id": "c11",
+   "type": "open_question",
+   "text": "Is a separate data processing agreement needed for the pilot? Nobody on the call could answer.",
+   "evidenceSegmentIds": [
+    "s000019",
+    "s000020"
+   ],
+   "confidence": 0.92
+  },
+  {
+   "id": "c12",
+   "type": "action_item",
+   "text": "Ask legal whether a separate data processing agreement is needed for the pilot.",
+   "evidenceSegmentIds": [
+    "s000020"
+   ],
+   "confidence": 0.8
+  },
+  {
+   "id": "c13",
+   "type": "action_item",
+   "text": "Set up and run a training session of about 30 minutes for the support team.",
+   "evidenceSegmentIds": [
+    "s000021",
+    "s000022",
+    "s000023"
+   ],
+   "confidence": 0.93,
+   "speakerId": "LOCAL",
+   "due": "the week of the 17th"
+  },
+  {
+   "id": "c14",
+   "type": "action_item",
+   "text": "Create an admin account on the Seashell dashboard for Marcus, for IT.",
+   "evidenceSegmentIds": [
+    "s000024",
+    "s000025"
+   ],
+   "confidence": 0.93,
+   "speakerId": "LOCAL"
+  },
+  {
+   "id": "c15",
+   "type": "decision",
+   "text": "Meet again next week at the same time for a weekly progress sync.",
+   "evidenceSegmentIds": [
+    "s000026",
+    "s000027"
+   ],
+   "confidence": 0.9
+  },
+  {
+   "id": "c16",
+   "type": "action_item",
+   "text": "Send the invite for the weekly sync.",
+   "evidenceSegmentIds": [
+    "s000027"
+   ],
+   "confidence": 0.92,
+   "speakerId": "LOCAL"
+  },
+  {
+   "id": "c17",
+   "type": "follow_up",
+   "text": "Confirm the IT approval timeline once the security questionnaire comes in.",
+   "evidenceSegmentIds": [
+    "s000028"
+   ],
+   "confidence": 0.92,
+   "speakerId": "REMOTE_01",
+   "person": "Marcus Okafor"
+  },
+  {
+   "id": "c18",
+   "type": "note",
+   "text": "Owner's note: Ask Dana whether Acme's Berlin office should join the pilot later.",
+   "evidenceSegmentIds": [],
+   "confidence": 0.9,
+   "ownerNoteIds": [
+    "ncac546cfb9"
+   ]
+  }
+ ],
+ "notes": [
+  {
+   "heading": "About them",
+   "items": [
+    {
+     "text": "Dana and Marcus from Acme.",
+     "evidenceSegmentIds": [
+      "s000001"
+     ]
+    },
+    {
+     "text": "Acme's support team is the pilot group: twenty people lined up.",
+     "evidenceSegmentIds": [
+      "s000002"
+     ]
+    },
+    {
+     "text": "Marcus looks after IT approval for the install and needs admin access for IT.",
+     "evidenceSegmentIds": [
+      "s000003",
+      "s000024"
+     ]
+    }
+   ]
+  },
+  {
+   "heading": "Goals and pain points",
+   "items": [
+    {
+     "text": "Agree how the Seashell pilot runs at Acme.",
+     "evidenceSegmentIds": [
+      "s000001"
+     ]
+    },
+    {
+     "text": "Support team is on calls back to back and may forget to start recordings.",
+     "evidenceSegmentIds": [
+      "s000013"
+     ]
+    }
+   ]
+  },
+  {
+   "heading": "Requirements",
+   "items": [
+    {
+     "text": "IT has to approve the install before anyone gets it.",
+     "evidenceSegmentIds": [
+      "s000003"
+     ]
+    },
+    {
+     "text": "Security questionnaire has to be complete for IT approval.",
+     "evidenceSegmentIds": [
+      "s000005",
+      "s000008"
+     ]
+    },
+    {
+     "text": "Admin access to the Seashell dashboard for IT.",
+     "evidenceSegmentIds": [
+      "s000024"
+     ]
+    },
+    {
+     "text": "Data handling matters to their legal team. Seashell records locally, so no audio leaves the laptops.",
+     "evidenceSegmentIds": [
+      "s000011",
+      "s000012"
+     ]
+    }
+   ]
+  },
+  {
+   "heading": "Budget, timeline and decision",
+   "items": [
+    {
+     "text": "Pilot starts November 17 with the twenty support people (agreed).",
+     "evidenceSegmentIds": [
+      "s000006",
+      "s000007"
+     ]
+    },
+    {
+     "text": "IT approval takes about a week once the questionnaire is complete.",
+     "evidenceSegmentIds": [
+      "s000005"
+     ]
+    },
+    {
+     "text": "Marcus needs the questionnaire back by this Friday, November 6.",
+     "evidenceSegmentIds": [
+      "s000008"
+     ]
+    }
+   ]
+  },
+  {
+   "heading": "Concerns",
+   "items": [
+    {
+     "text": "Agents may forget to start recordings. Seashell can start recording by itself when a call begins, which should help.",
+     "evidenceSegmentIds": [
+      "s000013",
+      "s000014"
+     ]
+    },
+    {
+     "text": "If adoption is low in the first week, the pilot could stall.",
+     "evidenceSegmentIds": [
+      "s000015"
+     ]
+    },
+    {
+     "text": "Not yet known if the Salesforce integration is in scope. Left open for now.",
+     "evidenceSegmentIds": [
+      "s000016",
+      "s000017",
+      "s000018"
+     ]
+    },
+    {
+     "text": "Not yet known if a separate data processing agreement is needed.",
+     "evidenceSegmentIds": [
+      "s000019",
+      "s000020"
+     ]
+    }
+   ]
+  },
+  {
+   "heading": "Next steps",
+   "items": [
+    {
+     "text": "Us: send the completed security questionnaire to Marcus by Friday, November 6.",
+     "evidenceSegmentIds": [
+      "s000008",
+      "s000009"
+     ],
+     "ownerNoteIds": [
+      "n2500a3ec53"
+     ]
+    },
+    {
+     "text": "Dana: share the list of pilot users by Monday.",
+     "evidenceSegmentIds": [
+      "s000010"
+     ]
+    },
+    {
+     "text": "Us: check with engineering on the Salesforce integration.",
+     "evidenceSegmentIds": [
+      "s000017"
+     ]
+    },
+    {
+     "text": "Ask legal about a separate data processing agreement.",
+     "evidenceSegmentIds": [
+      "s000020"
+     ]
+    },
+    {
+     "text": "Us: set up and run a 30-minute training for the support team the week of the 17th.",
+     "evidenceSegmentIds": [
+      "s000021",
+      "s000023"
+     ]
+    },
+    {
+     "text": "Us: create an admin account on the Seashell dashboard for Marcus.",
+     "evidenceSegmentIds": [
+      "s000024",
+      "s000025"
+     ]
+    },
+    {
+     "text": "Weekly sync next week, same time. We send the invite.",
+     "evidenceSegmentIds": [
+      "s000026",
+      "s000027"
+     ]
+    },
+    {
+     "text": "Marcus: confirm the IT approval timeline once he sees the questionnaire.",
+     "evidenceSegmentIds": [
+      "s000028"
+     ]
+    },
+    {
+     "text": "Owner's note: Ask Dana whether Acme's Berlin office should join the pilot later.",
+     "evidenceSegmentIds": [],
+     "ownerNoteIds": [
+      "ncac546cfb9"
+     ]
+    }
+   ]
+  }
+ ]
+}
