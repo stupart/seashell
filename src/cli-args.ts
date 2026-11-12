@@ -1,3 +1,4 @@
+import { existsSync } from 'fs';
 import type { DiarizeFileOptions } from './diarize.ts';
 import type { TranscriptFormat } from './transcript-types.ts';
 import type { HumainBackend } from './humain-client.ts';
@@ -1064,6 +1065,10 @@ export function parseCliArgs(args: string[]): CliCommand {
   if (args[0] === 'meeting' && args[1] === 'video') return parseMeetingVideo(args);
   if (args[0] === 'meeting') return parseMeeting(args);
   if (args[0] === 'library') return parseLibrary(args);
+  // A bare word that names no file is a command mistyped or misremembered ("seashell list"), not a recording to transcribe.
+  if (args[0] !== 'transcribe' && /^[\p{L}][\p{L}\p{N}-]*$/u.test(args[0]!) && !existsSync(args[0]!)) {
+    throw new Error(`Unknown command: ${args[0]}. See seashell --help`);
+  }
   return parseTranscribe(args, args[0] === 'transcribe');
 }
 
