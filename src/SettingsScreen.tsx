@@ -71,6 +71,14 @@ export interface SettingsActions {
   openFile?: (path: string) => void;
   /** Runs one automation again for the meeting whose run failed. */
   retryAutomation?: (automation: string, meetingId: string, signal: AbortSignal) => Promise<AutomationRun[]>;
+  /** Puts text on the clipboard: a command for Terminal, which Settings never shows. */
+  copy?: (text: string) => void;
+}
+
+/** Puts text on the clipboard. */
+function copyToClipboard(text: string): void {
+  const result = spawnSync('pbcopy', [], { input: text, encoding: 'utf8', timeout: 5_000 });
+  if (result.error || result.status !== 0) throw new Error('Copy failed.');
 }
 
 /** Opens a folder in Finder. */
@@ -574,6 +582,12 @@ export default function SettingsScreen(props: SetupActionProps & {
       return;
     }
     if (input === ',') { props.onClose(); return; }
+    // c copies a step only Terminal can do; the command itself is never shown.
+    const copy = selected?.kind === 'status' ? selected.status.copy : undefined;
+    if (input === 'c' && copy) {
+      try { (props.actions?.copy ?? copyToClipboard)(copy.text); setup.done('Copied.'); } catch (cause) { setup.failure(cause); }
+      return;
+    }
     // a adds a word to Vocabulary from its row or its list of words.
     if (input === 'a' && list === 'vocabulary') { setup.setMessage(undefined); setAdding(''); return; }
     if (editingRows) {
@@ -793,7 +807,7 @@ export default function SettingsScreen(props: SetupActionProps & {
           those are for `seashell status`, and the key bar has the key that fixes it. */}
       {selected.status.fix && <Box marginTop={1} flexShrink={0}>{selected.status.state === 'ok'
         ? <Paragraph width={width} text={selected.status.fix} />
-        : <Paragraph width={width} color="yellow" text={`Next: ${selected.status.fix}`} />}</Box>}
+        : <Paragraph width={width} color="yellow" text={`Next: ${selected.status.fix}${selected.status.copy ? ` ${selected.status.copy.how}` : ''}`} />}</Box>}
       {['prompts', 'voices', 'vocabulary', 'extractors', 'automations'].includes(selected.status.id) &&
         <Box flexDirection="column" marginTop={1} flexShrink={0}>{filesBody(selected.status.id)}</Box>}
     </Box>
@@ -813,6 +827,8 @@ export default function SettingsScreen(props: SetupActionProps & {
     : inDetail && list === 'vocabulary' && listLength ? [['a', 'add a word'], ['d', 'remove'], ['Enter', compact ? 'TextEdit' : 'open in TextEdit'], ['↑↓', 'choose'], ['Esc', 'back']]
     : [
       ...(retryRun ? [['r', 'try again'] as Hint] : []),
+      // The fix leads: a step only Terminal can do is copied for it.
+      ...(selected?.kind === 'status' && selected.status.copy ? [['c', 'copy the update command'] as Hint] : []),
       ...(selected?.kind === 'recording' ? [['Enter', 'change'] as Hint] : selected?.kind === 'guide' ? [['Enter', 'start'] as Hint]
         : video ? [['Enter', video.state === 'off' ? 'turn on' : 'turn off'] as Hint]
         : briefs ? !briefs.action ? [['Enter', 'turn off'] as Hint] : briefs.action === 'turn-on-briefs' ? [['Enter', 'turn on'] as Hint]

@@ -55,6 +55,11 @@ export interface FeatureStatus {
   readonly action?: FeatureAction;
   /** The same step from a terminal. */
   readonly command?: string;
+  /**
+   * A step only Terminal can do, such as installing the AI engine, which is not part of Seashell:
+   * c in Settings copies `text`, never shown, and the next step ends with `how`.
+   */
+  readonly copy?: { readonly text: string; readonly how: string };
 }
 
 export const FEATURE_ACTION_LABEL: Record<FeatureAction, string> = {
@@ -344,9 +349,12 @@ export async function readFeatureStatuses(options: {
     : !engine ? { state: 'off', summary: 'Not installed', action: 'open-ai', detail: `${aiDetail} The AI engine is not installed.`,
       fix: 'Install the AI engine.', command: 'seashell ai install <package.tgz>' } as const
     // Older than this Seashell: the notes still come, without what you typed, and briefs and follow-ups do not.
+    // The engine is installed apart from Seashell, from a package file, so no key updates it: c copies the
+    // command for Terminal, and the file is dropped in after it.
     : older ? { state: 'attention', summary: 'AI engine too old', action: 'open-ai',
-      detail: `${aiDetail} The AI engine is older than this Seashell, so notes leave out what you typed, and it cannot write briefs or follow-ups.`,
-      fix: 'Install a newer AI engine, then press r to recheck.', command: 'seashell ai install <package.tgz>' } as const
+      detail: `${aiDetail} The AI engine is older than this version of Seashell. Notes still work; typed notes, briefs and follow-ups need the newer engine.`,
+      fix: 'Install the newer engine from its package file.', command: 'seashell ai install <package.tgz>',
+      copy: { text: 'seashell ai install ', how: 'c copies the command: paste it in Terminal, then drag the file in.' } } as const
     : { state: 'ok', summary: `Using ${backends.map(providerName).join(' + ')}`, action: 'open-ai', detail: aiDetail } as const),
   });
 

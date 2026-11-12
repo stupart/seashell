@@ -353,7 +353,9 @@ export const JOURNEYS: Journey[] = [
       { title: 'History', history: true, until: 'Board' },
       { title: 'Notes without yours', press: [...Array(6).fill(UP), DOWN, DOWN, DOWN, DOWN, ENTER], keys: '↑ × 6 ↓ × 4 Enter', until: 'Board',
         note: 'One yellow line under your notes; the key bar leads with AI settings.' },
-      { title: 'AI settings', press: [','], narrowPress: [ENTER], keys: ',', until: 'too old', note: 'Settings opens on AI notes, which says what to do in plain words.' },
+      { title: 'AI settings', press: [','], narrowPress: [ENTER], keys: ',', until: 'too old', note: 'Settings opens on AI notes, which says what still works and what to do, in plain words.' },
+      { title: 'The update command, copied', press: ['c'], keys: 'c', until: 'Copied.',
+        note: 'The engine is installed apart from Seashell, so no key updates it: c copies the command for Terminal, which is never shown.' },
       { title: 'A point whose line was removed', press: [ESC, ...Array(7).fill(DOWN)], narrowInstead: [ESC, ESC, ...Array(9).fill(DOWN)], keys: 'Esc ↓ × 7',
         until: 'line removed',
         note: 'Its words stay as written; the time column says its line is gone.' },
@@ -679,6 +681,8 @@ function setupActions(mac: Mac): SettingsActions {
       return { heard: true, refused: false, detail: 'Heard your Mac. Meetings use it from the next call.' };
     },
     openTemplates: () => {}, openFolder: () => {}, openFile: () => {},
+    // Copying never touches the real clipboard.
+    copy: () => {},
     // Trying an automation again never posts anywhere.
     retryAutomation: async () => [],
   };

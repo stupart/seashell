@@ -259,7 +259,11 @@ test('Vocabulary counts its words and says what an old engine cannot do with the
     // AI notes says it too, in plain words; the command is for seashell status only.
     const notes = (await byId({ engine: rev3 }, ai))['ai-notes'];
     expect(notes).toMatchObject({ state: 'attention', summary: 'AI engine too old', action: 'open-ai', command: 'seashell ai install <package.tgz>' });
-    expect(`${notes!.detail} ${notes!.fix}`).not.toContain('seashell');
+    expect(`${notes!.detail} ${notes!.fix} ${notes!.copy!.how}`).not.toContain('seashell');
+    // No key updates an engine that is installed apart from Seashell, so none is promised: c copies the command for Terminal.
+    expect(notes!.fix).not.toMatch(/press r|recheck/iu);
+    expect(notes!.copy!.text).toBe('seashell ai install ');
+    expect(notes!.detail).toContain('Notes still work; typed notes, briefs and follow-ups need the newer engine.');
   } finally {
     process.env.SEASHELL_VOCABULARY_FILE = previous;
     rmSync(home, { recursive: true, force: true });
