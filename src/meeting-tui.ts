@@ -2,7 +2,7 @@ import type { MeetingArtifact, MeetingClaim, MeetingClaimType, OwnerNote } from 
 import { citedSegmentIds, claimOwnerAndDue, sourceLineRemoved, transcriptSegmentId } from './meeting-artifact.ts';
 import { compareMeetingEvidence, meetingEvidence } from './meeting-evidence.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
-import { formatTuiClock, sentenceClock } from './tui-state.ts';
+import { formatTuiClock, sentenceClock, speakerDisplayName } from './tui-state.ts';
 
 export type MeetingView = 'notes' | 'transcript' | 'chat';
 
@@ -83,8 +83,8 @@ export const META = '\t';
  * what it means.
  */
 export const FROM_YOUR_NOTES = '✎';
-/** In the time column of a point whose every cited line was removed from the transcript. */
-export const LINE_REMOVED = 'line removed';
+/** In the time column of a point whose every cited line was removed from the transcript: its source, as help says. */
+export const LINE_REMOVED = 'source removed';
 
 /** A line of the notes taken apart: its text, who owns it and by when, and when it was said. */
 export function bulletParts(line: string): { body: string; owner?: string; clock?: string } {
@@ -125,6 +125,39 @@ const TRAILING_GROUPS: Array<[string, MeetingClaimType[]]> = [
   ['Resources', ['resource']],
   ["Who's who", ['speaker_identity']],
 ];
+
+/** A person's name as written: up to four capitalised words, "Dana Whitfield", never "IT" or "the host". */
+const PERSON = /^(\p{Lu}[\p{Ll}'’-][\p{L}'’-]*(?:\s+\p{Lu}[\p{Ll}'’-][\p{L}'’-]*){0,3})/u;
+
+/**
+ * The names Who's who gives speakers who have none yet, for the speaker picker to suggest. A claim that
+ * says whom it is about (its speaker and person) is read as that; otherwise only "Speaker 1 is Dana
+ * Whitfield, …" names Speaker 1. A speaker given two names, or a name another speaker already has or is
+ * given, is left unnamed: a suggestion is one key from being kept, so it has to be unambiguous.
+ */
+export function whosWhoNames(
+  claims: readonly Pick<MeetingClaim, 'type' | 'text' | 'speakerId' | 'person'>[],
+  speakers: readonly { id: string; label: string; suggestion?: unknown }[],
+): Map<string, string> {
+  const unnamed = speakers.filter((speaker) => !speaker.suggestion && /^(?:Remote speaker|SPEAKER_)\s?\d+$/u.test(speaker.label));
+  const found = new Map<string, Set<string>>();
+  for (const claim of claims) {
+    if (claim.type !== 'speaker_identity') continue;
+    const named = claim.speakerId && claim.person?.trim() ? unnamed.filter((speaker) => speaker.id === claim.speakerId).map((speaker) => [speaker, claim.person!.trim()] as const)
+      : unnamed.flatMap((speaker) => {
+        const text = claim.text.trim();
+        const called = [speakerDisplayName(speaker.id, speaker.label), speaker.label].find((name) => text.toLocaleLowerCase().startsWith(`${name.toLocaleLowerCase()} `));
+        const rest = called && /^(?:is|was)\s+(?:(?:probably|likely|most likely)\s+)?(.*)$/su.exec(text.slice(called.length).trim())?.[1];
+        const name = rest ? PERSON.exec(rest)?.[1] : undefined;
+        return name ? [[speaker, name] as const] : [];
+      });
+    for (const [speaker, name] of named) found.set(speaker.id, new Set([...found.get(speaker.id) ?? [], name]));
+  }
+  const taken = new Set(speakers.filter((speaker) => !unnamed.includes(speaker)).map((speaker) => speaker.label.toLocaleLowerCase()));
+  const names = [...found].flatMap(([id, set]) => set.size === 1 ? [[id, [...set][0]!] as const] : []);
+  return new Map(names.filter(([id, name]) => !taken.has(name.toLocaleLowerCase())
+    && !names.some(([other, otherName]) => other !== id && otherName.toLocaleLowerCase() === name.toLocaleLowerCase())));
+}
 
 export function meetingViewLines(
   artifact: MeetingArtifact,

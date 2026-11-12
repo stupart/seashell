@@ -55,6 +55,11 @@ export interface FeatureStatus {
   readonly action?: FeatureAction;
   /** The same step from a terminal. */
   readonly command?: string;
+  /**
+   * A step only Terminal can do, such as installing the AI engine, which is not part of Seashell:
+   * c in Settings copies `text`, never shown, and the next step ends with `how`.
+   */
+  readonly copy?: { readonly text: string; readonly how: string };
 }
 
 export const FEATURE_ACTION_LABEL: Record<FeatureAction, string> = {
@@ -247,11 +252,12 @@ export async function readFeatureStatuses(options: {
               : predatesRecorder && !evidence?.audibleMicrophoneChunks
               ? ' Meetings recorded before this update could not hear you; that is fixed now.' : '') } as const
       : microphone.authorization === 'notDetermined'
-        // After an update macOS asks once more for the new copy: it was allowed, and needs your OK again.
+        // After an update macOS asks once more for the new copy: it was allowed, and needs your OK again. Nothing
+        // failed, and one step fixes it, so it is something to look at, in yellow, never a red ✗.
         ? (deps.microphoneAllowedBefore ?? microphoneAllowedBefore)()
-          ? { state: 'broken', summary: 'Needs your OK again after the update',
+          ? { state: 'attention', summary: 'Needs your OK again',
             detail: 'Seashell was updated, so macOS asks once more about Seashell Microphone. Until you allow it, meetings record other people but not you.',
-            fix: 'Choose Allow when macOS asks.', action: 'allow-microphone', command: 'seashell meeting microphone setup' } as const
+            fix: 'Press Enter, then choose Allow.', action: 'allow-microphone', command: 'seashell meeting microphone setup' } as const
           : { state: 'broken', summary: 'Not allowed yet',
             detail: 'Until you allow it, background meetings record other people but not you.',
             fix: 'Choose Allow when macOS asks.', action: 'allow-microphone', command: 'seashell meeting microphone setup' } as const
@@ -344,9 +350,12 @@ export async function readFeatureStatuses(options: {
     : !engine ? { state: 'off', summary: 'Not installed', action: 'open-ai', detail: `${aiDetail} The AI engine is not installed.`,
       fix: 'Install the AI engine.', command: 'seashell ai install <package.tgz>' } as const
     // Older than this Seashell: the notes still come, without what you typed, and briefs and follow-ups do not.
+    // The engine is installed apart from Seashell, from a package file, so no key updates it: c copies the
+    // command for Terminal, and the file is dropped in after it.
     : older ? { state: 'attention', summary: 'AI engine too old', action: 'open-ai',
-      detail: `${aiDetail} The AI engine is older than this Seashell, so notes leave out what you typed, and it cannot write briefs or follow-ups.`,
-      fix: 'Install a newer AI engine, then press r to recheck.', command: 'seashell ai install <package.tgz>' } as const
+      detail: `${aiDetail} The AI engine is older than this version of Seashell. Notes still work; typed notes, briefs and follow-ups need the newer engine.`,
+      fix: 'Install the newer engine from its package file.', command: 'seashell ai install <package.tgz>',
+      copy: { text: 'seashell ai install ', how: 'c copies the command: paste it in Terminal, then drag the file in.' } } as const
     : { state: 'ok', summary: `Using ${backends.map(providerName).join(' + ')}`, action: 'open-ai', detail: aiDetail } as const),
   });
 
@@ -382,7 +391,7 @@ function vocabularyStatus(libraryDir: string, vocabulary: ReturnType<typeof load
     detail: 'Names, companies and words for Seashell to spell right. Transcription and the meeting AI both use them.' } as const;
   const count = `${vocabulary.terms.length} ${vocabulary.terms.length === 1 ? 'word' : 'words'}`;
   if (vocabulary.problems.length) return { ...base, state: 'attention', summary: `${count} · some left out`, fix: vocabulary.problems[0]! };
-  // Optional, so having none is not a step to take: the list is empty and a adds a word.
+  // Optional, so having none is not a step to take: the list is empty and + adds a word.
   if (!vocabulary.terms.length) return { ...base, state: 'off', summary: existsSync(vocabularyPath(libraryDir)) ? 'No words yet' : 'None yet' };
   // Transcription still uses them; only the notes cannot.
   return older ? { ...base, state: 'attention', summary: `${count} · AI engine too old`,

@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { CaptureHealthTracker, parseCaptureHealth } from '../src/capture-health.ts';
+import { LIVE_TEXT_PAUSED } from '../src/live-text-guard.ts';
 import { captureRecordingMode, recordingNeedsAttention, recordingSummary } from '../src/RecordingStatus.tsx';
 
 test('record intent and helper readiness cannot claim capture before PCM arrives', () => {
@@ -104,7 +105,7 @@ test('the title slot gets the most urgent problem in a few words, its key apart:
     .toMatchObject({ headline: 'Ready · watching for calls', alert: { text: 'Meet detection unavailable. Check Speakers', short: 'Meet detection unavailable' } });
   // After the call: audio is safe and the notes are coming, not how far the audio got.
   expect(recordingSummary({ mode: 'processing', title: 'Design review', savedThroughSeconds: 110 }))
-    .toMatchObject({ headline: 'Call ended · Design review', detail: 'Audio saved · writing notes' });
+    .toMatchObject({ headline: 'Call ended · Design review', detail: 'Audio saved · writing notes', short: 'Call ended · writing notes…' });
 });
 
 test('while a call records, the status says what the video films, and a whole screen in the title itself', () => {
@@ -144,4 +145,15 @@ test('a microphone let go of because the call let go of its own is said plainly,
   // Opened again when the call comes back.
   health.state('microphone', { state: 'active' }, 21_000);
   expect(health.snapshot.microphone.state).toBe('receiving');
+});
+
+test('live text paused is said in yellow with no key: nothing fixes it but time, and the audio still records', () => {
+  const health = new CaptureHealthTracker({ nowUnixMs: 1000 });
+  health.pcm('microphone', { peak: 1000, rms: 500, rmsDbfs: -30 }, true, 1000);
+  health.pcm('systemAudio', { peak: 1000, rms: 500, rmsDbfs: -30 }, true, 1000);
+  const paused = recordingSummary({ mode: 'recording', health: health.snapshot, draftLabel: LIVE_TEXT_PAUSED, nowUnixMs: 1500 });
+  expect(paused.alert).toEqual({ text: 'Live text paused', color: 'yellow' });
+  // The whole sentence, for `seashell` output and the transcript's last row.
+  expect(paused.problems).toEqual([LIVE_TEXT_PAUSED]);
+  expect(LIVE_TEXT_PAUSED).toContain('Audio is still recording');
 });

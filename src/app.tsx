@@ -44,9 +44,9 @@ import { addMeetingNote, addRecordingNote, meetingOwnerNotes, recordingBundle } 
 import { briefKey, findBrief, makeBrief, newestSource, NoBriefHistoryError, readComingUp, type Brief, type ComingUpMeeting } from './briefs.ts';
 import { draftFollowUp, draftText, mailtoUrl, type DraftKind, type FollowUpDraft } from './drafts.ts';
 import { Chalk } from 'chalk';
-import { CAUTION, HEADING, META, meetingViewLines, OWNER_NOTES_UNREAD, plainMeetingLines, SUBHEADING, type MeetingView } from './meeting-tui.ts';
-import { FROM_YOUR_NOTES_HELP, HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, sheetInset, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
-import { lastTranscriptScroll, timedTranscriptRows, transcriptWindow, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
+import { CAUTION, HEADING, META, meetingViewLines, OWNER_NOTES_UNREAD, plainMeetingLines, SUBHEADING, whosWhoNames, type MeetingView } from './meeting-tui.ts';
+import { FROM_YOUR_NOTES_HELP, HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, sheetInset, SOURCE_REMOVED_HELP, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
+import { lastTranscriptScroll, lineAt, timedTranscriptRows, transcriptWindow, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
   renderText,
 } from './transcript-renderer.ts';
@@ -141,6 +141,8 @@ const PROJECT_ROOT = join(dirname(__filename), '..');
 const WHISPER_SERVER = join(PROJECT_ROOT, 'whisper.cpp/build/bin/whisper-server');
 const MODEL_PATH = join(PROJECT_ROOT, 'models', DEFAULT_WHISPER_MODEL_FILENAME);
 const HIGHLIGHT = new Chalk({ level: 1 }).black.bgYellow;
+/** Part of a row that says something about the rows, not what was said: dim. */
+const DIM = new Chalk({ level: 1 }).dim;
 /** Another match than the one n is on: in the same yellow, underlined rather than filled. */
 const SOFT_HIGHLIGHT = new Chalk({ level: 1 }).yellow.underline;
 
@@ -381,7 +383,9 @@ export default function App(props: {
   const [notesVersion, setNotesVersion] = useState(0);
   /** [a] during a call: a question over what has been said so far, answered in a sheet. Esc stops waiting.
    * `saved`: + kept the answer as one of your notes, so it is not offered twice. */
-  const [liveAnswer, setLiveAnswer] = useState<{ shown: string; catchUp: boolean; answer?: LiveAnswer; error?: string; saved?: boolean; abort: AbortController; scroll: number } | null>(null);
+  const [liveAnswer, setLiveAnswer] = useState<{ shown: string; catchUp: boolean; answer?: LiveAnswer; error?: string; saved?: boolean; abort: AbortController; scroll: number;
+    /** Live text paused here, in seconds: the answer reads no further, and says so. */
+    upTo?: number } | null>(null);
   /** When a key was last pressed here: "What did I miss?" covers at least the time since. */
   const lastLookedAt = useRef(Date.now());
   /** [u] A follow-up: its kind, then anything to add, at the key bar; the draft in a sheet. Its `ask` is what
@@ -397,6 +401,10 @@ export default function App(props: {
     point?: number } | null>(null);
   /** A past meeting opened at a moment, from a brief: its transcript scrolls there once its rows are laid out. */
   const [jumpTo, setJumpTo] = useState<{ id: string; at: number } | null>(null);
+  /** A past meeting opened from a brief, at the line a point cites: that line is chosen, and Esc goes back to the
+   * brief as it was, over the screen it was opened from. */
+  const [fromBrief, setFromBrief] = useState<{ id: string; at?: number; sheet: NonNullable<typeof briefSheet>; comingUpRow: number | null;
+    under: { view: View; recordId?: string; meetingView: MeetingView; scroll: number; historyOpen: boolean } } | null>(null);
 
   const microphoneCapture = useRef<MicrophoneCaptureHandle | null>(null);
   const systemAudioCapture = useRef<SystemAudioCaptureHandle | null>(null);
@@ -1001,10 +1009,23 @@ export default function App(props: {
     ? terminal.columns - layout.sidebarWidth - 4
     : terminal.columns - 2;
   const contentColumns = transcriptContentColumns ?? Math.max(1, mainPanelColumns);
+  // Opened from a brief, the transcript is a list with one line chosen: every row keeps the glyph's two columns.
+  const citing = Boolean(fromBrief && view === 'record' && selectedRecord?.id === fromBrief.id && meetingView === 'transcript');
+  const gutter = citing ? 2 : 0;
   const timedRows = useMemo(() => currentRecord
-    ? timedTranscriptRows(currentRecord, contentColumns, { timestamps: showTimestamps, speakers: showSpeakers })
-    : [], [currentRecord, contentColumns, showTimestamps, showSpeakers]);
-  const displayRows = useMemo(() => timedRows.map((row) => row.text), [timedRows]);
+    ? timedTranscriptRows(currentRecord, Math.max(1, contentColumns - gutter), { timestamps: showTimestamps, speakers: showSpeakers })
+    : [], [currentRecord, contentColumns, gutter, showTimestamps, showSpeakers]);
+  /** The line the brief's point cites, by its start, while the transcript is opened at it. */
+  const citedLine = citing && fromBrief?.at !== undefined ? lineAt(timedRows, fromBrief.at) : undefined;
+  // Live text the recorder paused while the Mac is busy: the words stop where it paused, and the
+  // transcript's last row, dim, says why, so a still transcript never reads as a quiet call.
+  const liveTextPaused = view === 'record' && currentEntry?.captureState === 'recording' && currentEntry.draftStatus?.stage === 'paused';
+  /** Where the live text stopped, in seconds on the call's clock: what a question during the call can read up to. */
+  const liveTextPausedAt = liveTextPaused ? Math.max(0, ...(currentRecord?.transcript.map((segment) => segment.end) ?? [])) : undefined;
+  const readerRows = useMemo(() => liveTextPaused
+    ? [...timedRows, ...timedRows.length ? [{ text: '' }] : [], ...wrapWords(LIVE_TEXT_PAUSED, contentColumns).map((text) => ({ text: DIM(text) }))]
+    : timedRows, [timedRows, liveTextPaused, contentColumns]);
+  const displayRows = useMemo(() => readerRows.map((row) => row.text), [readerRows]);
   const visibleRows = Math.max(1, transcriptContentRows ?? layout.visibleTranscriptRows);
   // A search shows the line that matched under each meeting, so the list holds half as many.
   const listCapacity = Math.max(1, Math.floor(layout.visibleLibraryItems / (searchQuery.trim() ? 2 : 1)));
@@ -1020,7 +1041,7 @@ export default function App(props: {
     return videoLookups.current.get(key);
   }).map((entry) => entry.id)), [libraryEntries]);
   const showingLiveTranscript = meetingView === 'transcript' && (view === 'live' || currentEntry?.captureState === 'recording');
-  const latestTranscriptScroll = lastTranscriptScroll(timedRows, visibleRows);
+  const latestTranscriptScroll = lastTranscriptScroll(readerRows, visibleRows);
   // The first row of every line that says what was searched for, so a match opens with its whole line at the top.
   const matchRows = useMemo(() => {
     const needle = searchQuery.trim().toLocaleLowerCase();
@@ -1054,13 +1075,18 @@ export default function App(props: {
     ? latestTranscriptScroll
     : Math.min(transcriptScroll, Math.max(latestTranscriptScroll, currentMatch ?? 0));
   // A line cut at the top keeps its time and speaker in view.
-  const visibleTranscriptRows = transcriptWindow(timedRows, visibleTranscriptScroll, visibleRows);
+  const visibleTranscriptRows = transcriptWindow(readerRows, visibleTranscriptScroll, visibleRows);
   // A brief's point opens its past meeting at the moment it cites. The rows rewrap as the reader is
   // measured and the list closes, so the moment is found again whenever they do, until the next key.
   useEffect(() => {
     if (!jumpTo || selectedRecord?.id !== jumpTo.id || meetingView !== 'transcript' || !timedRows.length) return;
-    setTranscriptScroll(Math.max(0, timedRows.findIndex((row) => row.start !== undefined && row.start >= jumpTo.at - 0.5)));
+    const line = lineAt(timedRows, jumpTo.at);
+    setTranscriptScroll(Math.max(0, timedRows.findIndex((row) => row.start === line)));
   }, [jumpTo, selectedRecord?.id, meetingView, timedRows]);
+  // Leaving the meeting a brief opened leaves the brief behind too.
+  useEffect(() => {
+    if (fromBrief && (view !== 'record' || selectedRecord?.id !== fromBrief.id)) setFromBrief(null);
+  }, [fromBrief, view, selectedRecord?.id]);
   // The rows rewrap once the list closes, so the match is found again whenever they do.
   useEffect(() => {
     if (currentMatch !== undefined) setTranscriptScroll(currentMatch);
@@ -1509,6 +1535,19 @@ export default function App(props: {
   [currentMeeting, meetingView, currentRecord, ownerNotes, recordingNow]);
   // The notes left out what you typed: the line under your notes says so, and the key bar leads with AI settings.
   const notesUnread = meetingLines.includes(`${CAUTION}${OWNER_NOTES_UNREAD}`);
+  // Who's who in the notes names speakers still without one: the speaker picker suggests those names, one key from kept.
+  const whosWho = useMemo(() => currentMeeting && currentRecord
+    ? whosWhoNames(currentMeeting.analysis?.claims ?? currentMeeting.provisionalClaims, currentRecord.speakers) : new Map<string, string>(),
+  [currentMeeting, currentRecord?.speakers]);
+  /** Who's who names said not to be someone, by meeting, speaker and name, so n is not asked again. */
+  const [declinedNames, setDeclinedNames] = useState<ReadonlySet<string>>(() => new Set());
+  const declinedKey = (speakerId: string, name: string) => `${currentRecord?.id}\n${speakerId}\n${name}`;
+  /** A name the picker suggests: from a voice named before, already in place, or from Who's who, not yet. */
+  const nameSuggestion = (speaker: TranscriptRecord['speakers'][number]): { name: string; from: 'voice' | 'notes' } | undefined => {
+    if (speaker.suggestion) return { name: speaker.label, from: 'voice' };
+    const named = whosWho.get(speaker.id);
+    return named && !declinedNames.has(declinedKey(speaker.id, named)) ? { name: named, from: 'notes' } : undefined;
+  };
   const auxiliaryMeetingLines = useMemo(() => (
     currentMeeting && meetingView !== 'transcript'
       ? wrappedMeetingRows([...(yourSide && view === 'record' && meetingView === 'notes' ? [`${CAUTION}${yourSide}`, ''] : []), ...meetingLines], contentColumns)
@@ -1876,9 +1915,11 @@ export default function App(props: {
     const route = configuredMeetingRoutes.chat;
     if (!recordingInView || !route) return;
     const typed = question.trim();
-    const catchUp = catchUpQuestion((Date.now() - recordingInView.startedAtUnixMs) / 1000, (lookedAtUnixMs - recordingInView.startedAtUnixMs) / 1000);
+    // With live text paused, the words stop where it paused: what you missed is asked up to there.
+    const upTo = liveTextPausedAt;
+    const catchUp = catchUpQuestion(upTo ?? (Date.now() - recordingInView.startedAtUnixMs) / 1000, (lookedAtUnixMs - recordingInView.startedAtUnixMs) / 1000);
     const abort = new AbortController();
-    setLiveAnswer({ abort, scroll: 0, catchUp: !typed,
+    setLiveAnswer({ abort, scroll: 0, catchUp: !typed, ...(upTo === undefined ? {} : { upTo }),
       shown: typed || (catchUp.from > 0 ? `What did I miss since ${sentenceClock(catchUp.from)}?` : 'What did I miss?') });
     if (recordingInView.own) { try { saveTranscriptRecord(libraryRoot, liveRecordRef.current); } catch { /* The saved draft so far is asked about. */ } }
     void askDuringCall(libraryRoot, recordingInView.id, typed || catchUp.question, route, { signal: abort.signal })
@@ -1905,7 +1946,8 @@ export default function App(props: {
   const openBrief = (meeting: ComingUpMeeting) => {
     const saved = findBrief(libraryRoot, meeting.upcoming);
     if (saved) { setBriefSheet({ meeting, brief: saved, scroll: 0 }); return; }
-    if (!canBrief(meeting)) { setCaution(new NoBriefHistoryError(meeting.upcoming.title).message); return; }
+    // Said in the key bar's one row; the meeting is the row it was chosen from, so its title is not repeated.
+    if (!canBrief(meeting)) { setCaution(NO_PAST_MEETINGS); return; }
     const route = configuredMeetingRoutes.reconciliation;
     if (!route) { setAiSetupIntent(null); setAiSetupOpen(true); return; }
     const abort = new AbortController();
@@ -1925,12 +1967,26 @@ export default function App(props: {
       });
   };
 
+  /** Back from the line a brief's point cites: the brief as it was, over the screen it was opened from. */
+  const backToBrief = (back: NonNullable<typeof fromBrief>) => {
+    setFromBrief(null);
+    const under = back.under.recordId ? libraryEntries.find((entry) => entry.id === back.under.recordId) : undefined;
+    if (under) openRecord(under);
+    else showNavigationItem({ kind: 'live', label: '' });
+    setMeetingView(back.under.meetingView);
+    setTranscriptScroll(back.under.scroll);
+    setHistoryOpen(back.under.historyOpen);
+    setComingUpRow(back.comingUpRow);
+    setBriefSheet(back.sheet);
+  };
+
   // The sheets that scroll, as rows: an answer during the call, a follow-up, a brief.
   // Sheets start where the notes do, a column in on a wide window.
   const sheetColumns = terminal.columns - 2 - sheetInset(terminal.columns);
   const sheetRowCount = Math.max(1, terminal.rows - 3);
   const liveLines = liveAnswer ? sheetLines([
-    { text: liveAnswer.shown, dim: true }, '',
+    { text: liveAnswer.shown, dim: true },
+    ...(liveAnswer.upTo === undefined ? [] : [{ text: `Up to ${sentenceClock(liveAnswer.upTo)}, when live text paused.`, dim: true }]), '',
     ...(liveAnswer.error ? [{ text: liveAnswer.error, color: 'red' as const }]
       : liveAnswer.answer ? [{ text: liveAnswer.answer.answer },
         // The times are the citation: where to look in the transcript.
@@ -1944,19 +2000,33 @@ export default function App(props: {
           })] : [])]
       : [{ text: '◐ Reading the call so far…', dim: true }]),
   ], sheetColumns) : [];
-  const draftLines = draft ? sheetLines(draft.error ? [{ text: draft.error, color: 'red' }]
-    : !draft.result ? [{ text: draft.kind === 'email' ? '◐ Writing the email…' : '◐ Writing the message…', dim: true }]
-    : [
-      // Who it is for, dim, as a mail app shows it above the subject.
-      ...(draft.result.kind === 'email' && draft.result.names.length ? [{ text: `To: ${draft.result.names.join(', ')}`, dim: true }] : []),
-      ...(draft.result.subject ? [{ text: `Subject: ${draft.result.subject}`, bold: true }, '' as const] : []),
-      ...draft.result.paragraphs.flatMap((paragraph, index) => {
-        const times = paragraph.evidenceSegmentIds.flatMap((id) => draft.result!.moments[id] === undefined ? [] : [draft.result!.moments[id]!])
-          .sort((a, b) => a - b).map(sentenceClock);
-        return [...(index ? ['' as const] : []), { text: paragraph.text },
-          ...(draft.sources && times.length ? [{ text: `  ${[...new Set(times)].join(', ')}`, dim: true }] : [])];
-      }),
-    ], sheetColumns) : [];
+  const draftLines = draft ? (() => {
+    if (draft.error) return sheetLines([{ text: draft.error, color: 'red' }], sheetColumns);
+    if (!draft.result) return sheetLines([{ text: draft.kind === 'email' ? '◐ Writing the email…' : '◐ Writing the message…', dim: true }], sheetColumns);
+    const result = draft.result;
+    // Who it is for, dim, as a mail app shows it above the subject: with their addresses where the row has room.
+    const addressed = `To: ${result.people.map((person) => person.email ? `${person.name} <${person.email}>` : person.name).join(', ')}`;
+    const to = Bun.stringWidth(addressed) <= sheetColumns ? addressed : `To: ${result.names.join(', ')}`;
+    // Where each paragraph came from, as the notes say it: zero-padded times in one column against the right edge,
+    // one to a row, so a paragraph that cites several lists them down the column.
+    const times = result.paragraphs.map((paragraph) => [...new Set(paragraph.evidenceSegmentIds
+      .flatMap((id) => result.moments[id] === undefined ? [] : [result.moments[id]!]).sort((a, b) => a - b).map(formatTuiClock))]);
+    const clockWidth = Math.max(0, ...times.flat().map((time) => time.length));
+    const room = Math.max(8, sheetColumns - (clockWidth ? clockWidth + 2 : 0));
+    const timed = (text: string, index: number): SheetLine[] => {
+      const rows = wrapWords(text, room);
+      return Array.from({ length: Math.max(rows.length, times[index]!.length) }, (_, row) => {
+        const words = rows[row] ?? '', time = times[index]![row];
+        return { raw: true, text: time ? `${words}${' '.repeat(Math.max(0, room - Bun.stringWidth(words)))}  ${DIM(time.padStart(clockWidth))}` : words };
+      });
+    };
+    return sheetLines([
+      ...(result.kind === 'email' && result.names.length ? [{ text: to, dim: true }] : []),
+      ...(result.subject ? [{ text: `Subject: ${result.subject}`, bold: true }, '' as const] : []),
+      ...result.paragraphs.flatMap((paragraph, index) => [...(index ? ['' as const] : []),
+        ...(draft.sources && clockWidth ? timed(paragraph.text, index) : [{ text: paragraph.text }])]),
+    ], sheetColumns);
+  })() : [];
   // Who owns each point a brief cites, from the past meeting's own notes: "You · Fri".
   const briefClaims = useMemo(() => new Map((briefSheet?.brief?.meetings ?? []).map((meeting): [string, MeetingClaim[]] => {
     try { const artifact = loadMeetingArtifact(libraryRoot, meeting.id); return [meeting.id, artifact?.analysis?.claims ?? artifact?.provisionalClaims ?? []]; }
@@ -2121,8 +2191,7 @@ export default function App(props: {
       } else if (draft?.result && input === 't') {
         setDraft((current) => current && { ...current, sources: !current.sources });
       } else if (draft && (draft.result || draft.error) && input === 'g') {
-        // Write it again: "Anything to add?" comes back with what was typed last time.
-        setDraft(null);
+        // Write it again: "Anything to add?" comes back with what was typed last time, over the email it rewrites.
         setDraftPrompt({ kind: draft.kind, input: draft.ask });
       } else if (draft?.error && key.return) {
         writeDraft(draft.kind, draft.ask);
@@ -2142,6 +2211,9 @@ export default function App(props: {
         const { meeting, at } = briefPoints[briefSheet.point ?? 0] ?? {};
         const entry = meeting && libraryEntries.find((candidate) => candidate.id === meeting.id);
         if (!entry) { setCaution('That meeting is no longer in your library.'); return; }
+        // Esc comes back to this point of the brief, over the screen it was opened from.
+        setFromBrief({ id: entry.id, ...(at === undefined ? {} : { at }), sheet: briefSheet, comingUpRow,
+          under: { view, ...(view === 'record' && selectedRecord ? { recordId: selectedRecord.id } : {}), meetingView, scroll: transcriptScroll, historyOpen } });
         setBriefSheet(null); setComingUpRow(null); setHistoryOpen(false);
         openRecord(entry);
         setMeetingView('transcript');
@@ -2185,13 +2257,21 @@ export default function App(props: {
     if (speakerPickerOpen) {
       if (key.escape || input === 'r') { setSpeakerPickerOpen(false); return; }
       const speakers = currentRecord?.speakers ?? [];
-      const suggested = speakers[speakerSelection]?.suggestion ? speakers[speakerSelection] : undefined;
+      const chosen = speakers[speakerSelection];
+      const suggestion = chosen && nameSuggestion(chosen);
       if (key.upArrow) setSpeakerSelection((index) => moveSelection(index, -1, speakers.length));
       else if (key.downArrow) setSpeakerSelection((index) => moveSelection(index, 1, speakers.length));
       // A name Seashell suggested from a known voice: keep it, which also teaches the voice, or say it is not them.
-      else if (input === 'y' && suggested) renameSpeaker(suggested.id, suggested.label, `Kept ${suggested.label}.`);
-      else if (input === 'n' && suggested) renameSpeaker(suggested.id, suggested.suggestion!.previous,
-        `${suggested.label} is ${speakerDisplayName(suggested.id, suggested.suggestion!.previous)} again.`);
+      else if (input === 'y' && chosen?.suggestion) renameSpeaker(chosen.id, chosen.label, `Kept ${chosen.label}.`);
+      else if (input === 'n' && chosen?.suggestion) renameSpeaker(chosen.id, chosen.suggestion.previous,
+        `${chosen.label} is ${speakerDisplayName(chosen.id, chosen.suggestion.previous)} again.`);
+      // A name from Who's who: y names them with it, n leaves them unnamed and stops suggesting it.
+      else if (input === 'y' && chosen && suggestion) renameSpeaker(chosen.id, suggestion.name,
+        `${speakerDisplayName(chosen.id, chosen.label)} is now ${suggestion.name}.`);
+      else if (input === 'n' && chosen && suggestion) {
+        setDeclinedNames((current) => new Set([...current, declinedKey(chosen.id, suggestion.name)]));
+        setNotice(`Left ${speakerDisplayName(chosen.id, chosen.label)} unnamed.`);
+      }
       else if (key.return) {
         const speaker = speakers[speakerSelection];
         setSpeakerPickerOpen(false);
@@ -2363,6 +2443,8 @@ export default function App(props: {
     }
     // Esc goes back one level and never leaves the app; only Q does.
     if (key.escape) {
+      // Opened from a brief, it goes back there, as the key bar says; with the meetings open over it, it closes them first.
+      if (fromBrief && !searchQuery) { if (historyOpen) setHistoryOpen(false); else backToBrief(fromBrief); return; }
       if (searchQuery) { setSearchQuery(''); setSearchHit(null); }
       else if (!historyOpen) toggleHistory();
       else if (layout.compact && view === 'record') setHistoryOpen(false);
@@ -2819,7 +2901,7 @@ export default function App(props: {
   const brief: Hint[] = briefable && !recordingInView ? [['b', 'coming up']] : [];
   // One order everywhere: what can be done here, then moving, then Esc. The way back to
   // the meetings comes early, so a narrow window keeps it.
-  const hints: Hint[] = atHome && attention.length ? [micToAllow ? ALLOW_MIC : ['Enter', 'guided setup'], ...byHand, ['f', 'import']]
+  const screenHints: Hint[] = atHome && attention.length ? [micToAllow ? ALLOW_MIC : ['Enter', 'guided setup'], ...byHand, ['f', 'import']]
     : historyOpen && searchQuery.trim() ? visibleEntries.length ? [['Enter', 'read'], ['/', 'search again'], ['Esc', 'clear search'], ['↑↓', 'choose']]
       : [['/', 'search again'], ['Esc', 'clear search']]
     : historyOpen && !navigationItems.some((item) => item.kind === 'record') ? [...byHand, ...brief, ['f', 'import'], ['/', 'search']]
@@ -2839,6 +2921,8 @@ export default function App(props: {
     : meetingView === 'chat' ? [['a', 'ask'], ['h', 'meetings'], ...brief, ...followUp, ['c', 'copy'], ['↑↓', 'scroll']]
     : [...nextMatch, ...watch, ['h', 'meetings'], ...brief, ['r', 'name speakers'], ['a', 'ask'], ...note, ['e', 'export'], ['c', 'copy'], ['↑↓', 'scroll']];
 
+  // Opened from a brief, the way back to it leads, so a narrow window keeps it.
+  const hints: Hint[] = fromBrief && !historyOpen ? [['Esc', 'back to brief'], ...screenHints] : screenHints;
   // Today's meetings show their time, older ones their day, in one column against the right edge.
   const listRowWidth = (layout.compact ? terminal.columns - 2 : layout.sidebarWidth - 2) - 2;
   const dateColumn = Math.max(0, ...navigationItems.slice(sidebarStart, sidebarStart + listCapacity)
@@ -2871,7 +2955,7 @@ export default function App(props: {
   const readerScroll = currentMeeting && meetingView !== 'transcript' ? transcriptScroll : visibleTranscriptScroll;
   // How much is out of view, as Settings says it: what is below, or once at the end, what is above.
   // A time and speaker pinned at the top take a row of the view.
-  const readerShown = readerScroll + visibleRows - (currentMeeting && meetingView !== 'transcript' || timedRows[readerScroll]?.heading === undefined ? 0 : 1);
+  const readerShown = readerScroll + visibleRows - (currentMeeting && meetingView !== 'transcript' || readerRows[readerScroll]?.heading === undefined ? 0 : 1);
   const readerMore = readerTotal - readerShown > 0 ? `↓ ${readerTotal - readerShown} more` : readerScroll > 0 ? `↑ ${readerScroll} more` : undefined;
   const searchHighlight = meetingView === 'transcript' ? searchQuery : '';
   // The title says whether Seashell can record; the body says what is missing, or what happens next.
@@ -2933,11 +3017,17 @@ export default function App(props: {
               ? transcribingCount > 0 ? 'Preparing transcript…' : 'Speak to transcribe · the first words take a moment'
               : backgroundMessage ?? 'No transcript text'}</Text>
           )
-        ) : visibleTranscriptRows.map((row, index) => <Box key={index} flexShrink={0} height={1}>
-          {/* The line n is on is marked in full; the other matches are only underlined. */}
-          <Text wrap="truncate-end">{highlighted(row.text, searchHighlight,
-            currentMatch !== undefined && row.start !== timedRows[currentMatch]?.start) || ' '}</Text>
-        </Box>)}
+        ) : visibleTranscriptRows.map((row, index) => {
+          // The line a brief's point cites is chosen as a list's row is: inverse across the reader, › on its first row.
+          const cited = citedLine !== undefined && row.start === citedLine;
+          const mark = !citing ? '' : cited && visibleTranscriptRows[index - 1]?.start !== citedLine ? '› ' : '  ';
+          const text = highlighted(row.text, searchHighlight, currentMatch !== undefined && row.start !== timedRows[currentMatch]?.start) || ' ';
+          return <Box key={index} flexShrink={0} height={1}>
+            {/* The line n is on is marked in full; the other matches are only underlined. */}
+            <Text wrap="truncate-end" inverse={cited}>{mark}{cited
+              ? `${text}${' '.repeat(Math.max(0, contentColumns - gutter - Bun.stringWidth(stripVTControlCharacters(text))))}` : text}</Text>
+          </Box>;
+        })}
       </Box>
     </Box>
   );
@@ -2966,8 +3056,12 @@ export default function App(props: {
     </Sheet>;
   })() : null;
   const namedSpeakers = currentRecord?.speakers ?? [];
-  const speakerName = (speaker: (typeof namedSpeakers)[number]) =>
-    `${speakerDisplayName(speaker.id, speaker.label)}${speaker.suggestion ? ' · suggested' : ''}`;
+  const speakerName = (speaker: (typeof namedSpeakers)[number]) => {
+    const suggestion = nameSuggestion(speaker);
+    return suggestion ? `${speakerDisplayName(speaker.id, suggestion.name)} · suggested` : speakerDisplayName(speaker.id, speaker.label);
+  };
+  // Where the suggested names come from, said once under the list.
+  const suggestedFrom = new Set(namedSpeakers.flatMap((speaker) => nameSuggestion(speaker)?.from ?? []));
   const speakerColumn = Math.min(32, Math.max(18, ...namedSpeakers.map((speaker) => speakerName(speaker).length))) + 2;
   const speakerSheet = speakerPickerOpen && currentRecord ? <Sheet>
     {namedSpeakers.map((speaker, index) => {
@@ -2977,11 +3071,12 @@ export default function App(props: {
         <Text dimColor={index !== speakerSelection}>“{said}”</Text>
       </Text>;
     })}
-    {namedSpeakers.some((speaker) => speaker.suggestion) && <Box marginTop={1}>
-      <Text dimColor wrap="wrap">Suggested names come from voices you named before.</Text>
+    {suggestedFrom.size > 0 && <Box marginTop={1}>
+      <Paragraph width={sheetColumns} dimColor text={suggestedFrom.size > 1 ? "Suggested names come from voices you named before, and from Who's who in the notes."
+        : suggestedFrom.has('notes') ? "Suggested names come from Who's who in the notes." : 'Suggested names come from voices you named before.'} />
     </Box>}
   </Sheet> : null;
-  // Coming up: when, what, and whether its brief is ready, can be made, or has nothing to read.
+  // Coming up: when, what, and whether its brief is ready or has nothing to read.
   const comingUpSheet = comingUpRow !== null ? (() => {
     const now = new Date(statusNow);
     const whens = comingUp.map((meeting) => upcomingWhen(meeting.upcoming.startsAt, now));
@@ -2999,11 +3094,15 @@ export default function App(props: {
   })() : null;
   const helpSheet = helpMode ? <Sheet>
     {HELP_ROWS.map(([group, keys]) => <HelpRow key={group} group={group} keys={keys} />)}
-    <Box marginTop={1} flexShrink={0}><Paragraph width={sheetColumns} dimColor text={FROM_YOUR_NOTES_HELP} /></Box>
+    <Box marginTop={1} flexShrink={0} flexDirection="column">
+      <Paragraph width={sheetColumns} dimColor text={FROM_YOUR_NOTES_HELP} />
+      <Paragraph width={sheetColumns} dimColor text={SOURCE_REMOVED_HELP} />
+    </Box>
   </Sheet> : null;
 
   // Questions and typed answers take the key bar's row. Their keys are never cut.
-  const suggested = speakerPickerOpen ? currentRecord?.speakers[speakerSelection]?.suggestion ? currentRecord.speakers[speakerSelection] : undefined : undefined;
+  const pickedSpeaker = speakerPickerOpen ? currentRecord?.speakers[speakerSelection] : undefined;
+  const suggested = pickedSpeaker && nameSuggestion(pickedSpeaker);
   const noteClock = noteInput?.typedAtUnixMs !== undefined && recordingInView
     ? sentenceClock((noteInput.typedAtUnixMs - recordingInView.startedAtUnixMs) / 1000)
     : noteInput?.at !== undefined ? sentenceClock(noteInput.at) : undefined;
@@ -3104,8 +3203,10 @@ export default function App(props: {
   const silentSetup = attention.find((status) => (status.id === 'microphone' || status.id === 'computer-audio') && status.summary.includes('silent'));
   const live = summary?.alert && statusProps?.mode !== 'ready' && statusProps?.mode !== 'processing'
     ? sourceFinding(statusProps?.health, startedAt, statusNow) : undefined;
-  const finding: { text: string; source: 'microphone' | 'computer'; color: 'red' | 'yellow' } | undefined = live
+  // Live text paused is what the title's yellow says, so audio help opens on it: the audio itself is fine.
+  const finding: { text: string; source?: 'microphone' | 'computer'; color: 'red' | 'yellow' } | undefined = live
     ? { ...live, color: summary!.alert!.color }
+    : liveTextPaused ? { text: LIVE_TEXT_PAUSED, color: 'yellow' }
     : yourSide && view === 'record' ? { text: yourSide, source: 'microphone', color: 'yellow' }
     : silentSetup ? { text: silentSetup.detail, source: silentSetup.id === 'microphone' ? 'microphone' : 'computer', color: 'yellow' }
     : undefined;
@@ -3114,13 +3215,13 @@ export default function App(props: {
   const micHelpTests = finding?.source !== 'computer' && micStatus !== undefined && micStatus.action !== 'allow-microphone' && summary?.alert?.fix !== ALLOW_MIC;
   const sheetHints: Hint[] | undefined = notesSetup ? notesSetup.editing !== undefined ? [['Enter', 'save'], ['Esc', 'cancel']]
       : [...(notesSetup.row === 1 ? [['Enter', 'edit note'] as Hint] : [...write, ['←→', 'change'] as Hint]), ['↑↓', 'choose'], ['Esc', 'back']]
-    : speakerPickerOpen ? suggested ? [['y', 'keep'], ['n', `not ${suggested.label}`], ['Enter', 'rename'], ['↑↓', 'choose'], ['Esc', 'back']]
+    : speakerPickerOpen ? suggested ? [['y', 'keep'], ['n', `not ${suggested.name}`], ['Enter', 'rename'], ['↑↓', 'choose'], ['Esc', 'back']]
       : [['Enter', 'name'], ['↑↓', 'choose'], ['Esc', 'back']]
     : liveAnswer ? liveAnswer.answer || liveAnswer.error ? [...(liveAnswer.answer && !liveAnswer.saved ? [['+', 'save as note'] as Hint] : []),
       ...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']] : [['Esc', 'cancel']]
     : draft ? draft.result ? [['c', 'copy'], ...(draft.result.kind === 'email' ? [['o', 'open in Mail'] as Hint] : []), ['g', 'write again'],
       ['t', draft.sources ? 'hide times' : 'show times'], ...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']]
-      : draft.error ? [['Enter', 'try again'], ['g', 'write again'], ['Esc', 'back']] : [['Esc', 'cancel']]
+      : draft.error ? [['Enter', 'try again'], ['g', 'change what to add'], ['Esc', 'back']] : [['Esc', 'cancel']]
     : briefSheet ? briefSheet.brief ? [...(briefPoints[briefSheet.point ?? 0]?.meeting ? [['Enter', 'where it was said'] as Hint] : []), ['c', 'copy'],
       ...(briefPoints.length > 1 ? [['↑↓', 'choose'] as Hint] : []), ['o', 'open the file'], ['Esc', 'back']]
       : briefSheet.retry ? [['Enter', 'try again'], ['Esc', 'back']]
@@ -3169,7 +3270,7 @@ export default function App(props: {
         : slot ?? (liveAnswer && recordingInView ? { text: `● Recording ${recordingClock((statusNow - recordingInView.startedAtUnixMs) / 1000)}` } : undefined)} />
         : <ScreenTitle name={heading.text} bold={Boolean(heading.color)} {...(heading.color ? { color: heading.color } : {})}
           {...(heading.keep ? { keep: heading.keep } : {})}
-          {...(summary?.detail && !quietlyDone ? { detail: summary.detail } : {})} status={slot} />}
+          {...(summary?.detail && !quietlyDone ? { detail: summary.detail, ...(summary.short ? { short: summary.short } : {}) } : {})} status={slot} />}
       {sheet ?? <Box flexDirection="row" flexGrow={1} overflow="hidden">
         {historyOpen && list}
         {!drawerOnly && reader}
@@ -3208,16 +3309,20 @@ function searchHeading(count: number, query: string): string {
   return `${count === 0 ? 'No meeting mentions' : count === 1 ? '1 meeting mentions' : `${count} meetings mention`} "${query}"`;
 }
 
+/** Why a meeting coming up has no brief, in the key bar's one row. */
+const NO_PAST_MEETINGS = 'No past meetings with these people or this title.';
+
 /** A meeting coming up has a brief to read, or past meetings to make one from. */
 function canBrief(meeting: ComingUpMeeting): boolean {
   return Boolean(meeting.brief) || meeting.history > 0;
 }
 
-/** Where a meeting's brief stands: in the Coming up list's few words, or the home screen's longer ones. */
+/** Where a meeting's brief stands: in the Coming up list's few words, or the home screen's longer ones. The list
+ * says only a state; that Enter makes a brief is the key bar's to say, so one still to make says nothing there. */
 function briefState(meeting: ComingUpMeeting, short = false): string {
   if (meeting.brief) return 'brief ready';
-  if (!meeting.history) return 'no history';
-  return short ? 'make brief' : `${meeting.history} past ${meeting.history === 1 ? 'meeting' : 'meetings'} to brief from`;
+  if (!meeting.history) return 'no past meetings';
+  return short ? '' : `${meeting.history} past ${meeting.history === 1 ? 'meeting' : 'meetings'} to brief from`;
 }
 
 /** The microphone is not allowed yet, and Seashell can ask macOS (or open its pane). */

@@ -44,7 +44,10 @@ mock.module('../../src/humain-client.ts', () => ({ ...client,
 const record = createTranscriptRecord({ transcript: [{ start: 0, end: 2, text: 'Our budget is ten thousand.' }], speakers: [] },
   { id: 'acme-call', title: 'Acme discovery call', now: new Date(Date.now() - 3_600_000) });
 saveTranscriptRecord(library, record);
-saveMeetingArtifact(library, createMeetingArtifact(record));
+// From a calendar invite: the email is for everyone on it but you.
+saveMeetingArtifact(library, createMeetingArtifact(record, { calendar: { provider: 'macos-eventkit', eventId: 'acme', title: 'Acme discovery call',
+  startAt: record.createdAt, endAt: record.createdAt, calendar: 'you@example.com',
+  attendees: [{ name: 'You', email: 'you@example.com' }, { name: 'Dana Whitfield', email: 'dana@acme.example' }] } }));
 
 const { default: App } = await import('../../src/app.tsx');
 const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
@@ -68,9 +71,16 @@ try {
   for (const ch of 'keep it short') await type(ch);
   await type('\r');
   await until(() => screen().includes('Subject: Next steps') && screen().includes('g write again'), 'the email offers to write it again');
-  // g brings back "Anything to add?" with what was typed last time.
+  // Wide, the To line has room for addresses.
+  assert(screen().includes('To: Dana Whitfield <dana@acme.example>'), `the To line says who, with their address\n${screen()}`);
+  // Where each paragraph came from, as the notes say it: a zero-padded time against the right edge.
+  await type('t');
+  await until(() => /Our budget is ten thousand\. +00:00$/mu.test(screen()), 'times sit in the notes\' column, zero-padded');
+  await type('t');
+  // g brings back "Anything to add?" with what was typed last time, over the email it rewrites.
   await type('g');
   await until(() => screen().includes('Anything to add? keep it short█'), 'writing it again starts from the last ask');
+  assert(screen().includes('Subject: Next steps') && screen().includes('Our budget is ten thousand.'), `the email stays on screen behind its prompt\n${screen()}`);
   for (const ch of ' and warm') await type(ch);
   await type('\r');
   await until(() => asks.length === 2 && screen().includes('Subject: Next steps'), 'and Enter writes it again');
@@ -79,6 +89,7 @@ try {
   down = true;
   await type('g'); await type('\r');
   await until(() => screen().includes('The AI did not answer.') && screen().includes('Enter try again'), 'a failure offers to try again');
+  assert(screen().includes('g change what to add') && !screen().includes('g write again'), 'and g changes what to add');
   down = false;
   await type('\r');
   await until(() => asks.length === 4 && screen().includes('Subject: Next steps'), 'Enter tries again');

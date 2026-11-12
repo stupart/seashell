@@ -68,18 +68,36 @@ try {
   await Bun.sleep(200);
   await type('b');
   await until(() => screen().includes('Coming up') && screen().includes('Roadmap review') && screen().includes('Lunch with Sam')
-    && screen().includes('make brief') && screen().includes('no history'), 'b lists every meeting coming up, tomorrow\'s too, and where each brief stands');
+    && screen().includes('Enter make brief') && screen().includes('no past meetings'), 'b lists every meeting coming up, tomorrow\'s too, and where each brief stands');
+  // The list says states only; that Enter makes a brief is the key bar's to say.
+  assert(screen().split('\n').filter((line) => line.includes('make brief')).length === 1, `"make brief" is said once, in the key bar\n${screen()}`);
   await type('\r');
   await until(() => screen().includes('Brief · Roadmap review') && screen().includes('from Roadmap review,') && screen().includes('You · Fri'),
     'Enter makes the brief; it names the one past meeting once, and the owner sits on the right');
   await type('\x1b');
   await until(() => screen().includes('Coming up') && screen().includes('brief ready'), 'Esc goes back to the list, which says the brief is ready');
   await type('\x1b[B'); await type('\r');
-  await until(() => screen().includes('Nothing to brief from yet'), 'a meeting with no history says so');
+  await until(() => screen().includes('No past meetings with these people or this title.'), 'a meeting with no history says so, in one row');
   await type('\x1b[A'); await type('\r');
   await until(() => screen().includes('Brief · Roadmap review') && screen().includes('Enter where it was said'), 'a saved brief opens at once');
   await type('\r');
   await until(() => screen().includes('2 Transcript') && screen().split('\n').slice(3, 6).join('\n').includes('I will send the security summary'),
     'Enter opens the past meeting at the line the point cites');
+  // That line is chosen as a list's row is, and the way back to the brief leads the key bar.
+  await until(() => /^ *› \S.*I will send the security summary/mu.test(screen()), 'the cited line is marked with ›');
+  // Only a fix for something wrong on this Mac may come before it.
+  const keys = screen().trimEnd().split('\n').at(-1)!;
+  assert(keys.includes('Esc back to brief') && keys.indexOf('Esc back to brief') < keys.indexOf('h meetings'), `Esc back to brief leads\n${screen()}`);
+  await type('\x1b[B'); await type('\x1b[B');
+  assert(/^ *› \S.*I will send the security summary/mu.test(screen()) || !screen().includes('I will send'), 'the mark stays on its line while reading on');
+  // With the meetings open over it, Esc closes them first, then goes back.
+  await type('h');
+  await until(() => screen().includes('Meetings') && !screen().includes('Esc back to brief'), 'the meetings open');
+  await type('\x1b');
+  await until(() => screen().includes('Esc back to brief'), 'Esc closes them, and the way back to the brief returns');
+  await type('\x1b');
+  await until(() => screen().includes('Brief · Roadmap review') && /^ *› Send the security summary/mu.test(screen()), 'Esc returns to the same point of the brief');
+  await type('\x1b');
+  await until(() => screen().includes('Coming up') && screen().includes('brief ready'), 'and Esc again to the list it came from');
   process.stdout.write(JSON.stringify({ passed: true }) + '\n');
 } finally { app.unmount(); input.destroy(); output.destroy(); rmSync(root, { recursive: true, force: true }); }

@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { createMeetingArtifact } from '../src/meeting-artifact.ts';
-import { META, meetingViewLines, plainMeetingLines, SUBHEADING } from '../src/meeting-tui.ts';
+import { META, meetingViewLines, plainMeetingLines, SUBHEADING, whosWhoNames } from '../src/meeting-tui.ts';
 import { wrappedMeetingRows } from '../src/transcript-viewport.ts';
 import { stripVTControlCharacters } from 'util';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
@@ -202,4 +202,30 @@ test('the AI\'s loose points are "Also said" and who is who is "Who\'s who": "No
   expect(lines).toContain('# Also said');
   expect(lines).toContain("# Who's who");
   expect(lines).not.toContain('# Notes');
+});
+
+test('Who\'s who names the speakers who have no name yet, only when it is unambiguous', () => {
+  const speakers = [
+    { id: 'LOCAL', label: 'Microphone' },
+    { id: 'REMOTE_00', label: 'Remote speaker 1' },
+    { id: 'REMOTE_01', label: 'Remote speaker 2' },
+    { id: 'REMOTE_02', label: 'Priya', suggestion: { source: 'voice', previous: 'Remote speaker 3', similarity: 0.8 } },
+  ];
+  const who = (text: string, extra: object = {}) => ({ type: 'speaker_identity' as const, text, ...extra });
+  expect([...whosWhoNames([
+    who('Speaker 1 is Dana Whitfield, their head of operations.'),
+    who('Remote speaker 2 is probably Sam, who joined late.'),
+    // Not about anyone still unnamed, or no name in it.
+    who('Speaker 3 is Priya, who runs IT at Acme.'),
+    who('You are the account lead.'),
+    { type: 'note' as const, text: 'Speaker 1 is Dana.' },
+  ], speakers)]).toEqual([['REMOTE_00', 'Dana Whitfield'], ['REMOTE_01', 'Sam']]);
+  // A claim that says whom it is about is read as that.
+  expect(whosWhoNames([who('Runs IT at Acme.', { speakerId: 'REMOTE_01', person: 'Alex Kim' })], speakers).get('REMOTE_01')).toBe('Alex Kim');
+  // A role is not a name.
+  expect(whosWhoNames([who('Speaker 1 is the host.'), who('Speaker 2 is IT at Acme.')], speakers).size).toBe(0);
+  // Two names for one speaker, one name for two, or a name someone already has: nothing is suggested.
+  expect(whosWhoNames([who('Speaker 1 is Dana.'), who('Speaker 1 is Sam.')], speakers).size).toBe(0);
+  expect(whosWhoNames([who('Speaker 1 is Dana.'), who('Speaker 2 is Dana.')], speakers).size).toBe(0);
+  expect(whosWhoNames([who('Speaker 1 is Priya.')], speakers).size).toBe(0);
 });

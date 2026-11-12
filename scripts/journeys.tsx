@@ -136,9 +136,9 @@ export const JOURNEYS: Journey[] = [
       { title: 'Recording', note: 'Words appear as people speak.',
         world: ({ library, background }) => liveMeeting(library, background), until: 'Recording' },
       { title: 'Reading back during the call', press: [UP, UP, UP], keys: '↑ ↑ ↑' },
-      { title: 'Back to the latest words', press: ['l'], keys: 'L' },
+      { title: 'Back to the latest words', press: ['l'], keys: 'l' },
       { title: 'Stop asked', press: [' '], keys: 'Space', until: 'keep recording', note: 'Stopping asks first, whichever recorder runs the call.' },
-      { title: 'Kept recording', press: ['n'], keys: 'N' },
+      { title: 'Kept recording', press: ['n'], keys: 'n' },
       { title: 'The call ends', note: 'Audio is safe; the final transcript and notes are being made.',
         world: ({ library, background }) => endMeeting(library, background) },
     ],
@@ -153,12 +153,12 @@ export const JOURNEYS: Journey[] = [
       { title: 'Insights', press: ['\x1b[6~'], keys: 'Page Down', until: 'Insights', note: 'What the extractors found, under the notes.' },
       { title: 'Transcript', press: ['2'], keys: '2' },
       { title: 'Chat', press: ['3'], keys: '3' },
-      { title: 'Asking a question', press: ['a'], keys: 'A', note: 'Typing a question about the meeting.' },
+      { title: 'Asking a question', press: ['a'], keys: 'a', note: 'Typing a question about the meeting.' },
       { title: 'Question typed', press: [...'What did we promise Acme?'], keys: 'What did we promise Acme?' },
       { title: 'Cancelled', press: [ESC], keys: 'Esc' },
-      { title: 'Notes setup', press: ['1', 'g'], keys: '1 G', until: 'Notes setup', note: 'Template, a note to the AI, and whether AI may see it. Enter rewrites.' },
+      { title: 'Notes setup', press: ['1', 'g'], keys: '1 g', until: 'Notes setup', note: 'Template, a note to the AI, and whether AI may see it. Enter rewrites.' },
       { title: 'Back', press: [ESC], keys: 'Esc', note: 'Nothing changed, so nothing to say.' },
-      { title: 'Export', press: ['2', 'e'], keys: '2 E', note: 'Getting the transcript out.' },
+      { title: 'Export', press: ['2', 'e'], keys: '2 e', note: 'Getting the transcript out.' },
     ],
   },
   {
@@ -170,9 +170,9 @@ export const JOURNEYS: Journey[] = [
       { title: 'Typing', press: [...'pricing'], keys: 'pricing', note: 'Each meeting shows the line that matched, and when.' },
       { title: 'Results', press: [ENTER], keys: 'Enter' },
       { title: 'Opened a result', press: [ENTER], keys: 'Enter', until: '1 Notes', note: 'The matching line is at the top, highlighted.' },
-      { title: 'Next match', press: ['n'], keys: 'N' },
-      { title: 'Delete asked', press: ['d'], keys: 'D', note: 'Moving a meeting to the Trash.' },
-      { title: 'Delete cancelled', press: ['n'], keys: 'N' },
+      { title: 'Next match', press: ['n'], keys: 'n' },
+      { title: 'Delete asked', press: ['d'], keys: 'd', note: 'Moving a meeting to the Trash.' },
+      { title: 'Delete cancelled', press: ['n'], keys: 'n' },
     ],
   },
   {
@@ -181,15 +181,15 @@ export const JOURNEYS: Journey[] = [
     steps: [
       { title: 'History', history: true, until: 'Acme' },
       { title: 'Meeting transcript', press: [ENTER, '2'], keys: 'Enter 2', until: 'Speaker 1' },
-      { title: 'Picking a speaker', press: ['r'], keys: 'R', until: 'Name a speaker', note: 'Who can be named? Priya was suggested from a voice named before.' },
+      { title: 'Picking a speaker', press: ['r'], keys: 'r', until: 'Name a speaker', note: 'Who can be named? Priya was suggested from a voice named before.' },
       { title: 'Chose one', press: [ENTER], keys: 'Enter' },
       { title: 'Name typed', press: [...'Dana'], keys: 'Dana' },
       { title: 'Saved', press: [ENTER], keys: 'Enter' },
-      { title: 'A suggested name', press: ['r'], keys: 'R', until: 'y keep', note: 'The list opens on the suggestion still to check.' },
-      { title: 'Suggestion kept', press: ['y'], keys: 'Y', note: 'Keeping it also teaches Seashell the voice.' },
-      { title: 'Hide speakers', press: [ESC, 's'], keys: 'Esc S', note: 'Toggle.' },
-      { title: 'Show speakers again, hide times', press: ['s', 't'], keys: 'S T' },
-      { title: 'Speaker settings', press: ['t', ',', ...Array(7).fill(DOWN), ENTER], narrowPress: [ENTER], keys: 'T , ↓ × 7 Enter',
+      { title: 'A suggested name', press: ['r'], keys: 'r', until: 'y keep', note: 'The list opens on the suggestion still to check.' },
+      { title: 'Suggestion kept', press: ['y'], keys: 'y', note: 'Keeping it also teaches Seashell the voice.' },
+      { title: 'Hide speakers', press: [ESC, 's'], keys: 'Esc s', note: 'Toggle.' },
+      { title: 'Show speakers again, hide times', press: ['s', 't'], keys: 's t' },
+      { title: 'Speaker settings', press: ['t', ',', ...Array(7).fill(DOWN), ENTER], narrowPress: [ENTER], keys: 't , ↓ × 7 Enter',
         until: 'Speaker setup', note: 'From its row in Settings.' },
     ],
   },
@@ -199,7 +199,7 @@ export const JOURNEYS: Journey[] = [
     steps: [
       { title: 'History', history: true, until: 'Weekly' },
       { title: 'Meeting without notes', press: [DOWN, ENTER], keys: '↓ Enter', until: '1 Notes' },
-      { title: 'Asked for notes', press: ['g', ENTER], keys: 'G Enter', until: 'AI for notes', note: 'Notes setup, then Enter to write them. No AI chosen yet: what happens?' },
+      { title: 'Asked for notes', press: ['g', ENTER], keys: 'g Enter', until: 'AI for notes', note: 'Notes setup, then Enter to write them. No AI chosen yet: what happens?' },
       { title: 'Next choice', press: [DOWN], keys: '↓' },
       { title: 'Picked one', press: [ENTER], keys: 'Enter' },
       { title: 'Next', press: [ENTER], keys: 'Enter' },
@@ -212,7 +212,7 @@ export const JOURNEYS: Journey[] = [
       { title: 'Warning at the top', until: 'silent', note: 'Does it say what is wrong and what to do?' },
       { title: 'Microphone fails during a call',
         world: ({ library, background }) => liveMeeting(library, background, { microphoneDown: true }), until: 'Mic not heard' },
-      { title: 'Audio help', press: ['i'], keys: 'I', until: 'Sound', note: 'Access is allowed, so there is one thing to check, and Enter tests the mic.' },
+      { title: 'Audio help', press: ['i'], keys: 'i', until: 'Sound', note: 'Access is allowed, so there is one thing to check, and Enter tests the mic.' },
       { title: 'Testing the mic', press: [ENTER], keys: 'Enter', until: 'Microphone test', note: 'The meter, on its own; the call keeps recording.' },
       { title: 'Back', press: [ESC], keys: 'Esc' },
       { title: 'Settings', press: [','], keys: ',', until: 'Settings' },
@@ -256,14 +256,14 @@ export const JOURNEYS: Journey[] = [
         note: 'Who Seashell knows by voice.' },
       { title: 'Choosing someone', press: [ENTER], keys: 'Enter', until: 'forget' },
       { title: 'Forget asked', press: [ENTER], keys: 'Enter', until: 'y forget', note: 'Asked first, in the key bar.' },
-      { title: 'Forgotten', press: ['y'], keys: 'Y', until: 'Forgot' },
+      { title: 'Forgotten', press: ['y'], keys: 'y', until: 'Forgot' },
       { title: 'Prompts', press: [LEFT, DOWN, DOWN, DOWN], keys: '← ↓ ↓ ↓', note: 'What each AI role is told: as shipped, edited or empty.' },
       { title: 'Choosing a prompt', press: [ENTER, DOWN], keys: 'Enter ↓', until: 'put back' },
-      { title: 'Undo asked', press: ['d'], keys: 'D', until: 'y undo' },
-      { title: 'Edits undone', press: ['y'], keys: 'Y', until: 'Undid' },
+      { title: 'Undo asked', press: ['d'], keys: 'd', until: 'y undo' },
+      { title: 'Edits undone', press: ['y'], keys: 'y', until: 'Undid' },
       { title: 'Vocabulary', press: [LEFT, DOWN], narrowPress: [ENTER], keys: '← ↓', until: 'spell right',
         note: 'Names and words to spell right, kept in the app; Enter opens them as a file.' },
-      { title: 'Adding a word', press: ['a', ...'Humain'], keys: 'A Humain', until: 'Add a word', note: 'Typed in the key bar.' },
+      { title: 'Adding a word', press: ['+', ...'Humain'], keys: '+ Humain', until: 'Add a word', note: 'Typed in the key bar; + adds, as it adds a note.' },
       { title: 'Word added', press: [ENTER], keys: 'Enter', until: 'Added', note: 'The list shows it; the next call spells it that way.' },
       { title: 'Choosing a word', press: [ENTER], narrowInstead: [DOWN], keys: 'Enter', until: 'd remove', note: 'd removes it again.' },
       { title: 'Extractors', press: [LEFT, DOWN, ENTER], keys: '← ↓ Enter', until: 'Customer pains', note: 'A file that does not load is red. Wide, Enter opens the folder.' },
@@ -299,7 +299,7 @@ export const JOURNEYS: Journey[] = [
       { title: 'History', history: true, until: 'Roadmap' },
       { title: 'A meeting with video', press: [DOWN, DOWN, DOWN, ENTER], keys: '↓ ↓ ↓ Enter', until: 'watch video', note: 'w appears only when there is video.' },
       { title: 'Reading the transcript', press: ['2', ...Array(8).fill(DOWN)], keys: '2 ↓ × 8' },
-      { title: 'Video opened', press: ['w'], keys: 'W', until: 'Opened the video', note: 'It plays from the line at the top.' },
+      { title: 'Video opened', press: ['w'], keys: 'w', until: 'Opened the video', note: 'It plays from the line at the top.' },
     ],
   },
   {
@@ -312,17 +312,42 @@ export const JOURNEYS: Journey[] = [
         note: 'The note is timed when + is pressed, not when Enter is.' },
       { title: 'Noted', press: [ENTER], keys: 'Enter', until: 'Noted at' },
       { title: 'Your notes so far', press: ['1'], keys: '1', until: 'Your notes', note: 'In Notes, with the time it was written.' },
-      { title: 'Asking', press: ['2', 'a'], keys: '2 A', until: 'what did I miss', note: 'Enter alone asks what you missed.' },
+      { title: 'Asking', press: ['2', 'a'], keys: '2 a', until: 'what did I miss', note: 'Enter alone asks what you missed.' },
       { title: 'Reading the call', press: [ENTER], keys: 'Enter', until: 'Reading the call', note: 'Recording carries on; Esc stops waiting.' },
       { title: 'Catch up', until: 'From the call', note: 'The answer, then the moments it rests on, under the same names.' },
       { title: 'Saved as a note', press: ['+'], keys: '+', until: 'Noted at', note: 'The answer joins your notes, timed now.' },
       { title: 'Back to the call', press: [ESC], keys: 'Esc' },
-      { title: 'A private meeting', press: ['a'], keys: 'A', until: 'AI is off',
+      { title: 'A private meeting', press: ['a'], keys: 'a', until: 'AI is off',
         world: async ({ library }) => {
           const { loadMeetingArtifact, saveMeetingArtifact } = await import('../src/meeting-artifact.ts');
           saveMeetingArtifact(library, { ...loadMeetingArtifact(library, 'demo-live')!, ai: { off: true } });
         }, note: 'AI is off for it: nothing is sent, and it says so in a line, and in the title.' },
-      { title: 'Nothing to ask', press: ['l'], keys: 'L', note: 'With AI off, catch up is not offered, as follow-up is not.' },
+      { title: 'Nothing to ask', press: ['l'], keys: 'l', note: 'With AI off, catch up is not offered, as follow-up is not.' },
+    ],
+  },
+  {
+    id: 'live-text-paused', title: 'Live text paused while the Mac is busy', who: 'Someone on a call while their Mac is too busy for live text.',
+    machine: 'ready', library: 'demo', narrow: true,
+    steps: [
+      { title: 'Live text paused', world: ({ library, background }) => liveMeeting(library, background, { bundle: true, liveTextPaused: true }),
+        until: 'Live text paused while',
+        note: 'The title says so in yellow, and the transcript\'s last row says why. Nothing but time fixes it, so no key leads the key bar.' },
+      { title: 'Audio help', press: ['i'], keys: 'i', until: 'Audio help', note: 'It opens on what the title says: the audio itself is fine.' },
+      { title: 'Catch up', press: [ESC, 'a', ENTER], keys: 'Esc a Enter', until: 'From the call',
+        note: 'It reads up to where live text paused, and says so.' },
+    ],
+  },
+  {
+    id: 'whos-who', title: "Who's who, and a name from it", who: 'Someone whose notes say who each voice was.',
+    machine: 'ready', library: 'demo', narrow: true,
+    steps: [
+      { title: 'History', history: true, until: 'Acme', world: whosWho },
+      { title: "Who's who in the notes", press: [ENTER, ...Array(40).fill(DOWN)], keys: 'Enter ↓ × 40', until: "Who's who",
+        note: 'What the notes say about who each voice was.' },
+      { title: 'Naming a speaker', press: ['2', 'r'], keys: '2 r', until: 'Name a speaker',
+        note: "Speaker 1 has no name yet; the one Who's who gives is suggested, a key from kept." },
+      { title: 'Named', press: ['y'], keys: 'y', until: 'is now Dana Whitfield', note: 'One key, and the transcript and notes use it.' },
+      { title: 'In the transcript', press: [ESC], keys: 'Esc' },
     ],
   },
   {
@@ -334,15 +359,15 @@ export const JOURNEYS: Journey[] = [
       { title: 'What ✎ means', press: ['?'], keys: '?', until: 'your own notes' },
       { title: 'A note after the call', press: [ESC, '+', ...'Send Priya the admin guide'], keys: 'Esc + Send Priya the admin guide' },
       { title: 'Noted', press: [ENTER], keys: 'Enter', until: 'Noted', note: 'The notes use it when they are written again.' },
-      { title: 'A follow-up', press: ['u'], keys: 'U', until: 'Slack', note: 'Email or Slack.' },
-      { title: 'Anything to add', press: ['e', ...'keep it short'], keys: 'E keep it short' },
+      { title: 'A follow-up', press: ['u'], keys: 'u', until: 'Slack', note: 'Email or Slack.' },
+      { title: 'Anything to add', press: ['e', ...'keep it short'], keys: 'e keep it short' },
       { title: 'Writing it', press: [ENTER], keys: 'Enter', until: 'Writing the email' },
       { title: 'The email', until: 'Subject', note: 'Copy it, or open it in Mail as a draft. Nothing is sent.' },
-      { title: 'Where it came from', press: ['t'], keys: 'T', until: 'hide times', note: 'Times are there when you want them.' },
-      { title: 'Write it again', press: ['g'], keys: 'G', until: 'Anything to add', note: 'What you typed last time comes back, to change.' },
+      { title: 'Where it came from', press: ['t'], keys: 't', until: 'hide times', note: 'Times are there when you want them.' },
+      { title: 'Write it again', press: ['g'], keys: 'g', until: 'Anything to add', note: 'What you typed last time comes back, to change.' },
       { title: 'It failed', press: [ENTER], keys: 'Enter', until: 'try again', world: () => { process.env.JOURNEY_MODEL_DOWN = '1'; },
         note: 'The AI did not answer this time. Enter tries again.' },
-      { title: 'Notes the engine could not read', press: [ESC, 'h', DOWN, DOWN, DOWN, DOWN, ENTER], keys: 'Esc H ↓ ↓ ↓ ↓ Enter', until: 'Board',
+      { title: 'Notes the engine could not read', press: [ESC, 'h', DOWN, DOWN, DOWN, DOWN, ENTER], keys: 'Esc h ↓ ↓ ↓ ↓ Enter', until: 'Board',
         note: 'An older AI engine wrote these notes, so yours are listed as written, with one yellow line and the key that helps.' },
     ],
   },
@@ -353,10 +378,13 @@ export const JOURNEYS: Journey[] = [
       { title: 'History', history: true, until: 'Board' },
       { title: 'Notes without yours', press: [...Array(6).fill(UP), DOWN, DOWN, DOWN, DOWN, ENTER], keys: '↑ × 6 ↓ × 4 Enter', until: 'Board',
         note: 'One yellow line under your notes; the key bar leads with AI settings.' },
-      { title: 'AI settings', press: [','], narrowPress: [ENTER], keys: ',', until: 'too old', note: 'Settings opens on AI notes, which says what to do in plain words.' },
+      { title: 'AI settings', press: [','], narrowPress: [ENTER], keys: ',', until: 'too old', note: 'Settings opens on AI notes, which says what still works and what to do, in plain words.' },
+      { title: 'The update command, copied', press: ['c'], keys: 'c', until: 'Copied.',
+        note: 'The engine is installed apart from Seashell, so no key updates it: c copies the command for Terminal, which is never shown.' },
       { title: 'A point whose line was removed', press: [ESC, ...Array(7).fill(DOWN)], narrowInstead: [ESC, ESC, ...Array(9).fill(DOWN)], keys: 'Esc ↓ × 7',
-        until: 'line removed',
-        note: 'Its words stay as written; the time column says its line is gone.' },
+        until: 'source removed',
+        note: 'Its words stay as written; the time column says its source is gone.' },
+      { title: 'What "source removed" means', press: ['?'], keys: '?', until: 'whose line is gone', note: 'Said once in help, beside what ✎ means.' },
     ],
   },
   {
@@ -364,14 +392,14 @@ export const JOURNEYS: Journey[] = [
     machine: 'ready', library: 'demo', narrow: true,
     steps: [
       { title: 'The next meeting', world: ({ library }) => nextMeeting(library), until: 'Next:', note: 'The title line says what is next; b lists what is coming up.' },
-      { title: 'Coming up', press: ['b'], keys: 'B', until: 'Coming up', note: 'The next 36 hours, tomorrow morning included, and where each brief stands.' },
+      { title: 'Coming up', press: ['b'], keys: 'b', until: 'Coming up', note: 'The next 36 hours, tomorrow morning included, and where each brief stands.' },
       { title: 'Writing the brief', press: [ENTER], keys: 'Enter', until: '◐', note: 'From the past meetings with the same title or people. Esc stops it.' },
       { title: 'The brief', until: 'Still open', note: 'Each point says which meeting and when, dim on the right.' },
       { title: 'Back to the list', press: [ESC], keys: 'Esc', until: 'brief ready', note: 'It says the brief is ready.' },
       { title: 'Ready next time', press: [ENTER], keys: 'Enter', until: 'Still open', note: 'Saved in the Briefs folder: the second time it opens at once.' },
       { title: 'Choosing a point', press: [DOWN], keys: '↓', note: 'Who owns it sits on the right, as in the notes.' },
       { title: 'Where it was said', press: [ENTER], keys: 'Enter', until: '2 Transcript', note: 'The past meeting, at the line the point cites.' },
-      { title: 'No history', press: ['b', DOWN, DOWN, ENTER], keys: 'B ↓ ↓ Enter', until: 'Nothing to brief from',
+      { title: 'No history', press: ['b', DOWN, DOWN, ENTER], keys: 'b ↓ ↓ Enter', until: 'No past meetings',
         note: 'A meeting with nobody met before has nothing to read, and says so.' },
     ],
   },
@@ -589,6 +617,16 @@ function cannedAnswer(action: string, request: Record<string, any>): unknown {
   return undefined;
 }
 
+/** The Acme call's notes say who two of its voices were. Speaker 2 already has a name, from a voice named before. */
+async function whosWho({ library }: Context) {
+  const { loadMeetingArtifact, saveMeetingArtifact } = await import('../src/meeting-artifact.ts');
+  const artifact = loadMeetingArtifact(library, 'demo-acme')!;
+  artifact.analysis!.claims.push(
+    { id: 'w1', type: 'speaker_identity', text: 'Speaker 1 is Dana Whitfield, their head of operations.', evidenceSegmentIds: ['s000001'], confidence: 0.7 } as never,
+    { id: 'w2', type: 'speaker_identity', text: 'Speaker 2 is Priya, who runs IT at Acme.', evidenceSegmentIds: ['s000004'], confidence: 0.7 } as never);
+  saveMeetingArtifact(library, artifact);
+}
+
 /** What the recorder says is coming up on the calendar: the next meeting, with past meetings to brief from, then tomorrow's. */
 async function nextMeeting(library: string) {
   const { writeNextMeeting } = await import('../src/briefs.ts');
@@ -607,7 +645,14 @@ async function nextMeeting(library: string) {
   ] });
 }
 
-async function liveMeeting(library: string, background: Background, options: { microphoneDown?: boolean; bundle?: boolean } = {}) {
+/**
+ * The live call's audio, heard afresh before every step, as the recorder reports it every second.
+ * Without it the fixture's sound goes stale after eight seconds, and a later step would show
+ * "Nothing heard" instead of what the step is about.
+ */
+let keepHearing: (() => void) | undefined;
+
+async function liveMeeting(library: string, background: Background, options: { microphoneDown?: boolean; bundle?: boolean; liveTextPaused?: boolean } = {}) {
   const { createTranscriptRecord } = await import('../src/transcript-record.ts');
   const { saveTranscriptRecord } = await import('../src/transcript-library.ts');
   const { createMeetingArtifact, saveMeetingArtifact } = await import('../src/meeting-artifact.ts');
@@ -623,14 +668,22 @@ async function liveMeeting(library: string, background: Background, options: { m
   }
   const health = new CaptureHealthTracker();
   if (options.microphoneDown) health.state('microphone', { state: 'unavailable', code: 'microphone_stopped', message: 'The microphone stopped.' });
-  else health.pcm('microphone', { peak: 1000, rms: 500, rmsDbfs: -30 });
-  health.pcm('systemAudio', { peak: 1000, rms: 500, rmsDbfs: -30 });
-  background.writeBackgroundMeetingState(saved.directory, 'recording', { captureHealth: health.snapshot, audioSavedThroughMs: 110_000,
-    draftStatus: { stage: 'waiting', detail: 'Waiting for speech', queueDepth: 0 } });
-  background.writeBackgroundWatchStatus(library, { phase: 'recording', sessionId: record.id });
+  const hear = () => {
+    if (!options.microphoneDown) health.pcm('microphone', { peak: 1000, rms: 500, rmsDbfs: -30 });
+    health.pcm('systemAudio', { peak: 1000, rms: 500, rmsDbfs: -30 });
+    background.writeBackgroundMeetingState(saved.directory, 'recording', { captureHealth: health.snapshot });
+    background.writeBackgroundWatchStatus(library, { phase: 'recording', sessionId: record.id });
+  };
+  // Live text paused while the Mac is busy, as the recorder says it; otherwise waiting for the next words.
+  const { LIVE_TEXT_PAUSED } = await import('../src/live-text-guard.ts');
+  background.writeBackgroundMeetingState(saved.directory, 'recording', { audioSavedThroughMs: 110_000,
+    draftStatus: options.liveTextPaused ? { stage: 'paused', detail: LIVE_TEXT_PAUSED, queueDepth: 0 } : { stage: 'waiting', detail: 'Waiting for speech', queueDepth: 0 } });
+  hear();
+  keepHearing = hear;
 }
 
 async function endMeeting(library: string, background: Background) {
+  keepHearing = undefined;
   const { findTranscriptRecord } = await import('../src/transcript-library.ts');
   const { path } = findTranscriptRecord(library, 'demo-live');
   background.writeBackgroundMeetingState(dirname(path), 'processing');
@@ -679,6 +732,8 @@ function setupActions(mac: Mac): SettingsActions {
       return { heard: true, refused: false, detail: 'Heard your Mac. Meetings use it from the next call.' };
     },
     openTemplates: () => {}, openFolder: () => {}, openFile: () => {},
+    // Copying never touches the real clipboard.
+    copy: () => {},
     // Trying an automation again never posts anywhere.
     retryAutomation: async () => [],
   };
@@ -773,7 +828,7 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
         distinct.set(key, { ...route, roles: [...(distinct.get(key)?.roles ?? []), role] });
       }
       const results = [...distinct.values()].map((route, index) => route.backend === 'codex'
-        ? { ...route, ok: false, failure: { kind: 'not-signed-in', message: '' }, reason: 'Codex is not signed in. Run codex login in a terminal, then test again.' }
+        ? { ...route, ok: false, failure: { kind: 'not-signed-in', message: '' }, reason: 'Codex is not signed in. Open Codex and sign in, then test again.' }
         : { ...route, ok: true, latencyMs: 1400 + index * 900 });
       return { ok: results.every((result) => result.ok), engine: { ready: true }, routes: results };
     },
@@ -801,6 +856,7 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
   try {
     await sleep(500);
     for (const step of journey.steps) {
+      keepHearing?.();
       await step.world?.(context);
       if (step.world) await sleep(900);
       if (step.history && !stripVTControlCharacters(latest).includes('Meetings')) await type('h');

@@ -66,10 +66,25 @@ function cutStart(text: string, columns: number): string {
   return `…${cut}`;
 }
 
+/** The first sentence of some text: "Copied." of "Copied. Paste it in Terminal." */
+const firstSentence = (text: string) => text.match(/^.+?[.!?](?=\s|$)/u)?.[0];
+/** The first clause of a sentence: "System audio unavailable" of "System audio unavailable; continuing…". */
+const firstClause = (text: string) => text.match(/^(.+?)(?:[:;]| —)\s/u)?.[1];
+
+/**
+ * Text for the key bar's one row: whole when it fits, then its short form, then its first sentence,
+ * then that sentence's first clause. Only words that fit none of those are cut, at the end.
+ */
+export function oneRow(text: string, columns: number, short?: string): string {
+  const room = Math.max(1, columns);
+  const candidates = [text, short, firstSentence(text), firstClause(firstSentence(text) ?? text)];
+  return candidates.find((candidate) => candidate !== undefined && width(candidate) <= room) ?? cutEnd(short ?? firstSentence(text) ?? text, room);
+}
+
 /**
  * A question, a typed answer or work in progress, in the key bar's row. The keys
- * are never cut: a question gives way to its short form first, and typed text
- * scrolls behind its label, which always stays.
+ * are never cut: a question gives way to its short form, then its first sentence,
+ * and typed text scrolls behind its label, which always stays.
  */
 export function Prompt(props: {
   /** The question, or the label in front of typed text. */
@@ -89,10 +104,7 @@ export function Prompt(props: {
   // Typed text keeps at least a few words in view: a long label gives way to its short form first.
   const label = props.input !== undefined && props.short && room - width(props.text) - 1 < 16 ? props.short : props.text;
   const typed = props.input === undefined ? undefined : cutStart(`${props.input}█`, Math.max(2, room - width(label) - 1));
-  const text = typed !== undefined ? label
-    : width(props.text) <= room ? props.text
-    : props.short && width(props.short) <= room ? props.short
-    : cutEnd(props.short ?? props.text, room);
+  const text = typed !== undefined ? label : oneRow(props.text, room, props.short);
   return <Text key={shapeOf(hints)} wrap="truncate-end">
     <Text {...(props.color ? { color: props.color } : {})} dimColor={props.dimColor ?? false}>{text}</Text>
     {typed !== undefined ? ` ${typed}` : ''}
@@ -100,14 +112,10 @@ export function Prompt(props: {
   </Text>;
 }
 
-/** What just happened, in the key bar's row until the next key: green when it worked, red when it failed. */
+/** What just happened, in the key bar's row until the next key: green when it worked, yellow to look at, red when it failed.
+ * It keeps to that one row, as every screen's key bar does: too long for it, its first sentence says enough. */
 export function Toast(props: { text: string; columns: number; color?: Tone }) {
-  const color = props.color ?? 'green';
-  // A confirmation keeps to the key bar's one row: too long for it, its first sentence says enough.
-  // A warning or a failure has no keys to keep, so a long one wraps rather than loses its end.
-  const first = props.text.match(/^.+?[.!?](?=\s|$)/u)?.[0];
-  const text = color === 'green' && width(props.text) > props.columns && first && width(first) <= props.columns ? first : props.text;
-  return <Paragraph text={text} width={props.columns} color={color} />;
+  return <Text key={props.text} color={props.color ?? 'green'} wrap="truncate-end">{oneRow(props.text, props.columns)}</Text>;
 }
 
 /** The status slot at the right of the title line: what needs the person, or what Seashell is doing. */
@@ -138,29 +146,38 @@ function Marked(props: { text: string }) {
 export function ScreenTitle(props: { name: string; color?: Tone; bold?: boolean; detail?: string; status?: TitleStatus | undefined;
   /** How much of the name must stay in view, such as "Saved · audio needs review" before a meeting's title.
    * A screen's own name stays whole unless told otherwise; its status gives way instead. */
-  keep?: number }) {
+  keep?: number;
+  /** The name for a line with no room for its detail, which keeps the detail's part that matters in place of the
+   * meeting's title: "Call ended · writing notes…" for "Call ended · Design review  Audio saved · writing notes". */
+  short?: string }) {
   const { stdout } = useStdout();
   const columns = stdout?.columns ?? 80;
   const room = columns - 2;
   // The name of the app is there on a wide window and never on a narrow one, so it does not come and go with the status.
   const brand = columns >= 72;
   const lead = 2 + (brand ? 9 : 0);
-  const nameWidth = props.name ? 2 + width(props.name) : 0;
-  // The status gives way to its short form, then to a short screen name: a long meeting title is cut before it.
-  const fits = (text?: string) => text !== undefined && lead + nameWidth + 2 + width(text) <= room;
-  // One more column for the … that ends a cut name.
-  const statusRoom = room - lead - Math.min(nameWidth, 3 + (props.keep ?? width(props.name))) - 2;
-  // A dim status with no fix only informs ("Watching for calls"): it shows whole or not at all, and never cuts the name.
-  const informs = !props.status?.color && !props.status?.fix;
-  const statusText = !props.status ? undefined : fits(props.status.text) ? props.status.text : fits(props.status.short) ? props.status.short
-    : !informs && statusRoom >= 8 ? cutEnd(props.status.short ?? props.status.text, statusRoom) : undefined;
-  const statusWidth = statusText ? 2 + width(statusText) : 0;
-  const detail = props.detail && lead + nameWidth + 2 + width(props.detail) + statusWidth <= room ? props.detail : undefined;
+  const layout = (name: string, keep: number | undefined, withDetail: boolean) => {
+    const nameWidth = name ? 2 + width(name) : 0;
+    // The status gives way to its short form, then to a short screen name: a long meeting title is cut before it.
+    const fits = (text?: string) => text !== undefined && lead + nameWidth + 2 + width(text) <= room;
+    // One more column for the … that ends a cut name.
+    const statusRoom = room - lead - Math.min(nameWidth, 3 + (keep ?? width(name))) - 2;
+    // A dim status with no fix only informs ("Watching for calls"): it shows whole or not at all, and never cuts the name.
+    const informs = !props.status?.color && !props.status?.fix;
+    const statusText = !props.status ? undefined : fits(props.status.text) ? props.status.text : fits(props.status.short) ? props.status.short
+      : !informs && statusRoom >= 8 ? cutEnd(props.status.short ?? props.status.text, statusRoom) : undefined;
+    const statusWidth = statusText ? 2 + width(statusText) : 0;
+    const detail = withDetail && props.detail && lead + nameWidth + 2 + width(props.detail) + statusWidth <= room ? props.detail : undefined;
+    return { name, statusText, detail };
+  };
+  const whole = layout(props.name, props.keep, true);
+  // No room for the detail: the short name says its part that matters instead of the meeting's title.
+  const { name, statusText, detail } = props.short && props.detail && !whole.detail ? layout(props.short, undefined, false) : whole;
   return <Box flexDirection="column" flexShrink={0}>
     <Box justifyContent="space-between">
       {/* Keyed by its shape, as the key bar is, so a longer title is measured afresh. */}
-      <Text key={`${brand}-${Boolean(detail)}`} wrap="truncate-end">🐚{brand ? <Text> <Text bold color="cyan">Seashell</Text></Text> : ''}{props.name ? '  ' : ''}
-        <Text bold={props.bold ?? true} {...(props.color ? { color: props.color } : {})}><Marked text={props.name} /></Text>
+      <Text key={`${brand}-${Boolean(detail)}-${name === props.name}`} wrap="truncate-end">🐚{brand ? <Text> <Text bold color="cyan">Seashell</Text></Text> : ''}{name ? '  ' : ''}
+        <Text bold={props.bold ?? true} {...(props.color ? { color: props.color } : {})}><Marked text={name} /></Text>
         {detail ? <Text dimColor>  {detail}</Text> : null}
       </Text>
       {statusText && <Box flexShrink={0} marginLeft={2}>
@@ -211,9 +228,12 @@ export const HELP_ROWS: ReadonlyArray<readonly [string, string]> = [
   ['When asked', 'y record · n ignore'],
   ['Recording', 'starts and stops with the call · + note this moment · a catch up: "What did I miss?" · space record or stop by hand · V record with video · i audio help'],
   ['Next', 'b meetings coming up, and their briefs'],
-  ['Add', 'f import a file · F import and separate speakers'],
-  ['Setup', ', settings: speakers, AI and more'],
+  // Each of these keeps to one row of a 56-column window, so help and both of its marks fit 24 rows.
+  ['Add', 'f import · F import and separate speakers'],
+  ['Setup', ', settings: speakers, AI, vocabulary'],
 ];
 
 /** What ✎ means, said once in help rather than beside every point. */
 export const FROM_YOUR_NOTES_HELP = '✎ marks a point from your own notes.';
+/** What "source removed" in a point's time column means, said beside what ✎ means, in one row of a narrow window. */
+export const SOURCE_REMOVED_HELP = '"source removed" marks a point whose line is gone.';

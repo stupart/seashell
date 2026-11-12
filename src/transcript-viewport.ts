@@ -47,6 +47,17 @@ export function transcriptWindow(rows: readonly TranscriptRow[], scroll: number,
   return rows.slice(scroll, scroll + count);
 }
 
+/**
+ * The line a moment of the meeting falls in, by its start: the last line that started by then. A cited
+ * line that ran on from the one before it was joined to it, so that is the line to find. Before the
+ * first line, the first.
+ */
+export function lineAt(rows: readonly TranscriptRow[], at: number): number | undefined {
+  let found: number | undefined;
+  for (const row of rows) if (row.start !== undefined && row.start <= at + 0.5) found = row.start;
+  return found ?? rows.find((row) => row.start !== undefined)?.start;
+}
+
 /** The furthest the view scrolls: the last row in view, with room for a time and speaker pinned above it. */
 export function lastTranscriptScroll(rows: readonly TranscriptRow[], count: number): number {
   const last = Math.max(0, rows.length - Math.max(1, count));
@@ -116,7 +127,7 @@ const MIN_BULLET_TEXT_COLUMNS = 24;
 export function wrappedMeetingRows(lines: readonly string[], columns: number): string[] {
   const width = Math.max(1, Math.floor(columns));
   const parts = lines.map(bulletParts);
-  // The times share one column; "line removed" reaches left past it on its own row rather than widen it for all.
+  // The times share one column; "source removed" reaches left past it on its own row rather than widen it for all.
   const clockColumn = Math.max(0, ...parts.map(({ body, clock }) => body.startsWith('- ') && clock && !clock.includes(LINE_REMOVED) ? clock.length : 0));
   return parts.flatMap(({ body, owner, clock }) => {
     const clean = stripVTControlCharacters(body) || ' ';

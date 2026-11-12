@@ -71,6 +71,14 @@ export interface SettingsActions {
   openFile?: (path: string) => void;
   /** Runs one automation again for the meeting whose run failed. */
   retryAutomation?: (automation: string, meetingId: string, signal: AbortSignal) => Promise<AutomationRun[]>;
+  /** Puts text on the clipboard: a command for Terminal, which Settings never shows. */
+  copy?: (text: string) => void;
+}
+
+/** Puts text on the clipboard. */
+function copyToClipboard(text: string): void {
+  const result = spawnSync('pbcopy', [], { input: text, encoding: 'utf8', timeout: 5_000 });
+  if (result.error || result.status !== 0) throw new Error('Copy failed.');
 }
 
 /** Opens a folder in Finder. */
@@ -574,8 +582,14 @@ export default function SettingsScreen(props: SetupActionProps & {
       return;
     }
     if (input === ',') { props.onClose(); return; }
-    // a adds a word to Vocabulary from its row or its list of words.
-    if (input === 'a' && list === 'vocabulary') { setup.setMessage(undefined); setAdding(''); return; }
+    // c copies a step only Terminal can do; the command itself is never shown.
+    const copy = selected?.kind === 'status' ? selected.status.copy : undefined;
+    if (input === 'c' && copy) {
+      try { (props.actions?.copy ?? copyToClipboard)(copy.text); setup.done('Copied.'); } catch (cause) { setup.failure(cause); }
+      return;
+    }
+    // + adds a word to Vocabulary from its row or its list of words, as + adds a note in the app; a only ever asks.
+    if (input === '+' && list === 'vocabulary') { setup.setMessage(undefined); setAdding(''); return; }
     if (editingRows) {
       if (key.upArrow || input === 'k') { setRowIndex(value => Math.max(0, value - 1)); setup.setMessage(undefined); }
       else if (key.downArrow || input === 'j') { setRowIndex(value => Math.max(0, Math.min(listLength - 1, value + 1))); setup.setMessage(undefined); }
@@ -793,7 +807,7 @@ export default function SettingsScreen(props: SetupActionProps & {
           those are for `seashell status`, and the key bar has the key that fixes it. */}
       {selected.status.fix && <Box marginTop={1} flexShrink={0}>{selected.status.state === 'ok'
         ? <Paragraph width={width} text={selected.status.fix} />
-        : <Paragraph width={width} color="yellow" text={`Next: ${selected.status.fix}`} />}</Box>}
+        : <Paragraph width={width} color="yellow" text={`Next: ${selected.status.fix}${selected.status.copy ? ` ${selected.status.copy.how}` : ''}`} />}</Box>}
       {['prompts', 'voices', 'vocabulary', 'extractors', 'automations'].includes(selected.status.id) &&
         <Box flexDirection="column" marginTop={1} flexShrink={0}>{filesBody(selected.status.id)}</Box>}
     </Box>
@@ -810,17 +824,20 @@ export default function SettingsScreen(props: SetupActionProps & {
       ['↑↓', 'choose'], ['Esc', 'back']]
     : inDetail && list === 'voices' && listLength ? [['Enter', 'forget'], ['↑↓', 'choose'], ['Esc', 'back']]
     // Narrow, the file's key keeps its place in fewer words.
-    : inDetail && list === 'vocabulary' && listLength ? [['a', 'add a word'], ['d', 'remove'], ['Enter', compact ? 'TextEdit' : 'open in TextEdit'], ['↑↓', 'choose'], ['Esc', 'back']]
+    : inDetail && list === 'vocabulary' && listLength ? [['+', 'add a word'], ['d', 'remove'], ['Enter', compact ? 'TextEdit' : 'open in TextEdit'], ['↑↓', 'choose'], ['Esc', 'back']]
     : [
       ...(retryRun ? [['r', 'try again'] as Hint] : []),
+      // The fix leads: a step only Terminal can do is copied for it.
+      ...(selected?.kind === 'status' && selected.status.copy ? [['c', 'copy the update command'] as Hint] : []),
       ...(selected?.kind === 'recording' ? [['Enter', 'change'] as Hint] : selected?.kind === 'guide' ? [['Enter', 'start'] as Hint]
         : video ? [['Enter', video.state === 'off' ? 'turn on' : 'turn off'] as Hint]
         : briefs ? !briefs.action ? [['Enter', 'turn off'] as Hint] : briefs.action === 'turn-on-briefs' ? [['Enter', 'turn on'] as Hint]
           : [['Enter', lowerFirst(FEATURE_ACTION_LABEL[briefs.action])] as Hint, ['←→', 'on/off'] as Hint]
         : list === 'prompts' ? [['Enter', 'choose a prompt'] as Hint] : list === 'voices' && listLength ? [['Enter', 'choose someone'] as Hint]
-        : list === 'vocabulary' ? [['a', 'add a word'] as Hint, ['Enter', listLength ? 'choose a word' : 'open in TextEdit'] as Hint]
+        : list === 'vocabulary' ? [['+', 'add a word'] as Hint, ['Enter', listLength ? 'choose a word' : 'open in TextEdit'] as Hint]
         : action ? [['Enter', lowerFirst(FEATURE_ACTION_LABEL[action])] as Hint] : selected && testable(selected) ? [['Enter', 'test it now'] as Hint] : []),
-      ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ...(retryRun ? [] : [['r', 'recheck'] as Hint]), ['Esc', 'back'],
+      // Vocabulary is a list kept here, with nothing to check again: r is left off it.
+      ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ...(retryRun || list === 'vocabulary' ? [] : [['r', 'recheck'] as Hint]), ['Esc', 'back'],
     ];
   const failed = setup.message?.tone === 'failed' ? setup.message.text : undefined;
 
