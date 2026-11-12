@@ -130,6 +130,30 @@ test('final notes read your notes, and a point from them may cite no transcript'
   expect(lines).not.toContain('Your notes');
 });
 
+test('a note about something nobody said stays yours: under Your notes, never "Also said"', async () => {
+  const { root, record } = library();
+  addMeetingNote(root, record.id, 'Ask Dana about the Berlin office');
+  addMeetingNote(root, record.id, 'Ask about a Canada data centre');
+  const [berlin, canada] = loadMeetingArtifact(root, record.id)!.ownerNotes!.map((note) => note.id);
+  // As revision 4 answers: each note kept as its own note claim, citing nothing it heard. The Canada one is
+  // also a point under the template's next steps, so it shows there, marked ✎, and only there.
+  const humain = fake(() => ({ summary: 'Pilot in November.', claims: [
+    { id: 'c1', type: 'decision', text: 'Pilot in November.', evidenceSegmentIds: ['s000001'], confidence: 0.9 },
+    { id: 'c2', type: 'note', text: "Owner's note: ask Dana about the Berlin office.", evidenceSegmentIds: [], ownerNoteIds: [berlin], confidence: 0.6 },
+    { id: 'c3', type: 'note', text: "Owner's note: ask about a Canada data centre.", evidenceSegmentIds: [], ownerNoteIds: [canada], confidence: 0.6 },
+    { id: 'c4', type: 'note', text: 'They can start in November.', evidenceSegmentIds: ['s000001'], confidence: 0.6 },
+  ], notes: [{ heading: 'Next steps', items: [{ text: "Owner's note: ask about a Canada data centre.", evidenceSegmentIds: [], ownerNoteIds: [canada] }] }] }));
+  const template = { name: 'Call', body: '## Next steps\nWhat each side will do.' };
+  const artifact = await enrichMeeting(root, record.id, { mode: 'post-session', route, runner: humain.runner, engine: rev4,
+    instructions: { template } });
+  const lines = meetingViewLines(artifact, 'notes', record);
+  expect(lines.slice(0, 4)).toEqual(['Pilot in November.', '', '# Your notes', '- Ask Dana about the Berlin office']);
+  expect(lines).toContain(`- Owner's note: ask about a Canada data centre.\t\t${FROM_YOUR_NOTES}`);
+  expect(lines.filter((line) => /Canada/u.test(line))).toHaveLength(1);
+  // What was said is still "Also said"; neither note is.
+  expect(lines.slice(lines.indexOf('# Also said'))).toEqual(['# Also said', '- They can start in November.\t\t00:00']);
+});
+
 test('a point citing a note that was not sent, or nothing at all, is refused', async () => {
   const { root, record } = library();
   addMeetingNote(root, record.id, 'A note');
