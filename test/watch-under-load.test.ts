@@ -48,7 +48,7 @@ function busyWatch(root: string, overrides: (state: BusyState, snapshot: () => M
       consumeCommand: () => undefined,
       startCapture: (options) => {
         state.starts += 1;
-        const id = options.sessionId ?? 'busy-call';
+        const id = options.sessionId ?? `call-${state.starts}`;
         const store = new CaptureSessionStore({ libraryDir: root, sessionId: id, startedAtUnixMs: options.startedAt!.getTime(),
           createdAt: options.startedAt!.toISOString() });
         return { store, sessionId: id, manifestPath: store.manifestPath,
@@ -80,7 +80,7 @@ test('a stop sent while every poll takes 40 s is read before the next probe and 
     state.now = 3_000;
     const held = service.pollOnce();
     // Typed two seconds into a poll that will not finish for another 38.
-    writeMeetingCommand('stop', commandPath, 5_000, { sessionId: 'busy-call' });
+    writeMeetingCommand('stop', commandPath, 5_000, { sessionId: 'call-1' });
     await held;
     expect(state.stops).toBe(0);
     state.now += 3_000;
@@ -171,7 +171,57 @@ test('two hours of detector timeouts, half-read process lists and unreadable Mee
     expect(state.events.filter((event) => event.type.startsWith('meeting.')).map((event) => event.type))
       .toEqual(['meeting.started', 'meeting.capture-finished']);
   } finally { await service.shutdown(); }
-  expect(state.finalized).toEqual(['busy-call']);
+  expect(state.finalized).toEqual(['call-1']);
+});
+
+test('no final pass runs while a call records: a paused meeting waits, then each runs once', async () => {
+  const root = scratch('no-final-mid-call');
+  const commands: Array<'start' | 'stop' | undefined> = [];
+  const { state, service } = busyWatch(root, () => ({ consumeCommand: () => commands.shift() }));
+  const settle = () => Bun.sleep(10);
+  try {
+    expect((await service.pollOnce()).kind).toBe('start');
+    // Safari lets go of the microphone for the grace: the meeting pauses, held for resume.
+    state.input = [];
+    for (state.now = 3_000; state.now <= 24_000; state.now += 3_000) await service.pollOnce();
+    expect(state.events.map((event) => event.type)).toContain('meeting.capture-finished');
+    // Three seconds later, as tonight at 00:28, the person records by hand.
+    commands.push('start');
+    state.now += 3_000;
+    expect((await service.pollOnce()).kind).toBe('start');
+    // Long past the paused meeting's resume window, while the new recording runs.
+    for (state.now += 3_000; state.now <= 600_000; state.now += 3_000) await service.pollOnce();
+    await settle();
+    expect(state.finalized).toEqual([]);
+    commands.push('stop');
+    await service.pollOnce();
+    await settle();
+    expect(state.finalized).toEqual(['call-1', 'call-2']);
+  } finally { await service.shutdown(); }
+  expect(state.finalized).toEqual(['call-1', 'call-2']);
+});
+
+test('a call that pauses and resumes is transcribed once, after it has really ended', async () => {
+  const root = scratch('final-once');
+  const { state, service } = busyWatch(root);
+  try {
+    await service.pollOnce();
+    for (let pause = 0; pause < 3; pause += 1) {
+      state.input = [];
+      for (let poll = 0; poll < 8; poll += 1) { state.now += 3_000; await service.pollOnce(); }
+      state.input = [SAFARI];
+      state.now += 3_000;
+      expect((await service.pollOnce()).kind).toBe('start');
+      await Bun.sleep(10);
+      expect(state.finalized).toEqual([]);
+    }
+    state.input = [];
+    for (let poll = 0; poll < 80; poll += 1) { state.now += 3_000; await service.pollOnce(); }
+    await Bun.sleep(10);
+    expect(state.finalized).toEqual(['call-1']);
+  } finally { await service.shutdown(); }
+  expect(state.finalized).toEqual(['call-1']);
+  expect(state.starts).toBe(4);
 });
 
 test('a recording still reads as recording until its capture has closed, so "stopped" is never said early', async () => {

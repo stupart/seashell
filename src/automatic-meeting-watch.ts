@@ -193,6 +193,8 @@ export class AutomaticMeetingWatchService {
   /** A stopped meeting whose final pass waits briefly in case the call resumes. */
   #parked?: ActiveMeeting & { readonly parkedAtUnixMs: number; readonly resumeUntilUnixMs: number };
   #finalizationTail: Promise<void> = Promise.resolve();
+  /** Final passes waiting for every recording, and every meeting paused for resume, to end. */
+  #quietWaiters: Array<() => void> = [];
   #calendarCache?: { readAtUnixMs: number; events: Awaited<ReturnType<typeof readMacCalendarEventsAsync>> };
   #calendarRead?: Promise<void>;
   #calendarRetryAtUnixMs = 0;
@@ -461,6 +463,7 @@ export class AutomaticMeetingWatchService {
 
   async shutdown(): Promise<void> {
     this.#shuttingDown = true;
+    this.releaseIfQuiet();
     this.#signalMonitor?.stop();
     this.#calendarAbort.abort();
     this.#asking?.abort();
@@ -665,6 +668,7 @@ export class AutomaticMeetingWatchService {
         void stopped.then(() => this.enqueueFinalization({ ...resumed, capture: reopened }));
       }
       this.#controller.reset();
+      this.releaseIfQuiet();
       this.emit({ type: 'watch.error', at: now.toISOString(), message: `Could not save meeting: ${errorMessage(error)}` });
       return false;
     }
@@ -744,7 +748,27 @@ export class AutomaticMeetingWatchService {
         message: `Could not stop meeting capture: ${errorMessage(error)}`,
       });
     }
+    this.releaseIfQuiet();
     this.projectWatch();
+  }
+
+  /**
+   * No final pass runs mid-meeting. Transcribing and separating speakers is
+   * the heaviest work Seashell does, so it waits while anything records, and
+   * while a meeting is paused for resume, and then runs once over the whole
+   * meeting. A call that stops and resumes is still one meeting.
+   */
+  private get quiet(): boolean {
+    return this.#shuttingDown || (!this.#active && !this.#parked);
+  }
+
+  private untilQuiet(): Promise<void> {
+    return new Promise((resolve) => this.#quietWaiters.push(resolve));
+  }
+
+  private releaseIfQuiet(): void {
+    if (!this.quiet) return;
+    for (const resolve of this.#quietWaiters.splice(0)) resolve();
   }
 
   private expireParked(now: Date): void {
@@ -759,10 +783,17 @@ export class AutomaticMeetingWatchService {
       stage: 'stopped', queueDepth: 0, detail: 'Live draft stopped. Preparing the final transcript.',
     } });
     this.enqueueFinalization(parked);
+    this.releaseIfQuiet();
   }
 
   private enqueueFinalization(meeting: ActiveMeeting): void {
-    const task = async () => this.finalize(meeting.candidate, meeting.capture);
+    if (!this.quiet) this.markCapture(meeting.directory, 'processing', { draftStatus: {
+      stage: 'stopped', queueDepth: 0, detail: 'The final transcript starts when the call now recording ends.',
+    } });
+    const task = async () => {
+      if (!this.quiet) await this.untilQuiet();
+      return this.finalize(meeting.candidate, meeting.capture);
+    };
     this.#finalizationTail = this.#finalizationTail.then(task, task).catch((error: unknown) => {
       this.markCapture(meeting.directory, 'failed');
       this.emit({
