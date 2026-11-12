@@ -5,7 +5,8 @@ import { loadCaptureSession, type CaptureChunk } from './capture-session.ts';
 import type { PcmSignalLevel, SystemAudioStateUpdate } from './live-system-audio.ts';
 
 export type CaptureHealthSource = 'microphone' | 'systemAudio';
-export type CaptureHealthState = 'starting' | 'receiving' | 'quiet' | 'reconnecting' | 'unavailable' | 'stopped' | 'disabled';
+/** `released`: Seashell let go of the source on purpose, as when the call app released its microphone. Not a failure. */
+export type CaptureHealthState = 'starting' | 'receiving' | 'quiet' | 'reconnecting' | 'unavailable' | 'stopped' | 'disabled' | 'released';
 /** one-sided: the others are talking and your microphone hears nothing. */
 export type CaptureHealthWarningKind = 'quiet' | 'reconnecting' | 'unavailable' | 'no-audio' | 'one-sided';
 export interface CaptureHealthWarning {
@@ -70,7 +71,7 @@ const JUDGE_AFTER_OTHERS_SECONDS = 180;
 const YOUR_SIDE_MISSING_SHARE = 0.1;
 
 const sources = ['microphone', 'systemAudio'] as const;
-const states: readonly CaptureHealthState[] = ['starting', 'receiving', 'quiet', 'reconnecting', 'unavailable', 'stopped', 'disabled'];
+const states: readonly CaptureHealthState[] = ['starting', 'receiving', 'quiet', 'reconnecting', 'unavailable', 'stopped', 'disabled', 'released'];
 const kinds: readonly CaptureHealthWarningKind[] = ['quiet', 'reconnecting', 'unavailable', 'no-audio', 'one-sided'];
 const videoStates: readonly CaptureVideoState[] = ['starting', 'recording', 'waiting', 'stopped', 'unavailable'];
 /** Warnings that only sound, not just more PCM, resolves. */
@@ -125,7 +126,7 @@ export class CaptureHealthTracker {
   }
   pcm(source: CaptureHealthSource, level?: PcmSignalLevel, audible?: boolean, nowUnixMs = Date.now()): CaptureHealthSnapshot {
     const previous = this.#value[source];
-    if (previous.state === 'disabled' || previous.state === 'stopped') return this.#value;
+    if (previous.state === 'disabled' || previous.state === 'stopped' || previous.state === 'released') return this.#value;
     const now = Math.max(this.#value.updatedAtUnixMs, nowUnixMs);
     // This mirrors only the capture meter's signal floor, not speech recognition.
     const signal = audible === true || (audible === undefined && Boolean(level && level.peak >= 64 && level.rmsDbfs >= -60));
@@ -155,6 +156,16 @@ export class CaptureHealthTracker {
     const othersTalking = now - (others.lastSignalAtUnixMs ?? -Infinity) <= OTHERS_TALKING_MS;
     if (!delivering || !othersTalking || now - silentSince < this.#oneSidedAfterMs) return this.#value;
     return this.set('microphone', this.warn(mic, 'one-sided', ONE_SIDED_MESSAGE, now, 'microphone_one_sided'), now);
+  }
+  /**
+   * Seashell let go of the source on purpose: the call app released its
+   * microphone, so a headset can leave call mode. Opening it again starts it afresh.
+   */
+  release(source: CaptureHealthSource, nowUnixMs = Date.now()): CaptureHealthSnapshot {
+    const previous = this.#value[source];
+    if (previous.state === 'disabled' || previous.state === 'stopped') return this.#value;
+    return this.set(source, { ...previous, state: 'released', code: undefined,
+      message: `${label(source)} released: the call let go of it.` }, Math.max(this.#value.updatedAtUnixMs, nowUnixMs));
   }
   /** What the video track is doing and filming. Once a display is filmed, that stays said. */
   video(state: CaptureVideoState, filming?: { readonly kind: 'window' | 'display'; readonly name: string }, nowUnixMs = Date.now()): CaptureHealthSnapshot {

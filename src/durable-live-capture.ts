@@ -48,6 +48,14 @@ export interface DurableLiveCaptureHandle {
   readonly store: CaptureSessionStore;
   readonly health?: CaptureHealthSnapshot;
   readonly speakerFor?: (segment: TranscriptSegment) => MeetSpeaker | undefined;
+  /**
+   * Let go of the microphone and keep everything else recording: the call app
+   * released its own, and holding it would keep a Bluetooth headset in call
+   * mode. The session stays open, on the same clock.
+   */
+  releaseMicrophone?(): void;
+  /** Open the microphone again after releaseMicrophone, when the call comes back. */
+  reopenMicrophone?(): void;
   stop(reason?: string): Promise<CaptureSessionManifest>;
 }
 
@@ -92,6 +100,11 @@ export function startDurableLiveCapture(
   let microphoneLevel: PcmSignalLevel | undefined;
   let systemAudioLevel: PcmSignalLevel | undefined;
   let microphone: MicrophoneCaptureHandle | undefined;
+  /** Microphones let go of with releaseMicrophone; stop waits for them to close too. */
+  const releasedMicrophones: MicrophoneCaptureHandle[] = [];
+  /** Only the current microphone's callbacks speak for its health; a released one's last chunk is still saved. */
+  let microphoneToken: object | undefined;
+  let microphoneReleased = false;
   let systemAudio: SystemAudioCaptureHandle | undefined;
   let video: VideoTrackHandle | undefined;
   let videoState: VideoState | undefined = options.video ? 'starting' : undefined;
@@ -137,13 +150,16 @@ export function startDurableLiveCapture(
     });
   };
 
-  if (options.microphone !== false) {
+  const openMicrophone = () => {
+    const token = {};
+    microphoneToken = token;
+    const current = () => microphoneToken === token;
     try {
       microphone = (options.microphoneStarter ?? startMicrophoneCapture)({
         sessionStartedAtUnixMs: startedAt.getTime(),
         ...(options.chunkMilliseconds === undefined ? {} : { chunkMilliseconds: options.chunkMilliseconds }),
         onChunk: (chunk) => {
-          health.pcm('microphone', chunk.level, chunk.audible);
+          if (current()) health.pcm('microphone', chunk.level, chunk.audible);
           commit({
             sourcePath: chunk.path,
             trackId: 'microphone',
@@ -153,8 +169,12 @@ export function startDurableLiveCapture(
             clock: chunk.clock,
           });
         },
-        onLevel: (level) => { microphoneLevel = level; health.pcm('microphone', level); status(); },
+        onLevel: (level) => {
+          if (!current()) return;
+          microphoneLevel = level; health.pcm('microphone', level); status();
+        },
         onState: (update) => {
+          if (!current()) return;
           microphoneState = update.state;
           health.state('microphone', update);
           if (update.state === 'unavailable') fail(new Error(update.message ?? 'Microphone unavailable'));
@@ -167,7 +187,8 @@ export function startDurableLiveCapture(
       health.state('microphone', { state: 'unavailable', code: 'microphone_start_failed', message: normalized.message });
       fail(normalized);
     }
-  }
+  };
+  if (options.microphone !== false) openMicrophone();
   if (options.systemAudio !== false) {
     try {
       systemAudio = (options.systemAudioStarter ?? startSystemAudioCapture)({
@@ -248,6 +269,25 @@ export function startDurableLiveCapture(
     store,
     get health() { return health.snapshot; },
     ...(meetReader ? { speakerFor: meetReader.speakerFor } : {}),
+    releaseMicrophone() {
+      if (stopping || microphoneReleased || !microphone) return;
+      microphoneReleased = true;
+      const released = microphone;
+      microphoneToken = undefined;
+      microphone = undefined;
+      releasedMicrophones.push(released);
+      released.stop();
+      microphoneState = 'stopped';
+      microphoneLevel = undefined;
+      health.release('microphone');
+      status(true);
+    },
+    reopenMicrophone() {
+      if (stopping || !microphoneReleased) return;
+      microphoneReleased = false;
+      openMicrophone();
+      status(true);
+    },
     stop(reason = 'meeting-signal-ended') {
       if (stopping) return stopping;
       meetReader?.stop();
@@ -259,10 +299,11 @@ export function startDurableLiveCapture(
       const late = new Promise<'late'>((resolve) => {
         deadline = setTimeout(() => resolve('late'), options.stopDeadlineMs ?? CAPTURE_STOP_DEADLINE_MS);
       });
-      stopping = Promise.race([Promise.all([microphone?.done, systemAudio?.done, video?.done]), late]).then(async (outcome) => {
+      const microphones = [...releasedMicrophones, ...(microphone ? [microphone] : [])];
+      stopping = Promise.race([Promise.all([...microphones.map((handle) => handle.done), systemAudio?.done, video?.done]), late]).then(async (outcome) => {
         clearTimeout(deadline);
         if (outcome === 'late') {
-          for (const handle of [microphone, systemAudio]) if (handle?.process) signalProcessGroup(handle.process, 'SIGKILL');
+          for (const handle of [...microphones, systemAudio]) if (handle?.process) signalProcessGroup(handle.process, 'SIGKILL');
           options.onError?.(new Error('Capture did not stop in time. The audio saved so far is kept.'));
         }
         await store.drainCommits();

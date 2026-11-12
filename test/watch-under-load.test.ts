@@ -285,6 +285,55 @@ test('a Meet check that timed out is not run again three seconds later', async (
   } finally { await service.shutdown(); }
 });
 
+test('the microphone is let go of while the call app has let go of its own, and opened again when the call comes back', async () => {
+  const root = scratch('release-mic');
+  const microphone: string[] = [];
+  let detectorDown = false;
+  const { state, snapshot, service } = busyWatch(root, (state) => ({
+    readSignals: () => {
+      if (detectorDown) throw new MeetingSignalTimeout('Meeting signal detector heartbeat timed out');
+      return snapshot();
+    },
+    startCapture: (options) => {
+      state.starts += 1;
+      const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'call-1', startedAtUnixMs: options.startedAt!.getTime() });
+      return { store, sessionId: 'call-1', manifestPath: store.manifestPath,
+        releaseMicrophone: () => { microphone.push('released'); },
+        reopenMicrophone: () => { microphone.push('reopened'); },
+        async stop() { state.stops += 1; return store.setStatus('captured', 'test'); } };
+    },
+  }));
+  const poll = async () => { state.now += 3_000; return (await service.pollOnce()).kind; };
+  try {
+    await service.pollOnce();
+    // Safari lets go of the microphone. One reading could be a device switch; two are the call ending.
+    state.input = [];
+    await poll();
+    expect(microphone.filter((step) => step === 'released')).toEqual([]);
+    await poll();
+    expect(microphone.at(-1)).toBe('released');
+    // The call comes back inside the grace: the same recording, microphone open again.
+    state.input = [SAFARI];
+    await poll();
+    expect(microphone.at(-1)).toBe('reopened');
+    // A detector timeout during the grace tells nothing: it neither lets go nor counts as a reading.
+    state.input = [];
+    await poll();
+    detectorDown = true;
+    await poll();
+    await poll();
+    expect(microphone.filter((step) => step === 'released')).toHaveLength(1);
+    detectorDown = false;
+    await poll();
+    expect(microphone.filter((step) => step === 'released')).toHaveLength(2);
+    expect(microphone.at(-1)).toBe('released');
+    expect([state.starts, state.stops]).toEqual([1, 0]);
+    let finished = false;
+    for (let polls = 0; polls < 8 && !finished; polls += 1) finished = await poll() === 'finish';
+    expect(finished).toBe(true);
+  } finally { await service.shutdown(); }
+});
+
 test('a recording still reads as recording until its capture has closed, so "stopped" is never said early', async () => {
   const root = scratch('closing');
   const commands: Array<'start' | 'stop' | undefined> = [];

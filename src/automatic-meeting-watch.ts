@@ -47,6 +47,7 @@ import {
   MeetingAutomationController,
   resolveMeetingCandidate,
   calendarEventIsThisCall,
+  callReleasedMicrophone,
   followedCallUnobserved,
   hasConfirmedMeetingEnd,
   isBrowserApplication,
@@ -214,6 +215,8 @@ export class AutomaticMeetingWatchService {
   #aheadRead?: Promise<void>;
   #briefing?: Promise<void>;
   readonly #liveTextGuard = new LiveTextGuard();
+  /** Readings in a row in which the call has let go of the microphone, during its end grace. */
+  #microphoneLetGo = 0;
   /** A Meet check that timed out, held instead of checking again at once; each wait doubles, up to a minute. */
   #meetHeld?: MeetProbe;
   #meetRetryAtUnixMs = 0;
@@ -311,8 +314,9 @@ export class AutomaticMeetingWatchService {
     const followed = ['recording', 'ending', 'awaiting-consent'].includes(state.phase) ||
       (state.phase === 'cooldown' && state.stoppedByHand) ? state.candidate : undefined;
     const confirmedEnd = hasConfirmedMeetingEnd(state.candidate, meet);
-    const action = this.#controller.step(candidate, now.getTime(), confirmedEnd,
-      followedCallUnobserved(followed, candidate, snapshot, confirmedEnd));
+    const unobserved = followedCallUnobserved(followed, candidate, snapshot, confirmedEnd);
+    const action = this.#controller.step(candidate, now.getTime(), confirmedEnd, unobserved);
+    this.followMicrophone(callReleasedMicrophone(followed, candidate, snapshot), unobserved);
     this.guardLiveText(now, detectorTimedOut || meetTimedOut);
     if (action.kind === 'suggest') {
       this.#consentId = randomUUID();
@@ -388,6 +392,24 @@ export class AutomaticMeetingWatchService {
     this.#meetBackoffMs = Math.min(60_000, Math.max(10_000, this.#meetBackoffMs * 2));
     this.#meetRetryAtUnixMs = now.getTime() + this.#meetBackoffMs;
     this.#meetHeld = meet;
+  }
+
+  /**
+   * While a call's end grace runs because its app let go of the microphone,
+   * Seashell holds none either: otherwise a Bluetooth headset stays in call
+   * mode after the call. The session stays open, and the microphone opens
+   * again the moment the call comes back. Two readings in a row confirm it, so
+   * a blip as the call switches devices does not cycle the microphone.
+   */
+  private followMicrophone(released: boolean, unobserved: boolean): void {
+    const capture = this.#active?.capture;
+    if (!capture) return;
+    const ending = this.#controller.state.phase === 'ending';
+    // A reading that told nothing changes nothing.
+    if (ending && unobserved) return;
+    this.#microphoneLetGo = ending && released ? this.#microphoneLetGo + 1 : 0;
+    if (this.#microphoneLetGo >= 2) capture.releaseMicrophone?.();
+    else capture.reopenMicrophone?.();
   }
 
   /** Live text gives way when the Mac is overloaded (live-text-guard.ts); the audio never does. */
@@ -731,6 +753,7 @@ export class AutomaticMeetingWatchService {
       onDraftStatus({ stage: 'delayed', detail: 'Live transcript could not start. Audio is saved for final transcription.', queueDepth: 0 });
     } finally { initializingDraft = false; pendingDraftChunks.length = 0; }
     this.#active = { candidate, capture, directory, startedAt, ...(draft ? { draft } : {}) };
+    this.#microphoneLetGo = 0;
     this.projectWatch();
     if (resumed) {
       this.emit({

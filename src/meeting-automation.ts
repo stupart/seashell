@@ -480,6 +480,20 @@ export function followedCallUnobserved(
   return snapshot.inputProcesses.some((process) => sameApplicationFamily(process.bundleId, followed.bundleId));
 }
 
+/**
+ * The followed call's app has let go of the microphone and nothing else took
+ * its place: a complete reading shows no call holding it. While the end grace
+ * runs, Seashell should hold no microphone either.
+ */
+export function callReleasedMicrophone(
+  followed: MeetingCandidate | undefined,
+  candidate: MeetingCandidate | undefined,
+  snapshot: MeetingSignalSnapshot,
+): boolean {
+  if (!followed || followed.kind === 'manual' || candidate || !snapshot.supported || snapshot.complete === false) return false;
+  return !snapshot.inputProcesses.some((process) => sameApplicationFamily(process.bundleId, followed.bundleId));
+}
+
 /** Losing a readable Meet tree is not a new audio-only meeting. Preserve an
  * already recording call while its browser still owns microphone input. This
  * never starts capture or overrides a known end. Losing permission to read

@@ -45,6 +45,8 @@ function sourceLabel(source: CaptureSourceHealth | undefined, finished: boolean,
     if (source.warnings.some(w => w.resolvedAtUnixMs === undefined && w.kind === 'quiet')) return 'sound captured · quiet at end';
     return 'sound captured';
   }
+  // The call app let go of its microphone, so Seashell did too; it opens again if the call comes back.
+  if (source.state === 'released') return 'released · the call let go of it';
   // The recorder keeps checking, and starts the moment macOS allows it.
   if (source.state === 'unavailable' && source.code === MICROPHONE_NOT_ALLOWED) return 'not allowed';
   if (source.state === 'unavailable' || source.state === 'stopped') return 'not capturing';
