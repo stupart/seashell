@@ -16,7 +16,7 @@ import {
 import { initializeFirstInstall } from './first-install.ts';
 import { enableMeetingLaunchAtLogin } from './launch-at-login.ts';
 import { requestMeetAccessibilityPermission } from './meet-speakers.ts';
-import { microphonePermission } from './microphone-permission.ts';
+import { MICROPHONE_PRIVACY_OPENING, microphonePermission } from './microphone-permission.ts';
 import { calendarPermission } from './calendar-permission.ts';
 import { join } from 'path';
 import { ensureTemplatesDirectory, PROFILE_FILE } from './meeting-templates.ts';
@@ -213,7 +213,8 @@ export function useSetupActions(props: SetupActionProps & { onFinished?: () => v
           spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'], { stdio: 'ignore', timeout: 5_000 });
         }
         finished = result.authorization === 'authorized';
-        if (finished) done('Microphone allowed. Your side of meetings is recorded.'); else failed(result.detail);
+        if (finished) done('Microphone allowed. Your side of meetings is recorded.');
+        else failed(result.authorization === 'denied' ? MICROPHONE_PRIVACY_OPENING : result.detail);
       } else if (action === 'allow-calendar') {
         progress('macOS will ask about "Seashell Calendar". Choose Allow (Full Access).');
         const result = await (props.actions?.allowCalendar ?? (signal => calendarPermission({ request: true, signal })))(controller.signal);

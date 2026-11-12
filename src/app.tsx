@@ -90,7 +90,7 @@ import { writeMeetingConsent } from './meeting-consent.ts';
 import { writeMeetingCommand } from './meeting-command.ts';
 import { CaptureHealthTracker, readMeetingCoverage, yourSideNotice, type CaptureHealthSnapshot } from './capture-health.ts';
 import { ALLOW_MIC, captureRecordingMode, recordingClock, recordingSummary, sourceFinding, type RecordingMode } from './RecordingStatus.tsx';
-import { allowMicrophone } from './microphone-permission.ts';
+import { allowMicrophone, MICROPHONE_PRIVACY_OPENING } from './microphone-permission.ts';
 import { diarizationStatus } from './diarization-environment.ts';
 import { identifySavedSpeakers } from './speaker-reprocessing.ts';
 import { runHumainTranscription } from './humain-client.ts';
@@ -2662,8 +2662,11 @@ export default function App(props: {
   /** macOS's prompt for Seashell Microphone, or its Privacy pane once it said no. A recording
    * already running picks the microphone up by itself within seconds. */
   const askForMicrophone = () => {
-    setNotice('macOS will ask about "Seashell Microphone". Choose Allow.');
+    // What to do next is attention, not a confirmation: yellow until macOS answers.
+    setCaution('macOS will ask about "Seashell Microphone". Choose Allow.');
     void allowMicrophone().then((status) => {
+      // macOS never asks twice: once it said no, its Privacy pane opens, and the toast says what to turn on there.
+      if (status.authorization === 'denied' || status.authorization === 'restricted') { setCaution(MICROPHONE_PRIVACY_OPENING); return; }
       if (status.authorization !== 'authorized') { setCaution(status.detail); return; }
       setAttention((current) => current.filter((item) => item.id !== 'microphone'));
       setNotice('Microphone allowed. Seashell records your side now.');
@@ -3198,7 +3201,7 @@ function needsMicrophone(status: FeatureStatus): boolean {
 function attentionStatus(status: FeatureStatus): TitleStatus & { focus: FeatureId } {
   const silent = status.summary.includes('silent');
   const [what, fix] = status.id === 'recorder' ? [status.state === 'attention' ? 'Recorder not responding' : 'Recorder off', 'fix recorder']
-    : status.id === 'microphone' ? silent ? ['Mic silent', 'mic help'] : ['Mic not allowed', 'allow mic']
+    : status.id === 'microphone' ? silent ? ['Mic silent', 'mic help'] : status.summary.startsWith('Needs your OK') ? ['Mic needs your OK', 'allow mic'] : ['Mic not allowed', 'allow mic']
     : status.id === 'computer-audio' ? silent ? ['Computer audio silent', 'audio help'] : ['Computer audio unconfirmed', 'check audio']
     : status.id === 'detection' ? ['Meet not connected', 'connect Meet']
     : [`${MENU_LABEL[status.id]} needs you`, 'settings'];

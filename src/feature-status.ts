@@ -15,7 +15,7 @@ import { loadVocabulary, vocabularyPath } from './vocabulary.ts';
 import { meetingLaunchAtLoginStatus } from './launch-at-login.ts';
 import { loadMeetingTemplates, loadProfile, templatesDirectory } from './meeting-templates.ts';
 import { checkMeetConnection, type MeetProbe } from './meet-speakers.ts';
-import { microphonePermission, type MicrophonePermissionStatus } from './microphone-permission.ts';
+import { microphoneAllowedBefore, microphonePermission, type MicrophonePermissionStatus } from './microphone-permission.ts';
 import { calendarPermission } from './calendar-permission.ts';
 import type { HelperPermissionStatus } from './helper-permission.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
@@ -92,6 +92,8 @@ export interface FeatureStatusDependencies {
   readonly watchStatus?: typeof readBackgroundWatchStatus;
   readonly meetConnection?: (browser: 'auto' | 'chrome' | 'safari', signal?: AbortSignal) => Promise<MeetProbe>;
   readonly microphone?: (signal?: AbortSignal) => Promise<MicrophonePermissionStatus>;
+  /** An earlier copy of Seashell Microphone was allowed, so one not decided on came with an update. */
+  readonly microphoneAllowedBefore?: () => boolean;
   readonly calendar?: (signal?: AbortSignal) => Promise<HelperPermissionStatus>;
   readonly lastMeeting?: (libraryDir: string) => MeetingEvidence | undefined;
   readonly speakerSeparationReady?: () => boolean;
@@ -245,9 +247,14 @@ export async function readFeatureStatuses(options: {
               : predatesRecorder && !evidence?.audibleMicrophoneChunks
               ? ' Meetings recorded before this update could not hear you; that is fixed now.' : '') } as const
       : microphone.authorization === 'notDetermined'
-        ? { state: 'broken', summary: 'Not allowed yet',
-          detail: 'Until you allow it, background meetings record other people but not you.',
-          fix: 'Choose Allow when macOS asks.', action: 'allow-microphone', command: 'seashell meeting microphone setup' } as const
+        // After an update macOS asks once more for the new copy: it was allowed, and needs your OK again.
+        ? (deps.microphoneAllowedBefore ?? microphoneAllowedBefore)()
+          ? { state: 'broken', summary: 'Needs your OK again after the update',
+            detail: 'Seashell was updated, so macOS asks once more about Seashell Microphone. Until you allow it, meetings record other people but not you.',
+            fix: 'Choose Allow when macOS asks.', action: 'allow-microphone', command: 'seashell meeting microphone setup' } as const
+          : { state: 'broken', summary: 'Not allowed yet',
+            detail: 'Until you allow it, background meetings record other people but not you.',
+            fix: 'Choose Allow when macOS asks.', action: 'allow-microphone', command: 'seashell meeting microphone setup' } as const
         : microphone.authorization === 'denied'
           ? { state: 'broken', summary: 'Blocked in System Settings', detail: microphone.detail,
             fix: 'Turn on Seashell Microphone in Privacy & Security → Microphone.', action: 'allow-microphone', command: 'seashell meeting microphone setup' } as const

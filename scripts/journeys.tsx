@@ -68,7 +68,7 @@ interface Step {
   /** History starts open on a wide window and closed on a narrow one. */
   history?: boolean;
 }
-type Machine = 'fresh' | 'ready' | 'mic-silent';
+type Machine = 'fresh' | 'ready' | 'mic-silent' | 'mic-updated';
 interface Journey {
   id: string;
   title: string;
@@ -380,6 +380,16 @@ export const JOURNEYS: Journey[] = [
       { title: 'The meeting says so', press: [DOWN, DOWN, ENTER], keys: '↓ ↓ Enter', until: "Your side wasn't recorded", note: 'A yellow line, in the meeting only.' },
     ],
   },
+  {
+    id: 'mic-update', title: 'The microphone after an update', who: 'Someone who allowed the microphone once, then updated Seashell.',
+    machine: 'mic-updated', library: 'demo', narrow: true,
+    steps: [
+      { title: 'After the update', until: 'needs your OK', note: 'The title says so, and the key that helps leads the key bar.' },
+      { title: 'Microphone in Settings', press: [','], narrowPress: [ENTER], keys: ',', until: 'Needs your OK again',
+        note: 'It was allowed before: this is the new copy asking, not a microphone never allowed.' },
+      { title: 'Allowed again', press: [ENTER], keys: 'Enter', until: 'Microphone allowed', note: 'macOS asks once more; the recorder picks it up by itself.' },
+    ],
+  },
 ];
 
 const LINES: [string, string][] = [
@@ -625,7 +635,9 @@ async function endMeeting(library: string, background: Background) {
 }
 
 /** The pretend Mac: what is set up, which the setup actions change. */
-interface Mac { recorder: boolean; microphone: boolean; meet: boolean; calendar: boolean; screen: boolean; fresh: boolean; micSilent: boolean }
+interface Mac { recorder: boolean; microphone: boolean; meet: boolean; calendar: boolean; screen: boolean; fresh: boolean; micSilent: boolean;
+  /** An earlier copy of Seashell Microphone was allowed, before an update. */
+  micAllowedBefore: boolean }
 
 function dependencies(mac: Mac, oldEngine = false): FeatureStatusDependencies {
   return {
@@ -637,6 +649,7 @@ function dependencies(mac: Mac, oldEngine = false): FeatureStatusDependencies {
       ? { state: 'idle', detail: 'Join a call', accessibilityTrusted: true }
       : { state: 'off', detail: 'Not connected', accessibilityTrusted: false }) as never,
     microphone: async () => (mac.microphone ? { authorization: 'authorized', detail: 'Allowed.' } : { authorization: 'notDetermined', detail: 'Not asked.' }) as never,
+    microphoneAllowedBefore: () => mac.micAllowedBefore,
     calendar: async () => ({ authorization: mac.calendar ? 'authorized' : 'notDetermined', detail: 'Calendar.', calendars: 2 }) as never,
     lastMeeting: () => (mac.fresh ? undefined : { title: 'Acme discovery call', createdAt: new Date(Date.now() - 3 * 3_600_000).toISOString(), microphoneChunks: 3,
       audibleMicrophoneChunks: mac.micSilent ? 0 : 3, computerChunks: 3, audibleComputerChunks: 3, meetingKey: 'meet:chrome:/abc-defg-hij' }) as never,
@@ -712,12 +725,18 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
     : journey.machine === 'fresh' ? {} : { meeting: { speakerBrowser: 'auto', backend: 'claude-code', model: 'sonnet' } });
   if (!journey.firstRun) writeFileSync(process.env.SEASHELL_CONFIG, JSON.stringify(config));
   const fresh = journey.machine === 'fresh';
-  const mac: Mac = { recorder: !fresh, microphone: !fresh, meet: !fresh, calendar: false, screen: false, fresh, micSilent: journey.machine === 'mic-silent' };
+  const updated = journey.machine === 'mic-updated';
+  const mac: Mac = { recorder: !fresh, microphone: !fresh && !updated, meet: !fresh, calendar: false, screen: false, fresh, micSilent: journey.machine === 'mic-silent',
+    micAllowedBefore: updated };
   const room: Room = { microphone: 'zeros', computer: 'zeros' };
   Object.defineProperty(process.stdout, 'columns', { value: size.columns });
   Object.defineProperty(process.stdout, 'rows', { value: size.rows });
 
   mock.module('../src/watch-lock.ts', () => ({ acquireMeetingWatchLock: () => undefined }));
+  // Allowing the microphone from the app asks the pretend Mac, never macOS.
+  const permission = { ...await import('../src/microphone-permission.ts') };
+  mock.module('../src/microphone-permission.ts', () => ({ ...permission,
+    allowMicrophone: async () => { mac.microphone = true; return { authorization: 'authorized', detail: 'Allowed.' }; } }));
   mock.module('../src/meeting-consent.ts', () => ({ writeMeetingConsent: () => undefined }));
   const features = { ...await import('../src/feature-status.ts') };
   mock.module('../src/feature-status.ts', () => ({ ...features,
