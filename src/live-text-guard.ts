@@ -1,7 +1,7 @@
 import { availableParallelism, loadavg } from 'os';
 
-/** What the recording shows while live drafts are paused. */
-export const LIVE_TEXT_PAUSED = 'Live text paused: your Mac is busy. The transcript is written after the call.';
+/** What the recording says while live drafts are paused: the last row of its transcript, and `seashell` output. */
+export const LIVE_TEXT_PAUSED = 'Live text paused while your Mac is busy. Audio is still recording; the full transcript is written after the call.';
 
 /** One poll's view of how busy the Mac is. */
 export interface MacLoadReading {

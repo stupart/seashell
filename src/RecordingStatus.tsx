@@ -135,7 +135,8 @@ export function videoStatus(video: CaptureVideoHealth | undefined): string | und
   return video.state === 'unavailable' ? 'No video' : undefined;
 }
 
-/** "Live text paused: your Mac is busy…": drafts stopped on purpose, while the audio records. */
+/** "Live text paused while your Mac is busy…": drafts stopped on purpose, while the audio records. Nothing fixes it but
+ * time, so its alert offers no key; the transcript's last row says why. */
 const LIVE_TEXT_PAUSED_LEAD = 'Live text paused';
 /** Live text that is behind or paused is said; the recording itself is fine. */
 const draftProblem = (label?: string): boolean => Boolean(label?.includes('delayed') || label?.startsWith(LIVE_TEXT_PAUSED_LEAD));

@@ -141,6 +141,8 @@ const PROJECT_ROOT = join(dirname(__filename), '..');
 const WHISPER_SERVER = join(PROJECT_ROOT, 'whisper.cpp/build/bin/whisper-server');
 const MODEL_PATH = join(PROJECT_ROOT, 'models', DEFAULT_WHISPER_MODEL_FILENAME);
 const HIGHLIGHT = new Chalk({ level: 1 }).black.bgYellow;
+/** Part of a row that says something about the rows, not what was said: dim. */
+const DIM = new Chalk({ level: 1 }).dim;
 /** Another match than the one n is on: in the same yellow, underlined rather than filled. */
 const SOFT_HIGHLIGHT = new Chalk({ level: 1 }).yellow.underline;
 
@@ -381,7 +383,9 @@ export default function App(props: {
   const [notesVersion, setNotesVersion] = useState(0);
   /** [a] during a call: a question over what has been said so far, answered in a sheet. Esc stops waiting.
    * `saved`: + kept the answer as one of your notes, so it is not offered twice. */
-  const [liveAnswer, setLiveAnswer] = useState<{ shown: string; catchUp: boolean; answer?: LiveAnswer; error?: string; saved?: boolean; abort: AbortController; scroll: number } | null>(null);
+  const [liveAnswer, setLiveAnswer] = useState<{ shown: string; catchUp: boolean; answer?: LiveAnswer; error?: string; saved?: boolean; abort: AbortController; scroll: number;
+    /** Live text paused here, in seconds: the answer reads no further, and says so. */
+    upTo?: number } | null>(null);
   /** When a key was last pressed here: "What did I miss?" covers at least the time since. */
   const lastLookedAt = useRef(Date.now());
   /** [u] A follow-up: its kind, then anything to add, at the key bar; the draft in a sheet. Its `ask` is what
@@ -1004,7 +1008,15 @@ export default function App(props: {
   const timedRows = useMemo(() => currentRecord
     ? timedTranscriptRows(currentRecord, contentColumns, { timestamps: showTimestamps, speakers: showSpeakers })
     : [], [currentRecord, contentColumns, showTimestamps, showSpeakers]);
-  const displayRows = useMemo(() => timedRows.map((row) => row.text), [timedRows]);
+  // Live text the recorder paused while the Mac is busy: the words stop where it paused, and the
+  // transcript's last row, dim, says why, so a still transcript never reads as a quiet call.
+  const liveTextPaused = view === 'record' && currentEntry?.captureState === 'recording' && currentEntry.draftStatus?.stage === 'paused';
+  /** Where the live text stopped, in seconds on the call's clock: what a question during the call can read up to. */
+  const liveTextPausedAt = liveTextPaused ? Math.max(0, ...(currentRecord?.transcript.map((segment) => segment.end) ?? [])) : undefined;
+  const readerRows = useMemo(() => liveTextPaused
+    ? [...timedRows, ...timedRows.length ? [{ text: '' }] : [], ...wrapWords(LIVE_TEXT_PAUSED, contentColumns).map((text) => ({ text: DIM(text) }))]
+    : timedRows, [timedRows, liveTextPaused, contentColumns]);
+  const displayRows = useMemo(() => readerRows.map((row) => row.text), [readerRows]);
   const visibleRows = Math.max(1, transcriptContentRows ?? layout.visibleTranscriptRows);
   // A search shows the line that matched under each meeting, so the list holds half as many.
   const listCapacity = Math.max(1, Math.floor(layout.visibleLibraryItems / (searchQuery.trim() ? 2 : 1)));
@@ -1020,7 +1032,7 @@ export default function App(props: {
     return videoLookups.current.get(key);
   }).map((entry) => entry.id)), [libraryEntries]);
   const showingLiveTranscript = meetingView === 'transcript' && (view === 'live' || currentEntry?.captureState === 'recording');
-  const latestTranscriptScroll = lastTranscriptScroll(timedRows, visibleRows);
+  const latestTranscriptScroll = lastTranscriptScroll(readerRows, visibleRows);
   // The first row of every line that says what was searched for, so a match opens with its whole line at the top.
   const matchRows = useMemo(() => {
     const needle = searchQuery.trim().toLocaleLowerCase();
@@ -1054,7 +1066,7 @@ export default function App(props: {
     ? latestTranscriptScroll
     : Math.min(transcriptScroll, Math.max(latestTranscriptScroll, currentMatch ?? 0));
   // A line cut at the top keeps its time and speaker in view.
-  const visibleTranscriptRows = transcriptWindow(timedRows, visibleTranscriptScroll, visibleRows);
+  const visibleTranscriptRows = transcriptWindow(readerRows, visibleTranscriptScroll, visibleRows);
   // A brief's point opens its past meeting at the moment it cites. The rows rewrap as the reader is
   // measured and the list closes, so the moment is found again whenever they do, until the next key.
   useEffect(() => {
@@ -1874,9 +1886,11 @@ export default function App(props: {
     const route = configuredMeetingRoutes.chat;
     if (!recordingInView || !route) return;
     const typed = question.trim();
-    const catchUp = catchUpQuestion((Date.now() - recordingInView.startedAtUnixMs) / 1000, (lookedAtUnixMs - recordingInView.startedAtUnixMs) / 1000);
+    // With live text paused, the words stop where it paused: what you missed is asked up to there.
+    const upTo = liveTextPausedAt;
+    const catchUp = catchUpQuestion(upTo ?? (Date.now() - recordingInView.startedAtUnixMs) / 1000, (lookedAtUnixMs - recordingInView.startedAtUnixMs) / 1000);
     const abort = new AbortController();
-    setLiveAnswer({ abort, scroll: 0, catchUp: !typed,
+    setLiveAnswer({ abort, scroll: 0, catchUp: !typed, ...(upTo === undefined ? {} : { upTo }),
       shown: typed || (catchUp.from > 0 ? `What did I miss since ${sentenceClock(catchUp.from)}?` : 'What did I miss?') });
     if (recordingInView.own) { try { saveTranscriptRecord(libraryRoot, liveRecordRef.current); } catch { /* The saved draft so far is asked about. */ } }
     void askDuringCall(libraryRoot, recordingInView.id, typed || catchUp.question, route, { signal: abort.signal })
@@ -1929,7 +1943,8 @@ export default function App(props: {
   const sheetColumns = terminal.columns - 2 - sheetInset(terminal.columns);
   const sheetRowCount = Math.max(1, terminal.rows - 3);
   const liveLines = liveAnswer ? sheetLines([
-    { text: liveAnswer.shown, dim: true }, '',
+    { text: liveAnswer.shown, dim: true },
+    ...(liveAnswer.upTo === undefined ? [] : [{ text: `Up to ${sentenceClock(liveAnswer.upTo)}, when live text paused.`, dim: true }]), '',
     ...(liveAnswer.error ? [{ text: liveAnswer.error, color: 'red' as const }]
       : liveAnswer.answer ? [{ text: liveAnswer.answer.answer },
         // The times are the citation: where to look in the transcript.
@@ -2869,7 +2884,7 @@ export default function App(props: {
   const readerScroll = currentMeeting && meetingView !== 'transcript' ? transcriptScroll : visibleTranscriptScroll;
   // How much is out of view, as Settings says it: what is below, or once at the end, what is above.
   // A time and speaker pinned at the top take a row of the view.
-  const readerShown = readerScroll + visibleRows - (currentMeeting && meetingView !== 'transcript' || timedRows[readerScroll]?.heading === undefined ? 0 : 1);
+  const readerShown = readerScroll + visibleRows - (currentMeeting && meetingView !== 'transcript' || readerRows[readerScroll]?.heading === undefined ? 0 : 1);
   const readerMore = readerTotal - readerShown > 0 ? `↓ ${readerTotal - readerShown} more` : readerScroll > 0 ? `↑ ${readerScroll} more` : undefined;
   const searchHighlight = meetingView === 'transcript' ? searchQuery : '';
   // The title says whether Seashell can record; the body says what is missing, or what happens next.
@@ -3102,8 +3117,10 @@ export default function App(props: {
   const silentSetup = attention.find((status) => (status.id === 'microphone' || status.id === 'computer-audio') && status.summary.includes('silent'));
   const live = summary?.alert && statusProps?.mode !== 'ready' && statusProps?.mode !== 'processing'
     ? sourceFinding(statusProps?.health, startedAt, statusNow) : undefined;
-  const finding: { text: string; source: 'microphone' | 'computer'; color: 'red' | 'yellow' } | undefined = live
+  // Live text paused is what the title's yellow says, so audio help opens on it: the audio itself is fine.
+  const finding: { text: string; source?: 'microphone' | 'computer'; color: 'red' | 'yellow' } | undefined = live
     ? { ...live, color: summary!.alert!.color }
+    : liveTextPaused ? { text: LIVE_TEXT_PAUSED, color: 'yellow' }
     : yourSide && view === 'record' ? { text: yourSide, source: 'microphone', color: 'yellow' }
     : silentSetup ? { text: silentSetup.detail, source: silentSetup.id === 'microphone' ? 'microphone' : 'computer', color: 'yellow' }
     : undefined;
