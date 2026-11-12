@@ -46,7 +46,7 @@ import { draftFollowUp, draftText, mailtoUrl, type DraftKind, type FollowUpDraft
 import { Chalk } from 'chalk';
 import { CAUTION, HEADING, META, meetingViewLines, OWNER_NOTES_UNREAD, plainMeetingLines, SUBHEADING, type MeetingView } from './meeting-tui.ts';
 import { FROM_YOUR_NOTES_HELP, HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, sheetInset, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
-import { lastTranscriptScroll, timedTranscriptRows, transcriptWindow, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
+import { lastTranscriptScroll, lineAt, timedTranscriptRows, transcriptWindow, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
   renderText,
 } from './transcript-renderer.ts';
@@ -401,6 +401,10 @@ export default function App(props: {
     point?: number } | null>(null);
   /** A past meeting opened at a moment, from a brief: its transcript scrolls there once its rows are laid out. */
   const [jumpTo, setJumpTo] = useState<{ id: string; at: number } | null>(null);
+  /** A past meeting opened from a brief, at the line a point cites: that line is chosen, and Esc goes back to the
+   * brief as it was, over the screen it was opened from. */
+  const [fromBrief, setFromBrief] = useState<{ id: string; at?: number; sheet: NonNullable<typeof briefSheet>; comingUpRow: number | null;
+    under: { view: View; recordId?: string; meetingView: MeetingView; scroll: number; historyOpen: boolean } } | null>(null);
 
   const microphoneCapture = useRef<MicrophoneCaptureHandle | null>(null);
   const systemAudioCapture = useRef<SystemAudioCaptureHandle | null>(null);
@@ -1005,9 +1009,14 @@ export default function App(props: {
     ? terminal.columns - layout.sidebarWidth - 4
     : terminal.columns - 2;
   const contentColumns = transcriptContentColumns ?? Math.max(1, mainPanelColumns);
+  // Opened from a brief, the transcript is a list with one line chosen: every row keeps the glyph's two columns.
+  const citing = Boolean(fromBrief && view === 'record' && selectedRecord?.id === fromBrief.id && meetingView === 'transcript');
+  const gutter = citing ? 2 : 0;
   const timedRows = useMemo(() => currentRecord
-    ? timedTranscriptRows(currentRecord, contentColumns, { timestamps: showTimestamps, speakers: showSpeakers })
-    : [], [currentRecord, contentColumns, showTimestamps, showSpeakers]);
+    ? timedTranscriptRows(currentRecord, Math.max(1, contentColumns - gutter), { timestamps: showTimestamps, speakers: showSpeakers })
+    : [], [currentRecord, contentColumns, gutter, showTimestamps, showSpeakers]);
+  /** The line the brief's point cites, by its start, while the transcript is opened at it. */
+  const citedLine = citing && fromBrief?.at !== undefined ? lineAt(timedRows, fromBrief.at) : undefined;
   // Live text the recorder paused while the Mac is busy: the words stop where it paused, and the
   // transcript's last row, dim, says why, so a still transcript never reads as a quiet call.
   const liveTextPaused = view === 'record' && currentEntry?.captureState === 'recording' && currentEntry.draftStatus?.stage === 'paused';
@@ -1071,8 +1080,13 @@ export default function App(props: {
   // measured and the list closes, so the moment is found again whenever they do, until the next key.
   useEffect(() => {
     if (!jumpTo || selectedRecord?.id !== jumpTo.id || meetingView !== 'transcript' || !timedRows.length) return;
-    setTranscriptScroll(Math.max(0, timedRows.findIndex((row) => row.start !== undefined && row.start >= jumpTo.at - 0.5)));
+    const line = lineAt(timedRows, jumpTo.at);
+    setTranscriptScroll(Math.max(0, timedRows.findIndex((row) => row.start === line)));
   }, [jumpTo, selectedRecord?.id, meetingView, timedRows]);
+  // Leaving the meeting a brief opened leaves the brief behind too.
+  useEffect(() => {
+    if (fromBrief && (view !== 'record' || selectedRecord?.id !== fromBrief.id)) setFromBrief(null);
+  }, [fromBrief, view, selectedRecord?.id]);
   // The rows rewrap once the list closes, so the match is found again whenever they do.
   useEffect(() => {
     if (currentMatch !== undefined) setTranscriptScroll(currentMatch);
@@ -1938,6 +1952,19 @@ export default function App(props: {
       });
   };
 
+  /** Back from the line a brief's point cites: the brief as it was, over the screen it was opened from. */
+  const backToBrief = (back: NonNullable<typeof fromBrief>) => {
+    setFromBrief(null);
+    const under = back.under.recordId ? libraryEntries.find((entry) => entry.id === back.under.recordId) : undefined;
+    if (under) openRecord(under);
+    else showNavigationItem({ kind: 'live', label: '' });
+    setMeetingView(back.under.meetingView);
+    setTranscriptScroll(back.under.scroll);
+    setHistoryOpen(back.under.historyOpen);
+    setComingUpRow(back.comingUpRow);
+    setBriefSheet(back.sheet);
+  };
+
   // The sheets that scroll, as rows: an answer during the call, a follow-up, a brief.
   // Sheets start where the notes do, a column in on a wide window.
   const sheetColumns = terminal.columns - 2 - sheetInset(terminal.columns);
@@ -2155,6 +2182,9 @@ export default function App(props: {
         const { meeting, at } = briefPoints[briefSheet.point ?? 0] ?? {};
         const entry = meeting && libraryEntries.find((candidate) => candidate.id === meeting.id);
         if (!entry) { setCaution('That meeting is no longer in your library.'); return; }
+        // Esc comes back to this point of the brief, over the screen it was opened from.
+        setFromBrief({ id: entry.id, ...(at === undefined ? {} : { at }), sheet: briefSheet, comingUpRow,
+          under: { view, ...(view === 'record' && selectedRecord ? { recordId: selectedRecord.id } : {}), meetingView, scroll: transcriptScroll, historyOpen } });
         setBriefSheet(null); setComingUpRow(null); setHistoryOpen(false);
         openRecord(entry);
         setMeetingView('transcript');
@@ -2376,6 +2406,7 @@ export default function App(props: {
     }
     // Esc goes back one level and never leaves the app; only Q does.
     if (key.escape) {
+      if (fromBrief) { backToBrief(fromBrief); return; }
       if (searchQuery) { setSearchQuery(''); setSearchHit(null); }
       else if (!historyOpen) toggleHistory();
       else if (layout.compact && view === 'record') setHistoryOpen(false);
@@ -2832,7 +2863,7 @@ export default function App(props: {
   const brief: Hint[] = briefable && !recordingInView ? [['b', 'coming up']] : [];
   // One order everywhere: what can be done here, then moving, then Esc. The way back to
   // the meetings comes early, so a narrow window keeps it.
-  const hints: Hint[] = atHome && attention.length ? [micToAllow ? ALLOW_MIC : ['Enter', 'guided setup'], ...byHand, ['f', 'import']]
+  const screenHints: Hint[] = atHome && attention.length ? [micToAllow ? ALLOW_MIC : ['Enter', 'guided setup'], ...byHand, ['f', 'import']]
     : historyOpen && searchQuery.trim() ? visibleEntries.length ? [['Enter', 'read'], ['/', 'search again'], ['Esc', 'clear search'], ['↑↓', 'choose']]
       : [['/', 'search again'], ['Esc', 'clear search']]
     : historyOpen && !navigationItems.some((item) => item.kind === 'record') ? [...byHand, ...brief, ['f', 'import'], ['/', 'search']]
@@ -2852,6 +2883,8 @@ export default function App(props: {
     : meetingView === 'chat' ? [['a', 'ask'], ['h', 'meetings'], ...brief, ...followUp, ['c', 'copy'], ['↑↓', 'scroll']]
     : [...nextMatch, ...watch, ['h', 'meetings'], ...brief, ['r', 'name speakers'], ['a', 'ask'], ...note, ['e', 'export'], ['c', 'copy'], ['↑↓', 'scroll']];
 
+  // Opened from a brief, the way back to it leads, so a narrow window keeps it.
+  const hints: Hint[] = fromBrief && !historyOpen ? [['Esc', 'back to brief'], ...screenHints] : screenHints;
   // Today's meetings show their time, older ones their day, in one column against the right edge.
   const listRowWidth = (layout.compact ? terminal.columns - 2 : layout.sidebarWidth - 2) - 2;
   const dateColumn = Math.max(0, ...navigationItems.slice(sidebarStart, sidebarStart + listCapacity)
@@ -2946,11 +2979,17 @@ export default function App(props: {
               ? transcribingCount > 0 ? 'Preparing transcript…' : 'Speak to transcribe · the first words take a moment'
               : backgroundMessage ?? 'No transcript text'}</Text>
           )
-        ) : visibleTranscriptRows.map((row, index) => <Box key={index} flexShrink={0} height={1}>
-          {/* The line n is on is marked in full; the other matches are only underlined. */}
-          <Text wrap="truncate-end">{highlighted(row.text, searchHighlight,
-            currentMatch !== undefined && row.start !== timedRows[currentMatch]?.start) || ' '}</Text>
-        </Box>)}
+        ) : visibleTranscriptRows.map((row, index) => {
+          // The line a brief's point cites is chosen as a list's row is: inverse across the reader, › on its first row.
+          const cited = citedLine !== undefined && row.start === citedLine;
+          const mark = !citing ? '' : cited && visibleTranscriptRows[index - 1]?.start !== citedLine ? '› ' : '  ';
+          const text = highlighted(row.text, searchHighlight, currentMatch !== undefined && row.start !== timedRows[currentMatch]?.start) || ' ';
+          return <Box key={index} flexShrink={0} height={1}>
+            {/* The line n is on is marked in full; the other matches are only underlined. */}
+            <Text wrap="truncate-end" inverse={cited}>{mark}{cited
+              ? `${text}${' '.repeat(Math.max(0, contentColumns - gutter - Bun.stringWidth(stripVTControlCharacters(text))))}` : text}</Text>
+          </Box>;
+        })}
       </Box>
     </Box>
   );

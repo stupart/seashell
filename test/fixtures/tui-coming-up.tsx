@@ -81,5 +81,16 @@ try {
   await type('\r');
   await until(() => screen().includes('2 Transcript') && screen().split('\n').slice(3, 6).join('\n').includes('I will send the security summary'),
     'Enter opens the past meeting at the line the point cites');
+  // That line is chosen as a list's row is, and the way back to the brief leads the key bar.
+  await until(() => /^ *› \S.*I will send the security summary/mu.test(screen()), 'the cited line is marked with ›');
+  // Only a fix for something wrong on this Mac may come before it.
+  const keys = screen().trimEnd().split('\n').at(-1)!;
+  assert(keys.includes('Esc back to brief') && keys.indexOf('Esc back to brief') < keys.indexOf('h meetings'), `Esc back to brief leads\n${screen()}`);
+  await type('\x1b[B'); await type('\x1b[B');
+  assert(/^ *› \S.*I will send the security summary/mu.test(screen()) || !screen().includes('I will send'), 'the mark stays on its line while reading on');
+  await type('\x1b');
+  await until(() => screen().includes('Brief · Roadmap review') && /^ *› Send the security summary/mu.test(screen()), 'Esc returns to the same point of the brief');
+  await type('\x1b');
+  await until(() => screen().includes('Coming up') && screen().includes('brief ready'), 'and Esc again to the list it came from');
   process.stdout.write(JSON.stringify({ passed: true }) + '\n');
 } finally { app.unmount(); input.destroy(); output.destroy(); rmSync(root, { recursive: true, force: true }); }

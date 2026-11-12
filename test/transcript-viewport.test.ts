@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test';
 import { stripVTControlCharacters } from 'util';
-import { lastTranscriptScroll, timedTranscriptRows, transcriptRows, transcriptWindow, MouseScrollDecoder } from '../src/transcript-viewport.ts';
+import { lastTranscriptScroll, lineAt, timedTranscriptRows, transcriptRows, transcriptWindow, MouseScrollDecoder } from '../src/transcript-viewport.ts';
 
 test('one long paragraph remains reachable row by row at narrow widths', () => {
   const words = Array.from({ length: 100 }, (_, i) => `word${i}`);
@@ -87,4 +87,19 @@ test('"line removed" sits in the time column on its own row, without pushing the
   expect(rows[0]).toEndWith('You · Fri  00:35');
   expect(rows[1]).toEndWith('line removed');
   expect(rows.every((row) => Bun.stringWidth(row) === 60)).toBe(true);
+});
+
+test('a cited moment is found in the line it was joined to, not the line after it', () => {
+  // Dana's two sentences a second apart read as one line starting at 0:10.
+  const record = { transcript: [
+    { start: 0, end: 4, text: 'Thanks for making time.', speaker: 'LOCAL' },
+    { start: 10, end: 12, text: 'Sure.', speaker: 'REMOTE_00' },
+    { start: 12.5, end: 15, text: 'I will send the summary by Friday.', speaker: 'REMOTE_00' },
+    { start: 30, end: 33, text: 'Great.', speaker: 'LOCAL' },
+  ], speakers: [{ id: 'LOCAL', label: 'Microphone' }, { id: 'REMOTE_00', label: 'Dana' }] };
+  const rows = timedTranscriptRows(record, 80, { timestamps: true, speakers: true });
+  expect(rows.map((row) => row.start)).toEqual([0, 10, 30]);
+  expect(lineAt(rows, 12.5)).toBe(10);
+  expect(lineAt(rows, 30)).toBe(30);
+  expect(lineAt(rows, -5)).toBe(0);
 });
