@@ -90,6 +90,11 @@ try {
   assert(keys.includes('Esc back to brief') && keys.indexOf('Esc back to brief') < keys.indexOf('h meetings'), `Esc back to brief leads\n${screen()}`);
   await type('\x1b[B'); await type('\x1b[B');
   assert(/^ *› \S.*I will send the security summary/mu.test(screen()) || !screen().includes('I will send'), 'the mark stays on its line while reading on');
+  // With the meetings open over it, Esc closes them first, then goes back.
+  await type('h');
+  await until(() => screen().includes('Meetings') && !screen().includes('Esc back to brief'), 'the meetings open');
+  await type('\x1b');
+  await until(() => screen().includes('Esc back to brief'), 'Esc closes them, and the way back to the brief returns');
   await type('\x1b');
   await until(() => screen().includes('Brief · Roadmap review') && /^ *› Send the security summary/mu.test(screen()), 'Esc returns to the same point of the brief');
   await type('\x1b');

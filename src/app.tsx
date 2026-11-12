@@ -2440,7 +2440,8 @@ export default function App(props: {
     }
     // Esc goes back one level and never leaves the app; only Q does.
     if (key.escape) {
-      if (fromBrief) { backToBrief(fromBrief); return; }
+      // Opened from a brief, it goes back there, as the key bar says; with the meetings open over it, it closes them first.
+      if (fromBrief && !searchQuery) { if (historyOpen) setHistoryOpen(false); else backToBrief(fromBrief); return; }
       if (searchQuery) { setSearchQuery(''); setSearchHit(null); }
       else if (!historyOpen) toggleHistory();
       else if (layout.compact && view === 'record') setHistoryOpen(false);
