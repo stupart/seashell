@@ -3184,7 +3184,7 @@ export default function App(props: {
         : slot ?? (liveAnswer && recordingInView ? { text: `● Recording ${recordingClock((statusNow - recordingInView.startedAtUnixMs) / 1000)}` } : undefined)} />
         : <ScreenTitle name={heading.text} bold={Boolean(heading.color)} {...(heading.color ? { color: heading.color } : {})}
           {...(heading.keep ? { keep: heading.keep } : {})}
-          {...(summary?.detail && !quietlyDone ? { detail: summary.detail } : {})} status={slot} />}
+          {...(summary?.detail && !quietlyDone ? { detail: summary.detail, ...(summary.short ? { short: summary.short } : {}) } : {})} status={slot} />}
       {sheet ?? <Box flexDirection="row" flexGrow={1} overflow="hidden">
         {historyOpen && list}
         {!drawerOnly && reader}

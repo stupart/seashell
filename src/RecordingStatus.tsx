@@ -102,6 +102,9 @@ export interface RecordingSummary {
   label: string;
   /** Mic, computer audio and saved audio, for a wide title line. */
   detail?: string;
+  /** The headline for a title line with no room for the detail, when the detail says something the title must keep:
+   * "Call ended · writing notes…", with the meeting's title given way to it. */
+  short?: string;
   /** Everything that needs the person, in full: for `seashell` output and logs. */
   problems: string[];
   /** The most urgent problem in a few words, for the title's status slot: red while a source fails,
@@ -208,6 +211,8 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
     label,
     ...(alert ? { alert } : {}),
     ...(showSources ? { detail: saved } : {}),
+    // Narrow, that the notes are on their way matters more than which meeting it is: the list and the transcript say that.
+    ...(props.mode === 'processing' ? { short: `${label} · writing notes…` } : {}),
     problems,
   };
 }

@@ -105,7 +105,7 @@ test('the title slot gets the most urgent problem in a few words, its key apart:
     .toMatchObject({ headline: 'Ready · watching for calls', alert: { text: 'Meet detection unavailable. Check Speakers', short: 'Meet detection unavailable' } });
   // After the call: audio is safe and the notes are coming, not how far the audio got.
   expect(recordingSummary({ mode: 'processing', title: 'Design review', savedThroughSeconds: 110 }))
-    .toMatchObject({ headline: 'Call ended · Design review', detail: 'Audio saved · writing notes' });
+    .toMatchObject({ headline: 'Call ended · Design review', detail: 'Audio saved · writing notes', short: 'Call ended · writing notes…' });
 });
 
 test('while a call records, the status says what the video films, and a whole screen in the title itself', () => {

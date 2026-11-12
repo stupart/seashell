@@ -3,7 +3,7 @@ import React from 'react';
 import { render } from 'ink';
 import { Writable } from 'stream';
 import { stripVTControlCharacters } from 'util';
-import { oneRow, Prompt, Toast } from '../src/tui-chrome.tsx';
+import { oneRow, Prompt, ScreenTitle, Toast } from '../src/tui-chrome.tsx';
 
 /** The key bar's row on the narrowest window journeys check: 56 columns, less the frame's two. */
 const NARROW = 54;
@@ -42,4 +42,12 @@ test('at 56 columns every toast and question takes the key bar\'s one row', asyn
   const asked = await rows(React.createElement(Prompt, { text: 'Rewrite these notes? This replaces the notes written on Friday with new ones.',
     color: 'yellow', hints: [['y', 'rewrite'], ['n', 'keep']], columns: NARROW }), 56);
   expect(asked).toEqual(['Rewrite these notes?  y rewrite  n keep']);
+});
+
+test('a title line with no room for its detail keeps what the detail says matters, before the meeting\'s title', async () => {
+  const title = { name: 'Call ended · Design review', detail: 'Audio saved · writing notes', short: 'Call ended · writing notes…', keep: 10 };
+  expect((await rows(React.createElement(ScreenTitle, title), 100))[0]).toBe('🐚 Seashell  Call ended · Design review  Audio saved · writing notes');
+  expect((await rows(React.createElement(ScreenTitle, title), 56))[0]).toBe('🐚  Call ended · writing notes…');
+  // Without a short form, the detail simply gives way.
+  expect((await rows(React.createElement(ScreenTitle, { ...title, short: undefined }), 56))[0]).toBe('🐚  Call ended · Design review');
 });

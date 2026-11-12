@@ -146,29 +146,38 @@ function Marked(props: { text: string }) {
 export function ScreenTitle(props: { name: string; color?: Tone; bold?: boolean; detail?: string; status?: TitleStatus | undefined;
   /** How much of the name must stay in view, such as "Saved · audio needs review" before a meeting's title.
    * A screen's own name stays whole unless told otherwise; its status gives way instead. */
-  keep?: number }) {
+  keep?: number;
+  /** The name for a line with no room for its detail, which keeps the detail's part that matters in place of the
+   * meeting's title: "Call ended · writing notes…" for "Call ended · Design review  Audio saved · writing notes". */
+  short?: string }) {
   const { stdout } = useStdout();
   const columns = stdout?.columns ?? 80;
   const room = columns - 2;
   // The name of the app is there on a wide window and never on a narrow one, so it does not come and go with the status.
   const brand = columns >= 72;
   const lead = 2 + (brand ? 9 : 0);
-  const nameWidth = props.name ? 2 + width(props.name) : 0;
-  // The status gives way to its short form, then to a short screen name: a long meeting title is cut before it.
-  const fits = (text?: string) => text !== undefined && lead + nameWidth + 2 + width(text) <= room;
-  // One more column for the … that ends a cut name.
-  const statusRoom = room - lead - Math.min(nameWidth, 3 + (props.keep ?? width(props.name))) - 2;
-  // A dim status with no fix only informs ("Watching for calls"): it shows whole or not at all, and never cuts the name.
-  const informs = !props.status?.color && !props.status?.fix;
-  const statusText = !props.status ? undefined : fits(props.status.text) ? props.status.text : fits(props.status.short) ? props.status.short
-    : !informs && statusRoom >= 8 ? cutEnd(props.status.short ?? props.status.text, statusRoom) : undefined;
-  const statusWidth = statusText ? 2 + width(statusText) : 0;
-  const detail = props.detail && lead + nameWidth + 2 + width(props.detail) + statusWidth <= room ? props.detail : undefined;
+  const layout = (name: string, keep: number | undefined, withDetail: boolean) => {
+    const nameWidth = name ? 2 + width(name) : 0;
+    // The status gives way to its short form, then to a short screen name: a long meeting title is cut before it.
+    const fits = (text?: string) => text !== undefined && lead + nameWidth + 2 + width(text) <= room;
+    // One more column for the … that ends a cut name.
+    const statusRoom = room - lead - Math.min(nameWidth, 3 + (keep ?? width(name))) - 2;
+    // A dim status with no fix only informs ("Watching for calls"): it shows whole or not at all, and never cuts the name.
+    const informs = !props.status?.color && !props.status?.fix;
+    const statusText = !props.status ? undefined : fits(props.status.text) ? props.status.text : fits(props.status.short) ? props.status.short
+      : !informs && statusRoom >= 8 ? cutEnd(props.status.short ?? props.status.text, statusRoom) : undefined;
+    const statusWidth = statusText ? 2 + width(statusText) : 0;
+    const detail = withDetail && props.detail && lead + nameWidth + 2 + width(props.detail) + statusWidth <= room ? props.detail : undefined;
+    return { name, statusText, detail };
+  };
+  const whole = layout(props.name, props.keep, true);
+  // No room for the detail: the short name says its part that matters instead of the meeting's title.
+  const { name, statusText, detail } = props.short && props.detail && !whole.detail ? layout(props.short, undefined, false) : whole;
   return <Box flexDirection="column" flexShrink={0}>
     <Box justifyContent="space-between">
       {/* Keyed by its shape, as the key bar is, so a longer title is measured afresh. */}
-      <Text key={`${brand}-${Boolean(detail)}`} wrap="truncate-end">🐚{brand ? <Text> <Text bold color="cyan">Seashell</Text></Text> : ''}{props.name ? '  ' : ''}
-        <Text bold={props.bold ?? true} {...(props.color ? { color: props.color } : {})}><Marked text={props.name} /></Text>
+      <Text key={`${brand}-${Boolean(detail)}-${name === props.name}`} wrap="truncate-end">🐚{brand ? <Text> <Text bold color="cyan">Seashell</Text></Text> : ''}{name ? '  ' : ''}
+        <Text bold={props.bold ?? true} {...(props.color ? { color: props.color } : {})}><Marked text={name} /></Text>
         {detail ? <Text dimColor>  {detail}</Text> : null}
       </Text>
       {statusText && <Box flexShrink={0} marginLeft={2}>
