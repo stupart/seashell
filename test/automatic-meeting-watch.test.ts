@@ -123,8 +123,9 @@ for (const fault of ['detector', 'capture-start'] as const) {
 test('watcher records only after confirmation and finalizes after grace', async () => {
   const root = mkdtempSync(join(tmpdir(), 'seashell-auto-watch-'));
   roots.push(root);
-  const times = [0, 1_000, 2_000, 3_000, 4_000];
-  let timeIndex = 0;
+  // Each poll one second after the last. The clock moves only between polls:
+  // the watcher reads it as often as it needs within one.
+  let now = 0;
   let signalActive = true;
   const events: Array<{ type: string }> = [];
   let captureStarts = 0;
@@ -144,10 +145,10 @@ test('watcher records only after confirmation and finalizes after grace', async 
     },
     onEvent: (value) => events.push(value),
     dependencies: {
-      now: () => new Date(times[Math.min(timeIndex++, times.length - 1)]!),
+      now: () => new Date(now),
       readSignals: () => ({
         schemaVersion: 1,
-        capturedAtUnixMs: times[Math.max(0, timeIndex - 1)]!,
+        capturedAtUnixMs: now,
         supported: true,
         inputProcesses: signalActive
           ? [{ pid: 42, bundleId: 'us.zoom.xos', name: 'Zoom' }]
@@ -179,12 +180,13 @@ test('watcher records only after confirmation and finalizes after grace', async 
     },
   });
 
-  expect((await service.pollOnce()).kind).toBe('none');
-  expect((await service.pollOnce()).kind).toBe('start');
+  const poll = async () => { const action = await service.pollOnce(); now += 1_000; return action; };
+  expect((await poll()).kind).toBe('none');
+  expect((await poll()).kind).toBe('start');
   expect(captureStarts).toBe(1);
   signalActive = false;
-  expect((await service.pollOnce()).kind).toBe('none');
-  expect((await service.pollOnce()).kind).toBe('finish');
+  expect((await poll()).kind).toBe('none');
+  expect((await poll()).kind).toBe('finish');
   await service.shutdown();
   expect(captureStops).toBe(1);
   expect(events.map((value) => value.type)).toEqual([

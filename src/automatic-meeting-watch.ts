@@ -130,7 +130,15 @@ export interface AutomaticMeetingWatchOptions {
    * (launchd) starts a fresh one on the current code and settings.
    */
   readonly restartWhen?: () => string | undefined;
+  /** Tests only: STATUS_HEARTBEAT_MS. */
+  readonly statusHeartbeatMs?: number;
 }
+
+/**
+ * How often a running recorder rewrites its status, whatever its poll is
+ * doing. Readers count it gone after 30 s of silence (BACKGROUND_WATCH_FRESH_MS).
+ */
+export const STATUS_HEARTBEAT_MS = 5_000;
 
 /**
  * Why a long-running watcher should be replaced: a package upgrade moved or
@@ -179,6 +187,8 @@ export class AutomaticMeetingWatchService {
   readonly #dependencies: Required<AutomaticMeetingWatchDependencies>;
   readonly #signalMonitor?: MeetingSignalMonitor;
   #active?: ActiveMeeting;
+  /** A recording whose capture is still closing: it still reads as recording until it has. */
+  #closing?: ActiveMeeting;
   /** A stopped meeting whose final pass waits briefly in case the call resumes. */
   #parked?: ActiveMeeting & { readonly parkedAtUnixMs: number; readonly resumeUntilUnixMs: number };
   #finalizationTail: Promise<void> = Promise.resolve();
@@ -190,7 +200,6 @@ export class AutomaticMeetingWatchService {
   #meetWarning?: string;
   #consentId?: string;
   #asking?: AbortController;
-  #lastNowUnixMs = Date.now();
   #browserFrontAtUnixMs = Number.NEGATIVE_INFINITY;
   #meetCheckedAtUnixMs = Number.NEGATIVE_INFINITY;
   /** The calendar a few hours ahead, read every few minutes, for the next meeting and its brief. */
@@ -237,7 +246,12 @@ export class AutomaticMeetingWatchService {
 
   async pollOnce(): Promise<MeetingAutomationAction> {
     const now = this.#dependencies.now();
-    this.#lastNowUnixMs = now.getTime();
+    // What the person asked for comes before every probe below: on a busy Mac
+    // the signals and Meet checks can take longer than a command may wait.
+    // Notes first, so one typed just before stopping still lands in this recording.
+    this.takeNotes(now);
+    const byHand = await this.takeCommand(now);
+    if (byHand) return byHand;
     const automation = this.#config.meeting?.automation;
     const browser = automation?.enabled === false || automation?.mode === 'off'
       ? undefined : this.#config.meeting?.speakerBrowser;
@@ -273,28 +287,6 @@ export class AutomaticMeetingWatchService {
       resolveMeetingCandidate(snapshot, calendar, this.#config.meeting?.automation, meet),
       this.#controller.state, snapshot, meet, this.#parked?.candidate,
     );
-    // Notes first, so one typed just before stopping still lands in this recording.
-    this.takeNotes(now);
-    const command = this.#dependencies.consumeCommand(undefined, now.getTime());
-    if (command === 'stop' && this.#active) {
-      const stopped = this.#controller.stopByHand(now.getTime()) ?? this.#active.candidate;
-      this.emit({ type: 'meeting.stopped', at: now.toISOString(), candidate: stopped });
-      await this.finish(this.#active.candidate, 'stopped-by-hand');
-      this.projectWatch();
-      return { kind: 'none' };
-    }
-    if (command === 'start' && !this.#active) {
-      const manual = Object.freeze({
-        id: `manual:${randomUUID()}`, appName: 'Seashell', bundleId: '', pid: 0, kind: 'manual' as const,
-        title: calendar?.title?.trim() || 'Recording', ...(calendar ? { calendar } : {}),
-        evidence: Object.freeze(['manual' as const]), requiresConsent: false,
-      });
-      const started = this.#controller.startByHand(manual, now.getTime());
-      if (started && this.start(started, now)) {
-        this.projectWatch();
-        return { kind: 'start', candidate: started };
-      }
-    }
     const action = this.#controller.step(candidate, now.getTime(),
       hasConfirmedMeetingEnd(this.#controller.state.candidate, meet));
     if (action.kind === 'suggest') {
@@ -324,6 +316,35 @@ export class AutomaticMeetingWatchService {
     }
     this.projectWatch();
     return action;
+  }
+
+  /**
+   * Record or stop by hand. Read before anything slow: a stop is kept until
+   * the recording it was meant for is stopped, and a start acts at once rather
+   * than after the probes, with the calendar as last read for its title.
+   */
+  private async takeCommand(now: Date): Promise<MeetingAutomationAction | undefined> {
+    if (this.#shuttingDown) return undefined;
+    const command = this.#dependencies.consumeCommand(undefined, now.getTime(),
+      this.#active ? { recordingSessionId: this.#active.capture.sessionId } : {});
+    if (command === 'stop' && this.#active) {
+      const stopped = this.#controller.stopByHand(now.getTime()) ?? this.#active.candidate;
+      this.emit({ type: 'meeting.stopped', at: now.toISOString(), candidate: stopped });
+      await this.finish(this.#active.candidate, 'stopped-by-hand');
+      this.projectWatch();
+      return { kind: 'none' };
+    }
+    if (command !== 'start' || this.#active) return undefined;
+    const calendar = this.currentCalendar(now);
+    const manual = Object.freeze({
+      id: `manual:${randomUUID()}`, appName: 'Seashell', bundleId: '', pid: 0, kind: 'manual' as const,
+      title: calendar?.title?.trim() || 'Recording', ...(calendar ? { calendar } : {}),
+      evidence: Object.freeze(['manual' as const]), requiresConsent: false,
+    });
+    const started = this.#controller.startByHand(manual, now.getTime());
+    if (!started || !this.start(started, now)) return undefined;
+    this.projectWatch();
+    return { kind: 'start', candidate: started };
   }
 
   /**
@@ -421,7 +442,6 @@ export class AutomaticMeetingWatchService {
 
   approveSuggestion(): MeetingCandidate | undefined {
     const now = this.#dependencies.now();
-    this.#lastNowUnixMs = now.getTime();
     const candidate = this.#controller.approve(now.getTime());
     if (candidate && !this.start(candidate, now)) { this.projectWatch(); return undefined; }
     this.projectWatch();
@@ -429,8 +449,7 @@ export class AutomaticMeetingWatchService {
   }
 
   declineSuggestion(): void {
-    this.#lastNowUnixMs = this.#dependencies.now().getTime();
-    this.#controller.decline(this.#lastNowUnixMs);
+    this.#controller.decline(this.#dependencies.now().getTime());
     this.#consentId = undefined;
     this.projectWatch();
   }
@@ -678,10 +697,16 @@ export class AutomaticMeetingWatchService {
     const active = this.#active;
     if (!active) return;
     this.#active = undefined;
+    this.#closing = active;
     this.#consentId = undefined;
     try {
-      try { await active.capture.stop(reason); }
-      finally {
+      try {
+        await active.capture.stop(reason);
+        // Stopped means the capture has closed; its live draft is only cleanup.
+        this.#closing = undefined;
+        this.projectWatch();
+      } finally {
+        this.#closing = undefined;
         try { await active.draft?.close(); }
         catch (error) {
           this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(),
@@ -846,17 +871,28 @@ export class AutomaticMeetingWatchService {
     }
   }
 
+  /**
+   * Rewrites the recorder's status with a fresh time. The run loop calls this
+   * every few seconds, so a poll held up by a slow probe never makes a running
+   * recorder look gone.
+   */
+  heartbeat(): void {
+    this.projectWatch();
+  }
+
+  /** Stamped when written, never when the poll began: a slow poll must not publish a stale time. */
   private projectWatch(): void {
-    const candidate = this.#active?.candidate ?? this.#controller.state.candidate;
+    const recording = this.#active ?? this.#closing;
+    const candidate = recording?.candidate ?? this.#controller.state.candidate;
     try {
       writeBackgroundWatchStatus(this.#libraryDir, {
-        phase: this.#shuttingDown ? 'stopped' : this.#active ? 'recording'
+        phase: this.#shuttingDown ? 'stopped' : recording ? 'recording'
           : this.#controller.state.phase === 'awaiting-consent' ? 'awaiting-consent' : 'watching',
         ...(!this.#shuttingDown && candidate ? { candidate: { id: candidate.id, title: candidate.title, appName: candidate.appName } } : {}),
-        ...(this.#active ? { sessionId: this.#active.capture.sessionId } : {}),
+        ...(recording ? { sessionId: recording.capture.sessionId } : {}),
         ...(!this.#shuttingDown && this.#controller.state.phase === 'awaiting-consent' && this.#consentId ? { consentId: this.#consentId } : {}),
         ...(this.#meetWarning ? { warning: this.#meetWarning } : {}),
-      }, this.#lastNowUnixMs);
+      }, this.#dependencies.now().getTime());
     } catch (error) {
       this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(), message: `Could not save background recorder status: ${errorMessage(error)}` });
     }
@@ -874,8 +910,12 @@ export async function runAutomaticMeetingWatch(options: AutomaticMeetingWatchOpt
   // never install a competing process.exit handler that skips capture flush.
   const releaseSignalOwnership = claimManagedProcessSignalOwnership();
   let service: AutomaticMeetingWatchService | undefined;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
   try {
     service = new AutomaticMeetingWatchService(options);
+    const running = service;
+    heartbeat = setInterval(() => running.heartbeat(), options.statusHeartbeatMs ?? STATUS_HEARTBEAT_MS);
+    heartbeat.unref();
     options.onEvent?.(event({ type: 'watch.ready', at: new Date().toISOString() }));
     if (options.once) {
       await service.pollOnce();
@@ -893,6 +933,7 @@ export async function runAutomaticMeetingWatch(options: AutomaticMeetingWatchOpt
       await sleep(pollSeconds * 1_000, undefined, { signal: options.signal }).catch(() => {});
     }
   } finally {
+    clearInterval(heartbeat);
     try { await service?.shutdown(); }
     finally {
       try { lock.release(); } finally { releaseSignalOwnership(); }

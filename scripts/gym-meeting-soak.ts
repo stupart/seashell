@@ -20,6 +20,8 @@ const cycles = Number(process.argv[3] ?? 100);
 assert(Number.isSafeInteger(cycles) && cycles >= 20 && cycles <= 1000);
 const library = join(output, 'library');
 mkdirSync(library, { recursive: true, mode: 0o700 });
+// A real watcher reads and deletes the command file every poll: never the one a real call's stop is waiting in.
+process.env.SEASHELL_MEETING_COMMAND_PATH ||= join(output, 'meeting-command.json');
 const helper = join(output, 'audio-fixture');
 writeFileSync(helper, `
 const pcm = Buffer.alloc(48000);

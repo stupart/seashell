@@ -34,7 +34,9 @@ const output = join(root, '.gym-results', `${new Date().toISOString().replaceAll
 mkdirSync(output, { recursive: true, mode: 0o700 });
 const config = join(output, 'config.json');
 writeFileSync(config, JSON.stringify({ libraryDir: join(output, 'library'), meeting: { automation: { enabled: false } } }), { mode: 0o600 });
-const environment = { ...process.env, SEASHELL_CONFIG: config, SEASHELL_LIBRARY_DIR: join(output, 'library'), SEASHELL_REQUIRE_MEDIA_TESTS: '1' };
+// The meeting soak runs a real watcher: it must never read, and delete, a stop or a note typed during a real call.
+const environment = { ...process.env, SEASHELL_CONFIG: config, SEASHELL_LIBRARY_DIR: join(output, 'library'), SEASHELL_REQUIRE_MEDIA_TESTS: '1',
+  SEASHELL_MEETING_COMMAND_PATH: join(output, 'meeting-command.json') };
 type Result = { name: string; status: 'passed' | 'failed'; durationMs: number; error?: string };
 const results: Result[] = [];
 const metadata = {

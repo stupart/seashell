@@ -366,7 +366,7 @@ export default function App(props: {
   const [speakerPickerOpen, setSpeakerPickerOpen] = useState(false);
   const [confirmRewrite, setConfirmRewrite] = useState(false);
   /** Stopping a recording asks first, whichever recorder runs it: this window, or the background recorder. */
-  const [confirmStop, setConfirmStop] = useState<{ own: boolean; title?: string } | null>(null);
+  const [confirmStop, setConfirmStop] = useState<{ own: boolean; title?: string; sessionId?: string } | null>(null);
   /** Opened from a search: which match is at the top of the transcript; n moves to the next. */
   const [searchHit, setSearchHit] = useState<number | null>(null);
   const [exportMode, setExportMode] = useState(false);
@@ -2232,7 +2232,8 @@ export default function App(props: {
       if (input.toLowerCase() !== 'y') return;
       if (confirmStop.own) { setListeningPaused(true); return; }
       try {
-        writeMeetingCommand('stop');
+        // Named for the recording asked about, so a stop read late can never end a later one.
+        writeMeetingCommand('stop', undefined, Date.now(), confirmStop.sessionId ? { sessionId: confirmStop.sessionId } : {});
         setNotice('Stopping. The transcript and notes are written next.');
       } catch (cause) { setError(`Could not stop recording: ${cause instanceof Error ? cause.message : String(cause)}`); }
       return;
@@ -2539,7 +2540,11 @@ export default function App(props: {
     }
     // With the background recorder, Space records by hand and stops any recording.
     if (input === ' ' && watchOwnership === 'external') {
-      if (activeBackgroundEntry) { setConfirmStop({ own: false, title: activeBackgroundEntry.title }); return; }
+      if (activeBackgroundEntry) {
+        setConfirmStop({ own: false, title: activeBackgroundEntry.title,
+          ...(activeBackgroundEntry.id === backgroundWatch?.sessionId ? { sessionId: activeBackgroundEntry.id } : {}) });
+        return;
+      }
       try {
         // Plain Space is audio only, even if an earlier request for video was never picked up.
         clearVideoRequest();
