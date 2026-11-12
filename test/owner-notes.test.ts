@@ -269,15 +269,21 @@ test('every request names your side "You" and each other voice as the screen doe
   }
 });
 
-test('catch up shows the moments that matter: the ones the answer leads with, or the latest, never just the earliest five', () => {
-  // From the rc35 acceptance run (made-up): the answer cited its eleven moments most important first.
+test('catch up shows the moments that matter: one for each point the answer leads with, or the latest, never just the earliest five', () => {
   const at = (start: number) => ({ id: `s${String(start / 12 + 1).padStart(6, '0')}`, start, text: `Line at ${start}.` });
-  const led = [96, 108, 48, 60, 72, 120, 168, 144, 156, 132, 84].map(at);
-  expect(momentsThatMatter(led).map((moment) => moment.start)).toEqual([96, 108, 48, 60, 72]);
+  const line = (moment: { start: number }) => moment.start / 12;
+  // From the w9 re-run (made-up): three points, citing six lines, most important first. Marcus's ask and your
+  // "I'll send it" are one point, the decision and your "Agreed" another, and Dana's worry the last.
+  const led = [84, 96, 24, 60, 72, 168].map(at);
+  expect(momentsThatMatter(led, line).map((moment) => moment.start)).toEqual([84, 96, 24, 60, 168]);
+  // The rc35 run's eleven moments: a moment for each point first, still in the answer's order.
+  const many = [96, 108, 48, 60, 72, 120, 168, 144, 156, 132, 84].map(at);
+  expect(momentsThatMatter(many, line).map((moment) => moment.start)).toEqual([96, 48, 120, 168, 144]);
+  expect(momentsThatMatter(led.slice(0, 4), line)).toEqual(led.slice(0, 4));
   // Cited in the order they were said, they say nothing about what leads: the latest five, still in order.
   const said = [48, 60, 72, 84, 96, 108, 120, 132, 144, 156, 168].map(at);
-  expect(momentsThatMatter(said).map((moment) => moment.start)).toEqual([120, 132, 144, 156, 168]);
-  expect(momentsThatMatter(said.slice(0, 3)).map((moment) => moment.start)).toEqual([48, 60, 72]);
+  expect(momentsThatMatter(said, line).map((moment) => moment.start)).toEqual([120, 132, 144, 156, 168]);
+  expect(momentsThatMatter(said.slice(0, 3), line).map((moment) => moment.start)).toEqual([48, 60, 72]);
   // And the question asks for a short answer, in words a model keeps to.
   expect(catchUpQuestion(180, 60).question).toContain('at most three short sentences, under 60 words');
 });

@@ -650,26 +650,33 @@ export async function askDuringCall(
 ): Promise<LiveAnswer> {
   const { record, answer, evidenceSegmentIds } = await askHumain(libraryDir, transcriptId, question, route,
     { onStatus: options.onStatus, runner: options.runner ?? runHumainMeeting, engine: options.engine, partial: true, signal: options.signal });
-  const byId = new Map(meetingSegments(record).map((segment) => [segment.id, segment]));
+  const segments = meetingSegments(record);
+  const byId = new Map(segments.map((segment) => [segment.id, segment]));
+  const lines = new Map(segments.map((segment, index) => [segment.id, index]));
   const moments = [...new Set(evidenceSegmentIds)].flatMap((id) => {
     const segment = byId.get(id);
     // Named as the answer names them.
     return segment ? [{ id, start: segment.start, text: segment.text, ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
       ...(segment.speakerLabel ? { speaker: segment.speakerLabel } : {}) }] : [];
   });
-  return { question: question.trim(), answer, moments: momentsThatMatter(moments) };
+  return { question: question.trim(), answer, moments: momentsThatMatter(moments, (moment) => lines.get(moment.id) ?? -2) };
 }
 
 /** How many of an answer's moments a sheet shows under it. */
 export const MOMENTS_SHOWN = 5;
 
 /**
- * The moments an answer rests on that a sheet has room for, the ones that matter: those it cites
- * first, since it was asked for the most important first. Cited simply in the order they were said,
- * they say nothing about what leads, so the latest are shown, still in that order: the earliest are
- * what you saw before you looked away.
+ * The moments an answer rests on that a sheet has room for, the ones that matter: in the order it
+ * cites them, since it was asked for the most important first. Each point it makes cites a run of
+ * lines said one after another, so the first line of each run comes first, and a long first point
+ * cannot crowd out the last; the rest fill what room is left. Cited simply in the order they were
+ * said, they say nothing about what leads, so the latest are shown, still in that order: the
+ * earliest are what you saw before you looked away. `line` is a moment's place in the transcript.
  */
-export function momentsThatMatter(moments: readonly CitedMoment[], limit = MOMENTS_SHOWN): CitedMoment[] {
+export function momentsThatMatter(moments: readonly CitedMoment[], line: (moment: CitedMoment) => number, limit = MOMENTS_SHOWN): CitedMoment[] {
   const said = moments.every((moment, index) => index === 0 || moments[index - 1]!.start <= moment.start);
-  return said ? moments.slice(-limit) : moments.slice(0, limit);
+  if (said) return moments.slice(-limit);
+  const leads = moments.filter((moment, index) => index === 0 || line(moment) !== line(moments[index - 1]!) + 1);
+  const chosen = new Set([...new Set([...leads, ...moments])].slice(0, limit));
+  return moments.filter((moment) => chosen.has(moment));
 }
