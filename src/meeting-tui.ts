@@ -55,7 +55,7 @@ const STOP_WORDS = new Set(`a an the and or but nor so to of in on at by for wit
   it its this that these those there here i me my we us our you your he him his she her they them their who whom
   what which when where how why if not no yes up out also just all any each some let lets s t d ll re ve m`.split(/\s+/u));
 
-function wordsOf(text: string): Set<string> {
+export function wordsOf(text: string): Set<string> {
   return new Set(text.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
 }
 
@@ -168,13 +168,13 @@ type TemplateLine = { text: string; evidenceSegmentIds: string[]; removedEvidenc
 const YOU = /^(?:you|i|me|we|us|our side|our team|my side)$/iu;
 
 /** Who a template's line says will do it, before a colon: "Dana: share the list", "You: send it". */
-function lineOwner(text: string): string | undefined {
+export function lineOwner(text: string): string | undefined {
   const named = /^([^:]{1,40}):\s/u.exec(text.trim())?.[1]?.trim();
   return named && (YOU.test(named) || PERSON.exec(named)?.[1] === named) ? named : undefined;
 }
 
 /** "Dana" and "Dana Whitfield" are one person; "Us" and "You" are both you. */
-function sameOwner(left: string, right: string): boolean {
+export function sameOwner(left: string, right: string): boolean {
   if (YOU.test(left.trim()) || YOU.test(right.trim())) return YOU.test(left.trim()) && YOU.test(right.trim());
   const [a, b] = [[...wordsOf(left)], [...wordsOf(right)]];
   const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];

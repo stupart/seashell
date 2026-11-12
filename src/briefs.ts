@@ -13,7 +13,7 @@ import {
 import { claimOwnerAndDue, meetingIsPrivateAt, type MeetingArtifact, type MeetingAttendee, type MeetingCalendarEvent, type MeetingClaim } from './meeting-artifact.ts';
 import { claimsForHumain, engineCheck, meetingSegments, retryableRun, runSafeId, stableKey } from './meeting-enrichment.ts';
 import { isPrivate, readListed } from './meeting-memory.ts';
-import { contentWords } from './meeting-tui.ts';
+import { contentWords, lineOwner, sameOwner, wordsOf } from './meeting-tui.ts';
 import { loadProfile } from './meeting-templates.ts';
 import { listTranscriptRecords } from './transcript-library.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
@@ -234,30 +234,46 @@ function sectionHolds(heading: string): 'actions' | 'other' | 'any' {
 /**
  * Who owns a brief's point and by when, as the past meeting's notes say: "You · by Friday". Only
  * for the point's own action or follow-up, never one that merely shares a cited line with it: a
- * question about the data agreement is not the action to chase legal about it. The point's own
- * claim, in the newest meeting it cites, is the one citing the same lines (most alike first), then
- * the one whose words it says; under Decisions, Open questions and Risks, a point has no owner.
+ * question about the data agreement is not the action to chase legal about it, and an action of
+ * Dana's is not the point "You: run the training". The point's own claim is in the newest meeting
+ * it cites that has one: the claim citing the same lines (most alike first), then the one whose
+ * words it says, and never one owned by someone other than the owner the point names. Under
+ * Decisions, Open questions and Risks a point has no owner. What the point already says, "Dana:"
+ * or "by Wednesday", is not said again beside it.
  */
 export function briefPointOwner(
   brief: Pick<Brief, 'meetings'>, heading: string, item: Pick<BriefItem, 'text' | 'sources'>,
   claimsOf: (meetingId: string) => readonly MeetingClaim[],
 ): string | undefined {
   const holds = sectionHolds(heading);
-  const source = newestSource(brief, item);
-  if (!source || holds === 'other') return undefined;
-  const cited = new Set(source.evidenceSegmentIds);
+  if (holds === 'other') return undefined;
   const words = contentWords(item.text);
+  const said = wordsOf(item.text);
+  // "Dana:" or "You:" names the point's owner; "Changed:" names no one the notes know.
+  const people = ['You', ...item.sources.flatMap((source) => claimsOf(source.meetingId).flatMap((claim) => claim.person ? [claim.person] : []))];
+  const prefix = lineOwner(item.text);
+  const named = prefix && people.some((person) => sameOwner(prefix, person)) ? prefix : undefined;
   const action = (claim: MeetingClaim) => claim.type === 'action_item' || claim.type === 'follow_up';
-  const ranked = claimsOf(source.meetingId).flatMap((claim) => {
-    if (holds === 'actions' && !action(claim)) return [];
-    const shared = claim.evidenceSegmentIds.filter((id) => cited.has(id)).length;
-    if (!shared) return [];
-    const said = contentWords(claim.text);
-    return [{ claim, overlap: shared / new Set([...cited, ...claim.evidenceSegmentIds]).size,
-      words: said.size ? [...said].filter((word) => words.has(word)).length / said.size : 0 }];
-  }).sort((left, right) => right.overlap - left.overlap || right.words - left.words);
-  const own = ranked[0]?.claim;
-  return own && action(own) ? claimOwnerAndDue(own) : undefined;
+  const started = (source: BriefSource) => Date.parse(brief.meetings.find((meeting) => meeting.id === source.meetingId)?.startedAt ?? '') || 0;
+  for (const source of item.sources.toSorted((left, right) => started(right) - started(left))) {
+    const cited = new Set(source.evidenceSegmentIds);
+    const ranked = claimsOf(source.meetingId).flatMap((claim) => {
+      if (holds === 'actions' && !action(claim)) return [];
+      if (named && claim.person && !sameOwner(named, claim.person)) return [];
+      const shared = claim.evidenceSegmentIds.filter((id) => cited.has(id)).length;
+      if (!shared) return [];
+      const its = contentWords(claim.text);
+      return [{ claim, overlap: shared / new Set([...cited, ...claim.evidenceSegmentIds]).size,
+        words: its.size ? [...its].filter((word) => words.has(word)).length / its.size : 0 }];
+    }).sort((left, right) => right.overlap - left.overlap || right.words - left.words);
+    const own = ranked[0]?.claim;
+    if (!own) continue;
+    if (!action(own)) return undefined;
+    const person = own.person && !said.has([...wordsOf(own.person)][0] ?? '') ? own.person : undefined;
+    const due = own.due && ![...contentWords(own.due)].every((word) => said.has(word)) ? own.due : undefined;
+    return claimOwnerAndDue({ ...(person ? { person } : {}), ...(due ? { due } : {}) });
+  }
+  return undefined;
 }
 
 export function briefMarkdown(brief: Omit<Brief, 'path'>): string {

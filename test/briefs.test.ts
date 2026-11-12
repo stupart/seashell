@@ -167,33 +167,47 @@ test('a point citing several meetings is shown at the newest, which supersedes t
 });
 
 test("a brief's point shows the owner and due date of its own action only, never one that shares a cited line", () => {
-  // The rc35 acceptance brief before the Acme weekly sync (made-up), and the sync's own notes.
+  // The w9 re-run's brief before the Acme weekly sync (made-up), and the two meetings' own notes.
   const brief: Pick<Brief, 'meetings'> = { meetings: [
     { id: 'sync', title: 'Acme weekly sync', startedAt: '2026-11-10T20:00:00Z', moments: {} },
     { id: 'kickoff', title: 'Acme pilot kickoff', startedAt: '2026-11-03T20:00:00Z', moments: {} },
   ] };
-  const claim = (type: MeetingClaim['type'], text: string, ids: number[], extra: Partial<MeetingClaim> = {}): MeetingClaim =>
-    ({ id: text, type, text, evidenceSegmentIds: ids.map((id) => `s${String(id).padStart(6, '0')}`), confidence: 0.9, ...extra });
-  const sync = [
-    claim('decision', 'The pilot user list deadline moved to Wednesday because two team leads still need to send names.', [5, 6, 7]),
-    claim('action_item', 'Finish the pilot user list.', [5, 6, 7], { speakerId: 'REMOTE_00', due: 'by Wednesday' }),
-    claim('open_question', 'Is a data processing agreement needed? Legal hasn\'t answered yet.', [14]),
-    claim('follow_up', 'Chase legal on the data processing agreement.', [14, 15], { person: 'You', due: 'before the pilot starts' }),
-    claim('follow_up', 'Next weekly sync at the same time next week.', [16], { due: 'same time next week' }),
-  ];
-  const point = (text: string, ids: number[]) => ({ text, sources: [{ meetingId: 'sync', evidenceSegmentIds: ids.map((id) => `s${String(id).padStart(6, '0')}`) }] });
-  const owner = (heading: string, text: string, ids: number[]) => briefPointOwner(brief, heading, point(text, ids), (id) => id === 'sync' ? sync : []);
-  expect(owner('Open actions', 'Dana: finish the pilot user list, due by Wednesday (two team leads still need to send names).', [5, 6, 7])).toBe('by Wednesday');
-  expect(owner('Open actions', 'You: chase legal on the data processing agreement before the pilot starts.', [14, 15])).toBe('You · before the pilot starts');
+  const ids = (lines: number[]) => lines.map((id) => `s${String(id).padStart(6, '0')}`);
+  const claim = (type: MeetingClaim['type'], text: string, lines: number[], extra: Partial<MeetingClaim> = {}): MeetingClaim =>
+    ({ id: text, type, text, evidenceSegmentIds: ids(lines), confidence: 0.9, ...extra });
+  const claims: Record<string, MeetingClaim[]> = {
+    sync: [
+      claim('decision', 'The pilot user list is now due Wednesday, because two team leads still need to send names.', [5, 6, 7]),
+      claim('action_item', 'Finish the pilot user list', [5, 6, 7], { person: 'Dana Whitfield', due: 'by Wednesday' }),
+      claim('action_item', 'Tell the team about the training session', [9, 10], { person: 'Dana Whitfield' }),
+      claim('open_question', 'Is a data processing agreement needed? Legal hasn\'t said yet.', [14]),
+      claim('follow_up', 'Chase legal on the data processing agreement', [14, 15], { person: 'You', due: 'before the pilot starts' }),
+      claim('follow_up', 'Hold the next weekly check-in at the same time next week', [16]),
+    ],
+    kickoff: [claim('action_item', 'Set up and run a training session of about 30 minutes for the support team.', [21, 22, 23],
+      { person: 'You', due: 'the week of the 17th' })],
+  };
+  const point = (text: string, ...sources: Array<[string, number[]]>) =>
+    ({ text, sources: sources.map(([meetingId, lines]) => ({ meetingId, evidenceSegmentIds: ids(lines) })) });
+  const owner = (heading: string, item: ReturnType<typeof point>) => briefPointOwner(brief, heading, item, (id) => claims[id] ?? []);
   // The question shares a line with the follow-up to chase legal, but it is not that follow-up.
-  expect(owner('Open questions', 'Is a separate data processing agreement needed for the pilot? Legal hasn\'t answered yet.', [14])).toBeUndefined();
-  expect(owner('Since last time', 'Legal still hasn\'t said whether a data processing agreement is needed.', [14])).toBeUndefined();
+  expect(owner('Open questions', point('Is a separate data processing agreement needed for the pilot? Legal still hasn\'t answered.', ['sync', [14]]))).toBeUndefined();
+  expect(owner('Since last time', point('Legal still hasn\'t said whether a data processing agreement is needed.', ['sync', [14]]))).toBeUndefined();
   // A decision has no owner, even when an action rests on the same lines.
-  expect(owner('Decisions so far', 'Changed: the pilot user list deadline moved from Monday to Wednesday.', [6, 7])).toBeUndefined();
-  expect(owner('Decisions so far', 'Weekly progress sync at the same time each week.', [16])).toBeUndefined();
-  // "Since last time" holds any kind of point: an action's own words find it.
-  expect(owner('Since last time', 'The pilot user list slipped and is now due Wednesday.', [5, 6, 7])).toBe('by Wednesday');
-  expect(owner('Since last time', 'Legal still hasn\'t answered, and you\'ll chase them.', [14, 15])).toBe('You · before the pilot starts');
+  expect(owner('Decisions so far', point('Changed: the pilot user list deadline moved from Monday to Wednesday.', ['sync', [6, 7]]))).toBeUndefined();
+  // "You: run the training" is not Dana's action on the same line: its own is in the older meeting it cites.
+  expect(owner('Open actions', point('You: run the 30-minute training session for the support team, now booked for November 18 at 10am.',
+    ['kickoff', [21, 23]], ['sync', [9]]))).toBe('the week of the 17th');
+  // What the point already says is not said again beside it; what it does not say is.
+  expect(owner('Open actions', point('Dana Whitfield: finish the pilot user list, by Wednesday.', ['sync', [5, 6, 7]]))).toBeUndefined();
+  expect(owner('Open actions', point('You: chase legal on the data processing agreement, before the pilot starts.', ['sync', [14, 15]]))).toBeUndefined();
+  // "Since last time" holds any kind of point: one that says the decision again has no owner; one that says the action does.
+  expect(owner('Since last time', point('The pilot user list slipped to Wednesday because two team leads still needed to send names.', ['sync', [5, 6, 7]])))
+    .toBeUndefined();
+  expect(owner('Since last time', point('The pilot user list is still being finished.', ['sync', [5, 6, 7]]))).toBe('Dana Whitfield · by Wednesday');
+  expect(owner('Since last time', point('Legal still hasn\'t answered, and you\'ll chase them.', ['sync', [14, 15]]))).toBe('before the pilot starts');
+  // "Changed:" names no one the notes know, so it never hides an owner.
+  expect(owner('Since last time', point('Changed: Dana is still finishing the pilot user list.', ['sync', [6, 7]]))).toBe('by Wednesday');
 });
 
 test('a brief citing a meeting or moment it was not given is refused', async () => {
