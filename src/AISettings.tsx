@@ -122,7 +122,7 @@ export default function AISettings(props: {
     request.current?.abort();
     const controller = new AbortController(); request.current = controller;
     setTesting(true); setTest(undefined); setError(undefined);
-    void testMeetingAi(currentMeetingRoutes(props.current), { mode: props.current?.mode ?? 'hybrid', signal: controller.signal })
+    void testMeetingAi(currentMeetingRoutes(props.current), { mode: props.current?.mode ?? 'hybrid', signal: controller.signal, surface: 'app' })
       .then((result) => { if (!controller.signal.aborted) setTest(result); })
       .catch((cause) => { if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : String(cause)); })
       .finally(() => { if (!controller.signal.aborted) setTesting(false); });

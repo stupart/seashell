@@ -1362,9 +1362,11 @@ async function executeAiTest(json: boolean): Promise<number> {
   } else {
     print(['Meeting AI connection', ...result.routes.map((route) => {
       const roles = route.roles.map((role) => ROLE_NAMES[role]).join(', ');
+      // Two roles on one model at different efforts are two routes, so each says its effort.
+      const ai = `${route.backend} ${route.model}${route.effort ? `, ${route.effort} effort` : ''}`;
       return route.ok
-        ? `  ✓ ${roles} · ${route.backend} ${route.model}${route.latencyMs === undefined ? '' : ` · answered in ${(route.latencyMs / 1000).toFixed(1)} s`}`
-        : `  ✗ ${roles} · ${route.backend} ${route.model}\n    ${route.reason}`;
+        ? `  ✓ ${roles} · ${ai}${route.latencyMs === undefined ? '' : ` · answered in ${(route.latencyMs / 1000).toFixed(1)} s`}`
+        : `  ✗ ${roles} · ${ai}\n    ${route.reason}`;
     })].join('\n'));
   }
   return result.ok ? 0 : 1;

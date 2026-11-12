@@ -193,6 +193,20 @@ test('the AI test checks the engine first, then each distinct route in use once,
   expect((await testMeetingAi({}, { checkEngine: () => {}, probe })).ok).toBeFalse();
 });
 
+test('two roles on one model at different efforts are two routes, each with its effort; the app is told where to go, not a command', async () => {
+  const deep: HumainMeetingRoute = { backend: 'claude-code', model: 'opus[1m]', effort: 'high' };
+  const chat: HumainMeetingRoute = { backend: 'claude-code', model: 'opus[1m]', effort: 'medium' };
+  const probe = async (route: HumainMeetingRoute) => route.effort === 'high'
+    ? { ok: true, backend: route.backend, model: route.model, latencyMs: 2300 }
+    : { ok: false, backend: route.backend, model: route.model, failure: { kind: 'model-missing' as const, message: '' } };
+  const terminal = await testMeetingAi({ reconciliation: deep, chat }, { mode: 'post-session', checkEngine: () => {}, probe });
+  expect(terminal.routes.map((route) => [route.roles, route.effort])).toEqual([[['reconciliation'], 'high'], [['chat'], 'medium']]);
+  expect(terminal.routes[1]?.reason).toBe('Claude Code does not offer the model "opus[1m]". Choose another in Settings (,) or with seashell ai setup.');
+  const app = await testMeetingAi({ reconciliation: deep, chat }, { mode: 'post-session', checkEngine: () => {}, probe, surface: 'app' });
+  expect(app.routes[1]?.reason).toBe('Claude Code does not offer the model "opus[1m]". Choose another under Models.');
+  expect(app.routes[1]?.reason).not.toContain('seashell');
+});
+
 test('the engine\'s own usage line says which meeting actions it knows, and so whether it is revision 4', async () => {
   const { olderThanRevision4, parseMeetingActions } = await import('../src/humain-client.ts');
   const rev3 = 'Humain failed: Usage: humain meeting observe|reconcile|chat|extract <request.json> [--store <directory>] [--run-id <id>]';

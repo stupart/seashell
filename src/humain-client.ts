@@ -457,6 +457,8 @@ export interface MeetingAiRouteTest {
   roles: MeetingAiRole[];
   backend: HumainBackend;
   model: string;
+  /** How hard the model thinks, when the route says: two roles on one model at different efforts are two routes. */
+  effort?: string;
   ok: boolean;
   latencyMs?: number;
   failure?: { kind: HumainRouteFailureKind | 'engine-missing'; message: string };
@@ -474,14 +476,18 @@ const PROVIDER_NAMES: Record<HumainBackend, string> = {
   codex: 'Codex', 'claude-code': 'Claude Code', openrouter: 'OpenRouter', 'local-openai': 'Your local model server',
 };
 
+/** Where a test's answer is read: in a terminal, a command is the way on; in the app, a place in it. */
+export type MeetingAiTestSurface = 'terminal' | 'app';
+
 function plainReason(kind: NonNullable<MeetingAiRouteTest['failure']>['kind'],
-  route: { backend: HumainBackend; model: string }, message: string): string {
+  route: { backend: HumainBackend; model: string }, message: string, surface: MeetingAiTestSurface): string {
   const provider = PROVIDER_NAMES[route.backend];
   const detail = message.trim() ? ` ${message.trim()}` : '';
   switch (kind) {
     case 'engine-missing': return message;
     case 'not-signed-in': return `${provider} is not signed in.${detail}`;
-    case 'model-missing': return `${provider} does not offer the model "${route.model}". Choose another in Settings (,) or with seashell ai setup.${detail}`;
+    case 'model-missing': return `${provider} does not offer the model "${route.model}". ${surface === 'app'
+      ? 'Choose another under Models.' : 'Choose another in Settings (,) or with seashell ai setup.'}${detail}`;
     case 'timeout': return `${provider} did not answer in time.${detail}`;
     default: return `${provider} could not answer.${detail}`;
   }
@@ -499,6 +505,8 @@ export async function testMeetingAi(
     env?: NodeJS.ProcessEnv;
     signal?: AbortSignal;
     timeoutMs?: number;
+    /** Where the reasons are read; a terminal's name commands. */
+    surface?: MeetingAiTestSurface;
     /** Seams for tests: no engine is started and no prompt is sent. */
     checkEngine?: () => void;
     probe?: typeof probeHumainRoute;
@@ -525,7 +533,7 @@ export async function testMeetingAi(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { ok: false, engine: { ready: false, detail: message }, routes: [...distinct.values()].map(({ route, roles }) => ({
-      roles, backend: route.backend, model: route.model, ok: false,
+      roles, backend: route.backend, model: route.model, ...(route.effort ? { effort: route.effort } : {}), ok: false,
       failure: { kind: 'engine-missing', message }, reason: message,
     })) };
   }
@@ -533,9 +541,9 @@ export async function testMeetingAi(
   const results: MeetingAiRouteTest[] = [];
   for (const { route, roles } of distinct.values()) {
     const result = await probe(route, { env: options.env, signal: options.signal, timeoutMs: options.timeoutMs });
-    results.push({ roles, backend: route.backend, model: route.model, ok: result.ok,
+    results.push({ roles, backend: route.backend, model: route.model, ...(route.effort ? { effort: route.effort } : {}), ok: result.ok,
       ...(result.latencyMs === undefined ? {} : { latencyMs: result.latencyMs }),
-      ...(result.failure ? { failure: result.failure, reason: plainReason(result.failure.kind, route, result.failure.message) } : {}) });
+      ...(result.failure ? { failure: result.failure, reason: plainReason(result.failure.kind, route, result.failure.message, options.surface ?? 'terminal') } : {}) });
   }
   return { ok: results.length > 0 && results.every((result) => result.ok), engine: { ready: true }, routes: results };
 }
