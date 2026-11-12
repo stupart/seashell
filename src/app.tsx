@@ -45,7 +45,7 @@ import { briefKey, findBrief, makeBrief, NoBriefHistoryError, readComingUp, type
 import { draftFollowUp, draftText, mailtoUrl, type DraftKind, type FollowUpDraft } from './drafts.ts';
 import { Chalk } from 'chalk';
 import { CAUTION, HEADING, META, meetingViewLines, OWNER_NOTES_UNREAD, plainMeetingLines, SUBHEADING, type MeetingView } from './meeting-tui.ts';
-import { FROM_YOUR_NOTES_HELP, HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
+import { FROM_YOUR_NOTES_HELP, HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, sheetInset, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
 import { lastTranscriptScroll, timedTranscriptRows, transcriptWindow, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
   renderText,
@@ -1915,7 +1915,8 @@ export default function App(props: {
   };
 
   // The sheets that scroll, as rows: an answer during the call, a follow-up, a brief.
-  const sheetColumns = terminal.columns - 2;
+  // Sheets start where the notes do, a column in on a wide window.
+  const sheetColumns = terminal.columns - 2 - sheetInset(terminal.columns);
   const sheetRowCount = Math.max(1, terminal.rows - 3);
   const liveLines = liveAnswer ? sheetLines([
     { text: liveAnswer.shown, dim: true }, '',
@@ -2313,6 +2314,8 @@ export default function App(props: {
 
     if (audioHelpOpen) {
       if (input === 'i' || key.escape) { setAudioHelpOpen(false); return; }
+      // With access allowed, hearing it is the test: Enter listens to the microphone on its own.
+      if (key.return && micHelpTests) { setAudioHelpOpen(false); openGuide(false, 'microphone'); return; }
       // The same keys as the guided setup: o for Sound settings, p for Privacy.
       if (input === 'o' || input === 'p') {
         const target = input === 'o' ? 'x-apple.systempreferences:com.apple.preference.sound?input'
@@ -2964,7 +2967,7 @@ export default function App(props: {
     const whens = comingUp.map((meeting) => upcomingWhen(meeting.upcoming.startsAt, now));
     const whenWidth = Math.max(0, ...whens.map((when) => Bun.stringWidth(when)));
     const stateWidth = Math.max(0, ...comingUp.map((meeting) => briefState(meeting, true).length));
-    const titleRoom = Math.max(8, terminal.columns - 2 - 2 - whenWidth - 2 - 2 - stateWidth);
+    const titleRoom = Math.max(8, sheetColumns - 2 - whenWidth - 2 - 2 - stateWidth);
     return <Sheet>
       {comingUp.map((meeting, index) => {
         const chosen = index === comingUpRow;
@@ -2976,7 +2979,7 @@ export default function App(props: {
   })() : null;
   const helpSheet = helpMode ? <Sheet>
     {HELP_ROWS.map(([group, keys]) => <HelpRow key={group} group={group} keys={keys} />)}
-    <Box marginTop={1} flexShrink={0}><Paragraph width={terminal.columns - 2} dimColor text={FROM_YOUR_NOTES_HELP} /></Box>
+    <Box marginTop={1} flexShrink={0}><Paragraph width={sheetColumns} dimColor text={FROM_YOUR_NOTES_HELP} /></Box>
   </Sheet> : null;
 
   // Questions and typed answers take the key bar's row. Their keys are never cut.
@@ -3003,25 +3006,6 @@ export default function App(props: {
       hints: [['y', 'record'], ['n', 'ignore']] }
     : undefined;
   const write: Hint[] = currentMeeting?.ai?.off ? [] : [['Enter', hasNotes ? 'rewrite notes' : 'write notes']];
-  const sheetHints: Hint[] | undefined = notesSetup ? notesSetup.editing !== undefined ? [['Enter', 'save'], ['Esc', 'cancel']]
-      : [...(notesSetup.row === 1 ? [['Enter', 'edit note'] as Hint] : [...write, ['←→', 'change'] as Hint]), ['↑↓', 'choose'], ['Esc', 'back']]
-    : speakerPickerOpen ? suggested ? [['y', 'keep'], ['n', `not ${suggested.label}`], ['Enter', 'rename'], ['↑↓', 'choose'], ['Esc', 'back']]
-      : [['Enter', 'name'], ['↑↓', 'choose'], ['Esc', 'back']]
-    : liveAnswer ? liveAnswer.answer || liveAnswer.error ? [...(liveAnswer.answer && !liveAnswer.saved ? [['+', 'save as note'] as Hint] : []),
-      ...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']] : [['Esc', 'cancel']]
-    : draft ? draft.result ? [['c', 'copy'], ...(draft.result.kind === 'email' ? [['o', 'open in Mail'] as Hint] : []), ['g', 'write again'],
-      ['t', draft.sources ? 'hide times' : 'show times'], ...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']]
-      : draft.error ? [['Enter', 'try again'], ['g', 'write again'], ['Esc', 'back']] : [['Esc', 'cancel']]
-    : briefSheet ? briefSheet.brief ? [...(briefPoints[briefSheet.point ?? 0]?.meeting ? [['Enter', 'where it was said'] as Hint] : []), ['c', 'copy'],
-      ...(briefPoints.length > 1 ? [['↑↓', 'choose'] as Hint] : []), ['o', 'open the file'], ['Esc', 'back']]
-      : briefSheet.retry ? [['Enter', 'try again'], ['Esc', 'back']]
-      : briefSheet.error ? [['Esc', 'back']] : [['Esc', 'cancel']]
-    : comingUpRow !== null ? [...(comingUp[comingUpRow]?.brief ? [['Enter', 'read brief'] as Hint]
-      : comingUp[comingUpRow] && canBrief(comingUp[comingUpRow]!) ? [['Enter', 'make brief'] as Hint] : []), ['↑↓', 'choose'], ['Esc', 'back']]
-    : helpMode ? [['Esc', 'back']]
-    : audioHelpOpen ? [['o', 'Sound settings'], ['p', 'Privacy'], ['Esc', 'back']]
-    : undefined;
-
   const statusProps = showBackgroundStatus ? {
     mode: backgroundRecording ? backgroundWatch?.phase === 'recording' && backgroundWatch.sessionId === backgroundEntry?.id ? captureRecordingMode(backgroundEntry?.captureHealth) : 'unavailable' as RecordingMode
       : view === 'live' && backgroundWatch?.phase === 'awaiting-consent' ? 'awaiting-consent' as RecordingMode
@@ -3104,7 +3088,28 @@ export default function App(props: {
     : yourSide && view === 'record' ? { text: yourSide, source: 'microphone', color: 'yellow' }
     : silentSetup ? { text: silentSetup.detail, source: silentSetup.id === 'microphone' ? 'microphone' : 'computer', color: 'yellow' }
     : undefined;
-  const sheetWidth = terminal.columns - 2;
+  // Mic help with access allowed: one thing to check, and Enter listens to the microphone.
+  const micStatus = featureStatuses?.find((status) => status.id === 'microphone');
+  const micHelpTests = finding?.source !== 'computer' && micStatus !== undefined && micStatus.action !== 'allow-microphone' && summary?.alert?.fix !== ALLOW_MIC;
+  const sheetHints: Hint[] | undefined = notesSetup ? notesSetup.editing !== undefined ? [['Enter', 'save'], ['Esc', 'cancel']]
+      : [...(notesSetup.row === 1 ? [['Enter', 'edit note'] as Hint] : [...write, ['←→', 'change'] as Hint]), ['↑↓', 'choose'], ['Esc', 'back']]
+    : speakerPickerOpen ? suggested ? [['y', 'keep'], ['n', `not ${suggested.label}`], ['Enter', 'rename'], ['↑↓', 'choose'], ['Esc', 'back']]
+      : [['Enter', 'name'], ['↑↓', 'choose'], ['Esc', 'back']]
+    : liveAnswer ? liveAnswer.answer || liveAnswer.error ? [...(liveAnswer.answer && !liveAnswer.saved ? [['+', 'save as note'] as Hint] : []),
+      ...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']] : [['Esc', 'cancel']]
+    : draft ? draft.result ? [['c', 'copy'], ...(draft.result.kind === 'email' ? [['o', 'open in Mail'] as Hint] : []), ['g', 'write again'],
+      ['t', draft.sources ? 'hide times' : 'show times'], ...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']]
+      : draft.error ? [['Enter', 'try again'], ['g', 'write again'], ['Esc', 'back']] : [['Esc', 'cancel']]
+    : briefSheet ? briefSheet.brief ? [...(briefPoints[briefSheet.point ?? 0]?.meeting ? [['Enter', 'where it was said'] as Hint] : []), ['c', 'copy'],
+      ...(briefPoints.length > 1 ? [['↑↓', 'choose'] as Hint] : []), ['o', 'open the file'], ['Esc', 'back']]
+      : briefSheet.retry ? [['Enter', 'try again'], ['Esc', 'back']]
+      : briefSheet.error ? [['Esc', 'back']] : [['Esc', 'cancel']]
+    : comingUpRow !== null ? [...(comingUp[comingUpRow]?.brief ? [['Enter', 'read brief'] as Hint]
+      : comingUp[comingUpRow] && canBrief(comingUp[comingUpRow]!) ? [['Enter', 'make brief'] as Hint] : []), ['↑↓', 'choose'], ['Esc', 'back']]
+    : helpMode ? [['Esc', 'back']]
+    : audioHelpOpen ? micHelpTests ? [['Enter', 'test mic'], ['o', 'Sound settings'], ['Esc', 'back']] : [['o', 'Sound settings'], ['p', 'Privacy'], ['Esc', 'back']]
+    : undefined;
+  const sheetWidth = sheetColumns;
   // Each step's wrapped lines hang under its words, not its number.
   const step = (number: number, text: string) => <Box key={number} flexShrink={0}>
     <Box width={3} flexShrink={0}><Text>{number}.</Text></Box>
@@ -3112,8 +3117,11 @@ export default function App(props: {
   </Box>;
   const audioSheet = audioHelpOpen ? <Sheet>
     {finding && <Box flexShrink={0} marginBottom={1}><Paragraph text={finding.text} width={sheetWidth} color={finding.color} /></Box>}
-    {step(1, 'Check the right microphone is chosen and its level moves.')}
-    {step(2, 'Check Seashell Microphone is allowed in Privacy & Security.')}
+    {/* Allowed already, there is one thing to check, and no list of one. */}
+    {micHelpTests ? <Paragraph text="Check the right microphone is chosen and its level moves." width={sheetWidth} /> : <>
+      {step(1, 'Check the right microphone is chosen and its level moves.')}
+      {step(2, 'Check Seashell Microphone is allowed in Privacy & Security.')}
+    </>}
   </Sheet> : null;
   // The answer, the follow-up and the brief scroll: what is out of view is said in the corner, as a meeting's is.
   const scrollSheet = scrolling ? <Sheet>

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, Text, useStdout } from 'ink';
-import { wrapWords } from './tui-state.ts';
+import { COMPACT_TUI_COLUMNS, wrapWords } from './tui-state.ts';
 
 export type Hint = readonly [key: string, label: string];
 type Tone = 'red' | 'yellow' | 'green' | 'cyan';
@@ -171,10 +171,16 @@ export function ScreenTitle(props: { name: string; color?: Tone; bold?: boolean;
   </Box>;
 }
 
-/** Help, audio help, notes setup and speaker naming take the body instead of pushing it around.
- * The sheet's name goes on the title line, as every screen's does. */
+/** How far a sheet sits in from the frame: where the reader's notes start, a column in on a wide window. */
+export function sheetInset(columns: number): number {
+  return columns >= COMPACT_TUI_COLUMNS ? 1 : 0;
+}
+
+/** Help, audio help, notes setup and speaker naming take the body instead of pushing it around, starting
+ * in the column the body they cover starts in. The sheet's name goes on the title line, as every screen's does. */
 export function Sheet(props: { children: React.ReactNode }) {
-  return <Box flexDirection="column" flexGrow={1} overflow="hidden">
+  const { stdout } = useStdout();
+  return <Box flexDirection="column" flexGrow={1} overflow="hidden" paddingLeft={sheetInset(stdout?.columns ?? 80)}>
     {props.children}
   </Box>;
 }
