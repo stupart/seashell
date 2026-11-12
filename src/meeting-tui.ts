@@ -212,8 +212,12 @@ export function meetingViewLines(
     return claim && ownerOf(claim);
   };
   const shown = [...said];
+  // A note that only your notes say, which Humain keeps as your note: nobody said it, so it is never
+  // "Also said". Your note stays under Your notes, in your words, unless another point already uses it.
+  const onlyYours = (claim: MeetingClaim) => claim.type === 'note' && !claim.evidenceSegmentIds.length &&
+    !claim.removedEvidenceSegmentIds?.length && Boolean(claim.ownerNoteIds?.length);
   const fromClaims = (types: MeetingClaimType[]): Item[] => {
-    const items = claims.filter((claim) => types.includes(claim.type) && !repeated(claim));
+    const items = claims.filter((claim) => types.includes(claim.type) && !repeated(claim) && !onlyYours(claim));
     shown.push(...items.map((claim) => saying(claim.text, claim.evidenceSegmentIds)));
     return items.map((claim) => ({ text: claim.text, ids: claim.evidenceSegmentIds, owner: ownerOf(claim),
       removed: sourceLineRemoved(claim), notes: claim.ownerNoteIds }));
@@ -257,9 +261,10 @@ export function meetingViewLines(
     });
     return lines.length ? [`${SUBHEADING}${name}`, ...lines] : [];
   });
-  // Notes the AI has not read yet, or could not: during the call, or before notes are written.
-  // Once the notes use one, it shows there, marked ✎, and not here a second time.
-  const used = new Set([...claims.flatMap((claim) => claim.ownerNoteIds ?? []),
+  // Notes the AI has not read yet, or could not: during the call, or before notes are written. And
+  // notes it kept as yours, about something nobody said. Once the notes use one, it shows there, marked ✎,
+  // and not here a second time.
+  const used = new Set([...claims.filter((claim) => !onlyYours(claim)).flatMap((claim) => claim.ownerNoteIds ?? []),
     ...sections.flatMap((section) => section.items.flatMap((item) => item.ownerNoteIds ?? []))]);
   const unused = ownerNotes.filter((note) => !used.has(note.id));
   const yours = unused.length ? ['', `${HEADING}Your notes`, ...unused.map(noteBullet),

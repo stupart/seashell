@@ -28,9 +28,10 @@ Object.defineProperty(process.stdout, 'rows', { value: 30 });
 mock.module('../../src/watch-lock.ts', () => ({ acquireMeetingWatchLock: () => undefined }));
 const asks: string[] = [];
 let down = false;
+let older = false;
 const client = { ...await import('../../src/humain-client.ts') };
 mock.module('../../src/humain-client.ts', () => ({ ...client,
-  meetingEngineActions: async () => new Set(['observe', 'reconcile', 'chat', 'extract', 'brief', 'draft']),
+  meetingEngineActions: async () => new Set(['observe', 'reconcile', 'chat', 'extract', ...(older ? [] : ['brief', 'draft'])]),
   runHumainMeeting: async (_action: string, request: { draft?: { ask?: string }; segments: Array<{ id: string }> }) => {
     asks.push(request.draft?.ask ?? '');
     if (down) throw new Error('The AI did not answer.');
@@ -82,5 +83,12 @@ try {
   await type('\r');
   await until(() => asks.length === 4 && screen().includes('Subject: Next steps'), 'Enter tries again');
   assert.equal(asks[3], 'keep it short and warm');
+  // An engine too old for follow-ups says what to do next in plain words, never a command, and asks nothing.
+  older = true;
+  await type('g'); await type('\r');
+  await until(() => screen().includes('This AI engine cannot write follow-ups yet. Install a newer AI engine, then try again.'),
+    'an older engine says plainly what to do');
+  assert(!screen().includes('seashell ai install'), `the app shows no command\n${screen()}`);
+  assert.equal(asks.length, 4);
   process.stdout.write(JSON.stringify({ passed: true }) + '\n');
 } finally { app.unmount(); input.destroy(); output.destroy(); rmSync(root, { recursive: true, force: true }); }

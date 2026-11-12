@@ -7,6 +7,7 @@ import {
   briefKey,
   findBrief,
   makeBrief,
+  newestSource,
   NoBriefHistoryError,
   ownerKeys,
   readComingUp,
@@ -14,6 +15,7 @@ import {
   recordBriefAttempt,
   relevantMeetings,
   writeNextMeeting,
+  type Brief,
   type UpcomingMeeting,
 } from '../src/briefs.ts';
 import { draftAsk, draftFollowUp, draftText, mailtoUrl } from '../src/drafts.ts';
@@ -143,6 +145,22 @@ test('nothing to read is said plainly, and an older engine is told to update bef
   // An engine that cannot say prints its usage instead: the same plain answer.
   const usage: typeof runHumainMeeting = async () => { throw new Error('Humain failed: Usage: humain meeting observe|reconcile|chat|extract <request.json>'); };
   await expect(makeBrief(root, upcoming('Acme pilot', [dana]), { route, runner: usage, env })).rejects.toThrow('cannot write briefs yet');
+});
+
+test('a point citing several meetings is shown at the newest, which supersedes the rest', () => {
+  // Newest first, as a brief lists them; the model may cite them in any order.
+  const brief: Pick<Brief, 'meetings'> = { meetings: [
+    { id: 'sync', title: 'Acme weekly sync', startedAt: '2026-11-10T20:00:00Z', moments: { s000006: 60 } },
+    { id: 'kickoff', title: 'Acme pilot kickoff', startedAt: '2026-11-03T20:00:00Z', moments: { s000010: 108 } },
+  ] };
+  const kickoff = { meetingId: 'kickoff', evidenceSegmentIds: ['s000010'] };
+  const sync = { meetingId: 'sync', evidenceSegmentIds: ['s000006'] };
+  expect(newestSource(brief, { sources: [kickoff, sync] })).toEqual(sync);
+  expect(newestSource(brief, { sources: [sync, kickoff] })).toEqual(sync);
+  expect(newestSource(brief, { sources: [kickoff] })).toEqual(kickoff);
+  // A meeting the brief does not list never wins over one it does.
+  expect(newestSource(brief, { sources: [{ meetingId: 'gone', evidenceSegmentIds: ['s1'] }, kickoff] })).toEqual(kickoff);
+  expect(newestSource(brief, { sources: [] })).toBeUndefined();
 });
 
 test('a brief citing a meeting or moment it was not given is refused', async () => {
