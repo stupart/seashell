@@ -211,6 +211,18 @@ export function briefCitation(brief: Pick<Brief, 'meetings'>, source: BriefSourc
   return `${meeting.title}, ${day(meeting.startedAt)}${times.length ? `, ${sentenceClock(times[0]!)}` : ''}`;
 }
 
+/**
+ * Where the app shows a point: at the newest meeting it cites. Later meetings supersede earlier ones, so a
+ * deadline that moved is placed, and its owner and due read, where it moved, not where it was first set.
+ */
+export function newestSource(brief: Pick<Brief, 'meetings'>, item: Pick<BriefItem, 'sources'>): BriefSource | undefined {
+  const started = (source: BriefSource) => {
+    const meeting = brief.meetings.find((candidate) => candidate.id === source.meetingId);
+    return meeting ? Date.parse(meeting.startedAt) : Number.NEGATIVE_INFINITY;
+  };
+  return item.sources.toSorted((left, right) => started(right) - started(left))[0];
+}
+
 export function briefMarkdown(brief: Omit<Brief, 'path'>): string {
   const cite = (item: BriefItem) => item.sources.length ? ` _(${item.sources.map((source) => briefCitation(brief, source)).filter(Boolean).join('; ')})_` : '';
   return [

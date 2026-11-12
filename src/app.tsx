@@ -41,7 +41,7 @@ import {
 } from './meeting-artifact.ts';
 import { askDuringCall, catchUpQuestion, chatWithMeeting, enrichMeeting, type LiveAnswer } from './meeting-enrichment.ts';
 import { addMeetingNote, addRecordingNote, meetingOwnerNotes, recordingBundle } from './owner-notes.ts';
-import { briefKey, findBrief, makeBrief, NoBriefHistoryError, readComingUp, type Brief, type ComingUpMeeting } from './briefs.ts';
+import { briefKey, findBrief, makeBrief, newestSource, NoBriefHistoryError, readComingUp, type Brief, type ComingUpMeeting } from './briefs.ts';
 import { draftFollowUp, draftText, mailtoUrl, type DraftKind, type FollowUpDraft } from './drafts.ts';
 import { Chalk } from 'chalk';
 import { CAUTION, HEADING, META, meetingViewLines, OWNER_NOTES_UNREAD, plainMeetingLines, SUBHEADING, type MeetingView } from './meeting-tui.ts';
@@ -1960,9 +1960,10 @@ export default function App(props: {
     try { const artifact = loadMeetingArtifact(libraryRoot, meeting.id); return [meeting.id, artifact?.analysis?.claims ?? artifact?.provisionalClaims ?? []]; }
     catch { return [meeting.id, []]; }
   })), [briefSheet?.brief?.key, libraryRoot]);
-  // The points a brief cites, in order: which past meeting, and when in it.
+  // The points a brief cites, in order: which past meeting, and when in it. A point citing several is shown
+  // at the newest, which supersedes the rest.
   const briefPoints = (briefSheet?.brief?.sections ?? []).flatMap((section) => section.items).map((item) => {
-    const source = item.sources[0];
+    const source = newestSource(briefSheet!.brief!, item);
     const meeting = source && briefSheet!.brief!.meetings.find((candidate) => candidate.id === source.meetingId);
     const times = source?.evidenceSegmentIds.flatMap((id) => meeting?.moments[id] === undefined ? [] : [meeting.moments[id]!]).sort((a, b) => a - b) ?? [];
     const claim = source && briefClaims.get(source.meetingId)?.find((candidate) => (candidate.type === 'action_item' || candidate.type === 'follow_up')
