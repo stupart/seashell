@@ -11,11 +11,17 @@ const NARROW = 54;
 /** What a component draws, as plain rows, at this many columns. */
 async function rows(node: React.ReactElement, columns: number): Promise<string[]> {
   let latest = '';
-  const stdout = Object.assign(new Writable({ write(chunk, _encoding, done) { latest = chunk.toString() || latest; done(); } }), { columns, rows: 10 });
+  // Only a frame with something in it: Ink also writes a bare line break, as it unmounts and under CI.
+  const stdout = Object.assign(new Writable({ write(chunk, _encoding, done) {
+    if (stripVTControlCharacters(chunk.toString()).trim()) latest = chunk.toString();
+    done();
+  } }), { columns, rows: 10 });
   const app = render(node, { stdout: stdout as never, debug: true, patchConsole: false, exitOnCtrlC: false });
-  await Bun.sleep(20);
+  // Ink writes its frame on its own schedule, later on a busy Mac: wait for it rather than for a fixed time.
+  const deadline = Date.now() + 2_000;
+  while (!latest && Date.now() < deadline) await Bun.sleep(10);
   app.unmount();
-  return stripVTControlCharacters(latest).replace(/\n$/u, '').split('\n');
+  return stripVTControlCharacters(latest).replace(/^\n+|\n+$/gu, '').split('\n');
 }
 
 test('a toast or a question too long for the key bar keeps to one row: its short form, its first sentence, then its first clause', () => {
