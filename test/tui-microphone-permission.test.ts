@@ -84,7 +84,8 @@ test('a microphone allowed before an update "needs your OK again"; one never all
     dependencies: { microphone, microphoneAllowedBefore: () => allowedBefore, launchAtLogin: () => ({ enabled: true, loaded: true, label: 'f', plistPath: '/f', command: [] }),
       aiEngineInstalled: () => false, transcriptionReady: () => true, systemAudioHelperReady: () => true, speakerSeparationReady: () => true } } as never))
     .find((status) => status.id === 'microphone')!;
-  expect(await read(true)).toMatchObject({ state: 'broken', summary: 'Needs your OK again after the update', action: 'allow-microphone' });
+  // Allowed before: one step fixes it, so it is yellow, and the next step says which key.
+  expect(await read(true)).toMatchObject({ state: 'attention', summary: 'Needs your OK again', fix: 'Press Enter, then choose Allow.', action: 'allow-microphone' });
   expect(await read(false)).toMatchObject({ state: 'broken', summary: 'Not allowed yet', action: 'allow-microphone' });
   // Said in the app, so no command.
   expect(`${(await read(true)).detail} ${(await read(true)).fix}`).not.toContain('seashell');

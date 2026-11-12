@@ -17,6 +17,8 @@ const healthy: FeatureStatusDependencies = {
   watchStatus: () => ({ schemaVersion: 1, phase: 'watching', pid: 1, updatedAtUnixMs: 0 }),
   meetConnection: async () => ({ state: 'idle', detail: 'Join a call', accessibilityTrusted: true }),
   microphone: async () => ({ authorization: 'authorized', detail: 'Allowed.' }),
+  // Never allowed before: another test in this process may have recorded an allowed copy in the shared runtime folder.
+  microphoneAllowedBefore: () => false,
   lastMeeting: () => meeting({ audibleMicrophoneChunks: 8 }),
   speakerSeparationReady: () => false, aiEngineInstalled: () => true,
   transcriptionReady: () => true, systemAudioHelperReady: () => true,

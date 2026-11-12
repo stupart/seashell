@@ -252,11 +252,12 @@ export async function readFeatureStatuses(options: {
               : predatesRecorder && !evidence?.audibleMicrophoneChunks
               ? ' Meetings recorded before this update could not hear you; that is fixed now.' : '') } as const
       : microphone.authorization === 'notDetermined'
-        // After an update macOS asks once more for the new copy: it was allowed, and needs your OK again.
+        // After an update macOS asks once more for the new copy: it was allowed, and needs your OK again. Nothing
+        // failed, and one step fixes it, so it is something to look at, in yellow, never a red ✗.
         ? (deps.microphoneAllowedBefore ?? microphoneAllowedBefore)()
-          ? { state: 'broken', summary: 'Needs your OK again after the update',
+          ? { state: 'attention', summary: 'Needs your OK again',
             detail: 'Seashell was updated, so macOS asks once more about Seashell Microphone. Until you allow it, meetings record other people but not you.',
-            fix: 'Choose Allow when macOS asks.', action: 'allow-microphone', command: 'seashell meeting microphone setup' } as const
+            fix: 'Press Enter, then choose Allow.', action: 'allow-microphone', command: 'seashell meeting microphone setup' } as const
           : { state: 'broken', summary: 'Not allowed yet',
             detail: 'Until you allow it, background meetings record other people but not you.',
             fix: 'Choose Allow when macOS asks.', action: 'allow-microphone', command: 'seashell meeting microphone setup' } as const
