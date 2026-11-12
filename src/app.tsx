@@ -41,7 +41,7 @@ import {
 import { askDuringCall, catchUpQuestion, chatWithMeeting, enrichMeeting, type LiveAnswer } from './meeting-enrichment.ts';
 import { addMeetingNote, addRecordingNote, meetingOwnerNotes, recordingBundle } from './owner-notes.ts';
 import { briefKey, briefPointOwner, findBrief, makeBrief, newestSource, NoBriefHistoryError, readComingUp, type Brief, type BriefSource, type ComingUpMeeting } from './briefs.ts';
-import { draftFollowUp, draftText, mailtoUrl, type DraftKind, type FollowUpDraft } from './drafts.ts';
+import { continuesList, draftFollowUp, draftText, mailtoUrl, type DraftKind, type FollowUpDraft } from './drafts.ts';
 import { Chalk } from 'chalk';
 import { CAUTION, CITED_TOO, HEADING, META, meetingViewLines, OWNER_NOTES_UNREAD, plainMeetingLines, SUBHEADING, whosWhoNames, type MeetingView } from './meeting-tui.ts';
 import { FROM_YOUR_NOTES_HELP, HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, sheetInset, SOURCE_REMOVED_HELP, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
@@ -2013,19 +2013,24 @@ export default function App(props: {
     const times = result.paragraphs.map((paragraph) => [...new Set(paragraph.evidenceSegmentIds
       .flatMap((id) => result.moments[id] === undefined ? [] : [result.moments[id]!]).sort((a, b) => a - b).map(formatTuiClock))]);
     const clockWidth = Math.max(0, ...times.flat().map((time) => time.length));
-    const room = Math.max(8, sheetColumns - (clockWidth ? clockWidth + 2 : 0));
-    const timed = (text: string, index: number): SheetLine[] => {
-      const rows = wrapWords(text, room);
-      return Array.from({ length: Math.max(rows.length, times[index]!.length) }, (_, row) => {
-        const words = rows[row] ?? '', time = times[index]![row];
+    const shown = draft.sources && clockWidth;
+    const room = Math.max(8, sheetColumns - (shown ? clockWidth + 2 : 0));
+    // A bullet wraps under its own words, past its "- ", as the notes' bullets do.
+    const timed = (paragraph: FollowUpDraft['paragraphs'][number], index: number): SheetLine[] => {
+      const bullet = paragraph.kind === 'bullet';
+      const rows = wrapWords(paragraph.text, bullet ? Math.max(6, room - 2) : room)
+        .map((words, row) => bullet ? `${row ? '  ' : '- '}${words}` : words);
+      return Array.from({ length: Math.max(rows.length, shown ? times[index]!.length : 0) }, (_, row) => {
+        const words = rows[row] ?? '', time = shown ? times[index]![row] : undefined;
         return { raw: true, text: time ? `${words}${' '.repeat(Math.max(0, room - Bun.stringWidth(words)))}  ${DIM(time.padStart(clockWidth))}` : words };
       });
     };
     return sheetLines([
       ...(result.kind === 'email' && result.names.length ? [{ text: to, dim: true }] : []),
       ...(result.subject ? [{ text: `Subject: ${result.subject}`, bold: true }, '' as const] : []),
-      ...result.paragraphs.flatMap((paragraph, index) => [...(index ? ['' as const] : []),
-        ...(draft.sources && clockWidth ? timed(paragraph.text, index) : [{ text: paragraph.text }])]),
+      // Paragraphs a blank row apart; the bullets of a list, a row each.
+      ...result.paragraphs.flatMap((paragraph, index) => [...(index && !continuesList(result.paragraphs, index) ? ['' as const] : []),
+        ...timed(paragraph, index)]),
     ], sheetColumns);
   })() : [];
   // Who owns each point a brief cites, from the past meeting's own notes: "You · Fri".

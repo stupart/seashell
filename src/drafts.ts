@@ -24,7 +24,8 @@ import { findTranscriptRecord } from './transcript-library.ts';
 export type DraftKind = 'email' | 'slack';
 
 export interface DraftParagraph {
-  kind: 'greeting' | 'body' | 'closing';
+  /** A bullet is a point of a list, when you asked for one: its words without a marker; Seashell adds "- ". */
+  kind: 'greeting' | 'body' | 'bullet' | 'closing';
   text: string;
   evidenceSegmentIds: string[];
 }
@@ -96,12 +97,14 @@ function parseDraftOutput(value: unknown, kind: DraftKind, validIds: ReadonlySet
   if (!Array.isArray(output.paragraphs) || !output.paragraphs.length) throw new Error('Humain draft output has no paragraphs');
   const paragraphs = output.paragraphs.map((raw, index): DraftParagraph => {
     const paragraph = raw as Record<string, unknown> | undefined;
-    if (!paragraph || !['greeting', 'body', 'closing'].includes(paragraph.kind as string) ||
+    if (!paragraph || !['greeting', 'body', 'bullet', 'closing'].includes(paragraph.kind as string) ||
         typeof paragraph.text !== 'string' || !paragraph.text.trim() || !Array.isArray(paragraph.evidenceSegmentIds) ||
         paragraph.evidenceSegmentIds.some((id) => typeof id !== 'string' || !validIds.has(id))) {
       throw new Error(`Humain draft paragraph ${index} is invalid or cites a line the meeting does not have`);
     }
-    return { kind: paragraph.kind as DraftParagraph['kind'], text: paragraph.text.trim(), evidenceSegmentIds: [...paragraph.evidenceSegmentIds] as string[] };
+    // A bullet's marker is Seashell's to add, so one the AI wrote anyway is not doubled.
+    const text = paragraph.kind === 'bullet' ? paragraph.text.trim().replace(/^[-•*–]\s+/u, '') : paragraph.text.trim();
+    return { kind: paragraph.kind as DraftParagraph['kind'], text, evidenceSegmentIds: [...paragraph.evidenceSegmentIds] as string[] };
   });
   const subject = typeof output.subject === 'string' && output.subject.trim() ? output.subject.trim() : undefined;
   return { ...(kind === 'email' && subject ? { subject } : {}), paragraphs };
@@ -181,9 +184,20 @@ export async function draftFollowUp(
   };
 }
 
-/** The message as it would be pasted: paragraphs a blank line apart, with the subject first for an email. */
+/** A paragraph as it reads: a bullet with its "- ". */
+export function draftParagraphText(paragraph: Pick<DraftParagraph, 'kind' | 'text'>): string {
+  return paragraph.kind === 'bullet' ? `- ${paragraph.text}` : paragraph.text;
+}
+
+/** Whether a paragraph follows the one before it on the next line: bullets in a row are one list. */
+export function continuesList(paragraphs: readonly Pick<DraftParagraph, 'kind'>[], index: number): boolean {
+  return index > 0 && paragraphs[index]!.kind === 'bullet' && paragraphs[index - 1]!.kind === 'bullet';
+}
+
+/** The message as it would be pasted: paragraphs a blank line apart, a list a line a bullet, with the subject first for an email. */
 export function draftText(draft: Pick<FollowUpDraft, 'subject' | 'paragraphs'>, options: { subject?: boolean } = {}): string {
-  const body = draft.paragraphs.map((paragraph) => paragraph.text).join('\n\n');
+  const body = draft.paragraphs.map((paragraph, index) =>
+    `${index === 0 ? '' : continuesList(draft.paragraphs, index) ? '\n' : '\n\n'}${draftParagraphText(paragraph)}`).join('');
   return options.subject !== false && draft.subject ? `Subject: ${draft.subject}\n\n${body}` : body;
 }
 

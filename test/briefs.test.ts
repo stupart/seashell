@@ -288,6 +288,28 @@ test('a follow-up reads what you typed about the meeting, and signs off with you
   expect(draftAsk('as is', [])).toBe('as is');
 });
 
+test('a follow-up asked for bullets reads as a list: "- " before each, a line each, a blank line around the list', async () => {
+  const { root, add } = library();
+  add('acme-call', 'Acme discovery call', 5, [you, dana]);
+  const bullets: typeof runHumainMeeting = async () => ({ runId: 'r', compiledRunId: 'c', status: 'succeeded', receipt: {}, output: {
+    subject: 'Next steps', paragraphs: [
+      { kind: 'greeting', text: 'Hi Dana,', evidenceSegmentIds: [] },
+      { kind: 'body', text: 'Where we landed:', evidenceSegmentIds: ['s000001'] },
+      { kind: 'bullet', text: 'I send the security summary by Friday.', evidenceSegmentIds: ['s000002'] },
+      // A marker the AI wrote anyway is not doubled.
+      { kind: 'bullet', text: '- You confirm the pilot size.', evidenceSegmentIds: ['s000001'] },
+      { kind: 'closing', text: 'Thanks, Sam', evidenceSegmentIds: [] },
+    ] } });
+  const draft = await draftFollowUp(root, 'acme-call', 'email', route, { ask: 'Keep it to three bullets.', runner: bullets, engine: rev4 });
+  expect(draft.paragraphs.map((paragraph) => paragraph.kind)).toEqual(['greeting', 'body', 'bullet', 'bullet', 'closing']);
+  expect(draftText(draft)).toBe('Subject: Next steps\n\nHi Dana,\n\nWhere we landed:\n\n- I send the security summary by Friday.\n' +
+    '- You confirm the pilot size.\n\nThanks, Sam');
+  // Any other kind is still refused.
+  const odd: typeof runHumainMeeting = async () => ({ runId: 'r', compiledRunId: 'c', status: 'succeeded', receipt: {}, output: {
+    subject: 'S', paragraphs: [{ kind: 'aside', text: 'Hm.', evidenceSegmentIds: [] }] } });
+  await expect(draftFollowUp(root, 'acme-call', 'email', route, { runner: odd, engine: rev4 })).rejects.toThrow('paragraph 0 is invalid');
+});
+
 test('a follow-up from a private meeting, or with an older engine, sends nothing and says why', async () => {
   const { root, add } = library();
   add('private', 'Acme pricing', 5, [you, dana], { private: true });
