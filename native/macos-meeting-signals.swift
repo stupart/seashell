@@ -12,6 +12,10 @@ private struct SignalSnapshot: Codable {
     let schemaVersion: Int
     let capturedAtUnixMs: Int64
     let supported: Bool
+    /// False when Core Audio did not answer for every process, as on an
+    /// overloaded Mac: a process missing from the list may still hold its
+    /// microphone, so its absence proves nothing.
+    let complete: Bool
     let frontmostBundleId: String?
     let inputProcesses: [InputProcess]
 }
@@ -64,28 +68,37 @@ private func stringProperty(
     return value as String
 }
 
-private func audioInputProcesses() -> [InputProcess] {
-    guard #available(macOS 14.2, *) else { return [] }
+private func audioInputProcesses() -> (processes: [InputProcess], complete: Bool) {
+    guard #available(macOS 14.2, *) else { return ([], true) }
     var address = propertyAddress(kAudioHardwarePropertyProcessObjectList)
     var dataSize: UInt32 = 0
     let system = AudioObjectID(kAudioObjectSystemObject)
-    guard AudioObjectGetPropertyDataSize(system, &address, 0, nil, &dataSize) == noErr,
-          dataSize > 0 else {
-        return []
+    guard AudioObjectGetPropertyDataSize(system, &address, 0, nil, &dataSize) == noErr else {
+        return ([], false)
     }
+    guard dataSize > 0 else { return ([], true) }
     var ids = [AudioObjectID](
         repeating: 0,
         count: Int(dataSize) / MemoryLayout<AudioObjectID>.size
     )
     guard AudioObjectGetPropertyData(system, &address, 0, nil, &dataSize, &ids) == noErr else {
-        return []
+        return ([], false)
     }
-    return ids.compactMap { objectID in
-        guard (uint32Property(objectID, selector: kAudioProcessPropertyIsRunningInput) ?? 0) != 0,
-              let bundleId = stringProperty(objectID, selector: kAudioProcessPropertyBundleID),
-              !bundleId.isEmpty,
-              let pid = int32Property(objectID, selector: kAudioProcessPropertyPID),
-              pid >= 0 else {
+    var complete = true
+    let processes = ids.compactMap { objectID -> InputProcess? in
+        // A process that exits between the list and this read also lands
+        // here; that costs one poll its evidence, never a recording.
+        guard let running = uint32Property(objectID, selector: kAudioProcessPropertyIsRunningInput) else {
+            complete = false
+            return nil
+        }
+        guard running != 0 else { return nil }
+        guard let pid = int32Property(objectID, selector: kAudioProcessPropertyPID), pid >= 0 else {
+            complete = false
+            return nil
+        }
+        guard let bundleId = stringProperty(objectID, selector: kAudioProcessPropertyBundleID),
+              !bundleId.isEmpty else {
             return nil
         }
         let application = NSRunningApplication(processIdentifier: pid_t(pid))
@@ -95,6 +108,7 @@ private func audioInputProcesses() -> [InputProcess] {
             name: application?.localizedName ?? ""
         )
     }
+    return (processes, complete)
 }
 
 private func currentSnapshot() -> SignalSnapshot {
@@ -104,12 +118,14 @@ private func currentSnapshot() -> SignalSnapshot {
     } else {
         supported = false
     }
+    let input = audioInputProcesses()
     return SignalSnapshot(
         schemaVersion: 1,
         capturedAtUnixMs: Int64(Date().timeIntervalSince1970 * 1_000),
         supported: supported,
+        complete: input.complete,
         frontmostBundleId: NSWorkspace.shared.frontmostApplication?.bundleIdentifier,
-        inputProcesses: audioInputProcesses()
+        inputProcesses: input.processes
     )
 }
 

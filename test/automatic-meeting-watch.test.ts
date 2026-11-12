@@ -70,6 +70,7 @@ for (const fault of ['detector', 'capture-start'] as const) {
     roots.push(root);
     let now = 0;
     let broken = false;
+    let zoomOpen = true;
     let starts = 0;
     let stops = 0;
     const events: string[] = [];
@@ -83,7 +84,7 @@ for (const fault of ['detector', 'capture-start'] as const) {
         readSignals: () => {
           if (broken) throw new Error('detector disconnected');
           return { schemaVersion: 1, capturedAtUnixMs: now, supported: true,
-            inputProcesses: [{ pid: 42, bundleId: 'us.zoom.xos', name: 'Zoom' }] };
+            inputProcesses: zoomOpen ? [{ pid: 42, bundleId: 'us.zoom.xos', name: 'Zoom' }] : [] };
         },
         startCapture: () => {
           starts += 1;
@@ -108,10 +109,17 @@ for (const fault of ['detector', 'capture-start'] as const) {
       expect(starts).toBe(2);
       expect(service.phase).toBe('recording');
     } else {
+      // A lost detector says nothing about the call: it keeps recording, and says why it cannot tell.
       broken = true;
-      now = 2_000;
+      for (now = 2_000; now <= 62_000; now += 3_000) expect((await service.pollOnce()).kind).toBe('none');
+      expect(service.phase).toBe('recording');
+      expect(events).toContain('watch.warning');
+      expect(stops).toBe(0);
+      // Back, and the call has gone: that ends it, after the grace.
+      broken = false;
+      zoomOpen = false;
       await service.pollOnce();
-      now = 3_001;
+      now += 1_001;
       expect((await service.pollOnce()).kind).toBe('finish');
       expect(stops).toBe(1);
     }

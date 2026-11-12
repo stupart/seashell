@@ -45,6 +45,7 @@ import {
   MeetingAutomationController,
   resolveMeetingCandidate,
   calendarEventIsThisCall,
+  followedCallUnobserved,
   hasConfirmedMeetingEnd,
   isBrowserApplication,
   isVideoCallEvent,
@@ -287,8 +288,12 @@ export class AutomaticMeetingWatchService {
       resolveMeetingCandidate(snapshot, calendar, this.#config.meeting?.automation, meet),
       this.#controller.state, snapshot, meet, this.#parked?.candidate,
     );
-    const action = this.#controller.step(candidate, now.getTime(),
-      hasConfirmedMeetingEnd(this.#controller.state.candidate, meet));
+    const state = this.#controller.state;
+    const followed = ['recording', 'ending', 'awaiting-consent'].includes(state.phase) ||
+      (state.phase === 'cooldown' && state.stoppedByHand) ? state.candidate : undefined;
+    const confirmedEnd = hasConfirmedMeetingEnd(state.candidate, meet);
+    const action = this.#controller.step(candidate, now.getTime(), confirmedEnd,
+      followedCallUnobserved(followed, candidate, snapshot, confirmedEnd));
     if (action.kind === 'suggest') {
       this.#consentId = randomUUID();
       const why = meet && meet.state !== 'connected' ? meet.detail : undefined;

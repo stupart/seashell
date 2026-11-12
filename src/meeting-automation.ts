@@ -60,6 +60,12 @@ export interface MeetingSignalSnapshot {
   readonly schemaVersion: 1;
   readonly capturedAtUnixMs: number;
   readonly supported: boolean;
+  /**
+   * False when Core Audio did not answer for every process, as on an
+   * overloaded Mac: an app missing from inputProcesses may still hold its
+   * microphone. Helpers built before this said nothing, which reads as complete.
+   */
+  readonly complete?: boolean;
   readonly frontmostBundleId?: string;
   readonly inputProcesses: readonly AudioInputProcess[];
 }
@@ -201,6 +207,7 @@ export function parseMeetingSignalSnapshot(value: unknown): MeetingSignalSnapsho
     schemaVersion: 1 as const,
     capturedAtUnixMs: safeInteger(value.capturedAtUnixMs, 'Meeting signal capture time'),
     supported: value.supported,
+    ...(value.complete === false ? { complete: false } : {}),
     ...(typeof value.frontmostBundleId === 'string' && value.frontmostBundleId.trim()
       ? { frontmostBundleId: value.frontmostBundleId.trim() }
       : {}),
@@ -434,6 +441,28 @@ export function hasConfirmedMeetingEnd(candidate: MeetingCandidate | undefined, 
     candidate.id !== `meet:${meet.browser}:${meet.snapshot.meeting}`);
 }
 
+/**
+ * Whether a poll could not tell if the call being followed is still on. A
+ * detector that timed out or is restarting, a process list Core Audio only
+ * half answered, or a Meet page that could not be read is not the call
+ * ending. Only positive evidence is: a complete reading in which the call's
+ * app no longer holds the microphone, another call seen in its place, or
+ * Meet's page saying the call left (confirmedEnd).
+ */
+export function followedCallUnobserved(
+  followed: MeetingCandidate | undefined,
+  candidate: MeetingCandidate | undefined,
+  snapshot: MeetingSignalSnapshot,
+  confirmedEnd = false,
+): boolean {
+  if (!followed || followed.kind === 'manual' || confirmedEnd || candidate?.id === followed.id) return false;
+  // Nothing about the followed app can be proven from a partial reading, whatever else it shows.
+  if (!snapshot.supported || snapshot.complete === false) return true;
+  if (candidate) return false;
+  // Its app still holds the microphone, it just no longer resolves as a call.
+  return snapshot.inputProcesses.some((process) => sameApplicationFamily(process.bundleId, followed.bundleId));
+}
+
 /** Losing a readable Meet tree is not a new audio-only meeting. Preserve an
  * already recording call while its browser still owns microphone input. This
  * never starts capture or overrides a known end. Losing permission to read
@@ -632,7 +661,13 @@ export class MeetingAutomationController {
     return this.#state;
   }
 
-  step(candidate: MeetingCandidate | undefined, nowUnixMs = Date.now(), confirmedEnd = false): MeetingAutomationAction {
+  /**
+   * `unobserved` says this poll could not tell whether the followed call is
+   * still on (followedCallUnobserved). It neither counts toward the end grace
+   * nor resets it: a call ends on positive evidence at both ends of the grace
+   * period, with nothing in between saying it is still on.
+   */
+  step(candidate: MeetingCandidate | undefined, nowUnixMs = Date.now(), confirmedEnd = false, unobserved = false): MeetingAutomationAction {
     if (!this.#config.enabled || this.#config.mode === 'off') {
       this.#state = Object.freeze({ phase: 'watching', confirmations: 0 });
       return NONE;
@@ -643,6 +678,8 @@ export class MeetingAutomationController {
         this.#state = Object.freeze({ ...this.#state, missingSinceUnixMs: undefined });
         return NONE;
       }
+      // A detector timeout is not the call ending: it stays stopped.
+      if (unobserved) return NONE;
       const missingSince = this.#state.missingSinceUnixMs ?? nowUnixMs;
       if (nowUnixMs - missingSince < this.#config.endGraceSeconds * 1_000) {
         this.#state = Object.freeze({ ...this.#state, missingSinceUnixMs: missingSince });
@@ -685,6 +722,7 @@ export class MeetingAutomationController {
         });
         return NONE;
       }
+      if (unobserved) return NONE;
       const missingSince = this.#state.missingSinceUnixMs ?? nowUnixMs;
       if (nowUnixMs - missingSince < this.#config.endGraceSeconds * 1_000) {
         this.#state = Object.freeze({ ...this.#state, phase: 'ending', missingSinceUnixMs: missingSince });
@@ -700,7 +738,7 @@ export class MeetingAutomationController {
     if (this.#state.phase === 'awaiting-consent') {
       if (candidate?.id === this.#state.candidate?.id) {
         this.#state = Object.freeze({ ...this.#state, candidate });
-      } else {
+      } else if (!unobserved) {
         this.#state = Object.freeze({ phase: 'watching', confirmations: 0 });
       }
       return NONE;

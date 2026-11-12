@@ -9,6 +9,8 @@ import { CaptureSessionStore } from '../src/capture-session.ts';
 import { consumeMeetingCommand, writeMeetingCommand } from '../src/meeting-command.ts';
 import type { MeetingSignalSnapshot } from '../src/meeting-automation.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
+import type { SeashellConfig } from '../src/config.ts';
+import type { MeetProbe } from '../src/meet-speakers.ts';
 
 // Tonight's call, in miniature: a Safari call on a Mac so busy that its probes
 // time out, its detector restarts and every poll takes far longer than usual.
@@ -32,11 +34,12 @@ interface BusyState {
 }
 
 /** A watcher over a fake clock whose capture and final pass are counted, not run. */
-function busyWatch(root: string, overrides: (state: BusyState, snapshot: () => MeetingSignalSnapshot) => AutomaticMeetingWatchDependencies = () => ({})) {
+function busyWatch(root: string, overrides: (state: BusyState, snapshot: () => MeetingSignalSnapshot) => AutomaticMeetingWatchDependencies = () => ({}),
+  meeting: Omit<NonNullable<SeashellConfig['meeting']>, 'automation'> = {}) {
   const state: BusyState = { now: 0, input: [SAFARI], starts: 0, stops: 0, finalized: [], events: [] };
   const snapshot = (): MeetingSignalSnapshot => ({ schemaVersion: 1, capturedAtUnixMs: state.now, supported: true, inputProcesses: state.input });
   const service = new AutomaticMeetingWatchService({
-    config: { libraryDir: root, meeting: { automation: { confirmationPolls: 1, endGraceSeconds: 20, resumeWindowSeconds: 180,
+    config: { libraryDir: root, meeting: { ...meeting, automation: { confirmationPolls: 1, endGraceSeconds: 20, resumeWindowSeconds: 180,
       browserWithoutCalendar: 'automatic' } } },
     onEvent: (event) => state.events.push(event),
     dependencies: {
@@ -113,6 +116,62 @@ test('a poll held up by a slow probe keeps the recorder status fresh, so it neve
     expect(readBackgroundWatchStatus(root, { nowUnixMs: 40_000 })?.phase).toBe('watching');
   } finally { stop.abort(); release(); await run; }
   expect(readBackgroundWatchStatus(root, { nowUnixMs: 40_000 })?.phase).toBe('stopped');
+});
+
+/** The same every run: a Park–Miller sequence, so a failure replays exactly. */
+function sequence(seed: number) {
+  let value = seed;
+  return () => { value = value * 48_271 % 2_147_483_647; return value / 2_147_483_647; };
+}
+
+/** What a poll on tonight's Mac saw: mostly the call, often nothing that can be trusted. */
+function overloadedReadings(state: BusyState, snapshot: () => MeetingSignalSnapshot, seed = 7) {
+  const next = sequence(seed);
+  let outage = 0;
+  return {
+    readSignals: (): MeetingSignalSnapshot => {
+      // Now and then the detector is gone for a minute: its heartbeat timed out and it is restarting.
+      if (outage === 0 && next() < 0.02) outage = 20;
+      if (outage > 0) { outage -= 1; throw new Error('Meeting signal detector heartbeat timed out'); }
+      const roll = next();
+      if (roll < 0.15) throw new Error('Meeting signal detector heartbeat timed out');
+      // Core Audio answered for some processes only.
+      if (roll < 0.3) return { ...snapshot(), complete: false, inputProcesses: [] };
+      if (roll < 0.35) return { ...snapshot(), supported: false, inputProcesses: [] };
+      return snapshot();
+    },
+    readMeet: async (): Promise<MeetProbe> => {
+      return next() < 0.5
+        ? { state: 'unavailable', source: 'google-meet-accessibility', detail: 'Browser Accessibility inspection was incomplete.' }
+        : { state: 'unavailable', detail: 'Meeting detection and speaker names could not be checked. Check [V] Speakers.' };
+    },
+    readCalendar: async () => { throw new Error('Calendar did not respond. Meetings are still noticed without it. Check Calendar in Settings.'); },
+  };
+}
+
+test('two hours of detector timeouts, half-read process lists and unreadable Meet pages record one call, never stopped and resumed', async () => {
+  const root = scratch('no-churn');
+  const { state, service } = busyWatch(root, overloadedReadings, {
+    speakerBrowser: 'auto', calendar: { enabled: true, policy: 'all' },
+  });
+  try {
+    for (state.now = 0; state.now < 2 * 60 * 60_000; state.now += 3_000) await service.pollOnce();
+    expect(state.events.filter((event) => event.type.startsWith('meeting.')).map((event) => event.type)).toEqual(['meeting.started']);
+    expect(service.phase).not.toBe('watching');
+    expect([state.starts, state.stops, state.finalized.length]).toEqual([1, 0, 0]);
+    expect(state.events.some((event) => event.type === 'watch.warning' && event.message.includes('heartbeat'))).toBe(true);
+    // The call ends. The Mac is still overloaded, but the readings it can trust say Safari let go of the microphone.
+    state.input = [];
+    const ended = state.now;
+    let finishedAt: number | undefined;
+    for (; state.now <= ended + 120_000 && finishedAt === undefined; state.now += 3_000) {
+      if ((await service.pollOnce()).kind === 'finish') finishedAt = state.now;
+    }
+    expect(finishedAt! - ended).toBeGreaterThanOrEqual(20_000);
+    expect(state.events.filter((event) => event.type.startsWith('meeting.')).map((event) => event.type))
+      .toEqual(['meeting.started', 'meeting.capture-finished']);
+  } finally { await service.shutdown(); }
+  expect(state.finalized).toEqual(['busy-call']);
 });
 
 test('a recording still reads as recording until its capture has closed, so "stopped" is never said early', async () => {

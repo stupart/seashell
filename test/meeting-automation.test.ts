@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
+  followedCallUnobserved,
   MeetingSignalMonitor,
   MeetingAutomationController,
   parseMeetingSignalSnapshot,
@@ -444,4 +445,53 @@ test('a just-ended call is held for resume only by its own browser audio', () =>
   expect(preserveMeetingCandidateDuringObservationGap(other, watching, chrome, gap, held)).toBe(other);
   const left: MeetProbe = { state: 'idle', detail: 'Left', source: 'google-meet-accessibility', absenceConfirmed: true };
   expect(preserveMeetingCandidateDuringObservationGap(undefined, watching, webkit, left, held)).toBeUndefined();
+});
+
+test('a poll that can tell nothing neither ends a call nor resets its end grace', () => {
+  const controller = new MeetingAutomationController({ confirmationPolls: 1, endGraceSeconds: 20 });
+  expect(controller.step(zoom, 0).kind).toBe('start');
+  // Zoom let go of the microphone (positive evidence), then the detector went quiet for a minute.
+  expect(controller.step(undefined, 3_000).kind).toBe('none');
+  for (let at = 6_000; at <= 66_000; at += 3_000) expect(controller.step(undefined, at, false, true).kind).toBe('none');
+  expect(controller.state.phase).toBe('ending');
+  // The next poll it can trust still finds it gone: well past the grace, so it ends.
+  expect(controller.step(undefined, 69_000).kind).toBe('finish');
+
+  const steady = new MeetingAutomationController({ confirmationPolls: 1, endGraceSeconds: 20 });
+  steady.step(zoom, 0);
+  for (let at = 3_000; at <= 600_000; at += 3_000) expect(steady.step(undefined, at, false, true).kind).toBe('none');
+  expect(steady.state.phase).toBe('recording');
+});
+
+test('a call stopped by hand stays stopped, and a question stays asked, through detector timeouts', () => {
+  const stopped = new MeetingAutomationController({ confirmationPolls: 1, endGraceSeconds: 20 });
+  stopped.step(zoom, 0);
+  stopped.stopByHand(1_000);
+  for (let at = 3_000; at <= 120_000; at += 3_000) stopped.step(undefined, at, false, true);
+  // Back, and the same call is still on: it must not start recording again.
+  expect(stopped.step(zoom, 123_000).kind).toBe('none');
+  expect(stopped.state.phase).toBe('cooldown');
+
+  const asking = new MeetingAutomationController({ confirmationPolls: 1 });
+  expect(asking.step({ ...zoom, requiresConsent: true }, 0).kind).toBe('suggest');
+  asking.step(undefined, 3_000, false, true);
+  expect(asking.state.phase).toBe('awaiting-consent');
+});
+
+test('only a complete reading without its app, or another call, is evidence the followed call is gone', () => {
+  const zoomInput = { pid: 42, bundleId: 'us.zoom.xos', name: 'Zoom' };
+  const reading = (complete: boolean | undefined, inputProcesses: typeof zoomInput[] = []) =>
+    parseMeetingSignalSnapshot({ ...silent, inputProcesses, ...(complete === undefined ? {} : { complete }) });
+  expect(reading(false).complete).toBe(false);
+  expect(reading(true).complete).toBeUndefined();
+  expect(followedCallUnobserved(zoom, undefined, reading(undefined))).toBe(false);
+  expect(followedCallUnobserved(zoom, undefined, reading(false))).toBe(true);
+  expect(followedCallUnobserved(zoom, undefined, { ...silent, supported: false })).toBe(true);
+  // Still holding the microphone but no longer resolving as a call: not proof it ended.
+  expect(followedCallUnobserved(zoom, undefined, reading(true, [zoomInput]))).toBe(true);
+  const facetime = { ...zoom, id: 'audio:facetime', bundleId: 'com.apple.FaceTime' };
+  expect(followedCallUnobserved(zoom, facetime, reading(true))).toBe(false);
+  expect(followedCallUnobserved(zoom, facetime, reading(false))).toBe(true);
+  expect(followedCallUnobserved(zoom, undefined, reading(false), true)).toBe(false);
+  expect(followedCallUnobserved({ ...zoom, kind: 'manual' }, undefined, reading(false))).toBe(false);
 });

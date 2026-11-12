@@ -115,6 +115,7 @@ import {
 } from './tui-state.ts';
 import {
   DEFAULT_MEETING_AUTOMATION,
+  followedCallUnobserved,
   hasConfirmedMeetingEnd,
   preserveMeetingCandidateDuringObservationGap,
   MeetingAutomationController,
@@ -1656,9 +1657,16 @@ export default function App(props: {
     let cancelled = false;
     let polling = false;
     const abort = new AbortController();
+    /** The call being recorded or asked about, which a reading that tells nothing must not end. */
+    const followed = () => {
+      const state = meetingAutomationController.current.state;
+      return ['recording', 'ending', 'awaiting-consent'].includes(state.phase) ||
+        (state.phase === 'cooldown' && state.stoppedByHand) ? state.candidate : undefined;
+    };
     const detectorFailed = (signalError: unknown) => {
       if (cancelled || isExiting.current || automaticTransition.current) return;
-      const action = meetingAutomationController.current.step(undefined, Date.now());
+      // A detector that failed says nothing about the call: it is not the call ending.
+      const action = meetingAutomationController.current.step(undefined, Date.now(), false, followed() !== undefined);
       setAutomationPhase(meetingAutomationController.current.state.phase);
       const message = signalError instanceof Error ? signalError.message : String(signalError);
       if (action.kind === 'finish') {
@@ -1681,8 +1689,9 @@ export default function App(props: {
           resolveMeetingCandidate(snapshot, calendarSuggestionRef.current ?? undefined, meetingAutomation, meet),
           meetingAutomationController.current.state, snapshot, meet,
         );
-        const action = meetingAutomationController.current.step(candidate, Date.now(),
-          hasConfirmedMeetingEnd(meetingAutomationController.current.state.candidate, meet));
+        const confirmedEnd = hasConfirmedMeetingEnd(meetingAutomationController.current.state.candidate, meet);
+        const action = meetingAutomationController.current.step(candidate, Date.now(), confirmedEnd,
+          followedCallUnobserved(followed(), candidate, snapshot, confirmedEnd));
         setAutomationPhase(meetingAutomationController.current.state.phase);
         meetingSignalFailure.current = null;
         if (action.kind === 'suggest') {
