@@ -228,11 +228,12 @@ export const HELP_ROWS: ReadonlyArray<readonly [string, string]> = [
   ['When asked', 'y record · n ignore'],
   ['Recording', 'starts and stops with the call · + note this moment · a catch up: "What did I miss?" · space record or stop by hand · V record with video · i audio help'],
   ['Next', 'b meetings coming up, and their briefs'],
-  ['Add', 'f import a file · F import and separate speakers'],
-  ['Setup', ', settings: speakers, AI, vocabulary and more'],
+  // Each of these keeps to one row of a 56-column window, so help and both of its marks fit 24 rows.
+  ['Add', 'f import · F import and separate speakers'],
+  ['Setup', ', settings: speakers, AI, vocabulary'],
 ];
 
 /** What ✎ means, said once in help rather than beside every point. */
 export const FROM_YOUR_NOTES_HELP = '✎ marks a point from your own notes.';
-/** What "source removed" in a point's time column means, said beside what ✎ means. */
-export const SOURCE_REMOVED_HELP = '"source removed" marks a point whose line is no longer in the transcript.';
+/** What "source removed" in a point's time column means, said beside what ✎ means, in one row of a narrow window. */
+export const SOURCE_REMOVED_HELP = '"source removed" marks a point whose line is gone.';
