@@ -38,7 +38,9 @@ writeFileSync(config, JSON.stringify({ libraryDir: join(output, 'library'), meet
 const environment = { ...process.env, SEASHELL_CONFIG: config, SEASHELL_LIBRARY_DIR: join(output, 'library'), SEASHELL_REQUIRE_MEDIA_TESTS: '1',
   SEASHELL_MEETING_COMMAND_PATH: join(output, 'meeting-command.json'),
   // Nor publish a recording state that other tools on this Mac act on.
-  SEASHELL_RECORDING_STATE_PATH: join(output, 'recording-state.json') };
+  SEASHELL_RECORDING_STATE_PATH: join(output, 'recording-state.json'),
+  // Nor replace the installed helper copies that hold the microphone and screen permissions.
+  SEASHELL_RUNTIME_DIR: join(output, 'Runtime') };
 type Result = { name: string; status: 'passed' | 'failed'; durationMs: number; error?: string };
 const results: Result[] = [];
 const metadata = {

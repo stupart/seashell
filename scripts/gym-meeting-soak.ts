@@ -24,6 +24,8 @@ mkdirSync(library, { recursive: true, mode: 0o700 });
 process.env.SEASHELL_MEETING_COMMAND_PATH ||= join(output, 'meeting-command.json');
 // Nor publish its synthetic meetings as the recording state other tools on this Mac act on.
 process.env.SEASHELL_RECORDING_STATE_PATH ||= join(output, 'recording-state.json');
+// Nor replace the installed helper copies that hold the microphone and screen permissions.
+process.env.SEASHELL_RUNTIME_DIR ||= join(output, 'Runtime');
 const helper = join(output, 'audio-fixture');
 writeFileSync(helper, `
 const pcm = Buffer.alloc(48000);
