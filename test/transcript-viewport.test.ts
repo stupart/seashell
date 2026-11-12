@@ -61,6 +61,14 @@ test('a line cut at the top of the view keeps its time and speaker', () => {
   // The last scroll leaves room for that row, so the last words are never pushed out of view.
   const last = lastTranscriptScroll(stacked, 3);
   expect(plain(transcriptWindow(stacked, last, 3)).at(-1)).toBe('A short reply.');
+  // There, the opening line's last row would sit at the top under its pinned time and speaker, pushing the
+  // reply out, so the view starts at the reply a row short: at the end, that row goes above, never under
+  // the newest words, which stay on the key bar.
+  expect(plain(transcriptWindow(stacked, last, 3))).toEqual(['01:05  Speaker 1', 'A short reply.']);
+  expect(plain(transcriptWindow(stacked, last, 3, { end: true }))).toEqual(['', '01:05  Speaker 1', 'A short reply.']);
+  // A view that fills, or a transcript shorter than the view, is left as it is.
+  expect(plain(transcriptWindow(stacked, 1, 3, { end: true }))).toEqual(plain(transcriptWindow(stacked, 1, 3)));
+  expect(plain(transcriptWindow(stacked, 0, 9, { end: true }))).toHaveLength(stacked.length);
   // In columns: the cut row takes its line's time and speaker beside it.
   const columns = timedTranscriptRows(timedRecord, 64, options);
   expect(plain(transcriptWindow(columns, 1, 2))[0]).toMatch(/^00:00  You {8}…\S/u);

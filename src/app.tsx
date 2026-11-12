@@ -1075,7 +1075,9 @@ export default function App(props: {
     ? latestTranscriptScroll
     : Math.min(transcriptScroll, Math.max(latestTranscriptScroll, currentMatch ?? 0));
   // A line cut at the top keeps its time and speaker in view.
-  const visibleTranscriptRows = transcriptWindow(readerRows, visibleTranscriptScroll, visibleRows);
+  // At the end, the newest words sit on the key bar, unless a search's match is to start the view.
+  const visibleTranscriptRows = transcriptWindow(readerRows, visibleTranscriptScroll, visibleRows,
+    { end: currentMatch === undefined && visibleTranscriptScroll === latestTranscriptScroll });
   // A brief's point opens its past meeting at the moment it cites. The rows rewrap as the reader is
   // measured and the list closes, so the moment is found again whenever they do, until the next key.
   useEffect(() => {

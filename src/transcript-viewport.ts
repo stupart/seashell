@@ -35,8 +35,17 @@ function wrapLine(text: string, columns: number): string[] {
  * The rows in view from this scroll position. A line cut at the top keeps its time and speaker in
  * view: beside its words where the transcript has columns, on a row above them where it stacks. Its
  * words start with "…", so "00:00 You" over "you landed on the pilot." never reads as one sentence.
+ *
+ * At the end (`end`, scrolled as far as lastTranscriptScroll goes), the newest words sit on the key
+ * bar. Where the transcript stacks, the last line's time and speaker pinned at the top take a row, so
+ * the view can come out a row short of full; that row goes above the words, never under them.
  */
-export function transcriptWindow(rows: readonly TranscriptRow[], scroll: number, count: number): TranscriptRow[] {
+export function transcriptWindow(rows: readonly TranscriptRow[], scroll: number, count: number, options: { end?: boolean } = {}): TranscriptRow[] {
+  const window = rowsFrom(rows, scroll, count);
+  return options.end && scroll > 0 && window.length < count ? [...Array.from({ length: count - window.length }, () => ({ text: '' })), ...window] : window;
+}
+
+function rowsFrom(rows: readonly TranscriptRow[], scroll: number, count: number): TranscriptRow[] {
   const top = rows[scroll];
   const timed = (text: string): TranscriptRow => top?.start === undefined ? { text } : { text, start: top.start };
   if (top?.pinned !== undefined) return [timed(top.pinned), ...rows.slice(scroll + 1, scroll + count)];
@@ -58,7 +67,12 @@ export function lineAt(rows: readonly TranscriptRow[], at: number): number | und
   return found ?? rows.find((row) => row.start !== undefined)?.start;
 }
 
-/** The furthest the view scrolls: the last row in view, with room for a time and speaker pinned above it. */
+/**
+ * The furthest the view scrolls: the last row in view, with room for a time and speaker pinned above
+ * it. When the row that would sit at the top is the end of a stacked line, its pinned time and speaker
+ * would push the last row out, so the view starts at the next line instead, a row short of full
+ * (transcriptWindow's `end` puts that row above).
+ */
 export function lastTranscriptScroll(rows: readonly TranscriptRow[], count: number): number {
   const last = Math.max(0, rows.length - Math.max(1, count));
   return rows[last]?.heading !== undefined && last + 1 < rows.length ? last + 1 : last;
