@@ -137,6 +137,8 @@ export const JOURNEYS: Journey[] = [
         world: ({ library, background }) => liveMeeting(library, background), until: 'Recording' },
       { title: 'Reading back during the call', press: [UP, UP, UP], keys: '↑ ↑ ↑' },
       { title: 'Back to the latest words', press: ['l'], keys: 'L' },
+      { title: 'Stop asked', press: [' '], keys: 'Space', until: 'keep recording', note: 'Stopping asks first, whichever recorder runs the call.' },
+      { title: 'Kept recording', press: ['n'], keys: 'N' },
       { title: 'The call ends', note: 'Audio is safe; the final transcript and notes are being made.',
         world: ({ library, background }) => endMeeting(library, background) },
     ],
