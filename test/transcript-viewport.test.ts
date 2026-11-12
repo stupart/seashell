@@ -81,11 +81,11 @@ test('something to look at in the notes stays marked on every row it wraps to, s
   expect(plainMeetingLines([`${CAUTION}${OWNER_NOTES_UNREAD}`])).toEqual([OWNER_NOTES_UNREAD]);
 });
 
-test('"line removed" sits in the time column on its own row, without pushing the other owners left', async () => {
+test('"source removed" sits in the time column on its own row, without pushing the other owners left', async () => {
   const { wrappedMeetingRows } = await import('../src/transcript-viewport.ts');
-  const rows = wrappedMeetingRows(['- Send the summary.\tYou · Fri\t00:35', '- Share the deck.\t\tline removed'], 60).map((row) => stripVTControlCharacters(row));
+  const rows = wrappedMeetingRows(['- Send the summary.\tYou · Fri\t00:35', '- Share the deck.\t\tsource removed'], 60).map((row) => stripVTControlCharacters(row));
   expect(rows[0]).toEndWith('You · Fri  00:35');
-  expect(rows[1]).toEndWith('line removed');
+  expect(rows[1]).toEndWith('source removed');
   expect(rows.every((row) => Bun.stringWidth(row) === 60)).toBe(true);
 });
 

@@ -127,7 +127,7 @@ const MIN_BULLET_TEXT_COLUMNS = 24;
 export function wrappedMeetingRows(lines: readonly string[], columns: number): string[] {
   const width = Math.max(1, Math.floor(columns));
   const parts = lines.map(bulletParts);
-  // The times share one column; "line removed" reaches left past it on its own row rather than widen it for all.
+  // The times share one column; "source removed" reaches left past it on its own row rather than widen it for all.
   const clockColumn = Math.max(0, ...parts.map(({ body, clock }) => body.startsWith('- ') && clock && !clock.includes(LINE_REMOVED) ? clock.length : 0));
   return parts.flatMap(({ body, owner, clock }) => {
     const clean = stripVTControlCharacters(body) || ' ';

@@ -234,3 +234,5 @@ export const HELP_ROWS: ReadonlyArray<readonly [string, string]> = [
 
 /** What ✎ means, said once in help rather than beside every point. */
 export const FROM_YOUR_NOTES_HELP = '✎ marks a point from your own notes.';
+/** What "source removed" in a point's time column means, said beside what ✎ means. */
+export const SOURCE_REMOVED_HELP = '"source removed" marks a point whose line is no longer in the transcript.';

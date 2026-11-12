@@ -357,8 +357,9 @@ export const JOURNEYS: Journey[] = [
       { title: 'The update command, copied', press: ['c'], keys: 'c', until: 'Copied.',
         note: 'The engine is installed apart from Seashell, so no key updates it: c copies the command for Terminal, which is never shown.' },
       { title: 'A point whose line was removed', press: [ESC, ...Array(7).fill(DOWN)], narrowInstead: [ESC, ESC, ...Array(9).fill(DOWN)], keys: 'Esc ↓ × 7',
-        until: 'line removed',
-        note: 'Its words stay as written; the time column says its line is gone.' },
+        until: 'source removed',
+        note: 'Its words stay as written; the time column says its source is gone.' },
+      { title: 'What "source removed" means', press: ['?'], keys: '?', until: 'no longer in the transcript', note: 'Said once in help, beside what ✎ means.' },
     ],
   },
   {

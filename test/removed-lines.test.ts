@@ -109,8 +109,8 @@ test('removing a phantom line moves every citation of it aside, marked, and noth
   const artifact = loadMeetingArtifact(root, record.id)!;
   const lines = meetingViewLines(artifact, 'notes', findTranscriptRecord(root, record.id).record);
   // Its words stay as written; the time column says the line is gone.
-  expect(lines).toContain('- Everyone was grateful.\t\tline removed');
-  expect(lines).toContain('- Grateful.\t\tline removed');
+  expect(lines).toContain('- Everyone was grateful.\t\tsource removed');
+  expect(lines).toContain('- Grateful.\t\tsource removed');
   const meeting = getMeeting(root, { id: record.id });
   expect(meeting.notes.items.find((item) => item.text === 'Everyone was grateful.')!.evidence).toEqual(['s000001 (no longer in the transcript)']);
   expect(meeting.notes.items[0]!.evidence).toEqual(['s000002 00:06', 's000001 (no longer in the transcript)']);
@@ -156,7 +156,7 @@ test('meetings cleaned before this fix heal as they are read, with no migration'
   expect(JSON.stringify(meeting)).not.toContain('s000001 00:00');
   expect(meeting.notes.items[1]!.evidence).toEqual(['s000001 (no longer in the transcript)']);
   expect(queryNotes(root, { kind: 'decisions' }).items[0]!.evidence).toEqual(['s000002 00:06', 's000001 (no longer in the transcript)']);
-  expect(meetingViewLines(loadMeetingArtifact(root, record.id)!, 'notes', cleaned)).toContain('- Everyone was grateful.\t\tline removed');
+  expect(meetingViewLines(loadMeetingArtifact(root, record.id)!, 'notes', cleaned)).toContain('- Everyone was grateful.\t\tsource removed');
   expect(statSync(path).mtimeMs).toBe(before);
 
   const sent: Array<{ role: string; request: any }> = [];
@@ -200,9 +200,9 @@ test('a point only your notes support is never "source line removed": it stays y
   // Shown as yours (✎ at the note's time), never as a removed line; only points whose cited lines went say so.
   const lines = meetingViewLines(loadMeetingArtifact(root, record.id)!, 'notes', findTranscriptRecord(root, record.id).record);
   expect(lines).toContain(`- Friday may slip.${'\t'}${'\t'}${FROM_YOUR_NOTES} 00:07`);
-  expect(lines.filter((line) => line.startsWith('- Friday may slip.')).every((line) => !line.includes('line removed'))).toBe(true);
-  expect(lines).toContain(`- Thanks, though Dana sounded unsure.${'\t'}${'\t'}${FROM_YOUR_NOTES} line removed`);
-  expect(lines).toContain('- Everyone was grateful.\t\tline removed');
+  expect(lines.filter((line) => line.startsWith('- Friday may slip.')).every((line) => !line.includes('source removed'))).toBe(true);
+  expect(lines).toContain(`- Thanks, though Dana sounded unsure.${'\t'}${'\t'}${FROM_YOUR_NOTES} source removed`);
+  expect(lines).toContain('- Everyone was grateful.\t\tsource removed');
   const documents = join(directory, 'documents');
   expect(readFileSync(join(documents, 'meeting-notes.md'), 'utf8')).toContain('- Friday may slip. _(your notes)_');
   expect(readFileSync(join(documents, 'risks.md'), 'utf8')).toContain('- Friday may slip. _(your notes)_');

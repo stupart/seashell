@@ -45,7 +45,7 @@ import { briefKey, findBrief, makeBrief, NoBriefHistoryError, readComingUp, type
 import { draftFollowUp, draftText, mailtoUrl, type DraftKind, type FollowUpDraft } from './drafts.ts';
 import { Chalk } from 'chalk';
 import { CAUTION, HEADING, META, meetingViewLines, OWNER_NOTES_UNREAD, plainMeetingLines, SUBHEADING, type MeetingView } from './meeting-tui.ts';
-import { FROM_YOUR_NOTES_HELP, HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, sheetInset, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
+import { FROM_YOUR_NOTES_HELP, HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, sheetInset, SOURCE_REMOVED_HELP, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
 import { lastTranscriptScroll, lineAt, timedTranscriptRows, transcriptWindow, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
   renderText,
@@ -3051,7 +3051,10 @@ export default function App(props: {
   })() : null;
   const helpSheet = helpMode ? <Sheet>
     {HELP_ROWS.map(([group, keys]) => <HelpRow key={group} group={group} keys={keys} />)}
-    <Box marginTop={1} flexShrink={0}><Paragraph width={sheetColumns} dimColor text={FROM_YOUR_NOTES_HELP} /></Box>
+    <Box marginTop={1} flexShrink={0} flexDirection="column">
+      <Paragraph width={sheetColumns} dimColor text={FROM_YOUR_NOTES_HELP} />
+      <Paragraph width={sheetColumns} dimColor text={SOURCE_REMOVED_HELP} />
+    </Box>
   </Sheet> : null;
 
   // Questions and typed answers take the key bar's row. Their keys are never cut.

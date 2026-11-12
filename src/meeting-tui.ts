@@ -83,8 +83,8 @@ export const META = '\t';
  * what it means.
  */
 export const FROM_YOUR_NOTES = '✎';
-/** In the time column of a point whose every cited line was removed from the transcript. */
-export const LINE_REMOVED = 'line removed';
+/** In the time column of a point whose every cited line was removed from the transcript: its source, as help says. */
+export const LINE_REMOVED = 'source removed';
 
 /** A line of the notes taken apart: its text, who owns it and by when, and when it was said. */
 export function bulletParts(line: string): { body: string; owner?: string; clock?: string } {
