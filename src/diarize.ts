@@ -3,6 +3,7 @@ import { diarizationStatus, resolveDiarizationPython } from './diarization-envir
 import { helperModelLabel, speakerEngine, speakerEngineArguments, speakersHelper, usesSpeakersHelper, type SpeakerEngine } from './speaker-engine.ts';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
+import { inferenceCommand } from './inference-priority.ts';
 import { prepareMedia, type PreparedMedia } from './media-preparation.ts';
 import { mergeDiarization } from './merge-diarization.ts';
 import {
@@ -87,7 +88,9 @@ async function runProcess(
   onStderr?: (message: string) => void,
 ): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(command, args, {
+    // Speaker separation runs after the call, at Darwin background priority.
+    const run = inferenceCommand(command, args, 'background');
+    const proc = spawn(run.command, run.args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, HF_HUB_OFFLINE: '1', PYANNOTE_METRICS_ENABLED: '0' },
     });

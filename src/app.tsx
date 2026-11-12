@@ -86,6 +86,7 @@ import { stripVTControlCharacters } from 'util';
 import { startMeetSpeakerReader, meetBrowserMatchesApp, probeMeetSpeakers, type MeetSpeakerReader, type MeetProbe } from './meet-speakers.ts';
 import { backgroundMeetingMessage } from './background-meeting-status.ts';
 import { readBackgroundWatchStatus, type BackgroundWatchStatus } from './background-watch-status.ts';
+import { LIVE_TEXT_PAUSED } from './live-text-guard.ts';
 import { writeMeetingConsent } from './meeting-consent.ts';
 import { writeMeetingCommand } from './meeting-command.ts';
 import { CaptureHealthTracker, readMeetingCoverage, yourSideNotice, type CaptureHealthSnapshot } from './capture-health.ts';
@@ -115,6 +116,7 @@ import {
 } from './tui-state.ts';
 import {
   DEFAULT_MEETING_AUTOMATION,
+  followedCallUnobserved,
   hasConfirmedMeetingEnd,
   preserveMeetingCandidateDuringObservationGap,
   MeetingAutomationController,
@@ -366,7 +368,7 @@ export default function App(props: {
   const [speakerPickerOpen, setSpeakerPickerOpen] = useState(false);
   const [confirmRewrite, setConfirmRewrite] = useState(false);
   /** Stopping a recording asks first, whichever recorder runs it: this window, or the background recorder. */
-  const [confirmStop, setConfirmStop] = useState<{ own: boolean; title?: string } | null>(null);
+  const [confirmStop, setConfirmStop] = useState<{ own: boolean; title?: string; sessionId?: string } | null>(null);
   /** Opened from a search: which match is at the top of the transcript; n moves to the next. */
   const [searchHit, setSearchHit] = useState<number | null>(null);
   const [exportMode, setExportMode] = useState(false);
@@ -1656,9 +1658,16 @@ export default function App(props: {
     let cancelled = false;
     let polling = false;
     const abort = new AbortController();
+    /** The call being recorded or asked about, which a reading that tells nothing must not end. */
+    const followed = () => {
+      const state = meetingAutomationController.current.state;
+      return ['recording', 'ending', 'awaiting-consent'].includes(state.phase) ||
+        (state.phase === 'cooldown' && state.stoppedByHand) ? state.candidate : undefined;
+    };
     const detectorFailed = (signalError: unknown) => {
       if (cancelled || isExiting.current || automaticTransition.current) return;
-      const action = meetingAutomationController.current.step(undefined, Date.now());
+      // A detector that failed says nothing about the call: it is not the call ending.
+      const action = meetingAutomationController.current.step(undefined, Date.now(), false, followed() !== undefined);
       setAutomationPhase(meetingAutomationController.current.state.phase);
       const message = signalError instanceof Error ? signalError.message : String(signalError);
       if (action.kind === 'finish') {
@@ -1681,8 +1690,9 @@ export default function App(props: {
           resolveMeetingCandidate(snapshot, calendarSuggestionRef.current ?? undefined, meetingAutomation, meet),
           meetingAutomationController.current.state, snapshot, meet,
         );
-        const action = meetingAutomationController.current.step(candidate, Date.now(),
-          hasConfirmedMeetingEnd(meetingAutomationController.current.state.candidate, meet));
+        const confirmedEnd = hasConfirmedMeetingEnd(meetingAutomationController.current.state.candidate, meet);
+        const action = meetingAutomationController.current.step(candidate, Date.now(), confirmedEnd,
+          followedCallUnobserved(followed(), candidate, snapshot, confirmedEnd));
         setAutomationPhase(meetingAutomationController.current.state.phase);
         meetingSignalFailure.current = null;
         if (action.kind === 'suggest') {
@@ -2232,7 +2242,8 @@ export default function App(props: {
       if (input.toLowerCase() !== 'y') return;
       if (confirmStop.own) { setListeningPaused(true); return; }
       try {
-        writeMeetingCommand('stop');
+        // Named for the recording asked about, so a stop read late can never end a later one.
+        writeMeetingCommand('stop', undefined, Date.now(), confirmStop.sessionId ? { sessionId: confirmStop.sessionId } : {});
         setNotice('Stopping. The transcript and notes are written next.');
       } catch (cause) { setError(`Could not stop recording: ${cause instanceof Error ? cause.message : String(cause)}`); }
       return;
@@ -2539,7 +2550,11 @@ export default function App(props: {
     }
     // With the background recorder, Space records by hand and stops any recording.
     if (input === ' ' && watchOwnership === 'external') {
-      if (activeBackgroundEntry) { setConfirmStop({ own: false, title: activeBackgroundEntry.title }); return; }
+      if (activeBackgroundEntry) {
+        setConfirmStop({ own: false, title: activeBackgroundEntry.title,
+          ...(activeBackgroundEntry.id === backgroundWatch?.sessionId ? { sessionId: activeBackgroundEntry.id } : {}) });
+        return;
+      }
       try {
         // Plain Space is audio only, even if an earlier request for video was never picked up.
         clearVideoRequest();
@@ -3022,7 +3037,8 @@ export default function App(props: {
       ? backgroundEntry?.captureState === 'ready' ? backgroundEntry.duration : undefined
       : backgroundEntry.audioSavedThroughMs / 1000,
     draftLabel: backgroundEntry?.captureState === 'recording'
-      ? backgroundEntry.draftStatus?.stage === 'delayed' ? 'Live transcript delayed · final pass will retry'
+      ? backgroundEntry.draftStatus?.stage === 'paused' ? LIVE_TEXT_PAUSED
+        : backgroundEntry.draftStatus?.stage === 'delayed' ? 'Live transcript delayed · final pass will retry'
         : backgroundEntry.draftStatus?.stage === 'transcribing' ? 'Live transcript updating…'
         : backgroundEntry.draftStatus?.stage === 'live' ? 'Live draft · updates as people speak'
         : 'Live transcript waiting for speech'

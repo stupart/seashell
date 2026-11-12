@@ -95,7 +95,7 @@ import { WarningRateLimit, watchLogWriter } from './watch-log.ts';
 import { MEETING_SIGNALS_HELPER, readMeetingSignalSnapshot } from './meeting-automation.ts';
 import { buildMeetingContext, loadMeetingContextFiles } from './meeting-context.ts';
 import { writeMeetingConsent } from './meeting-consent.ts';
-import { writeMeetingCommand } from './meeting-command.ts';
+import { recorderAnswering, requestRecorder, writeMeetingCommand } from './meeting-command.ts';
 import { readBackgroundWatchStatus } from './background-watch-status.ts';
 import { DEFAULT_MEETING_AUTOMATION, meetingApps, type MeetingCandidate } from './meeting-automation.ts';
 import { diarizationStatus } from './diarization-environment.ts';
@@ -1221,43 +1221,39 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
     }
     case 'record': {
       const libraryDir = resolveLibraryDir(undefined, process.env, loadConfig());
-      const before = readBackgroundWatchStatus(libraryDir);
-      if (!before || before.phase === 'unavailable' || before.phase === 'stopped') {
-        throw new Error('The background recorder is not running. Start it in Settings (press , in Seashell) and try again.');
-      }
-      if (command.command === 'stop' && before.phase !== 'recording') {
-        print(command.json ? JSON.stringify({ recording: false }) : 'Nothing is recording.');
-        return 0;
-      }
-      if (command.command === 'start' && before.phase === 'recording') {
-        print(command.json ? JSON.stringify({ recording: true, title: before.candidate?.title })
-          : `Already recording${before.candidate?.title ? ` ${before.candidate.title}` : ''}.${command.video ? ' Video can only start with a new recording.' : ''}`);
-        return 0;
-      }
-      if (command.video) {
+      const recorder = recorderAnswering(readBackgroundWatchStatus(libraryDir));
+      if (command.video && recorder.running && recorder.phase !== 'recording') {
         const permission = await screenCapturePermission();
         if (permission.authorization !== 'authorized') process.stderr.write(`No video yet: ${permission.detail}\n`);
-        startRecordingWithVideo(command.video);
+      }
+      const answer = await requestRecorder(command.command, {
+        libraryDir,
+        send: (sent, sessionId) => {
+          if (command.video) { startRecordingWithVideo(command.video); return; }
+          // A request left by an unanswered --video must not film this recording.
+          if (sent === 'start') clearVideoRequest();
+          writeMeetingCommand(sent, undefined, Date.now(), sessionId ? { sessionId } : {});
+        },
+        onWaiting: (sent) => { if (sent === 'stop' && !command.json) process.stdout.write('Stopping…'); },
+      });
+      if (answer.kind === 'not-running') {
+        throw new Error('The background recorder is not running. Start it in Settings (press , in Seashell) and try again.');
+      }
+      const title = 'title' in answer && answer.title ? ` ${answer.title}` : '';
+      if (command.json) {
+        print(JSON.stringify(answer.kind === 'nothing-recording' ? { recording: false }
+          : answer.kind === 'already-recording' ? { recording: true, title: answer.title }
+          : { recording: answer.recording, title: answer.title, ...(answer.kind === 'busy' ? { pending: true } : {}) }));
       } else {
-        // A request left by an unanswered --video must not film this recording.
-        if (command.command === 'start') clearVideoRequest();
-        writeMeetingCommand(command.command);
+        print(answer.kind === 'nothing-recording' ? 'Nothing is recording.'
+          : answer.kind === 'already-recording' ? `Already recording${title}.${command.video ? ' Video can only start with a new recording.' : ''}`
+          : command.command === 'stop' ? answer.kind === 'done' ? ' stopped. The transcript and notes are being written.'
+            : ' The recorder is busy; it will stop as soon as it can.'
+          : answer.kind === 'done' ? `Recording${title}${command.video ? ' with video' : ''}. Stop with: seashell record stop`
+          : 'The recorder is busy and has not started recording yet. Check seashell status in a moment.');
       }
-      // The recorder picks commands up on its next check, every few seconds.
-      const deadline = Date.now() + 12_000;
-      let now = before;
-      while (Date.now() < deadline) {
-        await Bun.sleep(500);
-        now = readBackgroundWatchStatus(libraryDir) ?? now;
-        if ((command.command === 'start') === (now.phase === 'recording')) break;
-      }
-      const recording = now.phase === 'recording';
-      const done = command.command === 'start' ? recording : !recording;
-      print(command.json ? JSON.stringify({ recording, title: now.candidate?.title })
-        : !done ? 'The recorder has not answered yet. Check seashell status in a moment.'
-        : recording ? `Recording${now.candidate?.title ? ` ${now.candidate.title}` : ''}${command.video ? ' with video' : ''}. Stop with: seashell record stop`
-        : 'Stopped. The transcript and notes are being written.');
-      return done ? 0 : 1;
+      // A stop the recorder has not read yet is still kept: it stops as soon as the recorder can.
+      return answer.kind === 'busy' && command.command === 'start' ? 1 : 0;
     }
     case 'speaker-compare': {
       const config = loadConfig();
@@ -1474,8 +1470,10 @@ async function executeMeetingIntelligence(command: MeetingIntelligenceCommand): 
           : `Added a note to ${record.title}${note.at === undefined ? '' : ` at ${sentenceClock(note.at)}`}. It is used the next time its notes are written.`);
         return 0;
       }
-      const watch = readBackgroundWatchStatus(libraryDir);
-      if (watch?.phase !== 'recording' || !watch.sessionId) {
+      // A busy recorder still takes notes; only one that is not recording refuses them.
+      const recorder = recorderAnswering(readBackgroundWatchStatus(libraryDir));
+      const watch = recorder.running && recorder.phase === 'recording' ? recorder.status : undefined;
+      if (!watch?.sessionId) {
         throw new Error('Nothing is recording. To add a note to a meeting: seashell note "<text>" --meeting <id>');
       }
       const typedAt = Date.now();

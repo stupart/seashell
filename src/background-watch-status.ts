@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 
 export interface BackgroundWatchProjection {
   phase: 'watching' | 'awaiting-consent' | 'recording' | 'stopped';
@@ -14,18 +15,35 @@ export interface BackgroundWatchStatus extends Omit<BackgroundWatchProjection, '
   phase: BackgroundWatchProjection['phase'] | 'unavailable';
   pid: number;
   updatedAtUnixMs: number;
+  /**
+   * Unavailable only: the recorder is alive but has not written for over 30 s,
+   * so it is busy, not gone. What it last said, which nothing confirms now.
+   */
+  lastPhase?: BackgroundWatchProjection['phase'];
 }
 const filename = '.background-watch.json';
+/** Past this, the recorder counts as not responding. It rewrites its status every few seconds while it runs. */
+export const BACKGROUND_WATCH_FRESH_MS = 30_000;
 const safeText = (value: unknown, limit = 500): value is string => typeof value === 'string' &&
   value.length > 0 && value.length <= limit && !/[\p{Cc}\p{Cf}]/u.test(value);
+/** What the reader accepts, so a calendar title with an emoji joiner or a newline never hides a running recorder. */
+const tidy = (value: string | undefined, limit = 500): string | undefined =>
+  value?.replace(/\p{Cf}/gu, '').replace(/\p{Cc}/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, limit).trim() || undefined;
 
 /** Current watcher state is separate from saved meetings. No capture or permissions are opened. */
 export function writeBackgroundWatchStatus(libraryDir: string, status: BackgroundWatchProjection, nowUnixMs = Date.now()): void {
   mkdirSync(libraryDir, { recursive: true, mode: 0o700 });
   const path = join(libraryDir, filename);
   const temporary = `${path}.${randomUUID()}.tmp`;
+  const candidate = status.candidate && tidy(status.candidate.id) ? {
+    id: tidy(status.candidate.id)!, title: tidy(status.candidate.title) ?? tidy(status.candidate.appName) ?? 'Meeting',
+    appName: tidy(status.candidate.appName) ?? 'Seashell',
+  } : undefined;
+  const sessionId = tidy(status.sessionId, 200), consentId = tidy(status.consentId, 200), warning = tidy(status.warning, 2000);
   try {
-    writeFileSync(temporary, JSON.stringify({ ...status, schemaVersion: 1, pid: process.pid, updatedAtUnixMs: nowUnixMs }), { mode: 0o600, flag: 'wx' });
+    writeFileSync(temporary, JSON.stringify({ phase: status.phase, ...(candidate ? { candidate } : {}),
+      ...(sessionId ? { sessionId } : {}), ...(consentId ? { consentId } : {}), ...(warning ? { warning } : {}),
+      schemaVersion: 1, pid: process.pid, updatedAtUnixMs: nowUnixMs }), { mode: 0o600, flag: 'wx' });
     renameSync(temporary, path);
   } finally { rmSync(temporary, { force: true }); }
 }
@@ -49,10 +67,44 @@ export function readBackgroundWatchStatus(libraryDir: string, options: {
       try { process.kill(pid, 0); return true; }
       catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
     });
-    if (v.phase !== 'stopped' && (now < v.updatedAtUnixMs || now - v.updatedAtUnixMs > 30_000 || !isAlive(v.pid))) return {
+    if (v.phase !== 'stopped' && !isAlive(v.pid)) return {
       schemaVersion: 1, pid: v.pid, updatedAtUnixMs: v.updatedAtUnixMs, phase: 'unavailable',
       warning: 'The background recorder is not responding. Recording status is unconfirmed.',
     };
+    if (v.phase !== 'stopped' && (now < v.updatedAtUnixMs || now - v.updatedAtUnixMs > BACKGROUND_WATCH_FRESH_MS)) return {
+      schemaVersion: 1, pid: v.pid, updatedAtUnixMs: v.updatedAtUnixMs, phase: 'unavailable', lastPhase: v.phase,
+      ...(v.sessionId === undefined ? {} : { sessionId: v.sessionId }),
+      ...(v.candidate === undefined ? {} : { candidate: v.candidate }),
+      warning: 'The background recorder is busy and has not confirmed its status lately. Recording status is unconfirmed.',
+    };
     return v as BackgroundWatchStatus;
   } catch { return; }
+}
+
+/**
+ * Where the recorder publishes its phase outside ~/Documents. macOS can take
+ * Documents access away from another app or session, which then still needs
+ * to know whether a call is recording. SEASHELL_RECORDING_STATE_PATH moves it;
+ * tests always do.
+ */
+export function recordingStatePath(env: NodeJS.ProcessEnv = process.env): string {
+  return env.SEASHELL_RECORDING_STATE_PATH?.trim() || join(homedir(), 'Library', 'Caches', 'seashell', 'background-watch.json');
+}
+
+/**
+ * Publish the recorder's phase as exactly { phase, updatedAtUnixMs,
+ * mirroredAtUnixMs }: other tools read these names. updatedAtUnixMs is the
+ * recorder's own status time, mirroredAtUnixMs when this file was written.
+ * Written atomically, readable by all (0644): it holds the phase, never
+ * anything about a meeting.
+ */
+export function writeRecordingState(phase: BackgroundWatchProjection['phase'], updatedAtUnixMs = Date.now(),
+  path = recordingStatePath()): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o755 });
+  const temporary = `${path}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify({ phase, updatedAtUnixMs, mirroredAtUnixMs: Date.now() })}\n`, { flag: 'wx' });
+    chmodSync(temporary, 0o644);
+    renameSync(temporary, path);
+  } finally { rmSync(temporary, { force: true }); }
 }

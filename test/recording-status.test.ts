@@ -127,3 +127,21 @@ test('while a call records, the status says what the video films, and a whole sc
   expect(summary(saved).label).toBe('● Recording 0:20 · filming the whole screen');
   expect(parseCaptureHealth({ ...health.snapshot, video: { state: 'filming the bank' } })).toBeUndefined();
 });
+
+test('a microphone let go of because the call let go of its own is said plainly, never as a failure', () => {
+  const health = new CaptureHealthTracker({ nowUnixMs: 1000 });
+  health.pcm('microphone', undefined, true, 1100);
+  health.pcm('systemAudio', undefined, true, 1100);
+  health.release('microphone', 1200);
+  // A late chunk from the released microphone does not undo it.
+  health.pcm('microphone', undefined, true, 1300);
+  expect(health.snapshot.microphone.state).toBe('released');
+  expect(parseCaptureHealth(JSON.parse(JSON.stringify(health.snapshot)))?.microphone.state).toBe('released');
+  health.pcm('systemAudio', undefined, true, 20_000);
+  expect(captureRecordingMode(health.snapshot)).toBe('recording');
+  expect(recordingNeedsAttention(health.snapshot, false, 20_000)).toBe(false);
+  expect(recordingSummary({ mode: 'recording', health: health.snapshot, nowUnixMs: 20_000, savedThroughSeconds: 19 }).alert).toBeUndefined();
+  // Opened again when the call comes back.
+  health.state('microphone', { state: 'active' }, 21_000);
+  expect(health.snapshot.microphone.state).toBe('receiving');
+});

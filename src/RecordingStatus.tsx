@@ -45,6 +45,8 @@ function sourceLabel(source: CaptureSourceHealth | undefined, finished: boolean,
     if (source.warnings.some(w => w.resolvedAtUnixMs === undefined && w.kind === 'quiet')) return 'sound captured · quiet at end';
     return 'sound captured';
   }
+  // The call app let go of its microphone, so Seashell did too; it opens again if the call comes back.
+  if (source.state === 'released') return 'released · the call let go of it';
   // The recorder keeps checking, and starts the moment macOS allows it.
   if (source.state === 'unavailable' && source.code === MICROPHONE_NOT_ALLOWED) return 'not allowed';
   if (source.state === 'unavailable' || source.state === 'stopped') return 'not capturing';
@@ -133,6 +135,11 @@ export function videoStatus(video: CaptureVideoHealth | undefined): string | und
   return video.state === 'unavailable' ? 'No video' : undefined;
 }
 
+/** "Live text paused: your Mac is busy…": drafts stopped on purpose, while the audio records. */
+const LIVE_TEXT_PAUSED_LEAD = 'Live text paused';
+/** Live text that is behind or paused is said; the recording itself is fine. */
+const draftProblem = (label?: string): boolean => Boolean(label?.includes('delayed') || label?.startsWith(LIVE_TEXT_PAUSED_LEAD));
+
 /**
  * One line for the title bar: capture, audible signal, durable save and text
  * generation stay distinct, but only what is wrong takes up rows. "Recording"
@@ -175,7 +182,7 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
     ...(failing.length ? [`${failing.join(' · ')}${finished ? '' : notAllowed ? ' · Enter to allow' : ' · i audio help'}`]
       : attention && !finished ? ['Check your input if expected sound is missing · i audio help'] : []),
     ...(props.warning ? [props.warning] : []),
-    ...(props.draftLabel?.includes('delayed') ? [props.draftLabel] : []),
+    ...(draftProblem(props.draftLabel) ? [props.draftLabel!] : []),
   ];
   // Not capturing at all is a failure; quiet, one-sided or unconfirmed sound needs a look.
   const failed = (source?: CaptureSourceHealth) => !finished && (source?.state === 'unavailable' || source?.state === 'stopped');
@@ -193,7 +200,8 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
     ? { text: sourceAlert, ...help,
       color: failed(props.health?.microphone) || failed(props.health?.systemAudio) ? 'red' as const : 'yellow' as const }
     : props.warning ? { ...warningAlert(props.warning), color: 'yellow' as const }
-    : props.draftLabel?.includes('delayed') ? { text: 'Live text delayed', color: 'yellow' as const } : undefined;
+    : draftProblem(props.draftLabel) ? { text: props.draftLabel!.startsWith(LIVE_TEXT_PAUSED_LEAD) ? 'Live text paused' : 'Live text delayed',
+      color: 'yellow' as const } : undefined;
   return {
     headline,
     label,
