@@ -5,6 +5,7 @@ import { calendarPermission } from './calendar-permission.ts';
 import { readFeatureStatuses, renderFeatureStatusTable } from './feature-status.ts';
 import { oneSidedNotifier } from './capture-health.ts';
 import { runMeetingsMcpServer } from './meetings-mcp.ts';
+import { addMeetingNote, carryCaptureNotes, recordingBundle, noteAtMoment, writeNoteCommand } from './owner-notes.ts';
 import { installMeetingsMcp } from './mcp-install.ts';
 import { mergeMeetingFragments, planMeetingMerges } from './meeting-merge.ts';
 import { discoverHumainProviders, resolveHumainExecutable } from './humain-client.ts';
@@ -28,7 +29,12 @@ import {
   resolveSaveByDefault,
   updateMeetingConfig,
   updateSpeakerEngine,
+  type SeashellConfig,
 } from './config.ts';
+import { findBrief, makeBrief, upcomingForBrief, type UpcomingMeeting } from './briefs.ts';
+import { draftFollowUp, draftText } from './drafts.ts';
+import { ensureVocabularyFile, loadVocabulary } from './vocabulary.ts';
+import { sentenceClock } from './tui-state.ts';
 import { parseCalendarEvents, readMacCalendarEventsAsync } from './calendar.ts';
 import {
   findTranscriptRecord,
@@ -89,7 +95,7 @@ import { WarningRateLimit, watchLogWriter } from './watch-log.ts';
 import { MEETING_SIGNALS_HELPER, readMeetingSignalSnapshot } from './meeting-automation.ts';
 import { buildMeetingContext, loadMeetingContextFiles } from './meeting-context.ts';
 import { writeMeetingConsent } from './meeting-consent.ts';
-import { writeMeetingCommand } from './meeting-command.ts';
+import { recorderAnswering, requestRecorder, writeMeetingCommand } from './meeting-command.ts';
 import { readBackgroundWatchStatus } from './background-watch-status.ts';
 import { DEFAULT_MEETING_AUTOMATION, meetingApps, type MeetingCandidate } from './meeting-automation.ts';
 import { diarizationStatus } from './diarization-environment.ts';
@@ -914,7 +920,8 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
               codeRoot: PROJECT_ROOT }),
           } : {}),
           // The login agent has no window of its own, so it asks with a dialog.
-          ...(!once ? { dependencies: { askToRecord: askToRecordWithDialog } } : {}),
+          // It also says, once per meeting, that a brief is ready.
+          ...(!once ? { dependencies: { askToRecord: askToRecordWithDialog, notify } } : {}),
           onEvent: (event) => {
             // Like the dialog, the notice is for someone at the Mac, not a one-shot check.
             if (!once) { notifyOneSided(event); notifyMicrophone(event); notifyScreenFilmed(event); }
@@ -940,6 +947,7 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
               print(`Possible ${event.candidate.appName} meeting detected; run \`seashell meeting consent approve\` to record it.`);
             }
             else if (event.type === 'meeting.stopped') print(`Stopped recording ${event.candidate.title}.`);
+            else if (event.type === 'brief.ready') print(`Brief ready for ${event.title}: ${event.path}`);
             else process.stderr.write(`${event.type}: ${event.message}\n`);
           },
         });
@@ -1121,6 +1129,7 @@ async function executeCapture(
   });
   store.setStatus('completed', 'final-transcript-published');
   store.attachTo(saved.directory);
+  try { carryCaptureNotes(libraryDir, record.id); } catch { /* They stay in the bundle, where the meeting still reads them. */ }
   print(command.json ? JSON.stringify(record, null, 2) : (
     `Recovered ${record.title}\n${saved.directory}`
   ));
@@ -1177,9 +1186,9 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
     case 'mcp': {
       if (command.action === 'serve') {
         const config = loadConfig();
-        // Extractors run on the final-notes route as configured at the time of the call.
+        // Extractors and briefs run on the final-notes route, drafts on chat's, as configured at the time of the call.
         await runMeetingsMcpServer(resolveLibraryDir(undefined, process.env, config), PACKAGE_VERSION, process.stdin, process.stdout,
-          { route: () => resolveMeetingRoute(loadConfig().meeting, 'reconciliation') });
+          { route: () => resolveMeetingRoute(loadConfig().meeting, 'reconciliation'), chatRoute: () => resolveMeetingRoute(loadConfig().meeting, 'chat') });
         return 0;
       }
       const result = installMeetingsMcp();
@@ -1212,43 +1221,39 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
     }
     case 'record': {
       const libraryDir = resolveLibraryDir(undefined, process.env, loadConfig());
-      const before = readBackgroundWatchStatus(libraryDir);
-      if (!before || before.phase === 'unavailable' || before.phase === 'stopped') {
-        throw new Error('The background recorder is not running. Start it in Settings (press , in Seashell) and try again.');
-      }
-      if (command.command === 'stop' && before.phase !== 'recording') {
-        print(command.json ? JSON.stringify({ recording: false }) : 'Nothing is recording.');
-        return 0;
-      }
-      if (command.command === 'start' && before.phase === 'recording') {
-        print(command.json ? JSON.stringify({ recording: true, title: before.candidate?.title })
-          : `Already recording${before.candidate?.title ? ` ${before.candidate.title}` : ''}.${command.video ? ' Video can only start with a new recording.' : ''}`);
-        return 0;
-      }
-      if (command.video) {
+      const recorder = recorderAnswering(readBackgroundWatchStatus(libraryDir));
+      if (command.video && recorder.running && recorder.phase !== 'recording') {
         const permission = await screenCapturePermission();
         if (permission.authorization !== 'authorized') process.stderr.write(`No video yet: ${permission.detail}\n`);
-        startRecordingWithVideo(command.video);
+      }
+      const answer = await requestRecorder(command.command, {
+        libraryDir,
+        send: (sent, sessionId) => {
+          if (command.video) { startRecordingWithVideo(command.video); return; }
+          // A request left by an unanswered --video must not film this recording.
+          if (sent === 'start') clearVideoRequest();
+          writeMeetingCommand(sent, undefined, Date.now(), sessionId ? { sessionId } : {});
+        },
+        onWaiting: (sent) => { if (sent === 'stop' && !command.json) process.stdout.write('Stopping…'); },
+      });
+      if (answer.kind === 'not-running') {
+        throw new Error('The background recorder is not running. Start it in Settings (press , in Seashell) and try again.');
+      }
+      const title = 'title' in answer && answer.title ? ` ${answer.title}` : '';
+      if (command.json) {
+        print(JSON.stringify(answer.kind === 'nothing-recording' ? { recording: false }
+          : answer.kind === 'already-recording' ? { recording: true, title: answer.title }
+          : { recording: answer.recording, title: answer.title, ...(answer.kind === 'busy' ? { pending: true } : {}) }));
       } else {
-        // A request left by an unanswered --video must not film this recording.
-        if (command.command === 'start') clearVideoRequest();
-        writeMeetingCommand(command.command);
+        print(answer.kind === 'nothing-recording' ? 'Nothing is recording.'
+          : answer.kind === 'already-recording' ? `Already recording${title}.${command.video ? ' Video can only start with a new recording.' : ''}`
+          : command.command === 'stop' ? answer.kind === 'done' ? ' stopped. The transcript and notes are being written.'
+            : ' The recorder is busy; it will stop as soon as it can.'
+          : answer.kind === 'done' ? `Recording${title}${command.video ? ' with video' : ''}. Stop with: seashell record stop`
+          : 'The recorder is busy and has not started recording yet. Check seashell status in a moment.');
       }
-      // The recorder picks commands up on its next check, every few seconds.
-      const deadline = Date.now() + 12_000;
-      let now = before;
-      while (Date.now() < deadline) {
-        await Bun.sleep(500);
-        now = readBackgroundWatchStatus(libraryDir) ?? now;
-        if ((command.command === 'start') === (now.phase === 'recording')) break;
-      }
-      const recording = now.phase === 'recording';
-      const done = command.command === 'start' ? recording : !recording;
-      print(command.json ? JSON.stringify({ recording, title: now.candidate?.title })
-        : !done ? 'The recorder has not answered yet. Check seashell status in a moment.'
-        : recording ? `Recording${now.candidate?.title ? ` ${now.candidate.title}` : ''}${command.video ? ' with video' : ''}. Stop with: seashell record stop`
-        : 'Stopped. The transcript and notes are being written.');
-      return done ? 0 : 1;
+      // A stop the recorder has not read yet is still kept: it stops as soon as the recorder can.
+      return answer.kind === 'busy' && command.command === 'start' ? 1 : 0;
     }
     case 'speaker-compare': {
       const config = loadConfig();
@@ -1333,6 +1338,10 @@ Node ${node.version}. Provider/model readiness is separate; run seashell ai prov
     case 'extract':
     case 'automations':
     case 'query':
+    case 'note':
+    case 'brief':
+    case 'draft':
+    case 'vocabulary':
       return executeMeetingIntelligence(command);
   }
 }
@@ -1353,9 +1362,11 @@ async function executeAiTest(json: boolean): Promise<number> {
   } else {
     print(['Meeting AI connection', ...result.routes.map((route) => {
       const roles = route.roles.map((role) => ROLE_NAMES[role]).join(', ');
+      // Two roles on one model at different efforts are two routes, so each says its effort.
+      const ai = `${route.backend} ${route.model}${route.effort ? `, ${route.effort} effort` : ''}`;
       return route.ok
-        ? `  ✓ ${roles} · ${route.backend} ${route.model}${route.latencyMs === undefined ? '' : ` · answered in ${(route.latencyMs / 1000).toFixed(1)} s`}`
-        : `  ✗ ${roles} · ${route.backend} ${route.model}\n    ${route.reason}`;
+        ? `  ✓ ${roles} · ${ai}${route.latencyMs === undefined ? '' : ` · answered in ${(route.latencyMs / 1000).toFixed(1)} s`}`
+        : `  ✗ ${roles} · ${ai}\n    ${route.reason}`;
     })].join('\n'));
   }
   return result.ok ? 0 : 1;
@@ -1442,6 +1453,61 @@ async function executeMeetingIntelligence(command: MeetingIntelligenceCommand): 
       ].join('\n'));
       return problems.length ? 1 : 0;
     }
+    case 'vocabulary': {
+      const path = ensureVocabularyFile(libraryDir);
+      const vocabulary = loadVocabulary(libraryDir);
+      print(command.json ? JSON.stringify(vocabulary, null, 2) : [
+        `Vocabulary: ${path}`,
+        vocabulary.terms.length ? `  ${vocabulary.terms.join(', ')}` : '  No words yet. Add one per line: names, companies, jargon.',
+        ...vocabulary.problems.map((problem) => `  ! ${problem}`),
+        'Transcription and the meeting AI spell these as written. Lines starting with # are notes to you.',
+      ].join('\n'));
+      return 0;
+    }
+    case 'note': {
+      if (command.meeting) {
+        const note = addMeetingNote(libraryDir, command.meeting, command.text, command.atSeconds === undefined ? {} : { at: command.atSeconds });
+        const { record } = findTranscriptRecord(libraryDir, command.meeting);
+        print(command.json ? JSON.stringify(note, null, 2)
+          : `Added a note to ${record.title}${note.at === undefined ? '' : ` at ${sentenceClock(note.at)}`}. It is used the next time its notes are written.`);
+        return 0;
+      }
+      // A busy recorder still takes notes; only one that is not recording refuses them.
+      const recorder = recorderAnswering(readBackgroundWatchStatus(libraryDir));
+      const watch = recorder.running && recorder.phase === 'recording' ? recorder.status : undefined;
+      if (!watch?.sessionId) {
+        throw new Error('Nothing is recording. To add a note to a meeting: seashell note "<text>" --meeting <id>');
+      }
+      const typedAt = Date.now();
+      const path = writeNoteCommand(command.text, typedAt);
+      // The recorder picks notes up on its next check, every few seconds.
+      const deadline = Date.now() + 12_000;
+      while (existsSync(path) && Date.now() < deadline) await Bun.sleep(250);
+      const bundle = recordingBundle(libraryDir, watch.sessionId);
+      const at = bundle ? noteAtMoment(bundle, typedAt) : undefined;
+      const taken = !existsSync(path);
+      print(command.json ? JSON.stringify({ kept: taken, ...(at === undefined ? {} : { at }) })
+        : taken ? `Noted${at === undefined ? '' : ` at ${sentenceClock(at)}`}${watch.candidate?.title ? ` in ${watch.candidate.title}` : ''}.`
+        : 'The recorder has not picked the note up yet. It keeps it for 10 minutes; check seashell status.');
+      return taken ? 0 : 1;
+    }
+    case 'brief': {
+      const route = resolveMeetingRoute(config.meeting, 'reconciliation');
+      if (!route) throw new Error('Meeting AI is not set up, so there is no one to write the brief. Choose a provider: seashell ai setup');
+      const upcoming = await briefTarget(libraryDir, config, command.target);
+      const brief = findBrief(libraryDir, upcoming) ?? await makeBrief(libraryDir, upcoming, { route, onStatus: status });
+      print(command.json ? JSON.stringify(brief, null, 2) : `${readFileSync(brief.path, 'utf8').replace(/^---[\s\S]*?---\n/u, '').trim()}\n\nSaved: ${brief.path}`);
+      return 0;
+    }
+    case 'draft': {
+      const route = resolveMeetingRoute(config.meeting, 'chat');
+      if (!route) throw new Error('Meeting AI is not set up for chat. Choose a provider: seashell ai setup');
+      const draft = await draftFollowUp(libraryDir, command.id, command.slack ? 'slack' : 'email', route,
+        { ...(command.ask ? { ask: command.ask } : {}), onStatus: status });
+      print(command.json ? JSON.stringify(draft, null, 2) : draftText(draft));
+      if (!command.json) process.stderr.write('Nothing was sent.\n');
+      return 0;
+    }
     case 'query': {
       const result = queryNotes(libraryDir, {
         ...(command.noteKind ? { kind: command.noteKind } : {}),
@@ -1467,6 +1533,28 @@ async function executeMeetingIntelligence(command: MeetingIntelligenceCommand): 
       return 0;
     }
   }
+}
+
+/**
+ * The meeting a brief is for: the next one, or the next whose title has these words, as the app's
+ * Coming up lists them (upcomingForBrief). Without a calendar event, a title still finds its past
+ * meetings, as a series does.
+ */
+async function briefTarget(libraryDir: string, config: SeashellConfig, target: 'next' | { title: string }): Promise<UpcomingMeeting> {
+  const calendar = config.meeting?.calendar;
+  const readCalendar = async () => calendar?.enabled && (calendar.policy ?? 'ask') !== 'off'
+    ? await readMacCalendarEventsAsync({ leadMinutes: 7 * 24 * 60, lookbackMinutes: 0 }) : [];
+  const title = target === 'next' ? undefined : target.title;
+  const upcoming = await upcomingForBrief(libraryDir, title, readCalendar);
+  if (upcoming) return upcoming;
+  if (title === undefined) {
+    if (!calendar?.enabled) throw new Error('Briefs for the next meeting come from your calendar. Turn on calendar titles: seashell meeting calendar setup');
+    throw new Error('Nothing on your calendar in the next week.');
+  }
+  // Not on the calendar: the newest past meeting with those words names the series.
+  const words = title.toLocaleLowerCase('en-US').split(/\s+/u);
+  const past = listTranscriptRecords(libraryDir).find((entry) => words.every((word) => entry.title.toLocaleLowerCase('en-US').includes(word)));
+  return { title: past?.title ?? title, startsAt: new Date().toISOString(), attendees: [] };
 }
 
 /** A notification that needs no answer. The text is an argument, never part of the script. */

@@ -41,14 +41,16 @@ test.skipIf(process.platform !== 'darwin')('native timeout, process failure and 
   const root = mkdtempSync(join(tmpdir(), 'seashell-ax-errors-'));
   const helperPath = join(root, 'probe');
   try {
-    for (const script of [
-      '#!/bin/sh\nexec /bin/sleep 10\n',
-      '#!/bin/sh\nprintf "permission denied" >&2\nexit 1\n',
-      '#!/bin/sh\nprintf "invalid json"\n',
-    ]) {
+    for (const [script, timedOut] of [
+      // Only a helper that never answered says so: the watcher backs off from it, and counts it toward a busy Mac.
+      ['#!/bin/sh\nexec /bin/sleep 10\n', true],
+      ['#!/bin/sh\nprintf "permission denied" >&2\nexit 1\n', false],
+      ['#!/bin/sh\nprintf "invalid json"\n', false],
+    ] as const) {
       writeFileSync(helperPath, script, { mode: 0o700 });
       const result = await probeMeetAccessibility('auto', undefined, { helperPath });
-      expect(result).toEqual({ state: 'unavailable', detail: 'Meeting detection and speaker names could not be checked. Check [V] Speakers.' });
+      expect(result).toEqual({ state: 'unavailable', detail: 'Meeting detection and speaker names could not be checked. Check [V] Speakers.',
+        ...(timedOut ? { timedOut } : {}) });
       expect(result.detail).not.toContain('recording');
       expect(result.accessibilityTrusted).toBeUndefined();
     }

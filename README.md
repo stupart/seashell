@@ -408,7 +408,8 @@ bun run benchmark:live-asr -- ./sample.wav
 Seashell records calls by itself. To record anything else, press **Space** in
 Seashell or run `seashell record`; stop with **Space** or `seashell record stop`.
 A recording started by hand runs until you stop it. Stopping a call by hand keeps
-that call stopped until it ends.
+that call stopped until it ends. A stop is never lost: if the recorder is busy,
+`seashell record stop` says so, and it stops as soon as it can.
 
 Whether a call records by itself, asks first, or never records:
 
@@ -474,9 +475,10 @@ seashell meeting video <id> --at 12:34   # opens at that moment
 
 In Seashell, press **W** in a meeting that has video. It opens at the
 transcript line at the top of the screen, or at the start from Notes or Chat.
-Click a line to see that moment; the line being said is highlighted. The page
-works offline. The video has no sound of its own: the transcript carries the
-words.
+Click a line, or press Return on it, to see that moment; Space plays or pauses
+and the arrow keys move between lines. The line being said is highlighted and
+kept in view. The page works offline. The video has no sound of its own: the
+transcript carries the words.
 
 Turn video off, or off for one app:
 
@@ -546,7 +548,10 @@ until it is closed.
 | `M` | Approve a call Seashell asks about; make a saved transcript a meeting |
 | `1`–`3` | Open meeting Notes, Transcript, or Chat |
 | `G` | Notes setup for this meeting (template, a note, AI on or off); `Enter` there writes the notes. Rewriting asks first |
-| `A` | Ask an evidence-cited question about the current meeting |
+| `A` | Ask an evidence-cited question about the current meeting. During a call, `A` then `Enter` asks what you missed |
+| `+` | Write a note: during a call, at this moment; after it, about the meeting, or the line at the top of the transcript |
+| `U` | Draft a follow-up email or Slack message from the meeting. Nothing is sent |
+| `B` | Read the brief for your next meeting, or write it now. Shown when there is one, or past meetings to make one from |
 | `T` | Toggle timestamp presentation |
 | `S` | Toggle speaker presentation |
 | `R` | Choose a speaker and name them. Notes and chat stay, with the new name. A name suggested from a known voice says "suggested": `Y` keeps it, `N` says it is not them |
@@ -586,6 +591,8 @@ holds:
   each folder holds, any file that does not load, and the last automation runs.
   Enter opens the folder.
 - **Video:** on or off, and whether macOS lets Seashell record the screen.
+- **Vocabulary:** how many words it holds. Enter opens the file.
+- **Briefs:** before meetings, on or off. Enter switches it.
 
 Drag-and-drop also accepts absolute audio or video paths. Live microphone and
 system capture pause while an import runs and resume afterward.
@@ -791,6 +798,82 @@ and follow-ups. Your template's sections come next, then dates, facts and the
 rest. Risks, open questions, follow-ups and due dates need Humain prompt
 revision 3 or later.
 
+### Your notes
+
+Type what you notice during a call: press `+`, write one line, press Enter.
+The note is timed when you press `+`, and kept beside the call's audio, so a
+crash keeps it too. From a terminal, during a recording:
+
+```sh
+seashell note "Dana sounded unsure about November"
+seashell note "Send Priya the admin guide" --meeting <id> [--at 12:34]
+```
+
+After a call, `+` in a meeting adds a note about it, or about the line at the
+top of its transcript. Notes show under **Your notes** until the notes are
+written. Final notes read them as your own account of the meeting: a point that
+came from your notes has ✎ before its time. A note the call contradicts becomes
+an open question. A private meeting keeps your notes and sends them nowhere.
+Your notes need Humain prompt revision 4; an older engine keeps them listed as
+you wrote them and says so.
+
+### Questions during a call
+
+During a call, press `A`, then Enter: Seashell asks the AI what you missed since
+you last pressed a key here, or in the last five minutes if that was more
+recent. Type your own question instead if you like. The answer says when each
+point was said. Recording carries on, and Esc stops waiting. Nothing is saved;
+the final notes come when the call ends. A private meeting is never asked about.
+
+### Briefs before meetings
+
+About 15 minutes before a calendar meeting, the background recorder reads your
+past meetings with the same title or anyone on the invite (other than you),
+newest first, up to 20, and asks the AI for a brief: what was decided, what is
+still open, what to bring up, each point cited. It is saved in
+`~/Documents/Sea Shell/Briefs` and macOS says "Brief ready" once. A meeting with
+no history gets no brief and no notification. Private meetings are never read.
+
+In Seashell, the title line shows your next meeting when there is a brief to
+read or make, and `B` opens it. From a terminal:
+
+```sh
+seashell brief                  # the next meeting on your calendar
+seashell brief "Weekly sync"    # the next one with that title
+```
+
+Briefs need calendar titles on, an AI for final notes, and Humain prompt
+revision 4. Settings → **Briefs** turns them off.
+
+### Follow-ups
+
+In a meeting, press `U`, choose email or Slack, and add anything you want ("keep
+it to three bullets"). The draft shows with its subject; `T` shows when each
+part was said. `C` copies it, and `O` opens an email in Mail as a draft, to
+everyone invited except you. Seashell never sends anything.
+
+```sh
+seashell draft <id> [--slack] [--ask "keep it to three bullets"]
+```
+
+Follow-ups need Humain prompt revision 4.
+
+### Vocabulary
+
+Names, companies and jargon to spell right go in
+`~/Documents/Sea Shell/Vocabulary.txt`, one per line, beside Prompts. Lines
+starting with `#` are notes to you. Transcription uses them, live and for the
+final transcript, and so does every AI run: notes, chat, briefs and follow-ups.
+
+```sh
+seashell vocabulary             # make the file and list what it holds
+```
+
+Up to 200 words of up to 80 characters each. Whisper reads only as many as fit
+its prompt, from the top. On a test track padded with long silence, a prompt of
+50 unusual names never made Whisper write one of them. The AI needs Humain
+prompt revision 4 to use the words; an older engine is not sent them.
+
 ### Prompts
 
 What each meeting AI role is told sits in `~/Documents/Sea Shell/Prompts`, next
@@ -942,23 +1025,24 @@ stops a test.
 ### Meetings in Claude Code and Codex
 
 `seashell mcp install` adds the meetings server and its skill. Reading tools:
-`list_meetings`, `get_meeting`, `get_transcript`, `search_transcripts`,
+`list_meetings`, `get_meeting` (with your notes), `get_transcript`, `search_transcripts`,
 `list_action_items`, `query_notes`, `get_insights`, `get_video_moment` (the
 screen recording and offset for a transcript moment, when there is one),
-`list_extractors`, `list_automations`, `list_prompts` and `list_templates`.
+`list_extractors`, `list_automations`, `list_prompts`, `list_templates`,
+`get_vocabulary` and `draft_follow_up` (which returns a draft and never sends it).
 
 Tools that change your files, which the agent uses only when you ask:
-`edit_segment` (fix a line), `rename_speaker`, `update_prompt`,
-`update_template`, `create_extractor`, `update_extractor`, `delete_extractor`,
-`run_extractor`, `create_automation`, `update_automation` and
-`delete_automation`. A corrected line or a named speaker keeps the old
-transcript in the meeting's history (`seashell meeting restore` puts it back)
-and keeps the notes, marked as possibly out of date after a correction. A
-speaker an agent names doesn't teach Seashell their voice; only a name you give
-does. An automation an agent adds or changes stays off until you turn it on in
-its file, and still asks you before sending anything outside. Every tool
-refuses private meetings, and a meeting whose `meeting.json` can't be read
-counts as private.
+`add_note`, `edit_segment` (fix a line), `rename_speaker`, `update_vocabulary`,
+`update_prompt`, `update_template`, `create_extractor`, `update_extractor`,
+`delete_extractor`, `run_extractor`, `create_automation`, `update_automation`,
+`delete_automation`, and `get_brief`, which returns the saved brief for a meeting
+or writes one. A corrected line or a named speaker keeps the old transcript in
+the meeting's history (`seashell meeting restore` puts it back) and keeps the
+notes, marked as possibly out of date after a correction. A speaker an agent
+names doesn't teach Seashell their voice; only a name you give does. An
+automation an agent adds or changes stays off until you turn it on in its file,
+and still asks you before sending anything outside. Every tool refuses private
+meetings, and a meeting whose `meeting.json` can't be read counts as private.
 
 ### Google Meet status
 
@@ -1405,6 +1489,26 @@ Operational guarantees:
 - exit code `0` means success and `1` means validation, dependency, media, or
   processing failure; signal exits use the standard `130`/`143` codes.
 
+### Is a call recording? (for other tools)
+
+The background recorder publishes its phase outside `~/Documents`, so a tool
+that macOS has denied Documents access can still check it:
+
+```text
+~/Library/Caches/seashell/background-watch.json
+{"phase":"recording","updatedAtUnixMs":1794450011268,"mirroredAtUnixMs":1794450011270}
+```
+
+- `phase` is `watching`, `awaiting-consent`, `recording` or `stopped`.
+- `updatedAtUnixMs` is the recorder's own status time; `mirroredAtUnixMs` is
+  when the file was written. It is rewritten at least every 5 seconds while the
+  recorder runs, and at once on every phase change.
+- Trust `recording` only while `updatedAtUnixMs` is under 30 seconds old: a
+  recorder that crashed cannot say it stopped. Treat older as unknown.
+- It is replaced atomically and readable by everyone (mode 0644); it holds the
+  phase and nothing about any meeting.
+- `SEASHELL_RECORDING_STATE_PATH` moves it, as tests do.
+
 Example agent workflow:
 
 ```bash
@@ -1463,6 +1567,13 @@ seashell doctor
 - **Metal initialization crashes:** Sea Shell automatically retries file and
   live transcription on CPU. Set `SEASHELL_DISABLE_GPU=1` to skip the Metal
   attempt entirely while diagnosing the local whisper.cpp build.
+- **Final transcripts are slow:** Seashell's own heavy work never competes with
+  a call. Live drafts run at utility priority; the final pass, speaker
+  separation and speech detection run at macOS background priority
+  (`taskpolicy`), and wait until nothing is recording. When the Mac is
+  overloaded during a call, live text pauses ("Live text paused: your Mac is
+  busy") while the audio keeps recording. Set `SEASHELL_INFERENCE_PRIORITY=normal`
+  to run them at normal priority, for example to benchmark.
 - **Speaker setup failure:** run `seashell setup --speakers`, verify the pyannote
   packages, accept the model terms, and provide `HF_TOKEN` for the first run.
 - **Aggregate channel mismatch:** verify the channel count and physical routing

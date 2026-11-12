@@ -42,7 +42,9 @@ const add = (id: string, title: string, hoursAgo: number) => {
   const { directory } = saveTranscriptRecord(library, record);
   const artifact = createMeetingArtifact(record);
   artifact.status = 'ready';
-  artifact.analysis = { final: true, runId: 'fixture', createdAt: record.createdAt, summary: 'A made-up summary.', claims: [] } as never;
+  // Who's who names Speaker 2, who has a name of their own until it is said not to be Priya.
+  artifact.analysis = { final: true, runId: 'fixture', createdAt: record.createdAt, summary: 'A made-up summary.',
+    claims: [{ id: 'w1', type: 'speaker_identity', text: 'Speaker 2 is Sam Ortiz, their engineer.', evidenceSegmentIds: [], confidence: 0.7 }] } as never;
   saveMeetingArtifact(library, artifact);
   return directory;
 };
@@ -124,7 +126,9 @@ try {
   const top = screen().split('\n').find((line) => /^\s*\d\d:\d\d/u.test(line));
   assert.ok(top, 'a timed line is at the top');
   assert.ok(played[1]!.atSeconds! > 0, 'it opens where the transcript was scrolled to');
-  await until(() => screen().includes(`Opened the video at ${top!.trim().slice(0, 5)}`), 'and says where');
+  // The column pads the time; a sentence does not: "00:50" there is "0:50" here.
+  const [minutes, seconds] = top!.trim().slice(0, 5).split(':').map(Number);
+  await until(() => screen().includes(`Opened the video at ${minutes}:${String(seconds).padStart(2, '0')}.`), 'and says where');
 
   // Suggested names: y keeps one, n says it is not them.
   await type('r');
@@ -137,6 +141,15 @@ try {
   await type('n');
   await until(() => speakers('filmed-call').find((speaker) => speaker.id === 'REMOTE_01')?.label === 'Remote speaker 2', 'n undoes Priya');
   assert.equal(speakers('filmed-call').find((speaker) => speaker.id === 'REMOTE_01')!.suggestion, undefined);
+  // Unnamed again, Speaker 2 takes the name Who's who gives them: one key names them.
+  await until(() => screen().includes('Sam Ortiz · suggested'), 'Who\'s who suggests a name');
+  // Any key clears the toast; up and back down stays on Speaker 2.
+  await type('\x1b[A', '\x1b[B');
+  await until(() => screen().includes('y keep') && screen().includes('n not Sam Ortiz'), 'y keeps it, n says it is not them');
+  assert.ok(screen().replace(/\s+/gu, ' ').includes("Who's who in the notes"), 'and says where it came from');
+  await type('y');
+  await until(() => speakers('filmed-call').find((speaker) => speaker.id === 'REMOTE_01')?.label === 'Sam Ortiz', 'y names them with it');
+  await until(() => screen().includes('Speaker 2 is now Sam Ortiz.'), 'and says so');
   await type('\x1b');
 
   // Rewriting notes runs the extractors that fit, then shows what they found.

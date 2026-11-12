@@ -40,9 +40,15 @@ const real = { ...await import('../../src/feature-status.ts') };
 mock.module('../../src/feature-status.ts', () => ({ ...real,
   readFeatureStatuses: (options: any) => real.readFeatureStatuses({ ...options, dependencies }) }));
 let asked = 0;
+// The first time, macOS has already said no: its Privacy pane opens instead. The second, it is allowed.
+let denied = true;
 const permission = await import('../../src/microphone-permission.ts');
 mock.module('../../src/microphone-permission.ts', () => ({ ...permission,
-  allowMicrophone: async () => { asked++; mac.microphone = 'authorized'; return { authorization: 'authorized', detail: 'Allowed.' }; } }));
+  allowMicrophone: async () => {
+    asked++;
+    if (denied) { denied = false; return { authorization: 'denied', detail: 'Microphone access is off for Seashell Microphone.' }; }
+    mac.microphone = 'authorized'; return { authorization: 'authorized', detail: 'Allowed.' };
+  } }));
 
 const { default: App } = await import('../../src/app.tsx');
 const input = Object.assign(new PassThrough(), { isTTY: true, setRawMode() {}, ref() {}, unref() {} });
@@ -62,7 +68,11 @@ try {
   await until(() => plain().includes("Can't record yet") && plain().includes('Enter allow mic'), 'launch offers the microphone prompt on Enter');
   assert.ok(!plain().includes('Guided setup'), 'not the guide first');
   input.write('\r');
-  await until(() => asked === 1 && since('Enter allow mic').includes('Microphone allowed'), 'Enter asks macOS, and says it worked');
+  await until(() => asked === 1 && plain().includes('Opening Privacy & Security: turn on Seashell Microphone.'),
+    'once macOS has said no, the toast says what to turn on in the pane that opens');
+  await Bun.sleep(100);
+  input.write('\r');
+  await until(() => asked === 2 && since('Enter allow mic').includes('Microphone allowed'), 'Enter asks macOS, and says it worked');
   assert.ok(!plain().includes('Guided setup'), 'Enter asked for the microphone instead of opening the guide');
   console.log(JSON.stringify({ passed: true }));
 } finally {

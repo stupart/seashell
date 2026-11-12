@@ -5,8 +5,9 @@ import { join } from 'path';
 import { fileURLToPath } from 'url';
 import type { MicrophonePermissionStatus } from '../src/microphone-permission.ts';
 import {
-  MICROPHONE_START_NOTICES, MICROPHONE_UPDATE_NOTICE, microphoneStartNotifier, microphoneUpdateNotice,
+  MICROPHONE_START_NOTICES, MICROPHONE_UPDATE_NOTICE, microphoneAllowedBefore, microphoneStartNotifier, microphoneUpdateNotice,
 } from '../src/microphone-permission.ts';
+import { readFeatureStatuses } from '../src/feature-status.ts';
 import { ALLOW_MIC, recordingSummary } from '../src/RecordingStatus.tsx';
 import type { CaptureHealthSnapshot } from '../src/capture-health.ts';
 
@@ -59,8 +60,11 @@ test('after an update replaced Seashell Microphone, the login agent asks once at
     // A first install that was never allowed: nothing was allowed before, so not "again".
     install('copy one');
     expect(await microphoneUpdateNotice({ env, check })).toBeUndefined();
+    expect(microphoneAllowedBefore(env)).toBe(false);
     authorization = 'authorized';
     expect(await microphoneUpdateNotice({ env, check })).toBeUndefined();
+    // Allowed once: a copy macOS has not decided on is one needing your OK again.
+    expect(microphoneAllowedBefore(env)).toBe(true);
     // An update replaces the copy, and macOS has not decided on it.
     install('copy two, a new protocol');
     authorization = 'notDetermined';
@@ -72,4 +76,17 @@ test('after an update replaced Seashell Microphone, the login agent asks once at
     authorization = 'denied';
     expect(await microphoneUpdateNotice({ env, check })).toBeUndefined();
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a microphone allowed before an update "needs your OK again"; one never allowed is "not allowed yet"', async () => {
+  const microphone = async () => ({ authorization: 'notDetermined' as const, detail: 'Fixture.' });
+  const read = async (allowedBefore: boolean) => (await readFeatureStatuses({ config: {}, libraryDir: mkdtempSync(join(tmpdir(), 'seashell-mic-status-')),
+    dependencies: { microphone, microphoneAllowedBefore: () => allowedBefore, launchAtLogin: () => ({ enabled: true, loaded: true, label: 'f', plistPath: '/f', command: [] }),
+      aiEngineInstalled: () => false, transcriptionReady: () => true, systemAudioHelperReady: () => true, speakerSeparationReady: () => true } } as never))
+    .find((status) => status.id === 'microphone')!;
+  // Allowed before: one step fixes it, so it is yellow, and the next step says which key.
+  expect(await read(true)).toMatchObject({ state: 'attention', summary: 'Needs your OK again', fix: 'Press Enter, then choose Allow.', action: 'allow-microphone' });
+  expect(await read(false)).toMatchObject({ state: 'broken', summary: 'Not allowed yet', action: 'allow-microphone' });
+  // Said in the app, so no command.
+  expect(`${(await read(true)).detail} ${(await read(true)).fix}`).not.toContain('seashell');
 });

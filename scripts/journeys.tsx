@@ -57,6 +57,8 @@ interface Step {
   press?: string[];
   /** More keys, only on a narrow window: there, Enter opens a Settings row before it acts. */
   narrowPress?: string[];
+  /** Other keys altogether on a narrow window, where a row's detail is left with Esc. */
+  narrowInstead?: string[];
   /** How the keys read to a person, when they are not printable. */
   keys?: string;
   /** Change the world before the frame: a meeting starts, a recording fails. */
@@ -66,7 +68,7 @@ interface Step {
   /** History starts open on a wide window and closed on a narrow one. */
   history?: boolean;
 }
-type Machine = 'fresh' | 'ready' | 'mic-silent';
+type Machine = 'fresh' | 'ready' | 'mic-silent' | 'mic-updated';
 interface Journey {
   id: string;
   title: string;
@@ -79,6 +81,8 @@ interface Journey {
   firstRun?: boolean;
   /** Settings to start from, instead of the machine's. */
   config?: object;
+  /** The AI engine is older than this Seashell: it cannot read your notes, write briefs or follow-ups. */
+  oldEngine?: boolean;
   narrow?: boolean;
   steps: Step[];
 }
@@ -132,7 +136,9 @@ export const JOURNEYS: Journey[] = [
       { title: 'Recording', note: 'Words appear as people speak.',
         world: ({ library, background }) => liveMeeting(library, background), until: 'Recording' },
       { title: 'Reading back during the call', press: [UP, UP, UP], keys: '↑ ↑ ↑' },
-      { title: 'Back to the latest words', press: ['l'], keys: 'L' },
+      { title: 'Back to the latest words', press: ['l'], keys: 'l' },
+      { title: 'Stop asked', press: [' '], keys: 'Space', until: 'keep recording', note: 'Stopping asks first, whichever recorder runs the call.' },
+      { title: 'Kept recording', press: ['n'], keys: 'n' },
       { title: 'The call ends', note: 'Audio is safe; the final transcript and notes are being made.',
         world: ({ library, background }) => endMeeting(library, background) },
     ],
@@ -147,12 +153,12 @@ export const JOURNEYS: Journey[] = [
       { title: 'Insights', press: ['\x1b[6~'], keys: 'Page Down', until: 'Insights', note: 'What the extractors found, under the notes.' },
       { title: 'Transcript', press: ['2'], keys: '2' },
       { title: 'Chat', press: ['3'], keys: '3' },
-      { title: 'Asking a question', press: ['a'], keys: 'A', note: 'Typing a question about the meeting.' },
+      { title: 'Asking a question', press: ['a'], keys: 'a', note: 'Typing a question about the meeting.' },
       { title: 'Question typed', press: [...'What did we promise Acme?'], keys: 'What did we promise Acme?' },
       { title: 'Cancelled', press: [ESC], keys: 'Esc' },
-      { title: 'Notes setup', press: ['1', 'g'], keys: '1 G', until: 'Notes setup', note: 'Template, a note to the AI, and whether AI may see it. Enter rewrites.' },
+      { title: 'Notes setup', press: ['1', 'g'], keys: '1 g', until: 'Notes setup', note: 'Template, a note to the AI, and whether AI may see it. Enter rewrites.' },
       { title: 'Back', press: [ESC], keys: 'Esc', note: 'Nothing changed, so nothing to say.' },
-      { title: 'Export', press: ['2', 'e'], keys: '2 E', note: 'Getting the transcript out.' },
+      { title: 'Export', press: ['2', 'e'], keys: '2 e', note: 'Getting the transcript out.' },
     ],
   },
   {
@@ -164,9 +170,9 @@ export const JOURNEYS: Journey[] = [
       { title: 'Typing', press: [...'pricing'], keys: 'pricing', note: 'Each meeting shows the line that matched, and when.' },
       { title: 'Results', press: [ENTER], keys: 'Enter' },
       { title: 'Opened a result', press: [ENTER], keys: 'Enter', until: '1 Notes', note: 'The matching line is at the top, highlighted.' },
-      { title: 'Next match', press: ['n'], keys: 'N' },
-      { title: 'Delete asked', press: ['d'], keys: 'D', note: 'Moving a meeting to the Trash.' },
-      { title: 'Delete cancelled', press: ['n'], keys: 'N' },
+      { title: 'Next match', press: ['n'], keys: 'n' },
+      { title: 'Delete asked', press: ['d'], keys: 'd', note: 'Moving a meeting to the Trash.' },
+      { title: 'Delete cancelled', press: ['n'], keys: 'n' },
     ],
   },
   {
@@ -175,15 +181,15 @@ export const JOURNEYS: Journey[] = [
     steps: [
       { title: 'History', history: true, until: 'Acme' },
       { title: 'Meeting transcript', press: [ENTER, '2'], keys: 'Enter 2', until: 'Speaker 1' },
-      { title: 'Picking a speaker', press: ['r'], keys: 'R', until: 'Name a speaker', note: 'Who can be named? Priya was suggested from a voice named before.' },
+      { title: 'Picking a speaker', press: ['r'], keys: 'r', until: 'Name a speaker', note: 'Who can be named? Priya was suggested from a voice named before.' },
       { title: 'Chose one', press: [ENTER], keys: 'Enter' },
       { title: 'Name typed', press: [...'Dana'], keys: 'Dana' },
       { title: 'Saved', press: [ENTER], keys: 'Enter' },
-      { title: 'A suggested name', press: ['r'], keys: 'R', until: 'y keep', note: 'The list opens on the suggestion still to check.' },
-      { title: 'Suggestion kept', press: ['y'], keys: 'Y', note: 'Keeping it also teaches Seashell the voice.' },
-      { title: 'Hide speakers', press: [ESC, 's'], keys: 'Esc S', note: 'Toggle.' },
-      { title: 'Show speakers again, hide times', press: ['s', 't'], keys: 'S T' },
-      { title: 'Speaker settings', press: ['t', ',', ...Array(7).fill(DOWN), ENTER], narrowPress: [ENTER], keys: 'T , ↓ × 7 Enter',
+      { title: 'A suggested name', press: ['r'], keys: 'r', until: 'y keep', note: 'The list opens on the suggestion still to check.' },
+      { title: 'Suggestion kept', press: ['y'], keys: 'y', note: 'Keeping it also teaches Seashell the voice.' },
+      { title: 'Hide speakers', press: [ESC, 's'], keys: 'Esc s', note: 'Toggle.' },
+      { title: 'Show speakers again, hide times', press: ['s', 't'], keys: 's t' },
+      { title: 'Speaker settings', press: ['t', ',', ...Array(7).fill(DOWN), ENTER], narrowPress: [ENTER], keys: 't , ↓ × 7 Enter',
         until: 'Speaker setup', note: 'From its row in Settings.' },
     ],
   },
@@ -193,7 +199,7 @@ export const JOURNEYS: Journey[] = [
     steps: [
       { title: 'History', history: true, until: 'Weekly' },
       { title: 'Meeting without notes', press: [DOWN, ENTER], keys: '↓ Enter', until: '1 Notes' },
-      { title: 'Asked for notes', press: ['g', ENTER], keys: 'G Enter', until: 'AI for notes', note: 'Notes setup, then Enter to write them. No AI chosen yet: what happens?' },
+      { title: 'Asked for notes', press: ['g', ENTER], keys: 'g Enter', until: 'AI for notes', note: 'Notes setup, then Enter to write them. No AI chosen yet: what happens?' },
       { title: 'Next choice', press: [DOWN], keys: '↓' },
       { title: 'Picked one', press: [ENTER], keys: 'Enter' },
       { title: 'Next', press: [ENTER], keys: 'Enter' },
@@ -206,7 +212,8 @@ export const JOURNEYS: Journey[] = [
       { title: 'Warning at the top', until: 'silent', note: 'Does it say what is wrong and what to do?' },
       { title: 'Microphone fails during a call',
         world: ({ library, background }) => liveMeeting(library, background, { microphoneDown: true }), until: 'Mic not heard' },
-      { title: 'Audio help', press: ['i'], keys: 'I', until: 'Sound' },
+      { title: 'Audio help', press: ['i'], keys: 'i', until: 'Sound', note: 'Access is allowed, so there is one thing to check, and Enter tests the mic.' },
+      { title: 'Testing the mic', press: [ENTER], keys: 'Enter', until: 'Microphone test', note: 'The meter, on its own; the call keeps recording.' },
       { title: 'Back', press: [ESC], keys: 'Esc' },
       { title: 'Settings', press: [','], keys: ',', until: 'Settings' },
       { title: 'What to check', press: [ENTER], keys: 'Enter', note: 'Narrow, Enter opens the item; wide, it is already beside the list.' },
@@ -249,17 +256,26 @@ export const JOURNEYS: Journey[] = [
         note: 'Who Seashell knows by voice.' },
       { title: 'Choosing someone', press: [ENTER], keys: 'Enter', until: 'forget' },
       { title: 'Forget asked', press: [ENTER], keys: 'Enter', until: 'y forget', note: 'Asked first, in the key bar.' },
-      { title: 'Forgotten', press: ['y'], keys: 'Y', until: 'Forgot' },
+      { title: 'Forgotten', press: ['y'], keys: 'y', until: 'Forgot' },
       { title: 'Prompts', press: [LEFT, DOWN, DOWN, DOWN], keys: '← ↓ ↓ ↓', note: 'What each AI role is told: as shipped, edited or empty.' },
       { title: 'Choosing a prompt', press: [ENTER, DOWN], keys: 'Enter ↓', until: 'put back' },
-      { title: 'Undo asked', press: ['d'], keys: 'D', until: 'y undo' },
-      { title: 'Edits undone', press: ['y'], keys: 'Y', until: 'Undid' },
+      { title: 'Undo asked', press: ['d'], keys: 'd', until: 'y undo' },
+      { title: 'Edits undone', press: ['y'], keys: 'y', until: 'Undid' },
+      { title: 'Vocabulary', press: [LEFT, DOWN], narrowPress: [ENTER], keys: '← ↓', until: 'spell right',
+        note: 'Names and words to spell right, kept in the app; Enter opens them as a file.' },
+      { title: 'Adding a word', press: ['+', ...'Humain'], keys: '+ Humain', until: 'Add a word', note: 'Typed in the key bar; + adds, as it adds a note.' },
+      { title: 'Word added', press: [ENTER], keys: 'Enter', until: 'Added', note: 'The list shows it; the next call spells it that way.' },
+      { title: 'Choosing a word', press: [ENTER], narrowInstead: [DOWN], keys: 'Enter', until: 'd remove', note: 'd removes it again.' },
       { title: 'Extractors', press: [LEFT, DOWN, ENTER], keys: '← ↓ Enter', until: 'Customer pains', note: 'A file that does not load is red. Wide, Enter opens the folder.' },
       { title: 'Automations', press: [LEFT, DOWN, ENTER], keys: '← ↓ Enter', until: 'Last runs', note: 'And how their last runs went.' },
-      { title: 'Video', press: [LEFT, DOWN, DOWN], keys: '← ↓ ↓', note: 'On, but macOS has not allowed Screen Recording yet.' },
+      { title: 'Briefs', press: [LEFT, DOWN], narrowPress: [ENTER], keys: '← ↓', until: '15 minutes',
+        note: 'On by default, waiting for calendar titles: Enter turns those on here, and ←→ switch briefs.' },
+      { title: 'Calendar titles on, from Briefs', press: [ENTER], keys: 'Enter', until: 'Calendar titles on',
+        note: 'The same setup as the Calendar titles row.' },
+      { title: 'Video', press: [DOWN, DOWN], narrowInstead: [ESC, DOWN, DOWN], keys: '↓ ↓', note: 'On, but macOS has not allowed Screen Recording yet.' },
       { title: 'Video off', press: [ENTER], keys: 'Enter', note: 'Enter switches video. Wide, it turns off; narrow, it opens the item first.' },
       { title: 'Video on, Screen Recording allowed', press: [ENTER], keys: 'Enter', note: 'Turning it on asks macOS for Screen Recording.' },
-      { title: 'Computer audio', press: [LEFT, ...Array(11).fill(UP)], keys: '← ↑ × 11',
+      { title: 'Computer audio', press: [LEFT, ...Array(13).fill(UP)], keys: '← ↑ × 13',
         note: 'Meetings keep the background recorder\'s permission until a check at the Mac allows Seashell System Audio.' },
       { title: 'Computer audio checked', press: [ENTER], keys: 'Enter', note: 'Wide, Enter plays a short sound and listens; narrow, it opens the item first.' },
     ],
@@ -283,7 +299,108 @@ export const JOURNEYS: Journey[] = [
       { title: 'History', history: true, until: 'Roadmap' },
       { title: 'A meeting with video', press: [DOWN, DOWN, DOWN, ENTER], keys: '↓ ↓ ↓ Enter', until: 'watch video', note: 'w appears only when there is video.' },
       { title: 'Reading the transcript', press: ['2', ...Array(8).fill(DOWN)], keys: '2 ↓ × 8' },
-      { title: 'Video opened', press: ['w'], keys: 'W', until: 'Opened the video', note: 'It plays from the line at the top.' },
+      { title: 'Video opened', press: ['w'], keys: 'w', until: 'Opened the video', note: 'It plays from the line at the top.' },
+    ],
+  },
+  {
+    id: 'during-call', title: 'Notes and questions during a call', who: 'Someone on a call who wants to jot something down, or catch up after looking away.',
+    machine: 'ready', library: 'demo', narrow: true,
+    steps: [
+      { title: 'Recording', world: ({ library, background }) => liveMeeting(library, background, { bundle: true }), until: 'catch up',
+        note: 'A note and a catch-up are one key each.' },
+      { title: 'Typing a note', press: ['+', ...'Dana sounded unsure about November'], keys: '+ Dana sounded unsure about November',
+        note: 'The note is timed when + is pressed, not when Enter is.' },
+      { title: 'Noted', press: [ENTER], keys: 'Enter', until: 'Noted at' },
+      { title: 'Your notes so far', press: ['1'], keys: '1', until: 'Your notes', note: 'In Notes, with the time it was written.' },
+      { title: 'Asking', press: ['2', 'a'], keys: '2 a', until: 'what did I miss', note: 'Enter alone asks what you missed.' },
+      { title: 'Reading the call', press: [ENTER], keys: 'Enter', until: 'Reading the call', note: 'Recording carries on; Esc stops waiting.' },
+      { title: 'Catch up', until: 'From the call', note: 'The answer, then the moments it rests on, under the same names.' },
+      { title: 'Saved as a note', press: ['+'], keys: '+', until: 'Noted at', note: 'The answer joins your notes, timed now.' },
+      { title: 'Back to the call', press: [ESC], keys: 'Esc' },
+      { title: 'A private meeting', press: ['a'], keys: 'a', until: 'AI is off',
+        world: async ({ library }) => {
+          const { loadMeetingArtifact, saveMeetingArtifact } = await import('../src/meeting-artifact.ts');
+          saveMeetingArtifact(library, { ...loadMeetingArtifact(library, 'demo-live')!, ai: { off: true } });
+        }, note: 'AI is off for it: nothing is sent, and it says so in a line, and in the title.' },
+      { title: 'Nothing to ask', press: ['l'], keys: 'l', note: 'With AI off, catch up is not offered, as follow-up is not.' },
+    ],
+  },
+  {
+    id: 'live-text-paused', title: 'Live text paused while the Mac is busy', who: 'Someone on a call while their Mac is too busy for live text.',
+    machine: 'ready', library: 'demo', narrow: true,
+    steps: [
+      { title: 'Live text paused', world: ({ library, background }) => liveMeeting(library, background, { bundle: true, liveTextPaused: true }),
+        until: 'Live text paused while',
+        note: 'The title says so in yellow, and the transcript\'s last row says why. Nothing but time fixes it, so no key leads the key bar.' },
+      { title: 'Audio help', press: ['i'], keys: 'i', until: 'Audio help', note: 'It opens on what the title says: the audio itself is fine.' },
+      { title: 'Catch up', press: [ESC, 'a', ENTER], keys: 'Esc a Enter', until: 'From the call',
+        note: 'It reads up to where live text paused, and says so.' },
+    ],
+  },
+  {
+    id: 'whos-who', title: "Who's who, and a name from it", who: 'Someone whose notes say who each voice was.',
+    machine: 'ready', library: 'demo', narrow: true,
+    steps: [
+      { title: 'History', history: true, until: 'Acme', world: whosWho },
+      { title: "Who's who in the notes", press: [ENTER, ...Array(40).fill(DOWN)], keys: 'Enter ↓ × 40', until: "Who's who",
+        note: 'What the notes say about who each voice was.' },
+      { title: 'Naming a speaker', press: ['2', 'r'], keys: '2 r', until: 'Name a speaker',
+        note: "Speaker 1 has no name yet; the one Who's who gives is suggested, a key from kept." },
+      { title: 'Named', press: ['y'], keys: 'y', until: 'is now Dana Whitfield', note: 'One key, and the transcript and notes use it.' },
+      { title: 'In the transcript', press: [ESC], keys: 'Esc' },
+    ],
+  },
+  {
+    id: 'after-call', title: 'Your notes, and a follow-up', who: 'Someone who wrote notes during a call and now owes the other side an email.',
+    machine: 'ready', library: 'demo', narrow: true,
+    steps: [
+      { title: 'History', history: true, until: 'Acme' },
+      { title: 'Notes from your notes', press: [ENTER], keys: 'Enter', until: '1 Notes', note: '✎ marks a point that came from your own notes.' },
+      { title: 'What ✎ means', press: ['?'], keys: '?', until: 'your own notes' },
+      { title: 'A note after the call', press: [ESC, '+', ...'Send Priya the admin guide'], keys: 'Esc + Send Priya the admin guide' },
+      { title: 'Noted', press: [ENTER], keys: 'Enter', until: 'Noted', note: 'The notes use it when they are written again.' },
+      { title: 'A follow-up', press: ['u'], keys: 'u', until: 'Slack', note: 'Email or Slack.' },
+      { title: 'Anything to add', press: ['e', ...'keep it short'], keys: 'e keep it short' },
+      { title: 'Writing it', press: [ENTER], keys: 'Enter', until: 'Writing the email' },
+      { title: 'The email', until: 'Subject', note: 'Copy it, or open it in Mail as a draft. Nothing is sent.' },
+      { title: 'Where it came from', press: ['t'], keys: 't', until: 'hide times', note: 'Times are there when you want them.' },
+      { title: 'Write it again', press: ['g'], keys: 'g', until: 'Anything to add', note: 'What you typed last time comes back, to change.' },
+      { title: 'It failed', press: [ENTER], keys: 'Enter', until: 'try again', world: () => { process.env.JOURNEY_MODEL_DOWN = '1'; },
+        note: 'The AI did not answer this time. Enter tries again.' },
+      { title: 'Notes the engine could not read', press: [ESC, 'h', DOWN, DOWN, DOWN, DOWN, ENTER], keys: 'Esc h ↓ ↓ ↓ ↓ Enter', until: 'Board',
+        note: 'An older AI engine wrote these notes, so yours are listed as written, with one yellow line and the key that helps.' },
+    ],
+  },
+  {
+    id: 'old-engine', title: 'An AI engine older than Seashell', who: 'Someone whose notes left out what they typed.',
+    machine: 'ready', library: 'demo', narrow: true, oldEngine: true,
+    steps: [
+      { title: 'History', history: true, until: 'Board' },
+      { title: 'Notes without yours', press: [...Array(6).fill(UP), DOWN, DOWN, DOWN, DOWN, ENTER], keys: '↑ × 6 ↓ × 4 Enter', until: 'Board',
+        note: 'One yellow line under your notes; the key bar leads with AI settings.' },
+      { title: 'AI settings', press: [','], narrowPress: [ENTER], keys: ',', until: 'too old', note: 'Settings opens on AI notes, which says what still works and what to do, in plain words.' },
+      { title: 'The update command, copied', press: ['c'], keys: 'c', until: 'Copied.',
+        note: 'The engine is installed apart from Seashell, so no key updates it: c copies the command for Terminal, which is never shown.' },
+      { title: 'A point whose line was removed', press: [ESC, ...Array(7).fill(DOWN)], narrowInstead: [ESC, ESC, ...Array(9).fill(DOWN)], keys: 'Esc ↓ × 7',
+        until: 'source removed',
+        note: 'Its words stay as written; the time column says its source is gone.' },
+      { title: 'What "source removed" means', press: ['?'], keys: '?', until: 'whose line is gone', note: 'Said once in help, beside what ✎ means.' },
+    ],
+  },
+  {
+    id: 'brief', title: 'A brief before the next meeting', who: 'Someone with a meeting in 40 minutes who met these people before.',
+    machine: 'ready', library: 'demo', narrow: true,
+    steps: [
+      { title: 'The next meeting', world: ({ library }) => nextMeeting(library), until: 'Next:', note: 'The title line says what is next; b lists what is coming up.' },
+      { title: 'Coming up', press: ['b'], keys: 'b', until: 'Coming up', note: 'The next 36 hours, tomorrow morning included, and where each brief stands.' },
+      { title: 'Writing the brief', press: [ENTER], keys: 'Enter', until: '◐', note: 'From the past meetings with the same title or people. Esc stops it.' },
+      { title: 'The brief', until: 'Still open', note: 'Each point says which meeting and when, dim on the right.' },
+      { title: 'Back to the list', press: [ESC], keys: 'Esc', until: 'brief ready', note: 'It says the brief is ready.' },
+      { title: 'Ready next time', press: [ENTER], keys: 'Enter', until: 'Still open', note: 'Saved in the Briefs folder: the second time it opens at once.' },
+      { title: 'Choosing a point', press: [DOWN], keys: '↓', note: 'Who owns it sits on the right, as in the notes.' },
+      { title: 'Where it was said', press: [ENTER], keys: 'Enter', until: '2 Transcript', note: 'The past meeting, at the line the point cites.' },
+      { title: 'No history', press: ['b', DOWN, DOWN, ENTER], keys: 'b ↓ ↓ Enter', until: 'No past meetings',
+        note: 'A meeting with nobody met before has nothing to read, and says so.' },
     ],
   },
   {
@@ -292,6 +409,16 @@ export const JOURNEYS: Journey[] = [
     steps: [
       { title: 'History', history: true, until: 'Hiring' },
       { title: 'The meeting says so', press: [DOWN, DOWN, ENTER], keys: '↓ ↓ Enter', until: "Your side wasn't recorded", note: 'A yellow line, in the meeting only.' },
+    ],
+  },
+  {
+    id: 'mic-update', title: 'The microphone after an update', who: 'Someone who allowed the microphone once, then updated Seashell.',
+    machine: 'mic-updated', library: 'demo', narrow: true,
+    steps: [
+      { title: 'After the update', until: 'needs your OK', note: 'The title says so, and the key that helps leads the key bar.' },
+      { title: 'Microphone in Settings', press: [','], narrowPress: [ENTER], keys: ',', until: 'Needs your OK again',
+        note: 'It was allowed before: this is the new copy asking, not a microphone never allowed.' },
+      { title: 'Allowed again', press: [ENTER], keys: 'Enter', until: 'Microphone allowed', note: 'macOS asks once more; the recorder picks it up by itself.' },
     ],
   },
 ];
@@ -329,7 +456,8 @@ async function seed(library: string): Promise<void> {
     // Priya was named in an earlier call, so Seashell suggests her name for this voice.
     const speakers = id === 'demo-acme' ? SPEAKERS.map((speaker) => speaker.id === 'REMOTE_01'
       ? { ...speaker, label: 'Priya', suggestion: { source: 'voice' as const, previous: speaker.label, similarity: 0.83 } } : speaker) : SPEAKERS;
-    const record = createTranscriptRecord({ transcript: demoTranscript(), speakers },
+    // Board prep lost a line heard in silence, which one of its points rested on.
+    const record = createTranscriptRecord({ transcript: demoTranscript().filter((segment) => id !== 'demo-board' || segment.id !== 's000003'), speakers },
       { id, title, now: typeof when === 'number' ? new Date(Date.now() - when * 3_600_000) : when });
     const { directory } = saveTranscriptRecord(library, record);
     if (id === 'demo-roadmap') {
@@ -348,7 +476,14 @@ async function seed(library: string): Promise<void> {
         microphone: source, systemAudio: source,
         coverage: { yourSideAudibleSeconds: 20, otherSideAudibleSeconds: 2400, yourSideAudibleShare: 0.008, yourSideMissing: true } }));
     }
-    const artifact = createMeetingArtifact(record);
+    // The Acme call came from a calendar invite: a follow-up is addressed to everyone on it but you.
+    const artifact = createMeetingArtifact(record, id === 'demo-acme' ? { calendar: { provider: 'macos-eventkit', eventId: 'demo-acme-call', title,
+      startAt: record.createdAt, endAt: record.createdAt, calendar: 'you@example.com', attendees: [{ name: 'You', email: 'you@example.com' },
+        { name: 'Dana Whitfield', email: 'dana@acme.example' }, { name: 'Priya', email: 'priya@acme.example' }] } } : {});
+    const typed = (noteId: string, text: string, at: number) => ({ id: noteId, text, at, addedAt: record.createdAt });
+    if (id === 'demo-acme') artifact.ownerNotes = [typed('n1', 'Ask about the Canada question before the kickoff', 20), typed('n2', 'Priya cares most about admin controls', 52)];
+    // Written by an engine too old for them, so they are listed as written.
+    if (id === 'demo-board') artifact.ownerNotes = [typed('n3', 'They want the hiring plan before the next board meeting', 30)];
     if (notes) {
       artifact.status = 'ready';
       artifact.analysis = {
@@ -361,7 +496,14 @@ async function seed(library: string): Promise<void> {
           { id: 'c4', type: 'risk', text: 'The pilot waits on their security review.', evidenceSegmentIds: ['s000004', 's000006'], confidence: 0.8 },
           { id: 'c5', type: 'open_question', text: 'Does their legal team need the data kept in Canada?', evidenceSegmentIds: ['s000002'], confidence: 0.8 },
           { id: 'c6', type: 'follow_up', text: 'Hand onboarding to the support team after two weeks.', person: 'You', evidenceSegmentIds: ['s000010'], confidence: 0.8 },
-          { id: 'c7', type: 'note', text: 'Admin controls are on by default for the pilot.', evidenceSegmentIds: ['s000008'], confidence: 0.7 },
+          { id: 'c7', type: 'note', text: 'Admin controls are on by default for the pilot.', evidenceSegmentIds: ['s000008'], confidence: 0.7,
+            ...(id === 'demo-acme' ? { ownerNoteIds: ['n2'] } : {}) },
+          // Only your notes say it: there is no line in the transcript to cite.
+          ...(id === 'demo-acme' ? [{ id: 'c8', type: 'follow_up', text: 'Check whether their legal team needs the data in Canada before the kickoff.',
+            person: 'You', evidenceSegmentIds: [], ownerNoteIds: ['n1'], confidence: 0.7 }] : []),
+          // The line it rested on was heard in silence and removed from the transcript; the point stays, and says so.
+          ...(id === 'demo-board' ? [{ id: 'c9', type: 'decision', text: 'Share the board deck once the hiring plan is final.',
+            evidenceSegmentIds: [], removedEvidenceSegmentIds: ['s000003'], confidence: 0.7 }] : []),
         ] as never,
         notes: [
           { heading: 'Where they stand', items: [{ text: 'Per-seat pricing works for them.', evidenceSegmentIds: ['s000001'] }] },
@@ -370,6 +512,7 @@ async function seed(library: string): Promise<void> {
             { text: 'Kickoff the week of the tenth.', evidenceSegmentIds: ['s000011'] },
           ] },
         ] as never,
+        ...(id === 'demo-board' ? { ownerNotesUnread: true as const } : {}),
       };
       // Two of these repeat the notes and are left out; the rest are new.
       if (id === 'demo-acme') artifact.insights = [{ extractor: 'Customer pains', createdAt: record.createdAt, runId: 'demo-insight', fields: [
@@ -431,7 +574,85 @@ async function seedFiles(root: string, library: string): Promise<void> {
   }
 }
 
-async function liveMeeting(library: string, background: Background, options: { microphoneDown?: boolean } = {}) {
+/** Made-up answers, citing the made-up meeting they were asked about. */
+function cannedAnswer(action: string, request: Record<string, any>): unknown {
+  const ids = (request.segments ?? []).map((segment: { id: string }) => segment.id);
+  const cite = (...wanted: string[]) => wanted.filter((id) => ids.includes(id));
+  // Named as the request names them, which is as the transcript shows them.
+  const asker = (request.segments ?? []).find((segment: { id: string }) => segment.id === 's000004')?.speakerLabel ?? 'They';
+  if (action === 'chat' && request.partial) return {
+    answer: `${asker} asked for the security summary in writing, and you said you would send it by Friday. If it clears, they start the pilot with twelve people in November.`,
+    evidenceSegmentIds: cite('s000004', 's000005', 's000006'),
+  };
+  if (action === 'draft') return {
+    ...(request.draft?.kind === 'email' ? { subject: 'Pilot next steps and the security summary' } : {}),
+    paragraphs: [
+      { kind: 'greeting', text: 'Hi Dana and Priya,', evidenceSegmentIds: [] },
+      { kind: 'body', text: 'Thanks for the time today. The per-seat price works for you, and the data stays on your own machines.', evidenceSegmentIds: cite('s000001', 's000003') },
+      { kind: 'body', text: 'I will send the security summary by Friday. If it clears your review, we start the pilot with twelve people in November, with admin controls on from day one.', evidenceSegmentIds: cite('s000005', 's000006', 's000008') },
+      // The note typed after the call reaches the draft as "My notes:".
+      ...(String(request.draft?.ask ?? '').includes('admin guide')
+        ? [{ kind: 'body', text: 'I will also send Priya the admin guide.', evidenceSegmentIds: cite('s000007') }] : []),
+      { kind: 'closing', text: 'Talk soon,', evidenceSegmentIds: [] },
+    ],
+  };
+  if (action === 'brief') {
+    const meeting = request.meetings?.[0];
+    const sent = (meeting?.segments ?? []).map((segment: { id: string }) => segment.id);
+    const source = (...wanted: string[]) => [{ meetingId: meeting.meetingId, evidenceSegmentIds: wanted.filter((id) => sent.includes(id)) }];
+    return {
+      summary: 'Last time they were ready to pilot in November if the security review cleared. You owe them the security summary, and their Canada question is still open.',
+      sections: [
+        { heading: 'Still open', items: [
+          { text: 'Does their legal team need the data kept in Canada?', sources: source('s000002') },
+          { text: 'You promised the security summary by Friday.', sources: source('s000005') },
+        ] },
+        { heading: 'Bring up', items: [
+          { text: 'Confirm the kickoff the week of the tenth.', sources: source('s000011') },
+          { text: 'Who owns onboarding after the first two weeks.', sources: source('s000010') },
+        ] },
+      ],
+    };
+  }
+  return undefined;
+}
+
+/** The Acme call's notes say who two of its voices were. Speaker 2 already has a name, from a voice named before. */
+async function whosWho({ library }: Context) {
+  const { loadMeetingArtifact, saveMeetingArtifact } = await import('../src/meeting-artifact.ts');
+  const artifact = loadMeetingArtifact(library, 'demo-acme')!;
+  artifact.analysis!.claims.push(
+    { id: 'w1', type: 'speaker_identity', text: 'Speaker 1 is Dana Whitfield, their head of operations.', evidenceSegmentIds: ['s000001'], confidence: 0.7 } as never,
+    { id: 'w2', type: 'speaker_identity', text: 'Speaker 2 is Priya, who runs IT at Acme.', evidenceSegmentIds: ['s000004'], confidence: 0.7 } as never);
+  saveMeetingArtifact(library, artifact);
+}
+
+/** What the recorder says is coming up on the calendar: the next meeting, with past meetings to brief from, then tomorrow's. */
+async function nextMeeting(library: string) {
+  const { writeNextMeeting } = await import('../src/briefs.ts');
+  const startsAt = new Date(Date.now() + 40 * 60_000);
+  startsAt.setSeconds(0, 0);
+  const tomorrow = (hour: number, minute: number) => {
+    const at = new Date(Date.now() + 86_400_000);
+    at.setHours(hour, minute, 0, 0);
+    return at.toISOString();
+  };
+  writeNextMeeting(library, { upcoming: { title: 'Roadmap review', startsAt: startsAt.toISOString(), eventId: 'demo-roadmap-series',
+    attendees: [{ name: 'Dana Whitfield', email: 'dana@example.com' }] }, history: 1, later: [
+    { upcoming: { title: 'Acme check-in', startsAt: tomorrow(10, 0), eventId: 'demo-acme-check-in',
+      attendees: [{ name: 'Priya', email: 'priya@acme.example' }] }, history: 1 },
+    { upcoming: { title: 'Lunch with Sam', startsAt: tomorrow(12, 30), eventId: 'demo-lunch', attendees: [{ name: 'Sam', email: 'sam@example.com' }] }, history: 0 },
+  ] });
+}
+
+/**
+ * The live call's audio, heard afresh before every step, as the recorder reports it every second.
+ * Without it the fixture's sound goes stale after eight seconds, and a later step would show
+ * "Nothing heard" instead of what the step is about.
+ */
+let keepHearing: (() => void) | undefined;
+
+async function liveMeeting(library: string, background: Background, options: { microphoneDown?: boolean; bundle?: boolean; liveTextPaused?: boolean } = {}) {
   const { createTranscriptRecord } = await import('../src/transcript-record.ts');
   const { saveTranscriptRecord } = await import('../src/transcript-library.ts');
   const { createMeetingArtifact, saveMeetingArtifact } = await import('../src/meeting-artifact.ts');
@@ -440,16 +661,29 @@ async function liveMeeting(library: string, background: Background, options: { m
     { id: 'demo-live', title: 'Design review', now: new Date(Date.now() - 120_000) });
   const saved = saveTranscriptRecord(library, record);
   saveMeetingArtifact(library, createMeetingArtifact(record));
+  // The audio so far, where a note typed during the call is kept.
+  if (options.bundle) {
+    const { CaptureSessionStore } = await import('../src/capture-session.ts');
+    new CaptureSessionStore({ libraryDir: library, sessionId: record.id, startedAtUnixMs: Date.parse(record.createdAt), createdAt: record.createdAt });
+  }
   const health = new CaptureHealthTracker();
   if (options.microphoneDown) health.state('microphone', { state: 'unavailable', code: 'microphone_stopped', message: 'The microphone stopped.' });
-  else health.pcm('microphone', { peak: 1000, rms: 500, rmsDbfs: -30 });
-  health.pcm('systemAudio', { peak: 1000, rms: 500, rmsDbfs: -30 });
-  background.writeBackgroundMeetingState(saved.directory, 'recording', { captureHealth: health.snapshot, audioSavedThroughMs: 110_000,
-    draftStatus: { stage: 'waiting', detail: 'Waiting for speech', queueDepth: 0 } });
-  background.writeBackgroundWatchStatus(library, { phase: 'recording', sessionId: record.id });
+  const hear = () => {
+    if (!options.microphoneDown) health.pcm('microphone', { peak: 1000, rms: 500, rmsDbfs: -30 });
+    health.pcm('systemAudio', { peak: 1000, rms: 500, rmsDbfs: -30 });
+    background.writeBackgroundMeetingState(saved.directory, 'recording', { captureHealth: health.snapshot });
+    background.writeBackgroundWatchStatus(library, { phase: 'recording', sessionId: record.id });
+  };
+  // Live text paused while the Mac is busy, as the recorder says it; otherwise waiting for the next words.
+  const { LIVE_TEXT_PAUSED } = await import('../src/live-text-guard.ts');
+  background.writeBackgroundMeetingState(saved.directory, 'recording', { audioSavedThroughMs: 110_000,
+    draftStatus: options.liveTextPaused ? { stage: 'paused', detail: LIVE_TEXT_PAUSED, queueDepth: 0 } : { stage: 'waiting', detail: 'Waiting for speech', queueDepth: 0 } });
+  hear();
+  keepHearing = hear;
 }
 
 async function endMeeting(library: string, background: Background) {
+  keepHearing = undefined;
   const { findTranscriptRecord } = await import('../src/transcript-library.ts');
   const { path } = findTranscriptRecord(library, 'demo-live');
   background.writeBackgroundMeetingState(dirname(path), 'processing');
@@ -457,16 +691,21 @@ async function endMeeting(library: string, background: Background) {
 }
 
 /** The pretend Mac: what is set up, which the setup actions change. */
-interface Mac { recorder: boolean; microphone: boolean; meet: boolean; calendar: boolean; screen: boolean; fresh: boolean; micSilent: boolean }
+interface Mac { recorder: boolean; microphone: boolean; meet: boolean; calendar: boolean; screen: boolean; fresh: boolean; micSilent: boolean;
+  /** An earlier copy of Seashell Microphone was allowed, before an update. */
+  micAllowedBefore: boolean }
 
-function dependencies(mac: Mac): FeatureStatusDependencies {
+function dependencies(mac: Mac, oldEngine = false): FeatureStatusDependencies {
   return {
+    // What the pretend engine can do, read from its usage line as the real check does: no prompt.
+    engine: async () => new Set(['observe', 'reconcile', 'chat', 'extract', ...(oldEngine ? [] : ['brief', 'draft'])]),
     launchAtLogin: () => ({ enabled: mac.recorder, loaded: mac.recorder, label: 'demo', plistPath: '/demo', command: [] }),
     watchStatus: () => (mac.recorder ? { schemaVersion: 1, phase: 'watching', pid: 1, updatedAtUnixMs: Date.now() } : undefined) as never,
     meetConnection: async () => (mac.meet
       ? { state: 'idle', detail: 'Join a call', accessibilityTrusted: true }
       : { state: 'off', detail: 'Not connected', accessibilityTrusted: false }) as never,
     microphone: async () => (mac.microphone ? { authorization: 'authorized', detail: 'Allowed.' } : { authorization: 'notDetermined', detail: 'Not asked.' }) as never,
+    microphoneAllowedBefore: () => mac.micAllowedBefore,
     calendar: async () => ({ authorization: mac.calendar ? 'authorized' : 'notDetermined', detail: 'Calendar.', calendars: 2 }) as never,
     lastMeeting: () => (mac.fresh ? undefined : { title: 'Acme discovery call', createdAt: new Date(Date.now() - 3 * 3_600_000).toISOString(), microphoneChunks: 3,
       audibleMicrophoneChunks: mac.micSilent ? 0 : 3, computerChunks: 3, audibleComputerChunks: 3, meetingKey: 'meet:chrome:/abc-defg-hij' }) as never,
@@ -493,6 +732,8 @@ function setupActions(mac: Mac): SettingsActions {
       return { heard: true, refused: false, detail: 'Heard your Mac. Meetings use it from the next call.' };
     },
     openTemplates: () => {}, openFolder: () => {}, openFile: () => {},
+    // Copying never touches the real clipboard.
+    copy: () => {},
     // Trying an automation again never posts anywhere.
     retryAutomation: async () => [],
   };
@@ -531,6 +772,8 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
   process.env.SEASHELL_EXTRACTORS_DIR = join(root, 'Extractors');
   process.env.SEASHELL_AUTOMATIONS_DIR = join(root, 'Automations');
   process.env.SEASHELL_VOICES_DIR = join(root, 'Voices');
+  process.env.SEASHELL_VOCABULARY_FILE = join(root, 'Vocabulary.txt');
+  process.env.SEASHELL_BRIEFS_DIR = join(root, 'Briefs');
   process.env.SEASHELL_DISABLE_SYSTEM_AUDIO = '1';
   process.env.SEASHELL_MEETING_COMMAND_PATH = join(root, 'meeting-command.json');
   process.env.SEASHELL_RUNTIME_DIR = join(root, 'Runtime');
@@ -540,16 +783,22 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
     : journey.machine === 'fresh' ? {} : { meeting: { speakerBrowser: 'auto', backend: 'claude-code', model: 'sonnet' } });
   if (!journey.firstRun) writeFileSync(process.env.SEASHELL_CONFIG, JSON.stringify(config));
   const fresh = journey.machine === 'fresh';
-  const mac: Mac = { recorder: !fresh, microphone: !fresh, meet: !fresh, calendar: false, screen: false, fresh, micSilent: journey.machine === 'mic-silent' };
+  const updated = journey.machine === 'mic-updated';
+  const mac: Mac = { recorder: !fresh, microphone: !fresh && !updated, meet: !fresh, calendar: false, screen: false, fresh, micSilent: journey.machine === 'mic-silent',
+    micAllowedBefore: updated };
   const room: Room = { microphone: 'zeros', computer: 'zeros' };
   Object.defineProperty(process.stdout, 'columns', { value: size.columns });
   Object.defineProperty(process.stdout, 'rows', { value: size.rows });
 
   mock.module('../src/watch-lock.ts', () => ({ acquireMeetingWatchLock: () => undefined }));
+  // Allowing the microphone from the app asks the pretend Mac, never macOS.
+  const permission = { ...await import('../src/microphone-permission.ts') };
+  mock.module('../src/microphone-permission.ts', () => ({ ...permission,
+    allowMicrophone: async () => { mac.microphone = true; return { authorization: 'authorized', detail: 'Allowed.' }; } }));
   mock.module('../src/meeting-consent.ts', () => ({ writeMeetingConsent: () => undefined }));
   const features = { ...await import('../src/feature-status.ts') };
   mock.module('../src/feature-status.ts', () => ({ ...features,
-    readFeatureStatuses: (options: object) => features.readFeatureStatuses({ ...options, dependencies: dependencies(mac) } as never) }));
+    readFeatureStatuses: (options: object) => features.readFeatureStatuses({ ...options, dependencies: dependencies(mac, journey.oldEngine) } as never) }));
   const client = { ...await import('../src/humain-client.ts') };
   mock.module('../src/humain-client.ts', () => ({ ...client,
     async discoverHumainProviders() { return { integrations: [
@@ -558,9 +807,17 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
       { id: 'local-openai', ready: false, detail: 'No server', nextStep: 'Connect a local server' },
     ] }; },
     async discoverHumainModels() { return ['opus', 'sonnet', 'haiku'].map((id) => ({ id, name: id, description: '', efforts: ['low', 'medium', 'high'] })); },
-    // Journeys never call a model: the notes stay "being written" until the window closes.
-    runHumainMeeting: (_action: string, _request: unknown, options: { signal?: AbortSignal }) => new Promise((_, reject) =>
-      options.signal?.addEventListener('abort', () => reject(new Error('Journeys never call a model')))),
+    // Journeys never call a model: the notes stay "being written" until the window closes, and a live
+    // question, a follow-up or a brief gets a made-up answer after a moment.
+    runHumainMeeting: (action: string, request: Record<string, any>, options: { signal?: AbortSignal }) => new Promise((resolve, reject) => {
+      options.signal?.addEventListener('abort', () => reject(new Error('Journeys never call a model')));
+      // A step can pretend the AI is not answering, to show how a failure reads.
+      if (process.env.JOURNEY_MODEL_DOWN) { setTimeout(() => reject(new Error('Claude Code did not answer. Check you are online, then try again.')), 300); return; }
+      const output = cannedAnswer(action, request);
+      if (output) setTimeout(() => resolve({ runId: `journey-${action}`, compiledRunId: 'journey', status: 'succeeded', receipt: {}, output }), 700);
+    }),
+    // The pretend engine knows briefs, drafts, your notes and vocabulary, unless the journey's is older.
+    meetingEngineActions: async () => new Set(['observe', 'reconcile', 'chat', 'extract', ...(journey.oldEngine ? [] : ['brief', 'draft'])]),
     // A pretend test: Claude Code answers, Codex is signed out. No prompt is sent anywhere.
     async testMeetingAi(routes: Record<string, { backend: string; model: string }>) {
       await new Promise((resolve) => setTimeout(resolve, 600));
@@ -571,7 +828,7 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
         distinct.set(key, { ...route, roles: [...(distinct.get(key)?.roles ?? []), role] });
       }
       const results = [...distinct.values()].map((route, index) => route.backend === 'codex'
-        ? { ...route, ok: false, failure: { kind: 'not-signed-in', message: '' }, reason: 'Codex is not signed in. Run codex login in a terminal, then test again.' }
+        ? { ...route, ok: false, failure: { kind: 'not-signed-in', message: '' }, reason: 'Codex is not signed in. Open Codex and sign in, then test again.' }
         : { ...route, ok: true, latencyMs: 1400 + index * 900 });
       return { ok: results.every((result) => result.ok), engine: { ready: true }, routes: results };
     },
@@ -599,10 +856,12 @@ async function runJourney(journey: Journey, size: { columns: number; rows: numbe
   try {
     await sleep(500);
     for (const step of journey.steps) {
+      keepHearing?.();
       await step.world?.(context);
       if (step.world) await sleep(900);
       if (step.history && !stripVTControlCharacters(latest).includes('Meetings')) await type('h');
-      for (const key of [...step.press ?? [], ...size === NARROW ? step.narrowPress ?? [] : []]) await type(key);
+      const keys = size === NARROW && step.narrowInstead ? step.narrowInstead : [...step.press ?? [], ...size === NARROW ? step.narrowPress ?? [] : []];
+      for (const key of keys) await type(key);
       if (step.until) {
         const deadline = Date.now() + 2500;
         while (!stripVTControlCharacters(latest).includes(step.until) && Date.now() < deadline) await sleep(40);

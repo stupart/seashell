@@ -192,3 +192,44 @@ test('the AI test checks the engine first, then each distinct route in use once,
   expect(missing.routes[0]?.reason).toContain('seashell ai install');
   expect((await testMeetingAi({}, { checkEngine: () => {}, probe })).ok).toBeFalse();
 });
+
+test('two roles on one model at different efforts are two routes, each with its effort; the app is told where to go, not a command', async () => {
+  const deep: HumainMeetingRoute = { backend: 'claude-code', model: 'opus[1m]', effort: 'high' };
+  const chat: HumainMeetingRoute = { backend: 'claude-code', model: 'opus[1m]', effort: 'medium' };
+  const probe = async (route: HumainMeetingRoute) => route.effort === 'high'
+    ? { ok: true, backend: route.backend, model: route.model, latencyMs: 2300 }
+    : { ok: false, backend: route.backend, model: route.model, failure: { kind: 'model-missing' as const, message: '' } };
+  const terminal = await testMeetingAi({ reconciliation: deep, chat }, { mode: 'post-session', checkEngine: () => {}, probe });
+  expect(terminal.routes.map((route) => [route.roles, route.effort])).toEqual([[['reconciliation'], 'high'], [['chat'], 'medium']]);
+  expect(terminal.routes[1]?.reason).toBe('Claude Code does not offer the model "opus[1m]". Choose another in Settings (,) or with seashell ai setup.');
+  const app = await testMeetingAi({ reconciliation: deep, chat }, { mode: 'post-session', checkEngine: () => {}, probe, surface: 'app' });
+  expect(app.routes[1]?.reason).toBe('Claude Code does not offer the model "opus[1m]". Choose another under Models.');
+  expect(app.routes[1]?.reason).not.toContain('seashell');
+});
+
+test('the engine\'s own usage line says which meeting actions it knows, and so whether it is revision 4', async () => {
+  const { olderThanRevision4, parseMeetingActions } = await import('../src/humain-client.ts');
+  const rev3 = 'Humain failed: Usage: humain meeting observe|reconcile|chat|extract <request.json> [--store <directory>] [--run-id <id>]';
+  expect([...parseMeetingActions(rev3)!]).toEqual(['observe', 'reconcile', 'chat', 'extract']);
+  expect(parseMeetingActions('something else went wrong')).toBeUndefined();
+  expect(await olderThanRevision4(async () => parseMeetingActions(rev3))).toBe(true);
+  expect(await olderThanRevision4(async () => parseMeetingActions('Usage: humain meeting observe|reconcile|chat|extract|brief|draft <request.json>'))).toBe(false);
+  // An engine that cannot say is taken to be current; what it refuses, it refuses plainly.
+  expect(await olderThanRevision4(async () => undefined)).toBe(false);
+  expect(await olderThanRevision4(async () => { throw new Error('no node'); })).toBe(false);
+});
+
+test('the installed engine\'s actions are read from its script, without running it', async () => {
+  const { meetingEngineActions } = await import('../src/humain-client.ts');
+  const root = mkdtempSync(join(tmpdir(), 'seashell-engine-actions-'));
+  try {
+    const cli = join(root, 'cli.js');
+    // Running this would leave a mark; reading it does not.
+    writeFileSync(cli, `require('fs').writeFileSync(${JSON.stringify(join(root, 'ran'))}, '');\n` +
+      'throw new Error("Usage: humain meeting observe|reconcile|chat|extract|brief|draft <request.json>");\n');
+    const check = meetingEngineActions as (env?: NodeJS.ProcessEnv) => Promise<ReadonlySet<string> | undefined>;
+    expect([...(await check({ HUMAIN_CLI: cli }))!]).toEqual(['observe', 'reconcile', 'chat', 'extract', 'brief', 'draft']);
+    expect(existsSync(join(root, 'ran'))).toBe(false);
+    expect(await check({ HUMAIN_CLI: join(root, 'missing.js') })).toBeUndefined();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

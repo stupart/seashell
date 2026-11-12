@@ -44,8 +44,9 @@ content somewhere, so only do that when the user asks.
   segment was said, or `video: null` when there is no recording.
 
 ## Speakers
-- "Microphone" is the user. "Remote speaker N", "System audio" and
-  "Unknown remote speaker" are other people. Calendar attendees (in
+- "Microphone" is the user, and the notes call them "You": an action owned
+  by "You" is the user's. "Remote speaker N" (in the notes, "Speaker N"),
+  "System audio" and "Unknown remote speaker" are other people. Calendar attendees (in
   `get_meeting`) suggest who they are, but say when a name is a guess.
 - A speaker marked `suggested` (`speakerSuggested` on a transcript line) was
   named by Seashell from a voice it knows, and the user has not confirmed it.

@@ -102,8 +102,12 @@ export function loadMeeting(libraryDir: string, id: unknown) {
   return { ...found, directory: dirname(found.path), artifact: readMeetingArtifact(dirname(found.path), found.record) };
 }
 
-/** A listed meeting's transcript and notes, from the folder the listing found. */
-function readListed(entry: TranscriptLibraryEntry): { record: TranscriptRecord; artifact: MeetingArtifact | undefined } {
+/**
+ * A listed meeting's transcript and notes, from the folder the listing found.
+ * Nothing is written, whatever changed: for every reader of the library,
+ * briefs included.
+ */
+export function readListed(entry: Pick<TranscriptLibraryEntry, 'directory'>): { record: TranscriptRecord; artifact: MeetingArtifact | undefined } {
   const record = loadTranscriptPath(join(entry.directory, 'transcript.json'));
   return { record, artifact: readMeetingArtifact(entry.directory, record) };
 }
@@ -180,17 +184,21 @@ export function getMeeting(libraryDir: string, args: Arguments) {
         ...(claim.person ? { person: claim.person } : {}),
         ...(claim.due ? { due: claim.due } : {}),
         evidence: cite(claim),
+        ...(claim.ownerNoteIds?.length ? { fromYourNotes: true } : {}),
       })),
       // The notes in the owner's template, section by section, each point cited.
       ...(artifact?.analysis?.notes ? {
         template: artifact.analysis.template,
         sections: artifact.analysis.notes.map(section => ({
           heading: section.heading,
-          items: section.items.map(item => ({ text: item.text, evidence: cite(item) })),
+          items: section.items.map(item => ({ text: item.text, evidence: cite(item),
+            ...(item.ownerNoteIds?.length ? { fromYourNotes: true } : {}) })),
         })),
       } : {}),
     },
     ...(artifact?.insights?.length ? { insights: artifact.insights.map(insight => insight.extractor) } : {}),
+    // What the user typed themselves; a note item from them says so.
+    ...(artifact?.ownerNotes?.length ? { yourNotes: artifact.ownerNotes.map(note => ({ text: note.text, ...(note.at === undefined ? {} : { at: clock(note.at) }) })) } : {}),
     transcriptSegments: record.transcript.length,
   };
 }

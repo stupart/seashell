@@ -1,4 +1,5 @@
 import type { MeetProbe } from './meet-speakers.ts';
+import { LIVE_TEXT_PAUSED, LiveTextGuard, macLoadPerCore } from './live-text-guard.ts';
 import { setTimeout as sleep } from 'timers/promises';
 import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync, statSync } from 'node:fs';
@@ -8,17 +9,32 @@ import { finalizeCaptureTranscript } from './capture-finalizer.ts';
 import { readMacCalendarEventsAsync, suggestCalendarMeeting } from './calendar.ts';
 import { meetBrowserMatchesApp, probeMeetSpeakers } from './meet-speakers.ts';
 import { writeBackgroundMeetingState, type BackgroundMeetingState, type BackgroundMeetingStatusOptions } from './background-meeting-status.ts';
-import { writeBackgroundWatchStatus } from './background-watch-status.ts';
+import { writeBackgroundWatchStatus, writeRecordingState } from './background-watch-status.ts';
 import { startBackgroundLiveTranscript, type BackgroundLiveTranscriptHandle, type BackgroundLiveTranscriptStatus } from './background-live-transcript.ts';
 import type { CommittedCaptureChunk } from './capture-session.ts';
 import { captureHealthTransitionKey } from './capture-health.ts';
 import { createTranscriptRecord } from './transcript-record.ts';
 import {
+  briefsEnabled,
   loadConfig,
   resolveLibraryDir,
   resolveMeetingRoute,
   type SeashellConfig,
 } from './config.ts';
+import {
+  briefDue,
+  briefKey,
+  COMING_UP_HOURS,
+  COMING_UP_LIMIT,
+  findBrief,
+  makeBrief,
+  NoBriefHistoryError,
+  recordBriefAttempt,
+  relevantMeetings,
+  upcomingCalendarMeetings,
+  upcomingFromEvent,
+  writeNextMeeting,
+} from './briefs.ts';
 import {
   startDurableLiveCapture,
   type DurableLiveCaptureHandle,
@@ -27,9 +43,12 @@ import {
 import {
   DEFAULT_MEETING_AUTOMATION,
   MeetingSignalMonitor,
+  MeetingSignalTimeout,
   MeetingAutomationController,
   resolveMeetingCandidate,
   calendarEventIsThisCall,
+  callReleasedMicrophone,
+  followedCallUnobserved,
   hasConfirmedMeetingEnd,
   isBrowserApplication,
   isVideoCallEvent,
@@ -56,6 +75,7 @@ import { acquireMeetingWatchLock } from './watch-lock.ts';
 import { buildMeetingContext } from './meeting-context.ts';
 import { consumeMeetingConsent, writeMeetingConsent } from './meeting-consent.ts';
 import { consumeMeetingCommand } from './meeting-command.ts';
+import { addRecordingNote, consumeNoteCommands, mergeOwnerNotes, readBundleNotes, savedOwnerNotes } from './owner-notes.ts';
 import { meetingVideoRequest } from './video-recording.ts';
 
 export type AutomaticMeetingWatchEvent =
@@ -67,6 +87,7 @@ export type AutomaticMeetingWatchEvent =
   | { readonly type: 'meeting.resumed'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string; readonly pausedSeconds: number }
   | { readonly type: 'meeting.capture-finished'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string }
   | { readonly type: 'meeting.ready'; readonly at: string; readonly candidate: MeetingCandidate; readonly transcriptId: string; readonly directory: string }
+  | { readonly type: 'brief.ready'; readonly at: string; readonly title: string; readonly path: string }
   | { readonly type: 'watch.warning'; readonly at: string; readonly message: string }
   | { readonly type: 'watch.restarting'; readonly at: string; readonly reason: string }
   | { readonly type: 'watch.error'; readonly at: string; readonly message: string };
@@ -82,12 +103,23 @@ export interface AutomaticMeetingWatchDependencies {
   readonly enrich?: typeof enrichMeeting;
   readonly consumeConsent?: typeof consumeMeetingConsent;
   readonly consumeCommand?: typeof consumeMeetingCommand;
+  /** Notes typed with `seashell note` during a recording. */
+  readonly consumeNotes?: typeof consumeNoteCommands;
   /**
    * Ask the person directly whether to record, when no Seashell window may be
    * open to ask. Resolves with their answer, or undefined if they did not
    * answer. Only the login agent passes one: tests and embedders never prompt.
    */
   readonly askToRecord?: (candidate: MeetingCandidate, signal: AbortSignal) => Promise<'approve' | 'decline' | undefined>;
+  /** Writes a brief before a meeting; tests pass one that sends nothing. */
+  readonly makeBrief?: typeof makeBrief;
+  /** The Mac's load per core, for pausing live text when it is overloaded; tests pass their own. */
+  readonly readLoad?: () => number;
+  /**
+   * Tells the person a brief is ready, once per meeting. Only the login agent
+   * passes one: tests and embedders never notify.
+   */
+  readonly notify?: (message: string) => void;
 }
 
 export interface AutomaticMeetingWatchOptions {
@@ -104,7 +136,15 @@ export interface AutomaticMeetingWatchOptions {
    * (launchd) starts a fresh one on the current code and settings.
    */
   readonly restartWhen?: () => string | undefined;
+  /** Tests only: STATUS_HEARTBEAT_MS. */
+  readonly statusHeartbeatMs?: number;
 }
+
+/**
+ * How often a running recorder rewrites its status, whatever its poll is
+ * doing. Readers count it gone after 30 s of silence (BACKGROUND_WATCH_FRESH_MS).
+ */
+export const STATUS_HEARTBEAT_MS = 5_000;
 
 /**
  * Why a long-running watcher should be replaced: a package upgrade moved or
@@ -153,9 +193,13 @@ export class AutomaticMeetingWatchService {
   readonly #dependencies: Required<AutomaticMeetingWatchDependencies>;
   readonly #signalMonitor?: MeetingSignalMonitor;
   #active?: ActiveMeeting;
+  /** A recording whose capture is still closing: it still reads as recording until it has. */
+  #closing?: ActiveMeeting;
   /** A stopped meeting whose final pass waits briefly in case the call resumes. */
   #parked?: ActiveMeeting & { readonly parkedAtUnixMs: number; readonly resumeUntilUnixMs: number };
   #finalizationTail: Promise<void> = Promise.resolve();
+  /** Final passes waiting for every recording, and every meeting paused for resume, to end. */
+  #quietWaiters: Array<() => void> = [];
   #calendarCache?: { readAtUnixMs: number; events: Awaited<ReturnType<typeof readMacCalendarEventsAsync>> };
   #calendarRead?: Promise<void>;
   #calendarRetryAtUnixMs = 0;
@@ -164,9 +208,21 @@ export class AutomaticMeetingWatchService {
   #meetWarning?: string;
   #consentId?: string;
   #asking?: AbortController;
-  #lastNowUnixMs = Date.now();
   #browserFrontAtUnixMs = Number.NEGATIVE_INFINITY;
   #meetCheckedAtUnixMs = Number.NEGATIVE_INFINITY;
+  /** The calendar a few hours ahead, read every few minutes, for the next meeting and its brief. */
+  #ahead?: { readAtUnixMs: number; events: Awaited<ReturnType<typeof readMacCalendarEventsAsync>> };
+  #aheadRead?: Promise<void>;
+  #briefing?: Promise<void>;
+  readonly #liveTextGuard = new LiveTextGuard();
+  /** Said once, until the recording state can be published again. */
+  #recordingStateFailed = false;
+  /** Readings in a row in which the call has let go of the microphone, during its end grace. */
+  #microphoneLetGo = 0;
+  /** A Meet check that timed out, held instead of checking again at once; each wait doubles, up to a minute. */
+  #meetHeld?: MeetProbe;
+  #meetRetryAtUnixMs = 0;
+  #meetBackoffMs = 0;
 
   constructor(options: AutomaticMeetingWatchOptions = {}) {
     this.#config = options.config ?? loadConfig();
@@ -189,7 +245,11 @@ export class AutomaticMeetingWatchService {
       enrich: options.dependencies?.enrich ?? enrichMeeting,
       consumeConsent: options.dependencies?.consumeConsent ?? consumeMeetingConsent,
       consumeCommand: options.dependencies?.consumeCommand ?? consumeMeetingCommand,
+      consumeNotes: options.dependencies?.consumeNotes ?? consumeNoteCommands,
       askToRecord: options.dependencies?.askToRecord ?? (async () => undefined),
+      makeBrief: options.dependencies?.makeBrief ?? makeBrief,
+      notify: options.dependencies?.notify ?? (() => {}),
+      readLoad: options.dependencies?.readLoad ?? macLoadPerCore,
     };
   }
 
@@ -204,23 +264,35 @@ export class AutomaticMeetingWatchService {
 
   async pollOnce(): Promise<MeetingAutomationAction> {
     const now = this.#dependencies.now();
-    this.#lastNowUnixMs = now.getTime();
+    // What the person asked for comes before every probe below: on a busy Mac
+    // the signals and Meet checks can take longer than a command may wait.
+    // Notes first, so one typed just before stopping still lands in this recording.
+    this.takeNotes(now);
+    const byHand = await this.takeCommand(now);
+    if (byHand) return byHand;
     const automation = this.#config.meeting?.automation;
     const browser = automation?.enabled === false || automation?.mode === 'off'
       ? undefined : this.#config.meeting?.speakerBrowser;
     let snapshot: MeetingSignalSnapshot;
+    let detectorTimedOut = false;
     try {
       snapshot = await this.#dependencies.readSignals();
     } catch (error) {
+      detectorTimedOut = error instanceof MeetingSignalTimeout;
       this.emit({ type: 'watch.warning', at: now.toISOString(), message: errorMessage(error) });
       snapshot = { schemaVersion: 1, capturedAtUnixMs: now.getTime(), supported: false, inputProcesses: [] };
     }
-    const skipMeet = Boolean(browser && browser !== 'off') && !this.meetCallPossible(snapshot, now);
-    if (browser && browser !== 'off' && !skipMeet) this.#meetCheckedAtUnixMs = now.getTime();
-    const meet = browser && browser !== 'off' && !skipMeet
-      ? await this.#dependencies.readMeet(browser, this.#calendarAbort.signal).catch(() => ({
-        state: 'unavailable' as const, detail: 'Could not check Google Meet. Check the connection in Speakers.',
-      })) : undefined;
+    const meetBrowser = browser && browser !== 'off' ? browser : undefined;
+    const skipMeet = meetBrowser !== undefined && !this.meetCallPossible(snapshot, now);
+    const probing = meetBrowser !== undefined && !skipMeet;
+    const holding = probing && this.#meetHeld !== undefined && now.getTime() < this.#meetRetryAtUnixMs;
+    if (probing && !holding) this.#meetCheckedAtUnixMs = now.getTime();
+    const meet = !meetBrowser || skipMeet ? undefined : holding ? this.#meetHeld
+      : await this.#dependencies.readMeet(meetBrowser, this.#calendarAbort.signal).catch((): MeetProbe => ({
+        state: 'unavailable', detail: 'Could not check Google Meet. Check the connection in Speakers.',
+      }));
+    const meetTimedOut = probing && !holding && meet?.timedOut === true;
+    if (probing && !holding) this.holdMeetAfterTimeout(meet, now);
     // Any browser window Accessibility cannot read lands here: with no call
     // running that is routine, and a person cannot act on it. Lost access is not.
     const routine = meet?.state === 'unavailable' && (meet as MeetProbe).accessibilityTrusted === true &&
@@ -233,34 +305,21 @@ export class AutomaticMeetingWatchService {
     if (this.#shuttingDown) {
       return { kind: 'none' };
     }
+    this.lookAhead(now);
     this.expireParked(now);
     const calendar = this.currentCalendar(now);
     const candidate = preserveMeetingCandidateDuringObservationGap(
       resolveMeetingCandidate(snapshot, calendar, this.#config.meeting?.automation, meet),
       this.#controller.state, snapshot, meet, this.#parked?.candidate,
     );
-    const command = this.#dependencies.consumeCommand(undefined, now.getTime());
-    if (command === 'stop' && this.#active) {
-      const stopped = this.#controller.stopByHand(now.getTime()) ?? this.#active.candidate;
-      this.emit({ type: 'meeting.stopped', at: now.toISOString(), candidate: stopped });
-      await this.finish(this.#active.candidate, 'stopped-by-hand');
-      this.projectWatch();
-      return { kind: 'none' };
-    }
-    if (command === 'start' && !this.#active) {
-      const manual = Object.freeze({
-        id: `manual:${randomUUID()}`, appName: 'Seashell', bundleId: '', pid: 0, kind: 'manual' as const,
-        title: calendar?.title?.trim() || 'Recording', ...(calendar ? { calendar } : {}),
-        evidence: Object.freeze(['manual' as const]), requiresConsent: false,
-      });
-      const started = this.#controller.startByHand(manual, now.getTime());
-      if (started && this.start(started, now)) {
-        this.projectWatch();
-        return { kind: 'start', candidate: started };
-      }
-    }
-    const action = this.#controller.step(candidate, now.getTime(),
-      hasConfirmedMeetingEnd(this.#controller.state.candidate, meet));
+    const state = this.#controller.state;
+    const followed = ['recording', 'ending', 'awaiting-consent'].includes(state.phase) ||
+      (state.phase === 'cooldown' && state.stoppedByHand) ? state.candidate : undefined;
+    const confirmedEnd = hasConfirmedMeetingEnd(state.candidate, meet);
+    const unobserved = followedCallUnobserved(followed, candidate, snapshot, confirmedEnd);
+    const action = this.#controller.step(candidate, now.getTime(), confirmedEnd, unobserved);
+    this.followMicrophone(callReleasedMicrophone(followed, candidate, snapshot), unobserved);
+    this.guardLiveText(now, detectorTimedOut || meetTimedOut);
     if (action.kind === 'suggest') {
       this.#consentId = randomUUID();
       const why = meet && meet.state !== 'connected' ? meet.detail : undefined;
@@ -290,6 +349,160 @@ export class AutomaticMeetingWatchService {
     return action;
   }
 
+  /**
+   * Record or stop by hand. Read before anything slow: a stop is kept until
+   * the recording it was meant for is stopped, and a start acts at once rather
+   * than after the probes, with the calendar as last read for its title.
+   */
+  private async takeCommand(now: Date): Promise<MeetingAutomationAction | undefined> {
+    if (this.#shuttingDown) return undefined;
+    const command = this.#dependencies.consumeCommand(undefined, now.getTime(),
+      this.#active ? { recordingSessionId: this.#active.capture.sessionId } : {});
+    if (command === 'stop' && this.#active) {
+      const stopped = this.#controller.stopByHand(now.getTime()) ?? this.#active.candidate;
+      this.emit({ type: 'meeting.stopped', at: now.toISOString(), candidate: stopped });
+      await this.finish(this.#active.candidate, 'stopped-by-hand');
+      this.projectWatch();
+      return { kind: 'none' };
+    }
+    if (command !== 'start' || this.#active) return undefined;
+    const calendar = this.currentCalendar(now);
+    const manual = Object.freeze({
+      id: `manual:${randomUUID()}`, appName: 'Seashell', bundleId: '', pid: 0, kind: 'manual' as const,
+      title: calendar?.title?.trim() || 'Recording', ...(calendar ? { calendar } : {}),
+      evidence: Object.freeze(['manual' as const]), requiresConsent: false,
+    });
+    const started = this.#controller.startByHand(manual, now.getTime());
+    if (!started || !this.start(started, now)) return undefined;
+    this.projectWatch();
+    return { kind: 'start', candidate: started };
+  }
+
+  /**
+   * A Meet check that timed out is held, not run again three seconds later:
+   * walking a browser's Accessibility tree is work for the browser running
+   * the call. Each wait doubles, from 10 s up to a minute, and an answer ends it.
+   * The held result is unreadable, so it never ends a call (followedCallUnobserved).
+   */
+  private holdMeetAfterTimeout(meet: MeetProbe | undefined, now: Date): void {
+    if (!meet?.timedOut) {
+      this.#meetHeld = undefined;
+      this.#meetRetryAtUnixMs = 0;
+      this.#meetBackoffMs = 0;
+      return;
+    }
+    this.#meetBackoffMs = Math.min(60_000, Math.max(10_000, this.#meetBackoffMs * 2));
+    this.#meetRetryAtUnixMs = now.getTime() + this.#meetBackoffMs;
+    this.#meetHeld = meet;
+  }
+
+  /**
+   * While a call's end grace runs because its app let go of the microphone,
+   * Seashell holds none either: otherwise a Bluetooth headset stays in call
+   * mode after the call. The session stays open, and the microphone opens
+   * again the moment the call comes back. Two readings in a row confirm it, so
+   * a blip as the call switches devices does not cycle the microphone.
+   */
+  private followMicrophone(released: boolean, unobserved: boolean): void {
+    const capture = this.#active?.capture;
+    if (!capture) return;
+    const ending = this.#controller.state.phase === 'ending';
+    // A reading that told nothing changes nothing.
+    if (ending && unobserved) return;
+    this.#microphoneLetGo = ending && released ? this.#microphoneLetGo + 1 : 0;
+    if (this.#microphoneLetGo >= 2) capture.releaseMicrophone?.();
+    else capture.reopenMicrophone?.();
+  }
+
+  /** Live text gives way when the Mac is overloaded (live-text-guard.ts); the audio never does. */
+  private guardLiveText(now: Date, probeTimedOut: boolean): void {
+    const draft = this.#active?.draft;
+    let loadPerCore = 0;
+    try { loadPerCore = this.#dependencies.readLoad(); } catch { /* No reading: judge by the rest. */ }
+    const change = this.#liveTextGuard.observe(now.getTime(), { loadPerCore, draftBehind: draft?.behind === true, probeTimedOut });
+    if (change === 'pause') draft?.pause?.(LIVE_TEXT_PAUSED);
+    else if (change === 'resume') draft?.resume?.();
+  }
+
+  /**
+   * Notes from a terminal go into the recording's bundle, timed by when they
+   * were typed. A recording paused for resume still takes them.
+   */
+  private takeNotes(now: Date): void {
+    const meeting = this.#active ?? this.#parked;
+    for (const note of this.#dependencies.consumeNotes(undefined, now.getTime())) {
+      if (!meeting) {
+        this.emit({ type: 'watch.warning', at: now.toISOString(), message: 'A note arrived with nothing recording, so it was not kept.' });
+        continue;
+      }
+      try { addRecordingNote(meeting.capture.store.root, note.text, note.createdAtUnixMs); }
+      catch (error) { this.emit({ type: 'watch.warning', at: now.toISOString(), message: `Could not keep a note: ${errorMessage(error)}` }); }
+    }
+  }
+
+  /**
+   * The next meeting on the calendar, for the app, and a brief about 15 minutes
+   * before one that has history. Never waits: the calendar read and the brief
+   * run beside the poll, one at a time. A meeting with no history, or a brief
+   * that fails, is tried once and never mentioned.
+   */
+  private lookAhead(now: Date): void {
+    const calendar = this.#config.meeting?.calendar;
+    if (!calendar?.enabled || (calendar.policy ?? 'ask') === 'off') return;
+    if ((!this.#ahead || now.getTime() - this.#ahead.readAtUnixMs >= 5 * 60_000) && !this.#aheadRead &&
+        now.getTime() >= this.#calendarRetryAtUnixMs) {
+      this.#aheadRead = this.#dependencies.readCalendar({ leadMinutes: COMING_UP_HOURS * 60, lookbackMinutes: 0, signal: this.#calendarAbort.signal })
+        .then((events) => {
+          this.#ahead = { readAtUnixMs: this.#dependencies.now().getTime(), events };
+          this.publishNext(this.#dependencies.now());
+        })
+        // The calendar's own read reports a failure; this one waits for the next window.
+        .catch(() => { this.#ahead = { readAtUnixMs: this.#dependencies.now().getTime(), events: this.#ahead?.events ?? [] }; })
+        .finally(() => { this.#aheadRead = undefined; });
+    }
+    const route = resolveMeetingRoute(this.#config.meeting, 'reconciliation');
+    if (!this.#ahead || this.#briefing || !route || !briefsEnabled(this.#config)) return;
+    const due = briefDue(this.#ahead.events, this.#libraryDir, now);
+    if (!due) return;
+    const key = briefKey(due);
+    this.#briefing = (async () => {
+      try {
+        const brief = await this.#dependencies.makeBrief(this.#libraryDir, due, { route, signal: this.#calendarAbort.signal });
+        recordBriefAttempt(this.#libraryDir, key, { at: new Date().toISOString(), outcome: 'made' });
+        this.#dependencies.notify(`Brief ready for ${due.title}`);
+        this.emit({ type: 'brief.ready', at: this.#dependencies.now().toISOString(), title: due.title, path: brief.path });
+      } catch (error) {
+        if (this.#shuttingDown) return;
+        const noHistory = error instanceof NoBriefHistoryError;
+        recordBriefAttempt(this.#libraryDir, key, { at: new Date().toISOString(), outcome: noHistory ? 'no-history' : 'failed',
+          ...(noHistory ? {} : { detail: errorMessage(error) }) });
+        if (!noHistory) this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(), message: `No brief for ${due.title}: ${errorMessage(error)}` });
+      } finally {
+        this.publishNext(this.#dependencies.now());
+      }
+    })().finally(() => { this.#briefing = undefined; });
+  }
+
+  /**
+   * What the app lists as coming up, over the next 36 hours, the nearest first: when each is, whether
+   * there is a brief, or past meetings to make one from.
+   */
+  private publishNext(now: Date): void {
+    try {
+      const events = this.#ahead ? upcomingCalendarMeetings(this.#ahead.events, now).slice(0, COMING_UP_LIMIT) : [];
+      const [nearest, ...later] = events.map((event) => {
+        const upcoming = upcomingFromEvent(event);
+        const brief = findBrief(this.#libraryDir, upcoming);
+        return { upcoming, history: brief ? brief.meetings.length : relevantMeetings(this.#libraryDir, upcoming).length,
+          ...(brief ? { brief: brief.path } : {}) };
+      });
+      if (!nearest) { writeNextMeeting(this.#libraryDir, undefined); return; }
+      writeNextMeeting(this.#libraryDir, { ...nearest, ...(later.length ? { later } : {}) }, now.getTime());
+    } catch (error) {
+      this.emit({ type: 'watch.warning', at: now.toISOString(), message: `Could not save the next meeting: ${errorMessage(error)}` });
+    }
+  }
+
   /** The answer goes through the consent file, so the next poll acts on it like any other. */
   private askToRecord(candidate: MeetingCandidate, consentId: string): void {
     this.#asking?.abort();
@@ -306,7 +519,6 @@ export class AutomaticMeetingWatchService {
 
   approveSuggestion(): MeetingCandidate | undefined {
     const now = this.#dependencies.now();
-    this.#lastNowUnixMs = now.getTime();
     const candidate = this.#controller.approve(now.getTime());
     if (candidate && !this.start(candidate, now)) { this.projectWatch(); return undefined; }
     this.projectWatch();
@@ -314,20 +526,22 @@ export class AutomaticMeetingWatchService {
   }
 
   declineSuggestion(): void {
-    this.#lastNowUnixMs = this.#dependencies.now().getTime();
-    this.#controller.decline(this.#lastNowUnixMs);
+    this.#controller.decline(this.#dependencies.now().getTime());
     this.#consentId = undefined;
     this.projectWatch();
   }
 
   async shutdown(): Promise<void> {
     this.#shuttingDown = true;
+    this.releaseIfQuiet();
     this.#signalMonitor?.stop();
     this.#calendarAbort.abort();
     this.#asking?.abort();
     if (this.#active) await this.finish(this.#active.candidate, 'watch-stopped');
     this.finalizeParked();
     await this.#calendarRead?.catch(() => {});
+    await this.#aheadRead?.catch(() => {});
+    await this.#briefing?.catch(() => {});
     await this.#finalizationTail;
     this.#consentId = undefined;
     this.projectWatch();
@@ -431,9 +645,10 @@ export class AutomaticMeetingWatchService {
             message: `Could not save live transcript status: ${errorMessage(error)}` });
         }
       }
-      if (status.stage === 'delayed' && status.detail !== draftWarning) this.emit({ type: 'watch.warning',
+      const warns = status.stage === 'delayed' || status.stage === 'paused';
+      if (warns && status.detail !== draftWarning) this.emit({ type: 'watch.warning',
         at: this.#dependencies.now().toISOString(), message: status.detail });
-      draftWarning = status.stage === 'delayed' ? status.detail : undefined;
+      draftWarning = warns ? status.detail : undefined;
     };
     let writtenAt = -Infinity, writtenKey: string | undefined;
     let warnedKey: string | undefined;
@@ -524,6 +739,7 @@ export class AutomaticMeetingWatchService {
         void stopped.then(() => this.enqueueFinalization({ ...resumed, capture: reopened }));
       }
       this.#controller.reset();
+      this.releaseIfQuiet();
       this.emit({ type: 'watch.error', at: now.toISOString(), message: `Could not save meeting: ${errorMessage(error)}` });
       return false;
     }
@@ -532,11 +748,14 @@ export class AutomaticMeetingWatchService {
         libraryDir: this.#libraryDir, record, onStatus: onDraftStatus,
         ...(capture.speakerFor ? { speakerFor: capture.speakerFor } : {}),
       });
+      // A Mac still overloaded from the last call gets no live text in this one either, until it calms.
+      if (this.#liveTextGuard.paused) draft.pause?.(LIVE_TEXT_PAUSED);
       for (const chunk of pendingDraftChunks) draft.enqueue(chunk);
     } catch {
       onDraftStatus({ stage: 'delayed', detail: 'Live transcript could not start. Audio is saved for final transcription.', queueDepth: 0 });
     } finally { initializingDraft = false; pendingDraftChunks.length = 0; }
     this.#active = { candidate, capture, directory, startedAt, ...(draft ? { draft } : {}) };
+    this.#microphoneLetGo = 0;
     this.projectWatch();
     if (resumed) {
       this.emit({
@@ -561,10 +780,16 @@ export class AutomaticMeetingWatchService {
     const active = this.#active;
     if (!active) return;
     this.#active = undefined;
+    this.#closing = active;
     this.#consentId = undefined;
     try {
-      try { await active.capture.stop(reason); }
-      finally {
+      try {
+        await active.capture.stop(reason);
+        // Stopped means the capture has closed; its live draft is only cleanup.
+        this.#closing = undefined;
+        this.projectWatch();
+      } finally {
+        this.#closing = undefined;
         try { await active.draft?.close(); }
         catch (error) {
           this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(),
@@ -597,7 +822,27 @@ export class AutomaticMeetingWatchService {
         message: `Could not stop meeting capture: ${errorMessage(error)}`,
       });
     }
+    this.releaseIfQuiet();
     this.projectWatch();
+  }
+
+  /**
+   * No final pass runs mid-meeting. Transcribing and separating speakers is
+   * the heaviest work Seashell does, so it waits while anything records, and
+   * while a meeting is paused for resume, and then runs once over the whole
+   * meeting. A call that stops and resumes is still one meeting.
+   */
+  private get quiet(): boolean {
+    return this.#shuttingDown || (!this.#active && !this.#parked);
+  }
+
+  private untilQuiet(): Promise<void> {
+    return new Promise((resolve) => this.#quietWaiters.push(resolve));
+  }
+
+  private releaseIfQuiet(): void {
+    if (!this.quiet) return;
+    for (const resolve of this.#quietWaiters.splice(0)) resolve();
   }
 
   private expireParked(now: Date): void {
@@ -612,10 +857,17 @@ export class AutomaticMeetingWatchService {
       stage: 'stopped', queueDepth: 0, detail: 'Live draft stopped. Preparing the final transcript.',
     } });
     this.enqueueFinalization(parked);
+    this.releaseIfQuiet();
   }
 
   private enqueueFinalization(meeting: ActiveMeeting): void {
-    const task = async () => this.finalize(meeting.candidate, meeting.capture);
+    if (!this.quiet) this.markCapture(meeting.directory, 'processing', { draftStatus: {
+      stage: 'stopped', queueDepth: 0, detail: 'The final transcript starts when the call now recording ends.',
+    } });
+    const task = async () => {
+      if (!this.quiet) await this.untilQuiet();
+      return this.finalize(meeting.candidate, meeting.capture);
+    };
     this.#finalizationTail = this.#finalizationTail.then(task, task).catch((error: unknown) => {
       this.markCapture(meeting.directory, 'failed');
       this.emit({
@@ -661,14 +913,16 @@ export class AutomaticMeetingWatchService {
     const saved = saveTranscriptRecord(this.#libraryDir, record);
     capture.store.setStatus('completed', 'automatic-meeting-finalized');
     capture.store.attachTo(saved.directory);
-    // The owner may have chosen a template, a note, or no AI while the call ran.
+    // The owner may have chosen a template, a note, or no AI while the call ran, and typed notes of their own.
     const ai = readMeetingAiSettings(this.#libraryDir, record.id);
+    const ownerNotes = mergeOwnerNotes(savedOwnerNotes(saved.directory), readBundleNotes(join(saved.directory, 'capture')));
     let artifact = createMeetingArtifact(record, {
       mode: this.#config.meeting?.mode ?? 'hybrid',
       ...(candidate.calendar === undefined ? {} : { calendar: candidate.calendar }),
       maxObserverRuns: this.#config.meeting?.maxObserverRuns,
     });
     if (ai) artifact = { ...artifact, ai };
+    if (ownerNotes.length) artifact = { ...artifact, ownerNotes };
     saveMeetingArtifact(this.#libraryDir, artifact);
     // Live analysis only helps while someone watches the call. After a
     // background meeting, replaying every window first would add minutes (19
@@ -727,17 +981,42 @@ export class AutomaticMeetingWatchService {
     }
   }
 
+  /**
+   * Rewrites the recorder's status with a fresh time. The run loop calls this
+   * every few seconds, so a poll held up by a slow probe never makes a running
+   * recorder look gone.
+   */
+  heartbeat(): void {
+    this.projectWatch();
+  }
+
+  /**
+   * Stamped when written, never when the poll began: a slow poll must not
+   * publish a stale time. The phase also goes outside ~/Documents
+   * (writeRecordingState), on its own, so losing one never loses the other.
+   */
   private projectWatch(): void {
-    const candidate = this.#active?.candidate ?? this.#controller.state.candidate;
+    const recording = this.#active ?? this.#closing;
+    const candidate = recording?.candidate ?? this.#controller.state.candidate;
+    const phase = this.#shuttingDown ? 'stopped' : recording ? 'recording'
+      : this.#controller.state.phase === 'awaiting-consent' ? 'awaiting-consent' : 'watching';
+    const updatedAtUnixMs = this.#dependencies.now().getTime();
+    try {
+      writeRecordingState(phase, updatedAtUnixMs);
+      this.#recordingStateFailed = false;
+    } catch (error) {
+      if (!this.#recordingStateFailed) this.emit({ type: 'watch.warning', at: new Date(updatedAtUnixMs).toISOString(),
+        message: `Could not publish the recording state outside Documents: ${errorMessage(error)}` });
+      this.#recordingStateFailed = true;
+    }
     try {
       writeBackgroundWatchStatus(this.#libraryDir, {
-        phase: this.#shuttingDown ? 'stopped' : this.#active ? 'recording'
-          : this.#controller.state.phase === 'awaiting-consent' ? 'awaiting-consent' : 'watching',
+        phase,
         ...(!this.#shuttingDown && candidate ? { candidate: { id: candidate.id, title: candidate.title, appName: candidate.appName } } : {}),
-        ...(this.#active ? { sessionId: this.#active.capture.sessionId } : {}),
+        ...(recording ? { sessionId: recording.capture.sessionId } : {}),
         ...(!this.#shuttingDown && this.#controller.state.phase === 'awaiting-consent' && this.#consentId ? { consentId: this.#consentId } : {}),
         ...(this.#meetWarning ? { warning: this.#meetWarning } : {}),
-      }, this.#lastNowUnixMs);
+      }, updatedAtUnixMs);
     } catch (error) {
       this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(), message: `Could not save background recorder status: ${errorMessage(error)}` });
     }
@@ -755,8 +1034,12 @@ export async function runAutomaticMeetingWatch(options: AutomaticMeetingWatchOpt
   // never install a competing process.exit handler that skips capture flush.
   const releaseSignalOwnership = claimManagedProcessSignalOwnership();
   let service: AutomaticMeetingWatchService | undefined;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
   try {
     service = new AutomaticMeetingWatchService(options);
+    const running = service;
+    heartbeat = setInterval(() => running.heartbeat(), options.statusHeartbeatMs ?? STATUS_HEARTBEAT_MS);
+    heartbeat.unref();
     options.onEvent?.(event({ type: 'watch.ready', at: new Date().toISOString() }));
     if (options.once) {
       await service.pollOnce();
@@ -774,6 +1057,7 @@ export async function runAutomaticMeetingWatch(options: AutomaticMeetingWatchOpt
       await sleep(pollSeconds * 1_000, undefined, { signal: options.signal }).catch(() => {});
     }
   } finally {
+    clearInterval(heartbeat);
     try { await service?.shutdown(); }
     finally {
       try { lock.release(); } finally { releaseSignalOwnership(); }

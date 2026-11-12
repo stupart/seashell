@@ -1,6 +1,6 @@
 import { installedHumainCli, requireHumainNode } from './humain-install.ts';
 import { spawn } from 'child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { dirname, join, resolve } from 'path';
 import {
@@ -9,8 +9,12 @@ import {
   trackTempDirectory,
 } from './process-lifecycle.ts';
 
-/** extract runs one owner-written extractor over a finished meeting. */
-export type HumainMeetingAction = 'observe' | 'reconcile' | 'chat' | 'extract';
+/**
+ * extract runs one owner-written extractor over a finished meeting. brief
+ * prepares the owner for an upcoming meeting from past ones; draft writes a
+ * follow-up email or Slack message from one meeting. Both need revision 4.
+ */
+export type HumainMeetingAction = 'observe' | 'reconcile' | 'chat' | 'extract' | 'brief' | 'draft';
 export type HumainBackend = 'codex' | 'claude-code' | 'openrouter' | 'local-openai';
 
 export interface HumainMeetingRoute {
@@ -341,6 +345,72 @@ export function olderHumainEngine(message: string): boolean {
   return /usage: humain|unknown (?:command|subcommand|option)|is not supported/iu.test(message);
 }
 
+/** How to get a newer engine, for the command line and agents only. The app says it in plain words and opens AI settings. */
+export const NEWER_ENGINE = 'Install a newer AI engine: seashell ai install <humain-package.tgz>';
+/** The same next step as the app says it, after "This AI engine cannot write follow-ups yet.": never a command. */
+export const NEWER_ENGINE_PLAIN = 'Install a newer AI engine, then try again.';
+
+/**
+ * Something the installed engine is too old to do, said in plain words: "This AI
+ * engine cannot write briefs yet." The command line and the meetings server add
+ * NEWER_ENGINE; the app never shows a command.
+ */
+export class OlderEngineError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'OlderEngineError';
+  }
+}
+
+/** An error's message, with how to install a newer engine when that is what it needs: for the command line and agents. */
+export function withNewerEngine(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return error instanceof OlderEngineError ? `${message} ${NEWER_ENGINE}` : message;
+}
+
+/** The meeting actions an engine lists in its usage line: "humain meeting observe|reconcile|chat|extract <request.json>". */
+export function parseMeetingActions(message: string): ReadonlySet<string> | undefined {
+  const listed = /humain meeting ((?:[a-z-]+\|)+[a-z-]+)/iu.exec(message)?.[1];
+  return listed ? new Set(listed.toLowerCase().split('|')) : undefined;
+}
+
+/** Reads the installed engine's meeting actions; undefined when it cannot say. */
+export type MeetingEngineCheck = () => Promise<ReadonlySet<string> | undefined>;
+
+const engineActions = new Map<string, ReadonlySet<string> | undefined>();
+
+/**
+ * The meeting actions the installed engine knows, from the usage line in its
+ * own script. Running it would say the same, but the engine checks every
+ * provider first, which takes many seconds; reading the file takes none, and
+ * no prompt is sent. Read once per engine file.
+ */
+export const meetingEngineActions: MeetingEngineCheck = async (env: NodeJS.ProcessEnv = process.env) => {
+  let script: string;
+  try {
+    const executable = resolveHumainExecutable(env);
+    script = executable.prefix[0] ?? executable.command;
+  } catch { return undefined; }
+  try {
+    const { mtimeMs, size } = statSync(script);
+    const key = `${script}:${mtimeMs}:${size}`;
+    if (!engineActions.has(key)) {
+      engineActions.set(key, size <= 64 * 1024 * 1024 ? parseMeetingActions(readFileSync(script, 'latin1')) : undefined);
+    }
+    return engineActions.get(key);
+  } catch { return undefined; }
+};
+
+/**
+ * Revision 4 brought briefs, drafts, the owner's notes and vocabulary together,
+ * so an engine whose usage lists no brief has none of them. An engine that
+ * cannot say is taken to be current: what it refuses, it refuses plainly.
+ */
+export async function olderThanRevision4(check: MeetingEngineCheck): Promise<boolean> {
+  const actions = await check().catch(() => undefined);
+  return actions !== undefined && !actions.has('brief');
+}
+
 export function parseHumainRouteProbe(stdout: string, route: HumainMeetingRoute): HumainRouteProbe {
   let value: any;
   try { value = JSON.parse(stdout); } catch { throw new Error('Humain returned malformed JSON'); }
@@ -376,7 +446,7 @@ export async function probeHumainRoute(
     return { ok: false, backend: route.backend, model: route.model, failure: message === 'Humain run timed out'
       ? { kind: 'timeout', message: `Humain itself did not answer within ${Math.round(timeoutMs / 1000) + 15} seconds.` }
       : olderHumainEngine(message)
-        ? { kind: 'provider-error', message: 'This Humain version cannot test connections yet. Install a newer engine: seashell ai install <humain-package.tgz>' }
+        ? { kind: 'provider-error', message: 'This AI engine is too old to test connections. Install a newer one.' }
         : { kind: 'provider-error', message: message.slice(0, 500) } };
   }
 }
@@ -387,6 +457,8 @@ export interface MeetingAiRouteTest {
   roles: MeetingAiRole[];
   backend: HumainBackend;
   model: string;
+  /** How hard the model thinks, when the route says: two roles on one model at different efforts are two routes. */
+  effort?: string;
   ok: boolean;
   latencyMs?: number;
   failure?: { kind: HumainRouteFailureKind | 'engine-missing'; message: string };
@@ -404,14 +476,18 @@ const PROVIDER_NAMES: Record<HumainBackend, string> = {
   codex: 'Codex', 'claude-code': 'Claude Code', openrouter: 'OpenRouter', 'local-openai': 'Your local model server',
 };
 
+/** Where a test's answer is read: in a terminal, a command is the way on; in the app, a place in it. */
+export type MeetingAiTestSurface = 'terminal' | 'app';
+
 function plainReason(kind: NonNullable<MeetingAiRouteTest['failure']>['kind'],
-  route: { backend: HumainBackend; model: string }, message: string): string {
+  route: { backend: HumainBackend; model: string }, message: string, surface: MeetingAiTestSurface): string {
   const provider = PROVIDER_NAMES[route.backend];
   const detail = message.trim() ? ` ${message.trim()}` : '';
   switch (kind) {
     case 'engine-missing': return message;
     case 'not-signed-in': return `${provider} is not signed in.${detail}`;
-    case 'model-missing': return `${provider} does not offer the model "${route.model}". Choose another in Settings (,) or with seashell ai setup.${detail}`;
+    case 'model-missing': return `${provider} does not offer the model "${route.model}". ${surface === 'app'
+      ? 'Choose another under Models.' : 'Choose another in Settings (,) or with seashell ai setup.'}${detail}`;
     case 'timeout': return `${provider} did not answer in time.${detail}`;
     default: return `${provider} could not answer.${detail}`;
   }
@@ -429,6 +505,8 @@ export async function testMeetingAi(
     env?: NodeJS.ProcessEnv;
     signal?: AbortSignal;
     timeoutMs?: number;
+    /** Where the reasons are read; a terminal's name commands. */
+    surface?: MeetingAiTestSurface;
     /** Seams for tests: no engine is started and no prompt is sent. */
     checkEngine?: () => void;
     probe?: typeof probeHumainRoute;
@@ -455,7 +533,7 @@ export async function testMeetingAi(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return { ok: false, engine: { ready: false, detail: message }, routes: [...distinct.values()].map(({ route, roles }) => ({
-      roles, backend: route.backend, model: route.model, ok: false,
+      roles, backend: route.backend, model: route.model, ...(route.effort ? { effort: route.effort } : {}), ok: false,
       failure: { kind: 'engine-missing', message }, reason: message,
     })) };
   }
@@ -463,9 +541,9 @@ export async function testMeetingAi(
   const results: MeetingAiRouteTest[] = [];
   for (const { route, roles } of distinct.values()) {
     const result = await probe(route, { env: options.env, signal: options.signal, timeoutMs: options.timeoutMs });
-    results.push({ roles, backend: route.backend, model: route.model, ok: result.ok,
+    results.push({ roles, backend: route.backend, model: route.model, ...(route.effort ? { effort: route.effort } : {}), ok: result.ok,
       ...(result.latencyMs === undefined ? {} : { latencyMs: result.latencyMs }),
-      ...(result.failure ? { failure: result.failure, reason: plainReason(result.failure.kind, route, result.failure.message) } : {}) });
+      ...(result.failure ? { failure: result.failure, reason: plainReason(result.failure.kind, route, result.failure.message, options.surface ?? 'terminal') } : {}) });
   }
   return { ok: results.length > 0 && results.every((result) => result.ok), engine: { ready: true }, routes: results };
 }

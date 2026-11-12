@@ -44,6 +44,19 @@ export function meetingWhen(createdAt: string, now = new Date(), withTime = true
   return withTime ? `${day} ${clockTime(created)}` : day;
 }
 
+/**
+ * When a meeting coming up starts: "Today 6:31 pm", "Tomorrow 10:00 am", "Fri 9:00 am". In a sentence,
+ * today's is just its time and the day is lower case: "6:31 pm", "tomorrow 10:00 am".
+ */
+export function upcomingWhen(startsAt: string, now = new Date(), inSentence = false): string {
+  const at = new Date(startsAt);
+  const tomorrow = new Date(now);
+  tomorrow.setDate(now.getDate() + 1);
+  if (at.toDateString() === now.toDateString()) return inSentence ? clockTime(at) : `Today ${clockTime(at)}`;
+  const day = at.toDateString() === tomorrow.toDateString() ? 'Tomorrow' : at.toLocaleDateString('en-US', { weekday: 'short' });
+  return `${inSentence && day === 'Tomorrow' ? 'tomorrow' : day} ${clockTime(at)}`;
+}
+
 /** The list's date column: the time for today's meetings, the day for older ones. */
 export function listWhen(createdAt: string, now = new Date()): string {
   return meetingWhen(createdAt, now, false);
@@ -160,15 +173,29 @@ export function speakerColors(ids: Iterable<string>): Map<string, (typeof SPEAKE
 }
 
 /**
- * A speaker as the screen names them: "You" for your own microphone, "Speaker 1" for a voice
- * Seashell numbered. The saved label, which agents and exports read, is left as it is.
+ * A speaker as the screen names them, and as the meeting AI is told them: "You" for your own
+ * microphone, "Speaker 1" for a voice Seashell numbered, never a raw id such as REMOTE_01 or
+ * SPEAKER_00, which count from zero. The saved label, which agents and exports read, is left as it is.
  */
 export function speakerDisplayName(id: string | undefined, label: string): string {
-  if (id === 'LOCAL' && label === 'Microphone') return 'You';
+  if (id === YOUR_SPEAKER_ID && (label === 'Microphone' || label === YOUR_SPEAKER_ID)) return 'You';
+  const raw = /^(?:REMOTE_)?(?:SPEAKER|REMOTE)_(\d+)$/u.exec(label);
+  if (raw) return `Speaker ${Number(raw[1]) + 1}`;
   return label.replace(/^Remote speaker (\d+)$/u, 'Speaker $1');
 }
 
-/** Compact media-relative clock for the TUI; exports retain millisecond detail. */
+/**
+ * A time on the meeting's clock as a sentence says it: "2:01", "0:07", "1:02:03". Only an aligned
+ * column pads it ("02:01"), with formatTuiClock.
+ */
+export function sentenceClock(seconds: number): string {
+  const whole = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(whole % 3600 / 60);
+  const hours = Math.floor(whole / 3600);
+  return `${hours ? `${hours}:${String(minutes).padStart(2, '0')}` : minutes}:${String(whole % 60).padStart(2, '0')}`;
+}
+
+/** Compact media-relative clock for the TUI's aligned columns; exports retain millisecond detail. */
 export function formatTuiClock(seconds: number): string {
   const totalSeconds = Math.max(0, Math.floor(seconds));
   const second = totalSeconds % 60;

@@ -9,11 +9,13 @@ import { captureCoverage, type CaptureCoverage } from './capture-health.ts';
 import { loadCaptureSession } from './capture-session.ts';
 import type { SeashellConfig } from './config.ts';
 import { diarizationStatus } from './diarization-environment.ts';
-import { resolveHumainExecutable } from './humain-client.ts';
+import { meetingEngineActions, olderThanRevision4, resolveHumainExecutable, type MeetingEngineCheck } from './humain-client.ts';
+import { briefsEnabled } from './config.ts';
+import { loadVocabulary, vocabularyPath } from './vocabulary.ts';
 import { meetingLaunchAtLoginStatus } from './launch-at-login.ts';
 import { loadMeetingTemplates, loadProfile, templatesDirectory } from './meeting-templates.ts';
 import { checkMeetConnection, type MeetProbe } from './meet-speakers.ts';
-import { microphonePermission, type MicrophonePermissionStatus } from './microphone-permission.ts';
+import { microphoneAllowedBefore, microphonePermission, type MicrophonePermissionStatus } from './microphone-permission.ts';
 import { calendarPermission } from './calendar-permission.ts';
 import type { HelperPermissionStatus } from './helper-permission.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
@@ -32,10 +34,11 @@ const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 /** ok: works · attention: works partly or needs one step · off: not set up (optional) · broken: should work and does not. */
 export type FeatureState = 'ok' | 'attention' | 'off' | 'broken';
 export type FeatureAction = 'enable-recorder' | 'connect-meet' | 'allow-microphone' | 'allow-calendar' | 'open-speakers' | 'open-ai' | 'open-templates'
-  | 'open-extractors' | 'open-automations' | 'turn-on-video' | 'allow-screen-recording' | 'check-computer-audio';
+  | 'open-extractors' | 'open-automations' | 'turn-on-video' | 'allow-screen-recording' | 'check-computer-audio'
+  | 'open-vocabulary' | 'turn-on-briefs';
 export type FeatureId = 'recorder' | 'detection' | 'microphone' | 'computer-audio' | 'transcription'
-  | 'meet-names' | 'speaker-separation' | 'voices' | 'ai-notes' | 'notes-templates' | 'prompts' | 'extractors' | 'automations'
-  | 'calendar' | 'video';
+  | 'meet-names' | 'speaker-separation' | 'voices' | 'ai-notes' | 'notes-templates' | 'prompts' | 'vocabulary' | 'extractors' | 'automations'
+  | 'briefs' | 'calendar' | 'video';
 
 export interface FeatureStatus {
   readonly id: FeatureId;
@@ -52,6 +55,11 @@ export interface FeatureStatus {
   readonly action?: FeatureAction;
   /** The same step from a terminal. */
   readonly command?: string;
+  /**
+   * A step only Terminal can do, such as installing the AI engine, which is not part of Seashell:
+   * c in Settings copies `text`, never shown, and the next step ends with `how`.
+   */
+  readonly copy?: { readonly text: string; readonly how: string };
 }
 
 export const FEATURE_ACTION_LABEL: Record<FeatureAction, string> = {
@@ -67,6 +75,8 @@ export const FEATURE_ACTION_LABEL: Record<FeatureAction, string> = {
   'turn-on-video': 'Turn video on',
   'allow-screen-recording': 'Allow Screen Recording',
   'check-computer-audio': 'Check computer audio',
+  'open-vocabulary': 'Open Vocabulary',
+  'turn-on-briefs': 'Turn briefs on',
 };
 
 /** What the most recent recorded meeting actually captured, per source. */
@@ -87,6 +97,8 @@ export interface FeatureStatusDependencies {
   readonly watchStatus?: typeof readBackgroundWatchStatus;
   readonly meetConnection?: (browser: 'auto' | 'chrome' | 'safari', signal?: AbortSignal) => Promise<MeetProbe>;
   readonly microphone?: (signal?: AbortSignal) => Promise<MicrophonePermissionStatus>;
+  /** An earlier copy of Seashell Microphone was allowed, so one not decided on came with an update. */
+  readonly microphoneAllowedBefore?: () => boolean;
   readonly calendar?: (signal?: AbortSignal) => Promise<HelperPermissionStatus>;
   readonly lastMeeting?: (libraryDir: string) => MeetingEvidence | undefined;
   readonly speakerSeparationReady?: () => boolean;
@@ -103,6 +115,8 @@ export interface FeatureStatusDependencies {
   readonly screenRecording?: (signal?: AbortSignal) => Promise<HelperPermissionStatus>;
   /** The people with a saved voice. */
   readonly voices?: () => ReadonlyArray<{ name: string; meetings: number }>;
+  /** What the installed AI engine can do, read from its own usage line. */
+  readonly engine?: MeetingEngineCheck;
 }
 
 export function lastMeetingEvidence(libraryDir: string): MeetingEvidence | undefined {
@@ -238,9 +252,15 @@ export async function readFeatureStatuses(options: {
               : predatesRecorder && !evidence?.audibleMicrophoneChunks
               ? ' Meetings recorded before this update could not hear you; that is fixed now.' : '') } as const
       : microphone.authorization === 'notDetermined'
-        ? { state: 'broken', summary: 'Not allowed yet',
-          detail: 'Until you allow it, background meetings record other people but not you.',
-          fix: 'Choose Allow when macOS asks.', action: 'allow-microphone', command: 'seashell meeting microphone setup' } as const
+        // After an update macOS asks once more for the new copy: it was allowed, and needs your OK again. Nothing
+        // failed, and one step fixes it, so it is something to look at, in yellow, never a red ✗.
+        ? (deps.microphoneAllowedBefore ?? microphoneAllowedBefore)()
+          ? { state: 'attention', summary: 'Needs your OK again',
+            detail: 'Seashell was updated, so macOS asks once more about Seashell Microphone. Until you allow it, meetings record other people but not you.',
+            fix: 'Press Enter, then choose Allow.', action: 'allow-microphone', command: 'seashell meeting microphone setup' } as const
+          : { state: 'broken', summary: 'Not allowed yet',
+            detail: 'Until you allow it, background meetings record other people but not you.',
+            fix: 'Choose Allow when macOS asks.', action: 'allow-microphone', command: 'seashell meeting microphone setup' } as const
         : microphone.authorization === 'denied'
           ? { state: 'broken', summary: 'Blocked in System Settings', detail: microphone.detail,
             fix: 'Turn on Seashell Microphone in Privacy & Security → Microphone.', action: 'allow-microphone', command: 'seashell meeting microphone setup' } as const
@@ -321,17 +341,29 @@ export async function readFeatureStatuses(options: {
   const backends = [...new Set(Object.values(routes).flatMap(route => route ? [route.backend] : []))];
   // Until an AI is chosen, that is what is missing: choosing one is the next step whether or not the engine is in yet.
   const aiDetail = 'Writes notes, decisions and action items after each meeting and answers questions about it.';
+  // The engine says what it can do from its usage line, never a prompt, so reading it costs nothing.
+  const older = engine && aiConfigured ? await olderThanRevision4(deps.engine ?? meetingEngineActions) : false;
   statuses.push({
     id: 'ai-notes', label: 'AI notes, summary & chat', optional: true,
     ...(!aiConfigured ? { state: 'off', summary: 'Not chosen', action: 'open-ai', detail: aiDetail,
       fix: 'Choose which AI writes your notes.', command: engine ? 'seashell ai setup' : 'seashell ai install <package.tgz>' } as const
     : !engine ? { state: 'off', summary: 'Not installed', action: 'open-ai', detail: `${aiDetail} The AI engine is not installed.`,
       fix: 'Install the AI engine.', command: 'seashell ai install <package.tgz>' } as const
+    // Older than this Seashell: the notes still come, without what you typed, and briefs and follow-ups do not.
+    // The engine is installed apart from Seashell, from a package file, so no key updates it: c copies the
+    // command for Terminal, and the file is dropped in after it.
+    : older ? { state: 'attention', summary: 'AI engine too old', action: 'open-ai',
+      detail: `${aiDetail} The AI engine is older than this version of Seashell. Notes still work; typed notes, briefs and follow-ups need the newer engine.`,
+      fix: 'Install the newer engine from its package file.', command: 'seashell ai install <package.tgz>',
+      copy: { text: 'seashell ai install ', how: 'c copies the command: paste it in Terminal, then drag the file in.' } } as const
     : { state: 'ok', summary: `Using ${backends.map(providerName).join(' + ')}`, action: 'open-ai', detail: aiDetail } as const),
   });
 
   statuses.push(templatesStatus(options.libraryDir));
-  statuses.push(promptsStatus(options.libraryDir), extractorsStatus(options.libraryDir), automationsStatus(options.libraryDir));
+  const vocabulary = loadVocabulary(options.libraryDir);
+  statuses.push(promptsStatus(options.libraryDir), vocabularyStatus(options.libraryDir, vocabulary, older),
+    extractorsStatus(options.libraryDir), automationsStatus(options.libraryDir),
+    briefsStatus(options.config, { calendarOn, aiConfigured: aiConfigured && engine, older }));
 
   const titlesDetail = 'Names each meeting after its calendar event (matched by its Meet link) and lists the attendees, which later helps name speakers.';
   statuses.push({
@@ -351,6 +383,39 @@ export async function readFeatureStatuses(options: {
 
   statuses.push(videoStatus(videoOn, screenRecording));
   return statuses;
+}
+
+/** Names and words to spell right, as a file the owner edits. */
+function vocabularyStatus(libraryDir: string, vocabulary: ReturnType<typeof loadVocabulary>, older: boolean): FeatureStatus {
+  const base = { id: 'vocabulary', label: 'Vocabulary', optional: true, action: 'open-vocabulary', command: 'seashell vocabulary',
+    detail: 'Names, companies and words for Seashell to spell right. Transcription and the meeting AI both use them.' } as const;
+  const count = `${vocabulary.terms.length} ${vocabulary.terms.length === 1 ? 'word' : 'words'}`;
+  if (vocabulary.problems.length) return { ...base, state: 'attention', summary: `${count} · some left out`, fix: vocabulary.problems[0]! };
+  // Optional, so having none is not a step to take: the list is empty and + adds a word.
+  if (!vocabulary.terms.length) return { ...base, state: 'off', summary: existsSync(vocabularyPath(libraryDir)) ? 'No words yet' : 'None yet' };
+  // Transcription still uses them; only the notes cannot.
+  return older ? { ...base, state: 'attention', summary: `${count} · AI engine too old`,
+    fix: 'Transcription uses them, but this AI engine is too old to. AI notes says what to do.', command: 'seashell ai install <package.tgz>' }
+    : { ...base, state: 'ok', summary: count };
+}
+
+const BRIEFS_DETAIL = 'About 15 minutes before a calendar meeting, Seashell writes a brief from past meetings with the same title or the same people, and tells you once. A meeting with no history gets none. Private meetings are never read.';
+
+/**
+ * Briefs before meetings: on by default, and only as useful as the calendar and the AI it needs. Off is
+ * never a nag; on but waiting for one of them is something to check, and Enter does that step here.
+ */
+function briefsStatus(config: SeashellConfig, ready: { calendarOn: boolean; aiConfigured: boolean; older: boolean }): FeatureStatus {
+  // Each says the one step that lets briefs happen; once they can, the command makes one now.
+  const base = { id: 'briefs', label: 'Briefs before meetings', optional: true, detail: BRIEFS_DETAIL } as const;
+  if (!briefsEnabled(config)) return { ...base, state: 'off', summary: 'Off', action: 'turn-on-briefs' };
+  if (!ready.calendarOn) return { ...base, state: 'attention', summary: 'On · needs calendar titles', action: 'allow-calendar',
+    fix: 'Turn on calendar titles, so Seashell knows what is coming up.', command: 'seashell meeting calendar setup' };
+  if (!ready.aiConfigured) return { ...base, state: 'attention', summary: 'On · needs AI notes', action: 'open-ai',
+    fix: 'Choose which AI writes your notes; it writes the briefs too.', command: 'seashell ai setup' };
+  if (ready.older) return { ...base, state: 'attention', summary: 'On · AI engine too old',
+    fix: 'This AI engine is too old to write briefs. AI notes says what to do.', command: 'seashell ai install <package.tgz>' };
+  return { ...base, state: 'ok', summary: 'On · 15 minutes before', command: 'seashell brief next' };
 }
 
 const VIDEO_DETAIL = 'Records the call\'s window beside its audio, about 60 MB an hour. In a meeting, w plays it from the line you are reading.';

@@ -13,6 +13,8 @@ import { finalTranscriptionThreads, transcriptionHardware, transcriptionUsesGpu,
 import { detectSpeechRegions, dropPhantomUnits, type SpeechRegion } from './speech-gate.ts';
 import { packSpeech, unpackUnits, type SpeechPacking } from './speech-packing.ts';
 import type { TimedTranscriptUnit } from './transcript-types.ts';
+import { defaultWhisperPrompt, whisperPromptTokens } from './vocabulary.ts';
+import { inferenceCommand } from './inference-priority.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -228,6 +230,8 @@ export interface TimestampTranscriptionOptions {
   modelPath?: string;
   hardware?: TranscriptionHardware;
   detectSpeech?: (wavPath: string) => Promise<SpeechRegion[] | undefined>;
+  /** Spellings to prefer, as Whisper's initial prompt (vocabulary.ts). Unset: the owner's vocabulary; empty: none. */
+  prompt?: string;
 }
 
 /** whisper.cpp started and then failed; spawn failures are plain errors. */
@@ -260,6 +264,7 @@ export async function transcribeWithTimestamps(
     throw error;
   }
   const stopTrackingTemp = trackTempDirectory(tempDirectory);
+  const prompt = options.prompt ?? defaultWhisperPrompt();
   const outputBase = join(tempDirectory, 'transcript');
   const outputJson = `${outputBase}.json`;
   const packedPath = join(tempDirectory, 'speech.wav');
@@ -278,7 +283,8 @@ export async function transcribeWithTimestamps(
     const audioPath = packing ? packedPath : filePath;
 
     const runWhisper = (disableGpu: boolean) => new Promise<void>((resolve, reject) => {
-      const proc = spawn(whisperCli, [
+      // The final pass never competes with a call: Darwin background priority.
+      const run = inferenceCommand(whisperCli, [
         ...(disableGpu ? ['-ng'] : []),
         '-m', modelPath,
         '-f', audioPath,
@@ -293,10 +299,15 @@ export async function transcribeWithTimestamps(
         '-dtw', 'large.v3.turbo',
         '-np',
         '-pp',
-        '-mc', '0',
+        // No earlier text conditions the next window: past text sets Whisper
+        // repeating itself. The vocabulary prompt goes to every window instead,
+        // with room for about its own tokens and little else (see vocabulary.ts).
+        '-mc', String(prompt ? whisperPromptTokens(prompt) : 0),
+        ...(prompt ? ['--carry-initial-prompt', '--prompt', prompt] : []),
         '-ojf',
         '-of', outputBase,
-      ], {
+      ], 'background');
+      const proc = spawn(run.command, run.args, {
         stdio: ['ignore', 'ignore', 'pipe'],
       });
       const stopTrackingChild = trackChildProcess(proc);

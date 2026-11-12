@@ -378,3 +378,53 @@ test('what the video films is saved with the capture health, and a filmed screen
   for (const next of [{ type: 'meeting.started' }, event, event, { type: 'watch.warning', message: 'Microphone is quiet.' }, { type: 'meeting.started' }, event]) notify(next);
   expect(notices).toEqual([warnings[0]!, warnings[0]!]);
 });
+
+test('letting go of the microphone keeps the session recording, and reopening it continues on the same clock', async () => {
+  const libraryDir = mkdtempSync(join(tmpdir(), 'seashell-release-mic-'));
+  roots.push(libraryDir);
+  const startedAtUnixMs = 1_786_400_000_000;
+  const microphones: Array<{ options: StartMicrophoneOptions; stopped: boolean; finish: () => void }> = [];
+  let systemStopped = false;
+  let finishSystem = () => {};
+  const level = { rms: 0.1, peak: 0.2, rmsDbfs: -20 };
+  const clock = { kind: 'process-start-estimate' as const, originUnixMs: startedAtUnixMs, sampleRate: 16_000 as const, uncertaintyMs: 2 };
+  const handle = startDurableLiveCapture({
+    libraryDir, sessionId: 'release-mic', startedAt: new Date(startedAtUnixMs),
+    microphoneStarter: (options) => {
+      let finish = () => {};
+      const done = new Promise<void>((resolve) => { finish = resolve; });
+      const entry = { options, stopped: false, finish };
+      microphones.push(entry);
+      options.onState({ state: 'active', message: 'Microphone input connected' });
+      return { process: undefined as unknown as ChildProcess, done, stop() {
+        entry.stopped = true;
+        // Its last chunk, from before it was let go of, still arrives.
+        options.onChunk({ path: fixture(libraryDir, `mic-${microphones.length}.wav`), startSeconds: 0, endSeconds: 1, sequence: 1,
+          source: 'microphone', audible: true, level, clock });
+        options.onState({ state: 'stopped' });
+        finish();
+      } };
+    },
+    systemAudioStarter: (options: StartSystemAudioOptions) => {
+      const done = new Promise<void>((resolve) => { finishSystem = resolve; });
+      options.onState({ state: 'active', message: 'Computer audio connected' });
+      return { process: undefined as unknown as ChildProcess, done, stop() { systemStopped = true; finishSystem(); } };
+    },
+  });
+  handle.releaseMicrophone!();
+  expect(microphones[0]!.stopped).toBe(true);
+  expect(systemStopped).toBe(false);
+  expect(handle.health?.microphone.state).toBe('released');
+  expect(handle.health?.systemAudio.state).not.toBe('stopped');
+  handle.releaseMicrophone!();
+  expect(microphones).toHaveLength(1);
+  handle.reopenMicrophone!();
+  expect(microphones).toHaveLength(2);
+  expect(microphones[1]!.options.sessionStartedAtUnixMs).toBe(startedAtUnixMs);
+  expect(handle.health?.microphone.state).toBe('receiving');
+  const manifest = await handle.stop();
+  expect(microphones.every((microphone) => microphone.stopped)).toBe(true);
+  expect(systemStopped).toBe(true);
+  // Both microphones' last chunks are kept.
+  expect(manifest.chunks.filter((chunk) => chunk.trackId === 'microphone')).toHaveLength(2);
+});

@@ -1,0 +1,567 @@
+import { createHash } from 'crypto';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs';
+import { dirname, join } from 'path';
+import {
+  humainRouteRequest,
+  olderHumainEngine,
+  OlderEngineError,
+  olderThanRevision4,
+  runHumainMeeting,
+  type HumainMeetingRoute,
+  type MeetingEngineCheck,
+} from './humain-client.ts';
+import { claimOwnerAndDue, meetingIsPrivateAt, type MeetingArtifact, type MeetingAttendee, type MeetingCalendarEvent, type MeetingClaim } from './meeting-artifact.ts';
+import { claimsForHumain, engineCheck, meetingSegments, retryableRun, runSafeId, stableKey } from './meeting-enrichment.ts';
+import { isPrivate, readListed } from './meeting-memory.ts';
+import { contentWords, lineOwner, sameOwner, wordsOf } from './meeting-tui.ts';
+import { loadProfile } from './meeting-templates.ts';
+import { listTranscriptRecords } from './transcript-library.ts';
+import type { TranscriptRecord } from './transcript-types.ts';
+import { sentenceClock } from './tui-state.ts';
+import { loadVocabulary } from './vocabulary.ts';
+
+/**
+ * A brief before a meeting: what was said the last times you met these people
+ * or this series, what is still open, and what to bring up. Seashell picks the
+ * past meetings itself (the same recurring title, or people in common, newest
+ * first, at most 20, never a private one), Humain writes the brief, and it is
+ * saved as Markdown in ~/Documents/Sea Shell/Briefs, every point cited.
+ */
+
+export const MAX_BRIEF_MEETINGS = 20;
+const BRIEF_TIMEOUT_MS = 8 * 60_000;
+/** Titles that say nothing about which meeting it is, so they never make a series. */
+const GENERIC_TITLES = new Set(['meeting', 'recording', 'call', 'google meet', 'zoom meeting', 'teams meeting', 'facetime', 'busy', 'hold']);
+
+export function briefsDirectory(libraryDir: string, env: NodeJS.ProcessEnv = process.env): string {
+  return env.SEASHELL_BRIEFS_DIR || join(dirname(libraryDir), 'Briefs');
+}
+
+/** The meeting coming up, as the calendar has it. */
+export interface UpcomingMeeting {
+  title: string;
+  startsAt: string;
+  eventId?: string;
+  calendar?: string;
+  attendees: MeetingAttendee[];
+  description?: string;
+}
+
+export function upcomingFromEvent(event: MeetingCalendarEvent): UpcomingMeeting {
+  return {
+    title: event.title, startsAt: event.startAt, eventId: event.eventId, attendees: event.attendees,
+    ...(event.calendar ? { calendar: event.calendar } : {}),
+    ...(event.location ? { description: event.location } : {}),
+  };
+}
+
+/** One brief per meeting: a recurring event's occurrences share an event id, so the start time tells them apart. */
+export function briefKey(upcoming: Pick<UpcomingMeeting, 'title' | 'startsAt' | 'eventId'>): string {
+  return createHash('sha256').update(JSON.stringify([upcoming.eventId ?? upcoming.title, upcoming.startsAt])).digest('hex').slice(0, 20);
+}
+
+function normalizedTitle(title: string | undefined): string {
+  return (title ?? '').toLocaleLowerCase('en-US').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+}
+
+const personKey = (person: Pick<MeetingAttendee, 'name' | 'email'>) =>
+  (person.email?.trim() || person.name.trim()).toLocaleLowerCase('en-US');
+
+/**
+ * Who "you" are on calendar invites, so a meeting is not "with" everyone just
+ * because you were in both. You are the attendee whose address names the
+ * calendar the event is on, and anyone on nine in ten of your past invites.
+ */
+export function ownerKeys(libraryDir: string, upcoming?: Pick<UpcomingMeeting, 'calendar'>): Set<string> {
+  const keys = new Set<string>();
+  if (upcoming?.calendar && /@/u.test(upcoming.calendar)) keys.add(upcoming.calendar.trim().toLocaleLowerCase('en-US'));
+  const counts = new Map<string, number>();
+  let meetings = 0;
+  for (const entry of listTranscriptRecords(libraryDir).slice(0, 200)) {
+    let attendees: MeetingAttendee[] = [];
+    try { attendees = JSON.parse(readFileSync(join(entry.directory, 'meeting.json'), 'utf8')).calendar?.attendees ?? []; } catch { continue; }
+    if (attendees.length < 2) continue;
+    meetings += 1;
+    for (const key of new Set(attendees.map(personKey))) counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  // You are on nearly every invite; a close colleague on most of them is still someone in common.
+  if (meetings >= 5) for (const [key, count] of counts) if (count >= meetings * 0.9) keys.add(key);
+  return keys;
+}
+
+export interface RelevantMeeting {
+  id: string;
+  title: string;
+  startedAt: string;
+  /** Why it was chosen: the same series, or people in common. */
+  why: 'series' | 'people';
+  /** The people in common, by name. */
+  shared: string[];
+  artifact: MeetingArtifact;
+  record: TranscriptRecord;
+  /** Its folder, to look at its privacy again before anything is sent. */
+  directory: string;
+}
+
+/**
+ * The past meetings a brief reads: the same recurring title, or anyone in
+ * common other than you, newest first. Only finished meetings with notes; a
+ * private one is never read, and nor is one whose meeting.json can't be read,
+ * since it might have said AI is off. Choosing writes nothing: each meeting is
+ * read from the folder the listing found, as agents read the library, so the
+ * recorder can count a brief's history every few minutes and change nothing.
+ */
+export function relevantMeetings(libraryDir: string, upcoming: UpcomingMeeting, limit = MAX_BRIEF_MEETINGS): RelevantMeeting[] {
+  const you = ownerKeys(libraryDir, upcoming);
+  const title = normalizedTitle(upcoming.title);
+  const people = new Map(upcoming.attendees.map((person) => [personKey(person), person.name]));
+  for (const key of you) people.delete(key);
+  const starts = Date.parse(upcoming.startsAt);
+  const found: RelevantMeeting[] = [];
+  for (const entry of listTranscriptRecords(libraryDir)) {
+    if (found.length >= limit) break;
+    if (entry.captureState === 'recording' || entry.captureState === 'processing') continue;
+    if (Number.isFinite(starts) && Date.parse(entry.createdAt) >= starts) continue;
+    if (isPrivate(entry.directory)) continue;
+    let artifact: MeetingArtifact | undefined;
+    let record: TranscriptRecord;
+    try { ({ artifact, record } = readListed(entry)); } catch { continue; }
+    if (!artifact || (!artifact.analysis?.summary && !(artifact.analysis?.claims ?? artifact.provisionalClaims).length)) continue;
+    const pastTitle = normalizedTitle(artifact.calendar?.title ?? artifact.title);
+    const series = (upcoming.eventId !== undefined && artifact.calendar?.eventId === upcoming.eventId) ||
+      (title !== '' && !GENERIC_TITLES.has(title) && pastTitle === title);
+    const shared = [...new Set([...(artifact.calendar?.attendees ?? []), ...artifact.attendees]
+      .flatMap((person) => people.has(personKey(person)) ? [people.get(personKey(person))!] : []))];
+    if (!series && !shared.length) continue;
+    found.push({ id: entry.id, title: artifact.calendar?.title ?? artifact.title, startedAt: entry.createdAt,
+      why: series ? 'series' : 'people', shared, artifact, record, directory: entry.directory });
+  }
+  return found;
+}
+
+// MARK: - The brief
+
+export interface BriefSource { meetingId: string; evidenceSegmentIds: string[] }
+export interface BriefItem { text: string; sources: BriefSource[] }
+export interface BriefSection { heading: string; items: BriefItem[] }
+
+export interface Brief {
+  schemaVersion: 1;
+  key: string;
+  upcoming: UpcomingMeeting;
+  createdAt: string;
+  summary: string;
+  sections: BriefSection[];
+  /** The past meetings it read, newest first, and where each cited moment is. */
+  meetings: Array<{ id: string; title: string; startedAt: string; moments: Record<string, number> }>;
+  /** The Markdown file. */
+  path: string;
+}
+
+/** There is nothing to brief from: said plainly, never as a failure. */
+export class NoBriefHistoryError extends Error {
+  constructor(title: string) {
+    super(`Nothing to brief from yet: no past meeting has the title "${title}" or anyone on its invite.`);
+    this.name = 'NoBriefHistoryError';
+  }
+}
+
+function parseBriefOutput(value: unknown, sent: ReadonlyMap<string, ReadonlySet<string>>): Pick<Brief, 'summary' | 'sections'> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Humain brief output must be an object');
+  const output = value as Record<string, unknown>;
+  if (typeof output.summary !== 'string' || !output.summary.trim() || !Array.isArray(output.sections)) {
+    throw new Error('Humain brief output is missing its summary or sections');
+  }
+  const sections = output.sections.map((raw, index): BriefSection => {
+    const section = raw as Record<string, unknown> | undefined;
+    if (!section || typeof section.heading !== 'string' || !section.heading.trim() || !Array.isArray(section.items)) {
+      throw new Error(`Humain brief section ${index} is invalid`);
+    }
+    return {
+      heading: section.heading.trim(),
+      items: section.items.map((rawItem, itemIndex) => {
+        const item = rawItem as Record<string, unknown> | undefined;
+        if (!item || typeof item.text !== 'string' || !item.text.trim() || !Array.isArray(item.sources)) {
+          throw new Error(`Humain brief section ${index} item ${itemIndex} is invalid`);
+        }
+        const sources = item.sources.map((rawSource) => {
+          const source = rawSource as Record<string, unknown> | undefined;
+          const segments = typeof source?.meetingId === 'string' ? sent.get(source.meetingId) : undefined;
+          if (!segments || !Array.isArray(source!.evidenceSegmentIds) ||
+              source!.evidenceSegmentIds.some((id) => typeof id !== 'string' || !segments.has(id))) {
+            throw new Error(`Humain brief section ${index} item ${itemIndex} cites a meeting or moment it was not given`);
+          }
+          return { meetingId: source!.meetingId as string, evidenceSegmentIds: [...source!.evidenceSegmentIds] as string[] };
+        });
+        return { text: item.text.trim(), sources };
+      }),
+    };
+  });
+  return { summary: output.summary.trim(), sections };
+}
+
+const dayAndTime = (iso: string) => new Date(iso).toLocaleString('en-US', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+const day = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+
+/** "Weekly sync, Nov 4, 12:04": a citation a person can find. */
+export function briefCitation(brief: Pick<Brief, 'meetings'>, source: BriefSource): string {
+  const meeting = brief.meetings.find((candidate) => candidate.id === source.meetingId);
+  if (!meeting) return '';
+  const times = source.evidenceSegmentIds.flatMap((id) => meeting.moments[id] === undefined ? [] : [meeting.moments[id]!])
+    .sort((a, b) => a - b);
+  return `${meeting.title}, ${day(meeting.startedAt)}${times.length ? `, ${sentenceClock(times[0]!)}` : ''}`;
+}
+
+/**
+ * Where the app shows a point: at the newest meeting it cites. Later meetings supersede earlier ones, so a
+ * deadline that moved is placed, and its owner and due read, where it moved, not where it was first set.
+ */
+export function newestSource(brief: Pick<Brief, 'meetings'>, item: Pick<BriefItem, 'sources'>): BriefSource | undefined {
+  const started = (source: BriefSource) => {
+    const meeting = brief.meetings.find((candidate) => candidate.id === source.meetingId);
+    return meeting ? Date.parse(meeting.startedAt) : Number.NEGATIVE_INFINITY;
+  };
+  return item.sources.toSorted((left, right) => started(right) - started(left))[0];
+}
+
+/** What a brief's section lists, by its heading: actions have an owner and a due date; decisions, questions and risks do not. */
+function sectionHolds(heading: string): 'actions' | 'other' | 'any' {
+  if (/\b(?:actions?|next steps?|to[- ]?dos?|follow[- ]?ups?|owed|waiting on)\b/iu.test(heading)) return 'actions';
+  if (/\b(?:decisions?|decided|questions?|risks?|concerns?)\b/iu.test(heading)) return 'other';
+  return 'any';
+}
+
+/**
+ * Who owns a brief's point and by when, as the past meeting's notes say: "You · by Friday". Only
+ * for the point's own action or follow-up, never one that merely shares a cited line with it: a
+ * question about the data agreement is not the action to chase legal about it, and an action of
+ * Dana's is not the point "You: run the training". The point's own claim is in the newest meeting
+ * it cites that has one: the claim citing the same lines (most alike first), then the one whose
+ * words it says, and never one owned by someone other than the owner the point names. Under
+ * Decisions, Open questions and Risks a point has no owner. What the point already says, "Dana:"
+ * or "by Wednesday", is not said again beside it.
+ */
+export function briefPointOwner(
+  brief: Pick<Brief, 'meetings'>, heading: string, item: Pick<BriefItem, 'text' | 'sources'>,
+  claimsOf: (meetingId: string) => readonly MeetingClaim[],
+): string | undefined {
+  const holds = sectionHolds(heading);
+  if (holds === 'other') return undefined;
+  const words = contentWords(item.text);
+  const said = wordsOf(item.text);
+  // "Dana:" or "You:" names the point's owner; "Changed:" names no one the notes know.
+  const people = ['You', ...item.sources.flatMap((source) => claimsOf(source.meetingId).flatMap((claim) => claim.person ? [claim.person] : []))];
+  const prefix = lineOwner(item.text);
+  const named = prefix && people.some((person) => sameOwner(prefix, person)) ? prefix : undefined;
+  const action = (claim: MeetingClaim) => claim.type === 'action_item' || claim.type === 'follow_up';
+  const started = (source: BriefSource) => Date.parse(brief.meetings.find((meeting) => meeting.id === source.meetingId)?.startedAt ?? '') || 0;
+  for (const source of item.sources.toSorted((left, right) => started(right) - started(left))) {
+    const cited = new Set(source.evidenceSegmentIds);
+    const ranked = claimsOf(source.meetingId).flatMap((claim) => {
+      if (holds === 'actions' && !action(claim)) return [];
+      if (named && claim.person && !sameOwner(named, claim.person)) return [];
+      const shared = claim.evidenceSegmentIds.filter((id) => cited.has(id)).length;
+      if (!shared) return [];
+      const its = contentWords(claim.text);
+      return [{ claim, overlap: shared / new Set([...cited, ...claim.evidenceSegmentIds]).size,
+        words: its.size ? [...its].filter((word) => words.has(word)).length / its.size : 0 }];
+    }).sort((left, right) => right.overlap - left.overlap || right.words - left.words);
+    const own = ranked[0]?.claim;
+    if (!own) continue;
+    if (!action(own)) return undefined;
+    const person = own.person && !said.has([...wordsOf(own.person)][0] ?? '') ? own.person : undefined;
+    const due = own.due && ![...contentWords(own.due)].every((word) => said.has(word)) ? own.due : undefined;
+    return claimOwnerAndDue({ ...(person ? { person } : {}), ...(due ? { due } : {}) });
+  }
+  return undefined;
+}
+
+export function briefMarkdown(brief: Omit<Brief, 'path'>): string {
+  const cite = (item: BriefItem) => item.sources.length ? ` _(${item.sources.map((source) => briefCitation(brief, source)).filter(Boolean).join('; ')})_` : '';
+  return [
+    '---',
+    `title: ${JSON.stringify(brief.upcoming.title)}`,
+    `starts: ${brief.upcoming.startsAt}`,
+    `made: ${brief.createdAt}`,
+    `meetings: [${brief.meetings.map((meeting) => meeting.id).join(', ')}]`,
+    '---',
+    `# Brief: ${brief.upcoming.title}`,
+    '',
+    `_${dayAndTime(brief.upcoming.startsAt)} · from ${brief.meetings.length} past ${brief.meetings.length === 1 ? 'meeting' : 'meetings'}_`,
+    '',
+    brief.summary,
+    ...brief.sections.flatMap((section) => ['', `## ${section.heading}`, '',
+      ...(section.items.length ? section.items.map((item) => `- ${item.text}${cite(item)}`) : ['- Nothing came up.'])]),
+    '',
+    '## Read from',
+    '',
+    ...brief.meetings.map((meeting) => `- ${meeting.title}, ${dayAndTime(meeting.startedAt)} (${meeting.id})`),
+    '',
+  ].join('\n');
+}
+
+function dataPath(libraryDir: string, key: string, env: NodeJS.ProcessEnv): string {
+  return join(briefsDirectory(libraryDir, env), '.data', `${key}.json`);
+}
+
+function atomicWrite(path: string, contents: string): void {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temporary, contents, { encoding: 'utf8', flag: 'w', mode: 0o600 });
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+}
+
+/** The brief already made for this meeting, if any. */
+export function findBrief(libraryDir: string, upcoming: Pick<UpcomingMeeting, 'title' | 'startsAt' | 'eventId'>, env: NodeJS.ProcessEnv = process.env): Brief | undefined {
+  try {
+    const brief = JSON.parse(readFileSync(dataPath(libraryDir, briefKey(upcoming), env), 'utf8')) as Brief;
+    return brief.schemaVersion === 1 && existsSync(brief.path) ? brief : undefined;
+  } catch { return undefined; }
+}
+
+/**
+ * Whether a saved brief read a meeting that is private now, or whose settings
+ * can't be read. Its words came from that meeting, so an agent is not handed it.
+ */
+export function briefReadsPrivate(libraryDir: string, brief: Pick<Brief, 'meetings'>): boolean {
+  const folders = new Map(listTranscriptRecords(libraryDir).map((entry) => [entry.id, entry.directory]));
+  return brief.meetings.some((meeting) => {
+    const folder = folders.get(meeting.id);
+    return folder !== undefined && meetingIsPrivateAt(folder);
+  });
+}
+
+/** Every brief made, newest meeting first. */
+export function listBriefs(libraryDir: string, env: NodeJS.ProcessEnv = process.env): Brief[] {
+  const directory = join(briefsDirectory(libraryDir, env), '.data');
+  if (!existsSync(directory)) return [];
+  return readdirSync(directory).filter((file) => file.endsWith('.json') && file !== 'attempts.json').flatMap((file) => {
+    try {
+      const brief = JSON.parse(readFileSync(join(directory, file), 'utf8')) as Brief;
+      return brief.schemaVersion === 1 && existsSync(brief.path) ? [brief] : [];
+    } catch { return []; }
+  }).toSorted((left, right) => right.upcoming.startsAt.localeCompare(left.upcoming.startsAt));
+}
+
+/** "2026-11-12 0930 Weekly sync.md": sorted by when, named by what. */
+function briefFileName(upcoming: UpcomingMeeting): string {
+  const at = new Date(upcoming.startsAt);
+  const pad = (value: number) => String(value).padStart(2, '0');
+  const stamp = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}${pad(at.getMinutes())}`;
+  const title = upcoming.title.replace(/[/:\\\u0000-\u001f]+/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, 80) || 'Meeting';
+  return `${stamp} ${title}.md`;
+}
+
+export interface MakeBriefOptions {
+  route: HumainMeetingRoute;
+  onStatus?: (message: string) => void;
+  signal?: AbortSignal;
+  runner?: typeof runHumainMeeting;
+  engine?: MeetingEngineCheck;
+  env?: NodeJS.ProcessEnv;
+  now?: Date;
+}
+
+/**
+ * Write a brief for an upcoming meeting and save it. Throws NoBriefHistoryError
+ * when there is nothing to read, and says plainly when the engine is too old.
+ */
+export async function makeBrief(libraryDir: string, upcoming: UpcomingMeeting, options: MakeBriefOptions): Promise<Brief> {
+  const env = options.env ?? process.env;
+  const found = relevantMeetings(libraryDir, upcoming);
+  if (!found.length) throw new NoBriefHistoryError(upcoming.title);
+  if (await olderThanRevision4(engineCheck(options))) throw new OlderEngineError('This AI engine cannot write briefs yet.');
+  // Privacy again, just before anything leaves: checking the engine can take 20 seconds,
+  // and a meeting made private meanwhile, or whose settings stopped reading, is not sent.
+  const chosen = found.filter((meeting) => !meetingIsPrivateAt(meeting.directory));
+  if (!chosen.length) throw new NoBriefHistoryError(upcoming.title);
+  options.onStatus?.(`Reading ${chosen.length} past ${chosen.length === 1 ? 'meeting' : 'meetings'}…`);
+  const sent = new Map<string, Set<string>>();
+  const meetings = chosen.map((meeting) => {
+    const all = meetingSegments(meeting.record);
+    // Each claim cites only lines the meeting still has, as on every request to Humain.
+    const claims = claimsForHumain(meeting.artifact.analysis?.claims ?? meeting.artifact.provisionalClaims, new Set(all.map((segment) => segment.id)));
+    const cited = new Set(claims.flatMap((claim) => claim.evidenceSegmentIds));
+    // Only the lines the notes cite: enough to quote, and 20 meetings stay small.
+    const segments = all.filter((segment) => cited.has(segment.id));
+    sent.set(meeting.id, new Set(segments.map((segment) => segment.id)));
+    return {
+      meetingId: meeting.id, title: meeting.title, startedAt: meeting.startedAt,
+      ...(meeting.artifact.analysis?.summary ? { summary: meeting.artifact.analysis.summary } : {}),
+      claims, ...(segments.length ? { segments } : {}),
+    };
+  });
+  const vocabulary = loadVocabulary(libraryDir, env).terms;
+  const profile = loadProfile(libraryDir, env);
+  const instructions = profile || vocabulary.length ? { ...(profile ? { profile } : {}), ...(vocabulary.length ? { vocabulary } : {}) } : undefined;
+  const key = briefKey(upcoming);
+  const request = {
+    upcoming: {
+      title: upcoming.title, startsAt: upcoming.startsAt,
+      ...(upcoming.attendees.length ? { attendees: upcoming.attendees.map((person) => ({ name: person.name, ...(person.email ? { email: person.email } : {}) })) } : {}),
+      ...(upcoming.description ? { description: upcoming.description } : {}),
+    },
+    meetings,
+    ...(instructions ? { instructions } : {}),
+    ...humainRouteRequest(options.route),
+  };
+  const idempotencyKey = stableKey(['brief', key, request]);
+  const storeDir = join(briefsDirectory(libraryDir, env), '.humain');
+  const { runId, idempotencyKey: attemptKey } = retryableRun(storeDir, runSafeId(`brief-${key}`, idempotencyKey), idempotencyKey);
+  options.onStatus?.('Writing the brief…');
+  const result = await (options.runner ?? runHumainMeeting)('brief', { briefId: key, idempotencyKey: attemptKey, ...request },
+    { storeDir, runId, ...(options.onStatus ? { onStatus: options.onStatus } : {}), ...(options.signal ? { signal: options.signal } : {}),
+      timeoutMs: BRIEF_TIMEOUT_MS })
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      throw olderHumainEngine(message) ? new OlderEngineError('This AI engine cannot write briefs yet.') : error;
+    });
+  const output = parseBriefOutput(result.output, sent);
+  const brief: Omit<Brief, 'path'> = {
+    schemaVersion: 1, key, upcoming, createdAt: (options.now ?? new Date()).toISOString(), ...output,
+    meetings: chosen.map((meeting) => ({ id: meeting.id, title: meeting.title, startedAt: meeting.startedAt,
+      moments: Object.fromEntries(meetingSegments(meeting.record).filter((segment) => sent.get(meeting.id)?.has(segment.id))
+        .map((segment) => [segment.id, segment.start])) })),
+  };
+  const path = join(briefsDirectory(libraryDir, env), briefFileName(upcoming));
+  // A brief made again for the same meeting replaces the earlier one.
+  const earlier = findBrief(libraryDir, upcoming, env);
+  atomicWrite(path, briefMarkdown(brief));
+  if (earlier && earlier.path !== path) rmSync(earlier.path, { force: true });
+  atomicWrite(dataPath(libraryDir, key, env), `${JSON.stringify({ ...brief, path }, null, 2)}\n`);
+  return { ...brief, path };
+}
+
+// MARK: - Before meetings, by themselves
+
+/** How long before a meeting the recorder makes its brief. */
+export const BRIEF_LEAD_MINUTES = 15;
+
+/** What the recorder already did for a meeting, so it tries once and tells you once. */
+type Attempt = { at: string; outcome: 'made' | 'no-history' | 'failed'; detail?: string };
+
+function attemptsPath(libraryDir: string, env: NodeJS.ProcessEnv): string {
+  return join(briefsDirectory(libraryDir, env), '.data', 'attempts.json');
+}
+
+export function readBriefAttempts(libraryDir: string, env: NodeJS.ProcessEnv = process.env): Record<string, Attempt> {
+  try { return JSON.parse(readFileSync(attemptsPath(libraryDir, env), 'utf8')) as Record<string, Attempt>; } catch { return {}; }
+}
+
+export function recordBriefAttempt(libraryDir: string, key: string, attempt: Attempt, env: NodeJS.ProcessEnv = process.env, now = new Date()): void {
+  // A month of attempts is plenty to never ask twice.
+  const kept = Object.entries(readBriefAttempts(libraryDir, env)).filter(([, value]) => now.getTime() - Date.parse(value.at) < 31 * 86_400_000);
+  atomicWrite(attemptsPath(libraryDir, env), `${JSON.stringify(Object.fromEntries([...kept, [key, attempt]]), null, 2)}\n`);
+}
+
+/** The calendar meeting a brief is due for now: starting within the lead time, with no brief and no attempt yet. */
+export function briefDue(events: readonly MeetingCalendarEvent[], libraryDir: string, now = new Date(), env: NodeJS.ProcessEnv = process.env): UpcomingMeeting | undefined {
+  const attempts = readBriefAttempts(libraryDir, env);
+  return events.map(upcomingFromEvent)
+    .filter((upcoming) => {
+      const until = Date.parse(upcoming.startsAt) - now.getTime();
+      return until > 0 && until <= BRIEF_LEAD_MINUTES * 60_000 && !attempts[briefKey(upcoming)] && !findBrief(libraryDir, upcoming, env);
+    })
+    .toSorted((left, right) => left.startsAt.localeCompare(right.startsAt))[0];
+}
+
+/** How far ahead the recorder tells the app about meetings: far enough that tomorrow morning's is there tonight. */
+export const COMING_UP_HOURS = 36;
+/** At most this many meetings coming up, so counting each one's history stays quick. */
+export const COMING_UP_LIMIT = 12;
+
+/** The meetings still to come, soonest first: started a moment ago at most, and not over. */
+export function upcomingCalendarMeetings(events: readonly MeetingCalendarEvent[], now = new Date()): MeetingCalendarEvent[] {
+  return events.filter((event) => Date.parse(event.startAt) > now.getTime() - 5 * 60_000 && Date.parse(event.endAt) > now.getTime())
+    .toSorted((left, right) => left.startAt.localeCompare(right.startAt));
+}
+
+// MARK: - The next meeting, for the app
+
+/** A meeting coming up, as the app lists it: `history` is how many past meetings a brief would read. */
+export interface ComingUpMeeting {
+  upcoming: UpcomingMeeting;
+  history: number;
+  /** The brief's Markdown file, once there is one. */
+  brief?: string;
+}
+
+/**
+ * The recorder reads the calendar; the app does not, so the app learns what is
+ * coming up from this file beside the library, as it learns the recorder's
+ * state. The nearest meeting is at the top, as it always was, so an older app
+ * still reads it; the rest of the next 36 hours follow in `later`.
+ */
+export interface NextMeeting extends ComingUpMeeting {
+  updatedAtUnixMs: number;
+  later?: ComingUpMeeting[];
+}
+
+const NEXT_FILE = '.next-meeting.json';
+
+export function writeNextMeeting(libraryDir: string, next: Omit<NextMeeting, 'updatedAtUnixMs'> | undefined, nowUnixMs = Date.now()): void {
+  const path = join(libraryDir, NEXT_FILE);
+  if (!next) { rmSync(path, { force: true }); return; }
+  atomicWrite(path, `${JSON.stringify({ ...next, updatedAtUnixMs: nowUnixMs })}\n`);
+}
+
+/**
+ * A meeting from the file, while it is still to come, with its brief only while the file is there.
+ * A brief made since the recorder last looked, from the app or an agent, counts at once.
+ */
+function stillComing(libraryDir: string, meeting: ComingUpMeeting | undefined, now: Date, env: NodeJS.ProcessEnv): ComingUpMeeting | undefined {
+  if (!meeting?.upcoming?.title || typeof meeting.upcoming.startsAt !== 'string' || !Number.isSafeInteger(meeting.history)) return undefined;
+  if (Date.parse(meeting.upcoming.startsAt) < now.getTime() - 10 * 60_000) return undefined;
+  const { upcoming, history } = meeting;
+  const brief = meeting.brief && existsSync(meeting.brief) ? meeting.brief : findBrief(libraryDir, upcoming, env)?.path;
+  return { upcoming, history, ...(brief ? { brief } : {}) };
+}
+
+/** The meetings coming up, soonest first, while the recorder said so recently, and when it did. */
+function readNextFile(libraryDir: string, now: Date, env: NodeJS.ProcessEnv): { meetings: ComingUpMeeting[]; updatedAtUnixMs: number } | undefined {
+  try {
+    const next = JSON.parse(readFileSync(join(libraryDir, NEXT_FILE), 'utf8')) as NextMeeting;
+    if (!next || !Number.isSafeInteger(next.updatedAtUnixMs) || now.getTime() - next.updatedAtUnixMs > 15 * 60_000) return undefined;
+    const meetings = [next, ...Array.isArray(next.later) ? next.later : []].flatMap((meeting) => stillComing(libraryDir, meeting, now, env) ?? [])
+      .toSorted((left, right) => left.upcoming.startsAt.localeCompare(right.upcoming.startsAt));
+    return { meetings, updatedAtUnixMs: next.updatedAtUnixMs };
+  } catch { return undefined; }
+}
+
+/** Every meeting coming up in the next 36 hours, soonest first, for the app's Coming up list. */
+export function readComingUp(libraryDir: string, now = new Date(), env: NodeJS.ProcessEnv = process.env): ComingUpMeeting[] {
+  return readNextFile(libraryDir, now, env)?.meetings ?? [];
+}
+
+/** The next meeting while it is still to come and the recorder said so recently. */
+export function readNextMeeting(libraryDir: string, now = new Date(), env: NodeJS.ProcessEnv = process.env): NextMeeting | undefined {
+  const read = readNextFile(libraryDir, now, env);
+  const [nearest, ...later] = read?.meetings ?? [];
+  return nearest && { ...nearest, updatedAtUnixMs: read!.updatedAtUnixMs, ...(later.length ? { later } : {}) };
+}
+
+/**
+ * The meeting a brief is for, as the app's Coming up has it: what the recorder last published from
+ * the calendar, so `seashell brief next`, agents and the app agree on which meeting is next. Only
+ * when the recorder has said nothing lately (it is not running) is the calendar read here, a week
+ * ahead. With title words, the soonest meeting whose title has every one of them.
+ */
+export async function upcomingForBrief(
+  libraryDir: string,
+  title: string | undefined,
+  readCalendar: () => Promise<MeetingCalendarEvent[]>,
+  now = new Date(),
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<UpcomingMeeting | undefined> {
+  const words = title?.toLocaleLowerCase('en-US').split(/\s+/u).filter(Boolean) ?? [];
+  const has = (candidate: string) => words.every((word) => candidate.toLocaleLowerCase('en-US').includes(word));
+  const published = readNextFile(libraryDir, now, env)?.meetings.find((meeting) => has(meeting.upcoming.title));
+  if (published) return published.upcoming;
+  const event = upcomingCalendarMeetings(await readCalendar(), now).find((candidate) => has(candidate.title));
+  return event && upcomingFromEvent(event);
+}

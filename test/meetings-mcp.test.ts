@@ -160,6 +160,14 @@ test('write tools say so in their annotations, and the server no longer calls it
   // A corrected line is kept in history, so editing is not destructive; an extractor talks to the AI provider.
   expect((byName.get('edit_segment') as any).destructiveHint).toBe(false);
   expect((byName.get('run_extractor') as any).openWorldHint).toBe(true);
+  // Your notes and the vocabulary are your files: adding a note writes, replacing the vocabulary replaces it.
+  expect(byName.get('get_vocabulary')).toEqual({ readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false });
+  expect(byName.get('add_note')).toEqual({ readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
+  expect(byName.get('update_vocabulary')).toEqual({ readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false });
+  // A follow-up goes to the AI provider and comes back as a draft: it changes nothing and sends nothing.
+  expect(byName.get('draft_follow_up')).toEqual({ readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true });
+  // A brief may be written through the AI provider and saved, replacing the saved one when asked to write it again.
+  expect(byName.get('get_brief')).toEqual({ readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
   expect(MEETINGS_MCP_INSTRUCTIONS).not.toContain('read-only');
 });
 
@@ -260,6 +268,7 @@ test('agents fix a line and name a speaker without losing the notes; private mee
     ['edit_segment', { id: 'hr-chat', segmentId: 's000001', text: 'x' }], ['rename_speaker', { id: 'hr-chat', speaker: 'x', name: 'y' }],
     ['run_extractor', { id: 'hr-chat', extractor: 'x' }], ['get_insights', { id: 'hr-chat' }],
     ['get_video_moment', { id: 'hr-chat', segmentId: 's000001' }],
+    ['add_note', { id: 'hr-chat', text: 'x' }], ['draft_follow_up', { id: 'hr-chat' }],
   ] as const) {
     expect(await call(root, name, args, deps)).toEqual({ error: true, value: expect.stringContaining('This meeting is private') });
   }
@@ -277,6 +286,83 @@ test('a meeting whose settings cannot be read is treated as private, never share
     startedAt: '2026-10-01T00:00:00.000Z', private: true });
   expect(await call(root, 'get_transcript', { id: 'weekly-sync' })).toEqual({ error: true, value: expect.stringContaining('This meeting is private') });
   expect((await call(root, 'list_action_items', {})).value.items).toEqual([]);
+  // Your notes and follow-ups refuse it too, and nothing is added to it.
+  expect(await call(root, 'add_note', { id: 'weekly-sync', text: 'x' })).toEqual({ error: true, value: expect.stringContaining('This meeting is private') });
+  expect(await call(root, 'draft_follow_up', { id: 'weekly-sync' }, { chatRoute: () => ({ backend: 'codex', model: 'fixture' }),
+    runner: (async () => { throw new Error('must not run'); }) as any })).toEqual({ error: true, value: expect.stringContaining('This meeting is private') });
+  expect(readFileSync(join(directory, 'meeting.json'), 'utf8')).toBe('{"schemaVersion":1,"ai":{"off":tr');
   writeFileSync(join(directory, 'meeting.json'), 'null');
   expect((await call(root, 'search_transcripts', { query: 'launch email' })).value.matches).toEqual([]);
+});
+
+const rev4 = async () => new Set(['observe', 'reconcile', 'chat', 'extract', 'brief', 'draft']);
+
+test('agents can add the user\'s note to a meeting, and read it back with what came from it', async () => {
+  const root = library();
+  expect((await call(root, 'add_note', { id: 'weekly-sync', text: 'Dana is on leave next week', at: '1:05' })).value)
+    .toEqual({ id: 'weekly-sync', note: { text: 'Dana is on leave next week', at: '01:05' } });
+  expect((await call(root, 'add_note', { id: 'weekly-sync', text: 'About the whole meeting' })).value.note).toEqual({ text: 'About the whole meeting' });
+  expect((await call(root, 'get_meeting', { id: 'weekly-sync' })).value.yourNotes)
+    .toEqual([{ text: 'Dana is on leave next week', at: '01:05' }, { text: 'About the whole meeting' }]);
+  expect((await call(root, 'add_note', { id: 'weekly-sync', text: 'x', at: 'soon' })).error).toBe(true);
+  // A private meeting refuses, as every tool does.
+  const { record } = findTranscriptRecord(root, 'weekly-sync');
+  saveMeetingArtifact(root, { ...createMeetingArtifact(record), ai: { off: true } });
+  expect((await call(root, 'add_note', { id: 'weekly-sync', text: 'Hidden' })).value).toContain('private');
+});
+
+test('agents read and replace the vocabulary, keeping its explanation', async () => {
+  const root = library();
+  const env = { SEASHELL_VOCABULARY_FILE: join(dirname(root), `${Date.now()}-Vocabulary.txt`) } as NodeJS.ProcessEnv;
+  roots.push(env.SEASHELL_VOCABULARY_FILE!);
+  expect((await call(root, 'get_vocabulary', {}, { env })).value.terms).toEqual([]);
+  expect((await call(root, 'update_vocabulary', { terms: ['Priya Raman', 'Northwind'] }, { env })).value.terms).toEqual(['Priya Raman', 'Northwind']);
+  const read = (await call(root, 'get_vocabulary', {}, { env })).value;
+  expect(read.file).toStartWith('# Words for Seashell to spell right');
+  expect(read.terms).toEqual(['Priya Raman', 'Northwind']);
+});
+
+test('a follow-up drafted for an agent is returned, cited, and marked as never sent', async () => {
+  const root = library();
+  const requests: any[] = [];
+  const runner = async (action: string, request: any) => {
+    requests.push({ action, ...request });
+    return { runId: 'r', compiledRunId: 'c', status: 'succeeded' as const, receipt: {}, output: { paragraphs: [
+      { kind: 'body', text: 'The pricing page ships Friday.', evidenceSegmentIds: ['s000001'] }] } };
+  };
+  const route = () => ({ backend: 'codex' as const, model: 'fixture' });
+  expect((await call(root, 'draft_follow_up', { id: 'weekly-sync', kind: 'slack', ask: 'one line' }, {})).value).toContain('not set up for chat');
+  const draft = (await call(root, 'draft_follow_up', { id: 'weekly-sync', kind: 'slack', ask: 'one line' }, { chatRoute: route, runner, engine: rev4 })).value;
+  expect(draft).toEqual({ sent: false, kind: 'slack', paragraphs: [{ kind: 'body', text: 'The pricing page ships Friday.', evidence: ['s000001 00:01'] }] });
+  expect(requests[0]).toMatchObject({ action: 'draft', draft: { kind: 'slack', ask: 'one line' } });
+});
+
+test('a brief for an agent comes from the calendar\'s next meeting, saved, then read back without the AI', async () => {
+  const root = library();
+  const env = { SEASHELL_BRIEFS_DIR: join(dirname(root), `${Date.now()}-Briefs`) } as NodeJS.ProcessEnv;
+  roots.push(env.SEASHELL_BRIEFS_DIR!);
+  let runs = 0;
+  const runner = async (_action: string, request: any) => {
+    runs += 1;
+    return { runId: 'r', compiledRunId: 'c', status: 'succeeded' as const, receipt: {}, output: { summary: 'Pricing ships Friday.',
+      sections: [{ heading: 'Still open', items: [{ text: 'Dana writes the launch email.', sources: [{ meetingId: request.meetings[0].meetingId, evidenceSegmentIds: ['s000002'] }] }] }] } };
+  };
+  const deps: MeetingsMcpDependencies = { env, runner, engine: rev4, route: () => ({ backend: 'codex', model: 'fixture' }),
+    calendar: async () => [{ provider: 'macos-eventkit', eventId: 'weekly', title: 'Weekly sync', startAt: new Date(Date.now() + 3_600_000).toISOString(),
+      endAt: new Date(Date.now() + 5_400_000).toISOString(), attendees: [] }] };
+  const brief = (await call(root, 'get_brief', {}, deps)).value;
+  expect(brief.meeting.title).toBe('Weekly sync');
+  expect(brief.sections[0].items[0]).toEqual({ text: 'Dana writes the launch email.',
+    // The day is the meeting's own, in local time.
+    sources: [{ meetingId: 'weekly-sync', segmentIds: ['s000002'], cite: expect.stringMatching(/^Weekly sync, (Sep 30|Oct 1), 1:05$/u) }] });
+  expect(existsSync(brief.path)).toBe(true);
+  expect((await call(root, 'get_brief', { title: 'weekly' }, deps)).value.path).toBe(brief.path);
+  expect(runs).toBe(1);
+  // Once the meeting it read is private, the saved brief is not handed over, and a new one leaves the meeting out.
+  const { record } = findTranscriptRecord(root, 'weekly-sync');
+  saveMeetingArtifact(root, { ...createMeetingArtifact(record), ai: { off: true } });
+  for (const args of [{}, { title: 'weekly' }]) {
+    expect(await call(root, 'get_brief', args, deps)).toEqual({ error: true, value: expect.stringContaining('Nothing to brief from yet') });
+  }
+  expect(runs).toBe(1);
 });

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import type { MeetingCalendarEvent } from './meeting-artifact.ts';
 import type { MeetProbe } from './meet-speakers.ts';
 import { terminateManagedChild } from './process-lifecycle.ts';
+import { StallClock } from './stall-clock.ts';
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -60,6 +61,12 @@ export interface MeetingSignalSnapshot {
   readonly schemaVersion: 1;
   readonly capturedAtUnixMs: number;
   readonly supported: boolean;
+  /**
+   * False when Core Audio did not answer for every process, as on an
+   * overloaded Mac: an app missing from inputProcesses may still hold its
+   * microphone. Helpers built before this said nothing, which reads as complete.
+   */
+  readonly complete?: boolean;
   readonly frontmostBundleId?: string;
   readonly inputProcesses: readonly AudioInputProcess[];
 }
@@ -201,6 +208,7 @@ export function parseMeetingSignalSnapshot(value: unknown): MeetingSignalSnapsho
     schemaVersion: 1 as const,
     capturedAtUnixMs: safeInteger(value.capturedAtUnixMs, 'Meeting signal capture time'),
     supported: value.supported,
+    ...(value.complete === false ? { complete: false } : {}),
     ...(typeof value.frontmostBundleId === 'string' && value.frontmostBundleId.trim()
       ? { frontmostBundleId: value.frontmostBundleId.trim() }
       : {}),
@@ -232,6 +240,15 @@ export function readMeetingSignalSnapshot(
   }
 }
 
+/**
+ * The detector did not answer in time. On a busy Mac that is a reason to back
+ * off and to pause live text, never a fact about any call.
+ */
+export class MeetingSignalTimeout extends Error {}
+
+/** The longest a failing detector waits before it is started again. */
+const DETECTOR_RESTART_MAX_MS = 30_000;
+
 type SnapshotListener = (snapshot: MeetingSignalSnapshot) => void;
 type ErrorListener = (error: Error) => void;
 
@@ -252,13 +269,17 @@ export class MeetingSignalMonitor {
   #failure?: Error;
   #restartTimer?: ReturnType<typeof setTimeout>;
   #heartbeatTimer?: ReturnType<typeof setInterval>;
-  #lastHeartbeat = 0;
+  /** On receipt time, which a late check does not count against the helper (stall-clock.ts). */
+  #heartbeat: StallClock;
+  /** Restarts since the last snapshot: each waits twice as long, so a struggling Core Audio is not hammered. */
+  #restarts = 0;
   #stopped = true;
 
   constructor(helperPath = MEETING_SIGNALS_HELPER, intervalMs = 3_000, helperArgs: readonly string[] = []) {
     this.#helperPath = helperPath;
     this.#helperArgs = [...helperArgs];
     this.#intervalMs = Math.max(250, Math.min(60_000, Math.round(intervalMs)));
+    this.#heartbeat = new StallClock(this.#intervalMs, performance.now());
   }
 
   start(): void {
@@ -267,7 +288,7 @@ export class MeetingSignalMonitor {
     this.#failure = undefined;
     this.#latest = undefined;
     this.#buffer = '';
-    this.#lastHeartbeat = performance.now();
+    this.#heartbeat.reset(performance.now());
     this.#heartbeatTimer ??= setInterval(() => this.checkHeartbeat(), this.#intervalMs);
     const child = spawn(this.#helperPath, [
       ...this.#helperArgs,
@@ -324,7 +345,7 @@ export class MeetingSignalMonitor {
       };
       const removeSnapshot = this.subscribe((snapshot) => finish(() => resolve(snapshot)));
       const removeError = this.onError((error) => finish(() => reject(error)));
-      const timeout = setTimeout(() => finish(() => reject(new Error(
+      const timeout = setTimeout(() => finish(() => reject(new MeetingSignalTimeout(
         `Meeting signal detector did not become ready within ${Math.ceil(timeoutMs / 1_000)} seconds`,
       ))), timeoutMs);
     });
@@ -362,7 +383,8 @@ export class MeetingSignalMonitor {
       if (!line.trim()) continue;
       try {
         const snapshot = parseMeetingSignalSnapshot(JSON.parse(line));
-        this.#lastHeartbeat = performance.now();
+        this.#heartbeat.data(performance.now());
+        this.#restarts = 0;
         this.#latest = snapshot;
         this.#failure = undefined;
         for (const listener of this.#listeners) listener(snapshot);
@@ -382,21 +404,23 @@ export class MeetingSignalMonitor {
     if (this.#stopped || !this.#child) return;
     // Use receipt time: a native wall-clock adjustment must not extend a lease
     // on stale evidence. Three missed intervals allow normal scheduling jitter.
-    if (performance.now() - this.#lastHeartbeat <= Math.max(1_000, this.#intervalMs * 3)) return;
+    if (this.#heartbeat.silentFor(performance.now()) <= Math.max(1_000, this.#intervalMs * 3)) return;
     const child = this.#child;
     this.#child = undefined;
     this.#latest = undefined;
-    this.fail(new Error('Meeting signal detector heartbeat timed out'));
+    this.fail(new MeetingSignalTimeout('Meeting signal detector heartbeat timed out'));
     void terminateManagedChild(child);
     this.scheduleRestart();
   }
 
   private scheduleRestart(): void {
     if (this.#stopped || this.#restartTimer) return;
+    const delay = Math.min(DETECTOR_RESTART_MAX_MS, 1_000 * 2 ** this.#restarts);
+    this.#restarts += 1;
     this.#restartTimer = setTimeout(() => {
       this.#restartTimer = undefined;
       if (!this.#stopped) this.start();
-    }, 1_000);
+    }, delay);
   }
 }
 
@@ -432,6 +456,42 @@ export function hasConfirmedMeetingEnd(candidate: MeetingCandidate | undefined, 
   if (!candidate?.evidence.includes('joined-meet') || !meet) return false;
   return (meet.state === 'idle' && (meet.source !== 'google-meet-accessibility' || meet.absenceConfirmed === true)) || Boolean(meet.state === 'connected' && meet.snapshot?.joined && meet.browser &&
     candidate.id !== `meet:${meet.browser}:${meet.snapshot.meeting}`);
+}
+
+/**
+ * Whether a poll could not tell if the call being followed is still on. A
+ * detector that timed out or is restarting, a process list Core Audio only
+ * half answered, or a Meet page that could not be read is not the call
+ * ending. Only positive evidence is: a complete reading in which the call's
+ * app no longer holds the microphone, another call seen in its place, or
+ * Meet's page saying the call left (confirmedEnd).
+ */
+export function followedCallUnobserved(
+  followed: MeetingCandidate | undefined,
+  candidate: MeetingCandidate | undefined,
+  snapshot: MeetingSignalSnapshot,
+  confirmedEnd = false,
+): boolean {
+  if (!followed || followed.kind === 'manual' || confirmedEnd || candidate?.id === followed.id) return false;
+  // Nothing about the followed app can be proven from a partial reading, whatever else it shows.
+  if (!snapshot.supported || snapshot.complete === false) return true;
+  if (candidate) return false;
+  // Its app still holds the microphone, it just no longer resolves as a call.
+  return snapshot.inputProcesses.some((process) => sameApplicationFamily(process.bundleId, followed.bundleId));
+}
+
+/**
+ * The followed call's app has let go of the microphone and nothing else took
+ * its place: a complete reading shows no call holding it. While the end grace
+ * runs, Seashell should hold no microphone either.
+ */
+export function callReleasedMicrophone(
+  followed: MeetingCandidate | undefined,
+  candidate: MeetingCandidate | undefined,
+  snapshot: MeetingSignalSnapshot,
+): boolean {
+  if (!followed || followed.kind === 'manual' || candidate || !snapshot.supported || snapshot.complete === false) return false;
+  return !snapshot.inputProcesses.some((process) => sameApplicationFamily(process.bundleId, followed.bundleId));
 }
 
 /** Losing a readable Meet tree is not a new audio-only meeting. Preserve an
@@ -632,7 +692,13 @@ export class MeetingAutomationController {
     return this.#state;
   }
 
-  step(candidate: MeetingCandidate | undefined, nowUnixMs = Date.now(), confirmedEnd = false): MeetingAutomationAction {
+  /**
+   * `unobserved` says this poll could not tell whether the followed call is
+   * still on (followedCallUnobserved). It neither counts toward the end grace
+   * nor resets it: a call ends on positive evidence at both ends of the grace
+   * period, with nothing in between saying it is still on.
+   */
+  step(candidate: MeetingCandidate | undefined, nowUnixMs = Date.now(), confirmedEnd = false, unobserved = false): MeetingAutomationAction {
     if (!this.#config.enabled || this.#config.mode === 'off') {
       this.#state = Object.freeze({ phase: 'watching', confirmations: 0 });
       return NONE;
@@ -643,6 +709,8 @@ export class MeetingAutomationController {
         this.#state = Object.freeze({ ...this.#state, missingSinceUnixMs: undefined });
         return NONE;
       }
+      // A detector timeout is not the call ending: it stays stopped.
+      if (unobserved) return NONE;
       const missingSince = this.#state.missingSinceUnixMs ?? nowUnixMs;
       if (nowUnixMs - missingSince < this.#config.endGraceSeconds * 1_000) {
         this.#state = Object.freeze({ ...this.#state, missingSinceUnixMs: missingSince });
@@ -685,6 +753,7 @@ export class MeetingAutomationController {
         });
         return NONE;
       }
+      if (unobserved) return NONE;
       const missingSince = this.#state.missingSinceUnixMs ?? nowUnixMs;
       if (nowUnixMs - missingSince < this.#config.endGraceSeconds * 1_000) {
         this.#state = Object.freeze({ ...this.#state, phase: 'ending', missingSinceUnixMs: missingSince });
@@ -700,7 +769,7 @@ export class MeetingAutomationController {
     if (this.#state.phase === 'awaiting-consent') {
       if (candidate?.id === this.#state.candidate?.id) {
         this.#state = Object.freeze({ ...this.#state, candidate });
-      } else {
+      } else if (!unobserved) {
         this.#state = Object.freeze({ phase: 'watching', confirmations: 0 });
       }
       return NONE;

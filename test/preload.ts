@@ -12,3 +12,19 @@ process.env.SEASHELL_APPROVAL_KEYCHAIN = 'off';
 
 // Naming, forgetting and private meetings change the voice library. Tests get their own, never the one in Application Support.
 process.env.SEASHELL_VOICES_DIR ||= mkdtempSync(join(tmpdir(), 'seashell-test-voices-'));
+
+// Vocabulary and briefs sit beside the real library by default. A test that names no library
+// must never read the owner's words or write a brief there.
+const scratch = mkdtempSync(join(tmpdir(), 'seashell-test-files-'));
+process.env.SEASHELL_VOCABULARY_FILE ||= join(scratch, 'Vocabulary.txt');
+process.env.SEASHELL_BRIEFS_DIR ||= join(scratch, 'Briefs');
+
+// `seashell note` leaves its notes beside the recorder's command file, and every watch poll
+// reads and deletes them. A test's watch must never take a note typed during a real call.
+process.env.SEASHELL_MEETING_COMMAND_PATH ||= join(scratch, 'meeting-command.json');
+
+// Live text pauses when the Mac is overloaded. A test's recording must not change with how busy this Mac is.
+process.env.SEASHELL_LOAD_PER_CORE ||= '0';
+
+// The recorder publishes its phase in ~/Library/Caches/seashell for other tools, which act on it. No test may write there.
+process.env.SEASHELL_RECORDING_STATE_PATH ||= join(scratch, 'recording-state.json');

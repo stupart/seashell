@@ -16,11 +16,12 @@ import {
 import { initializeFirstInstall } from './first-install.ts';
 import { enableMeetingLaunchAtLogin } from './launch-at-login.ts';
 import { requestMeetAccessibilityPermission } from './meet-speakers.ts';
-import { microphonePermission } from './microphone-permission.ts';
+import { MICROPHONE_PRIVACY_OPENING, microphonePermission } from './microphone-permission.ts';
 import { calendarPermission } from './calendar-permission.ts';
 import { join } from 'path';
 import { ensureTemplatesDirectory, PROFILE_FILE } from './meeting-templates.ts';
 import { ensurePromptsDirectory, listPrompts, resetPrompt, type PromptSummary } from './prompts.ts';
+import { addVocabularyTerm, ensureVocabularyFile, loadVocabulary, removeVocabularyTerm } from './vocabulary.ts';
 import { ensureExtractorsDirectory, loadExtractors, type ExtractorWhen } from './extractors.ts';
 import { askAutomationApprovalWithDialog, ensureAutomationsDirectory, loadAutomations, readAutomationRuns, runAutomations, runFailure,
   type Automation, type AutomationRun } from './automations.ts';
@@ -46,9 +47,11 @@ export const MENU_LABEL: Record<FeatureId, string> = {
   'ai-notes': 'AI notes',
   'notes-templates': 'Templates',
   prompts: 'Prompts',
+  vocabulary: 'Vocabulary',
   // What the notes call them; the files that make them live in the Extractors folder.
   extractors: 'Insights',
   automations: 'Automations',
+  briefs: 'Briefs',
   calendar: 'Calendar titles',
   video: 'Video',
 };
@@ -68,6 +71,14 @@ export interface SettingsActions {
   openFile?: (path: string) => void;
   /** Runs one automation again for the meeting whose run failed. */
   retryAutomation?: (automation: string, meetingId: string, signal: AbortSignal) => Promise<AutomationRun[]>;
+  /** Puts text on the clipboard: a command for Terminal, which Settings never shows. */
+  copy?: (text: string) => void;
+}
+
+/** Puts text on the clipboard. */
+function copyToClipboard(text: string): void {
+  const result = spawnSync('pbcopy', [], { input: text, encoding: 'utf8', timeout: 5_000 });
+  if (result.error || result.status !== 0) throw new Error('Copy failed.');
 }
 
 /** Opens a folder in Finder. */
@@ -157,6 +168,26 @@ export function useSetupActions(props: SetupActionProps & { onFinished?: () => v
         return false;
       } finally { props.onFinished?.(); }
     }
+    if (action === 'open-vocabulary') {
+      try {
+        (props.actions?.openFile ?? openTextFile)(ensureVocabularyFile(props.libraryDir));
+        done('Opened Vocabulary. Save it and the next meeting spells those words that way.');
+        return true;
+      } catch (cause) {
+        failure(cause);
+        return false;
+      } finally { props.onFinished?.(); }
+    }
+    if (action === 'turn-on-briefs') {
+      try {
+        props.onConfigChange?.(updateMeetingConfig({ briefs: { enabled: true } }));
+        done('Briefs on. Seashell writes one before a meeting that has history.');
+        return true;
+      } catch (cause) {
+        failure(cause);
+        return false;
+      } finally { props.onFinished?.(); }
+    }
     if (action === 'turn-on-video') {
       try {
         props.onConfigChange?.(updateMeetingConfig({ video: { enabled: true } }));
@@ -190,7 +221,8 @@ export function useSetupActions(props: SetupActionProps & { onFinished?: () => v
           spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone'], { stdio: 'ignore', timeout: 5_000 });
         }
         finished = result.authorization === 'authorized';
-        if (finished) done('Microphone allowed. Your side of meetings is recorded.'); else failed(result.detail);
+        if (finished) done('Microphone allowed. Your side of meetings is recorded.');
+        else failed(result.authorization === 'denied' ? MICROPHONE_PRIVACY_OPENING : result.detail);
       } else if (action === 'allow-calendar') {
         progress('macOS will ask about "Seashell Calendar". Choose Allow (Full Access).');
         const result = await (props.actions?.allowCalendar ?? (signal => calendarPermission({ request: true, signal })))(controller.signal);
@@ -318,7 +350,7 @@ type MenuItem =
 const SECTIONS: ReadonlyArray<readonly [string, ReadonlyArray<FeatureId | 'recording'>]> = [
   ['Recording', ['recording', 'recorder', 'detection', 'microphone', 'computer-audio', 'transcription']],
   ['Speakers', ['meet-names', 'speaker-separation', 'voices']],
-  ['AI notes', ['ai-notes', 'notes-templates', 'prompts', 'extractors', 'automations']],
+  ['AI notes', ['ai-notes', 'notes-templates', 'prompts', 'vocabulary', 'extractors', 'automations', 'briefs']],
   ['Extras', ['calendar', 'video']],
 ];
 
@@ -400,6 +432,8 @@ export default function SettingsScreen(props: SetupActionProps & {
   const opened = useRef(false);
   /** A yes-or-no question in the key bar's row, before anything is lost. */
   const [confirm, setConfirm] = useState<{ text: string; short?: string; yes: string; run: () => void }>();
+  /** [a] A word for Vocabulary, typed in the key bar's row. */
+  const [adding, setAdding] = useState<string>();
   // Recording rows show what was just saved, whether or not the caller passes it back down.
   const [config, setConfig] = useState(props.config);
   useEffect(() => setConfig(props.config), [props.config]);
@@ -437,6 +471,7 @@ export default function SettingsScreen(props: SetupActionProps & {
       automations: safely(() => loadAutomations(props.libraryDir), { automations: [], problems: [] }),
       runs: runs.map(run => ({ ...run, title: titles.get(run.meetingId) ?? run.meetingId })),
       voices: safely(() => (props.dependencies?.voices ?? listVoiceprints)(), []),
+      vocabulary: safely(() => loadVocabulary(props.libraryDir).terms, []),
     };
   }, [refresh, props.libraryDir]);
 
@@ -444,16 +479,18 @@ export default function SettingsScreen(props: SetupActionProps & {
   const selected = items[Math.min(index, items.length - 1)];
   const rows = recordingRows(config);
   const compact = props.columns < 72;
-  // Recording, prompts and saved voices have rows of their own to choose from.
+  // Recording, prompts, vocabulary and saved voices have rows of their own to choose from.
   const list = selected?.kind === 'recording' ? 'recording' as const
-    : selected?.kind === 'status' && (selected.status.id === 'prompts' || selected.status.id === 'voices') ? selected.status.id : undefined;
-  const listLength = list === 'recording' ? rows.length : list === 'prompts' ? files.prompts.length : list === 'voices' ? files.voices.length : 0;
+    : selected?.kind === 'status' && (selected.status.id === 'prompts' || selected.status.id === 'voices' || selected.status.id === 'vocabulary')
+      ? selected.status.id : undefined;
+  const listLength = list === 'recording' ? rows.length : list === 'prompts' ? files.prompts.length : list === 'voices' ? files.voices.length
+    : list === 'vocabulary' ? files.vocabulary.length : 0;
   // The latest run, when it failed only because a server did not answer: r tries it again.
   const retryRun = selected?.kind === 'status' && selected.status.id === 'automations' && (!compact || inDetail)
     && files.runs[0] && runFailure(files.runs[0])?.retry ? files.runs[0] : undefined;
   // Ink paints a frame before it swaps in the new input handler; read the latest state.
-  const latest = useRef({ selected, itemCount: items.length, rows, inDetail, rowIndex, config, list, listLength, files, confirm, retryRun });
-  latest.current = { selected, itemCount: items.length, rows, inDetail, rowIndex, config, list, listLength, files, confirm, retryRun };
+  const latest = useRef({ selected, itemCount: items.length, rows, inDetail, rowIndex, config, list, listLength, files, confirm, retryRun, adding });
+  latest.current = { selected, itemCount: items.length, rows, inDetail, rowIndex, config, list, listLength, files, confirm, retryRun, adding };
 
   const changeRow = (step: number) => {
     const { rows, rowIndex, config } = latest.current;
@@ -483,6 +520,17 @@ export default function SettingsScreen(props: SetupActionProps & {
     return !result || result.status === 'ok' ? { tone: 'done', text: `${run.automation} worked.` }
       : { tone: 'failed', text: result.status === 'skipped' ? `${run.automation} did not run.` : `${run.automation} failed again.` };
   });
+  // Briefs are one switch: Enter turns them off, and on again.
+  const switchBriefs = (on: boolean) => {
+    if (!on) { void setup.run('turn-on-briefs'); return; }
+    try {
+      const saved = updateMeetingConfig({ briefs: { enabled: false } });
+      setConfig(saved);
+      props.onConfigChange?.(saved);
+      setup.done('Briefs off. Nothing is written before meetings.');
+    } catch (cause) { setup.failure(cause); }
+    setRefresh(value => value + 1);
+  };
   // Video is one switch: Enter turns it on, and asks macOS for Screen Recording if it must; Enter again turns it off.
   const switchVideo = (on: boolean) => {
     try {
@@ -495,7 +543,7 @@ export default function SettingsScreen(props: SetupActionProps & {
   };
 
   useInput((input, key) => {
-    const { selected, itemCount, rows, inDetail, list, listLength, rowIndex, files, confirm, retryRun } = latest.current;
+    const { selected, itemCount, rows, inDetail, list, listLength, rowIndex, files, confirm, retryRun, adding } = latest.current;
     if (setup.busy) {
       if (key.escape) setup.cancel();
       return;
@@ -505,8 +553,28 @@ export default function SettingsScreen(props: SetupActionProps & {
       else if (input.toLowerCase() === 'n' || key.escape) setConfirm(undefined);
       return;
     }
+    if (adding !== undefined) {
+      if (key.escape) { setAdding(undefined); return; }
+      if (key.return) {
+        setAdding(undefined);
+        if (!adding.trim()) return;
+        attempt(() => {
+          const { term, added } = addVocabularyTerm(props.libraryDir, adding);
+          return added ? `Added "${term}". The next call spells it that way.` : `"${term}" is already there.`;
+        });
+        return;
+      }
+      if (key.backspace || key.delete) { setAdding(adding.slice(0, -1)); return; }
+      if (input && !key.ctrl && !key.meta) setAdding(adding + input);
+      return;
+    }
     // A confirmation stays in the key bar until the next key.
     if (setup.message?.tone === 'done') setup.setMessage(undefined);
+    // Briefs are a switch: ←→ turn them on and off wherever the row is shown, so Enter can do the step they wait on.
+    if ((key.leftArrow || key.rightArrow) && selected?.kind === 'status' && selected.status.id === 'briefs' && (!compact || inDetail)) {
+      switchBriefs(selected.status.action !== 'turn-on-briefs');
+      return;
+    }
     const editingRows = inDetail && list !== undefined;
     if (key.escape || key.leftArrow && inDetail && list !== 'recording') {
       if (inDetail) { setInDetail(false); setup.setMessage(undefined); return; }
@@ -514,9 +582,17 @@ export default function SettingsScreen(props: SetupActionProps & {
       return;
     }
     if (input === ',') { props.onClose(); return; }
+    // c copies a step only Terminal can do; the command itself is never shown.
+    const copy = selected?.kind === 'status' ? selected.status.copy : undefined;
+    if (input === 'c' && copy) {
+      try { (props.actions?.copy ?? copyToClipboard)(copy.text); setup.done('Copied.'); } catch (cause) { setup.failure(cause); }
+      return;
+    }
+    // + adds a word to Vocabulary from its row or its list of words, as + adds a note in the app; a only ever asks.
+    if (input === '+' && list === 'vocabulary') { setup.setMessage(undefined); setAdding(''); return; }
     if (editingRows) {
       if (key.upArrow || input === 'k') { setRowIndex(value => Math.max(0, value - 1)); setup.setMessage(undefined); }
-      else if (key.downArrow || input === 'j') { setRowIndex(value => Math.min(listLength - 1, value + 1)); setup.setMessage(undefined); }
+      else if (key.downArrow || input === 'j') { setRowIndex(value => Math.max(0, Math.min(listLength - 1, value + 1))); setup.setMessage(undefined); }
       // ←→ change a row; space only ever records, in the app.
       else if (list === 'recording') { if (key.leftArrow || key.rightArrow) changeRow(key.leftArrow ? -1 : 1); }
       else if (list === 'prompts') {
@@ -529,6 +605,16 @@ export default function SettingsScreen(props: SetupActionProps & {
         });
         else if (input === 'd' && prompt.state !== 'default') setConfirm({ text: `Undo your edits to ${prompt.title}?`, yes: 'undo',
           run: () => attempt(() => { resetPrompt(props.libraryDir, prompt.name); return `Undid your edits to ${prompt.title}.`; }) });
+      } else if (list === 'vocabulary') {
+        const term = files.vocabulary[rowIndex];
+        if (key.return) void setup.run('open-vocabulary');
+        else if (input === 'd' && term) attempt(() => {
+          removeVocabularyTerm(props.libraryDir, term);
+          // The list closes when its last word goes.
+          if (listLength <= 1) setInDetail(false);
+          setRowIndex(value => Math.max(0, Math.min(value, listLength - 2)));
+          return `Removed "${term}".`;
+        });
       } else if (list === 'voices') {
         const voice = files.voices[rowIndex];
         if (voice && key.return) setConfirm({ text: `Forget ${voice.name}'s voice? Names you gave stay; names Seashell suggested go.`,
@@ -553,6 +639,8 @@ export default function SettingsScreen(props: SetupActionProps & {
     if (selected?.kind === 'guide') props.onOpenGuide?.();
     else if (compact && !inDetail || list !== undefined && listLength > 0) { setInDetail(true); setRowIndex(0); setup.setMessage(undefined); }
     else if (key.return && selected?.kind === 'status' && selected.status.id === 'video') switchVideo(selected.status.state !== 'off');
+    // Briefs that work: Enter turns them off. Otherwise Enter does what they wait on, below.
+    else if (key.return && selected?.kind === 'status' && selected.status.id === 'briefs' && !selected.status.action) switchBriefs(true);
     else if (key.return && selected?.kind === 'status' && selected.status.action) void setup.run(selected.status.action);
     // Only hearing it proves a microphone or the Mac's sound works, and the guide listens.
     else if (key.return && selected?.kind === 'status' && testable(selected)) {
@@ -653,6 +741,17 @@ export default function SettingsScreen(props: SetupActionProps & {
     if (id === 'prompts') return files.prompts.map((prompt, i) => listRow(prompt.name, i, prompt.title, PROMPT_STATE[prompt.state], 18));
     if (id === 'voices') return files.voices.map((voice, i) =>
       listRow(voice.name, i, voice.name, `${voice.meetings} ${voice.meetings === 1 ? 'meeting' : 'meetings'}`, 22));
+    if (id === 'vocabulary') {
+      // As many words as fit, around the one being chosen; a dim line says how many more are out of view.
+      const room = Math.max(3, (props.rows ?? 30) - 14);
+      const top = files.vocabulary.length <= room ? 0 : Math.max(0, Math.min(rowIndex - Math.floor(room / 2), files.vocabulary.length - room));
+      const shown = files.vocabulary.slice(top, top + room);
+      return <>
+        {top > 0 && <Text dimColor>  ↑ {top} more</Text>}
+        {shown.map((term, i) => listRow(term, top + i, term, '', Math.min(width - 2, 80)))}
+        {top + room < files.vocabulary.length && <Text dimColor>  ↓ {files.vocabulary.length - top - room} more</Text>}
+      </>;
+    }
     if (id === 'extractors') return <>
       {files.extractors.extractors.map(extractor => <Text key={extractor.path} wrap="truncate-end">
         {'  '}{extractor.name.slice(0, 21).padEnd(22)}<Text dimColor>{whenWords(extractor.when)} · {extractor.fields.length} {extractor.fields.length === 1 ? 'field' : 'fields'}</Text>
@@ -704,19 +803,19 @@ export default function SettingsScreen(props: SetupActionProps & {
       <Text color={FEATURE_STATE_COLOR[selected.status.state]} wrap="truncate-end">{FEATURE_STATE_SYMBOL[selected.status.state]} {selected.status.summary}</Text>)}
     <Box flexDirection="column" flexShrink={1} overflow="hidden">
       <Box marginTop={1} flexShrink={0}><Paragraph width={width} text={selected.status.detail} /></Box>
-      {/* Yellow only when something needs doing; on a row that works, it is a note. */}
+      {/* Yellow only when something needs doing; on a row that works, it is a note. Never a command:
+          those are for `seashell status`, and the key bar has the key that fixes it. */}
       {selected.status.fix && <Box marginTop={1} flexShrink={0}>{selected.status.state === 'ok'
         ? <Paragraph width={width} text={selected.status.fix} />
-        : <Paragraph width={width} color="yellow" text={`Next: ${selected.status.fix}`} />}</Box>}
-      {!selected.status.action && selected.status.state !== 'ok' && selected.status.command
-        ? <Paragraph width={width} text={`Run: ${selected.status.command}`} /> : null}
-      {['prompts', 'voices', 'extractors', 'automations'].includes(selected.status.id) &&
+        : <Paragraph width={width} color="yellow" text={`Next: ${selected.status.fix}${selected.status.copy ? ` ${selected.status.copy.how}` : ''}`} />}</Box>}
+      {['prompts', 'voices', 'vocabulary', 'extractors', 'automations'].includes(selected.status.id) &&
         <Box flexDirection="column" marginTop={1} flexShrink={0}>{filesBody(selected.status.id)}</Box>}
     </Box>
   </>;
 
   const action = selected?.kind === 'status' ? selected.status.action : undefined;
   const video = selected?.kind === 'status' && selected.status.id === 'video' ? selected.status : undefined;
+  const briefs = selected?.kind === 'status' && selected.status.id === 'briefs' ? selected.status : undefined;
   // One order everywhere: what Enter does, then moving, then r, then Esc. Trying a failed run again
   // is the fix, so it leads; on that row r only ever tries again, and recheck gives way.
   const hints: Hint[] = compact && !inDetail ? [['Enter', 'open'], ['↑↓', 'choose'], ['r', 'recheck'], ['Esc', 'back']]
@@ -724,13 +823,21 @@ export default function SettingsScreen(props: SetupActionProps & {
     : inDetail && list === 'prompts' ? [['Enter', 'edit'], ...(files.prompts[rowIndex]?.state !== 'default' ? [['d', 'undo edits'] as Hint] : []),
       ['↑↓', 'choose'], ['Esc', 'back']]
     : inDetail && list === 'voices' && listLength ? [['Enter', 'forget'], ['↑↓', 'choose'], ['Esc', 'back']]
+    // Narrow, the file's key keeps its place in fewer words.
+    : inDetail && list === 'vocabulary' && listLength ? [['+', 'add a word'], ['d', 'remove'], ['Enter', compact ? 'TextEdit' : 'open in TextEdit'], ['↑↓', 'choose'], ['Esc', 'back']]
     : [
       ...(retryRun ? [['r', 'try again'] as Hint] : []),
+      // The fix leads: a step only Terminal can do is copied for it.
+      ...(selected?.kind === 'status' && selected.status.copy ? [['c', 'copy the update command'] as Hint] : []),
       ...(selected?.kind === 'recording' ? [['Enter', 'change'] as Hint] : selected?.kind === 'guide' ? [['Enter', 'start'] as Hint]
         : video ? [['Enter', video.state === 'off' ? 'turn on' : 'turn off'] as Hint]
+        : briefs ? !briefs.action ? [['Enter', 'turn off'] as Hint] : briefs.action === 'turn-on-briefs' ? [['Enter', 'turn on'] as Hint]
+          : [['Enter', lowerFirst(FEATURE_ACTION_LABEL[briefs.action])] as Hint, ['←→', 'on/off'] as Hint]
         : list === 'prompts' ? [['Enter', 'choose a prompt'] as Hint] : list === 'voices' && listLength ? [['Enter', 'choose someone'] as Hint]
+        : list === 'vocabulary' ? [['+', 'add a word'] as Hint, ['Enter', listLength ? 'choose a word' : 'open in TextEdit'] as Hint]
         : action ? [['Enter', lowerFirst(FEATURE_ACTION_LABEL[action])] as Hint] : selected && testable(selected) ? [['Enter', 'test it now'] as Hint] : []),
-      ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ...(retryRun ? [] : [['r', 'recheck'] as Hint]), ['Esc', 'back'],
+      // Vocabulary is a list kept here, with nothing to check again: r is left off it.
+      ...(compact ? [] : [['↑↓', 'choose'] as Hint]), ...(retryRun || list === 'vocabulary' ? [] : [['r', 'recheck'] as Hint]), ['Esc', 'back'],
     ];
   const failed = setup.message?.tone === 'failed' ? setup.message.text : undefined;
 
@@ -746,6 +853,7 @@ export default function SettingsScreen(props: SetupActionProps & {
       </Box>}
     </Box>
     {setup.busy ? <Prompt text="◐ Working…" dimColor hints={[['Esc', 'cancel']]} columns={props.columns - 2} />
+      : adding !== undefined ? <Prompt text="Add a word:" input={adding} color="yellow" hints={[['Enter', 'add'], ['Esc', 'cancel']]} columns={props.columns - 2} />
       : confirm ? <Prompt text={confirm.text} {...(confirm.short ? { short: confirm.short } : {})} color="yellow"
         hints={[['y', confirm.yes], ['n', 'keep']]} columns={props.columns - 2} />
       : setup.message?.tone === 'done' ? <Toast text={setup.message.text} columns={props.columns - 2} />

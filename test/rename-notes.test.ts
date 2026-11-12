@@ -69,9 +69,11 @@ test('undoing a suggested name takes it out of the notes, and says the notes may
 test('correcting a real name moves its actions to the new name; naming a placeholder still keeps the notes current', () => {
   const { root, record } = library([{ id: 'LOCAL', label: 'Microphone' }, { id: 'REMOTE_SPEAKER_00', label: 'Remote speaker 1' }]);
   const artifact = loadMeetingArtifact(root, record.id)!;
-  saveMeetingArtifact(root, { ...artifact, analysis: { ...artifact.analysis!, summary: 'Remote speaker 1 will send the deck.' } });
+  // The AI is told the name the screen shows, so notes say "Speaker 1" as well as the saved "Remote speaker 1".
+  saveMeetingArtifact(root, { ...artifact, analysis: { ...artifact.analysis!, summary: 'Remote speaker 1 will send the deck. Speaker 1 owns it; Speaker 12 does not.' } });
   renameMeetingSpeaker(root, record.id, 'Remote speaker 1', 'Dana');
-  expect(loadMeetingArtifact(root, record.id)!.analysis!.summary).toBe('Dana will send the deck.');
+  expect(loadMeetingArtifact(root, record.id)!.analysis!.summary).toBe('Dana will send the deck. Dana owns it; Speaker 12 does not.');
+  saveMeetingArtifact(root, { ...loadMeetingArtifact(root, record.id)!, analysis: { ...loadMeetingArtifact(root, record.id)!.analysis!, summary: 'Dana will send the deck.' } });
   expect(loadMeetingArtifact(root, record.id)!.notesOutdated).toBeUndefined();
 
   renameMeetingSpeaker(root, record.id, 'Dana', 'Diana');

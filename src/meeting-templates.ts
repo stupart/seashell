@@ -38,6 +38,8 @@ export interface MeetingInstructions {
   profile?: string;
   template?: { name: string; body: string };
   note?: string;
+  /** Spellings to use: names, companies, jargon (vocabulary.ts). Revision 4. */
+  vocabulary?: string[];
 }
 
 const PROFILE_STARTER = `<!--
@@ -191,8 +193,25 @@ export function writeMeetingTemplate(
 export function loadProfile(libraryDir: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
   const path = join(templatesDirectory(libraryDir, env), PROFILE_FILE);
   if (!existsSync(path)) return undefined;
-  const profile = meaningful(parseFrontmatter(readFileSync(path, 'utf8')).body);
+  const { fields, body } = parseFrontmatter(readFileSync(path, 'utf8'));
+  const text = meaningful(body);
+  // A `name:` line says who "You" is in every meeting, and what a follow-up is signed with, so the AI is told it.
+  const name = typeof fields.name === 'string' ? fields.name.trim() : '';
+  const profile = name && !text.includes(name) ? [`My name is ${name}.`, text].filter(Boolean).join('\n') : text;
   return profile || undefined;
+}
+
+/**
+ * Your first name, when About me says it: a `name:` line at its top, or "Name: Tyler", "My name is
+ * Tyler", "I'm Tyler" in its text. A follow-up signs off with it.
+ */
+export function profileName(libraryDir: string, env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const path = join(templatesDirectory(libraryDir, env), PROFILE_FILE);
+  if (!existsSync(path)) return undefined;
+  const { fields, body } = parseFrontmatter(readFileSync(path, 'utf8'));
+  const named = typeof fields.name === 'string' && fields.name.trim() ? fields.name.trim()
+    : /(?:^|[\n.!?]\s*)(?:[Nn]ame\s*:\s*|[Mm]y name is\s+|I['’]m\s+|I am\s+)(\p{Lu}[\p{L}'’-]*)/u.exec(meaningful(body))?.[1];
+  return named?.split(/\s+/u)[0] || undefined;
 }
 
 function escapeRegExp(value: string): string {

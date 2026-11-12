@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { parseCliArgs } from '../src/cli-args.ts';
 
 describe('transcription CLI parsing', () => {
@@ -8,6 +11,21 @@ describe('transcription CLI parsing', () => {
       files: ['meeting.mp4'],
       options: { format: 'text', timestamps: false, speakers: false },
     });
+  });
+
+  test('a word that is no command and names no file is an unknown command, not a recording', () => {
+    expect(() => parseCliArgs(['list'])).toThrow('Unknown command: list. See seashell --help');
+    expect(() => parseCliArgs(['list', '--json'])).toThrow('Unknown command: list.');
+    // A file by that name is still transcribed, as is anything that looks like a path.
+    const directory = mkdtempSync(join(tmpdir(), 'seashell-cli-'));
+    try {
+      writeFileSync(join(directory, 'standup'), '');
+      const cwd = process.cwd();
+      process.chdir(directory);
+      try { expect(parseCliArgs(['standup'])).toMatchObject({ kind: 'transcribe', files: ['standup'] }); } finally { process.chdir(cwd); }
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+    expect(parseCliArgs(['missing.m4a'])).toMatchObject({ kind: 'transcribe', files: ['missing.m4a'] });
+    expect(parseCliArgs(['transcribe', 'list'])).toMatchObject({ kind: 'transcribe', files: ['list'] });
   });
 
   test('supports independent timestamp and speaker presentation', () => {
@@ -424,4 +442,22 @@ test('meeting computer-audio checks, or at the Mac runs the one-time check', () 
   expect(parseCliArgs(['meeting', 'computer-audio', 'setup', '--json'])).toMatchObject({
     kind: 'meeting', action: { kind: 'computer-audio', operation: 'setup' }, json: true });
   expect(() => parseCliArgs(['meeting', 'computer-audio', 'allow'])).toThrow('seashell meeting computer-audio [setup|check]');
+});
+
+test('notes, briefs, drafts and vocabulary parse as a person types them', () => {
+  expect(parseCliArgs(['note', 'Dana', 'sounded', 'unsure'])).toEqual({ kind: 'note', text: 'Dana sounded unsure', json: false });
+  expect(parseCliArgs(['note', 'Send the guide', '--meeting', 'acme-call', '--at', '12:34', '--json']))
+    .toEqual({ kind: 'note', text: 'Send the guide', meeting: 'acme-call', atSeconds: 754, json: true });
+  // A time belongs to a meeting: during a recording the note is timed when typed.
+  expect(() => parseCliArgs(['note', 'x', '--at', '1:00'])).toThrow('Usage: seashell note');
+  expect(() => parseCliArgs(['note'])).toThrow('Usage: seashell note');
+  expect(parseCliArgs(['brief'])).toEqual({ kind: 'brief', target: 'next', json: false });
+  expect(parseCliArgs(['brief', 'next', '--json'])).toEqual({ kind: 'brief', target: 'next', json: true });
+  expect(parseCliArgs(['brief', 'Weekly', 'sync'])).toEqual({ kind: 'brief', target: { title: 'Weekly sync' }, json: false });
+  expect(parseCliArgs(['draft', 'acme-call'])).toEqual({ kind: 'draft', id: 'acme-call', slack: false, json: false });
+  expect(parseCliArgs(['draft', 'acme-call', '--slack', '--ask', 'keep it to three bullets']))
+    .toEqual({ kind: 'draft', id: 'acme-call', slack: true, ask: 'keep it to three bullets', json: false });
+  expect(() => parseCliArgs(['draft'])).toThrow('Usage: seashell draft');
+  expect(parseCliArgs(['vocabulary', '--json'])).toEqual({ kind: 'vocabulary', json: true });
+  expect(() => parseCliArgs(['vocabulary', 'add'])).toThrow('Usage: seashell vocabulary');
 });

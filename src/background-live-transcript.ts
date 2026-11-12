@@ -4,13 +4,15 @@ import type { CommittedCaptureChunk } from './capture-session.ts';
 import { reconcileLiveEcho } from './live-echo.ts';
 import { loadLocalAsrProfile } from './local-asr-profile.ts';
 import { LiveAsrScheduler, OwnedWhisperServer } from './local-asr-scheduler.ts';
+import { defaultWhisperPrompt } from './vocabulary.ts';
 import type { MeetSpeaker } from './meet-speakers.ts';
 import { DEFAULT_WHISPER_MODEL_FILENAME } from './model-config.ts';
 import { saveTranscriptRecord } from './transcript-library.ts';
 import type { TranscriptRecord, TranscriptSegment } from './transcript-types.ts';
 
 export interface BackgroundLiveTranscriptStatus {
-  readonly stage: 'waiting' | 'transcribing' | 'live' | 'delayed' | 'stopped';
+  /** `paused`: the Mac is too busy for live text (live-text-guard.ts); the audio still records. */
+  readonly stage: 'waiting' | 'transcribing' | 'live' | 'delayed' | 'paused' | 'stopped';
   readonly detail: string;
   readonly queueDepth: number;
 }
@@ -37,8 +39,20 @@ export interface BackgroundLiveTranscriptOptions {
 }
 export interface BackgroundLiveTranscriptHandle {
   readonly status: BackgroundLiveTranscriptStatus;
+  /**
+   * Live text has fallen behind the audio: a chunk has waited over 30 s for
+   * its draft, or drafts were skipped three times in a minute to catch up.
+   */
+  readonly behind?: boolean;
   /** Called only after a durable commit; never deletes or modifies chunk audio. */
   enqueue(chunk: CommittedCaptureChunk): void;
+  /**
+   * Stop making drafts and let the local engine go, keeping the drafts so far.
+   * Chunks that arrive meanwhile are skipped; the final pass covers them.
+   */
+  pause?(detail: string): void;
+  /** Make drafts again from the next chunk on. The engine starts again when it is needed. */
+  resume?(): void;
   /** Immediately blocks new/late draft writes, then closes owned inference. */
   close(): Promise<void>;
 }
@@ -46,9 +60,11 @@ export interface BackgroundLiveTranscriptHandle {
 function createLocalTranscriber(): BackgroundDraftTranscriber {
   const root = join(dirname(fileURLToPath(import.meta.url)), '..');
   const profile = loadLocalAsrProfile(join(root, 'models', DEFAULT_WHISPER_MODEL_FILENAME));
+  const prompt = defaultWhisperPrompt();
   return new OwnedWhisperServer(join(root, 'whisper.cpp', 'build', 'bin', 'whisper-server'), {
     ...profile, requestTimeoutMs: 120_000, idleTimeoutMs: 60_000,
     disableGpu: process.env.SEASHELL_DISABLE_GPU === '1',
+    ...(prompt ? { prompt } : {}),
   });
 }
 function positiveBound(value: number, name: string, maximum: number): number {
@@ -75,6 +91,13 @@ export function startBackgroundLiveTranscript(options: BackgroundLiveTranscriptO
   let transcriber: BackgroundDraftTranscriber | undefined;
   let transcriberStop: Promise<void> | undefined;
   let closing: Promise<void> | undefined;
+  /** Why drafts are paused, while they are. */
+  let paused: string | undefined;
+  /** An engine let go of by a pause, still shutting down. */
+  let retiring: Promise<void> = Promise.resolve();
+  /** When each chunk still waiting for its draft was queued, and when drafts were skipped to catch up. */
+  const waitingSince = new Map<string, number>();
+  let skippedAt: number[] = [];
   let statusPublished = false;
   let lastStatus: BackgroundLiveTranscriptStatus = Object.freeze({
     stage: 'waiting', detail: 'Waiting for speech. Audio is saved as it arrives.', queueDepth: 0,
@@ -83,7 +106,7 @@ export function startBackgroundLiveTranscript(options: BackgroundLiveTranscriptO
   const scheduler = new LiveAsrScheduler({
     maxPending,
     transcribe: (path, signal) => {
-      if (closed || limited || signal.aborted) return Promise.resolve('');
+      if (closed || limited || paused || signal.aborted) return Promise.resolve('');
       transcriber ??= (options.dependencies?.createTranscriber ?? createLocalTranscriber)();
       return transcriber.transcribe(path, signal);
     },
@@ -91,11 +114,11 @@ export function startBackgroundLiveTranscript(options: BackgroundLiveTranscriptO
   });
 
   function report() {
-    const queueDepth = closed ? 0 : scheduler.depth;
-    const stage = closed ? 'stopped' : delay ? 'delayed' : queueDepth > 0 ? 'transcribing'
+    const queueDepth = closed || paused ? 0 : scheduler.depth;
+    const stage = closed ? 'stopped' : paused ? 'paused' : delay ? 'delayed' : queueDepth > 0 ? 'transcribing'
       : record.transcript.length ? 'live' : 'waiting';
     const detail = closed ? 'Live draft stopped. Preparing the final transcript.'
-      : delay ?? (stage === 'transcribing' ? 'Preparing live text. Audio is already saved.'
+      : paused ?? delay ?? (stage === 'transcribing' ? 'Preparing live text. Audio is already saved.'
         : stage === 'live' ? 'Live transcript updating; the final pass refines timing and speakers.'
           : 'Waiting for speech. Audio is saved as it arrives.');
     if (statusPublished && lastStatus.stage === stage && lastStatus.queueDepth === queueDepth && lastStatus.detail === detail) return;
@@ -181,8 +204,13 @@ export function startBackgroundLiveTranscript(options: BackgroundLiveTranscriptO
   report();
   return {
     get status() { return lastStatus; },
+    get behind() {
+      const at = now().getTime();
+      skippedAt = skippedAt.filter((skipped) => at - skipped < 60_000);
+      return !paused && !closed && (skippedAt.length >= 3 || [...waitingSince.values()].some((since) => at - since > 30_000));
+    },
     enqueue(chunk) {
-      if (closed || limited || !chunk.audible) return;
+      if (closed || limited || paused || !chunk.audible) return;
       if (!Number.isSafeInteger(chunk.sequence) || chunk.sequence <= latestSequence[chunk.trackId] ||
           !Number.isFinite(chunk.startMs) || !Number.isFinite(chunk.endMs) ||
           chunk.startMs < 0 || chunk.endMs <= chunk.startMs || chunk.bytes < 44) return;
@@ -191,14 +219,35 @@ export function startBackgroundLiveTranscript(options: BackgroundLiveTranscriptO
         delayed('A saved chunk is too large for live preview. It remains available for final transcription.');
         return;
       }
+      waitingSince.set(chunk.id, now().getTime());
       void scheduler.enqueue({
         id: chunk.id, audioFile: chunk.path, start: chunk.startMs / 1000, end: chunk.endMs / 1000,
         speaker: chunk.trackId === 'microphone' ? 'LOCAL' : 'SYSTEM', sessionGeneration: 1,
       }).then(result => {
-        if (closed || limited) return;
+        waitingSince.delete(chunk.id);
+        if (result.status === 'superseded') skippedAt.push(now().getTime());
+        if (closed || limited || paused) return;
         if (result.status === 'completed') append(chunk, result.text);
         else if (result.status === 'superseded') delayed('Live text is catching up. Audio is saved; the final pass fills draft gaps.');
-      }).catch(() => delayed('Live transcription is delayed. Audio is saved; the final pass will retry locally.'));
+      }).catch(() => {
+        waitingSince.delete(chunk.id);
+        delayed('Live transcription is delayed. Audio is saved; the final pass will retry locally.');
+      });
+    },
+    pause(detail) {
+      if (closed || paused) return;
+      paused = detail;
+      // Drop what is queued and let the engine go: its model and threads are what the call needs back.
+      scheduler.cancelGeneration(1);
+      const engine = transcriber;
+      transcriber = undefined;
+      if (engine) retiring = Promise.all([retiring, Promise.resolve().then(() => engine.stop())]).then(() => {}, () => {});
+      report();
+    },
+    resume() {
+      if (closed || !paused) return;
+      paused = undefined;
+      report();
     },
     close() {
       if (closing) return closing;
@@ -208,7 +257,7 @@ export function startBackgroundLiveTranscript(options: BackgroundLiveTranscriptO
       timer = undefined;
       publish(true);
       report();
-      closing = Promise.allSettled([scheduler.stop(), stopTranscriber()]).then(async results => {
+      closing = Promise.allSettled([scheduler.stop(), stopTranscriber(), retiring]).then(async results => {
         // An aborted request may run its idle-timer finally block while the
         // first stop is closing the server. Clear that timer after the lane ends.
         await transcriber?.stop();

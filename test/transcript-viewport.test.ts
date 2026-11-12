@@ -1,6 +1,6 @@
 import { test, expect } from 'bun:test';
 import { stripVTControlCharacters } from 'util';
-import { lastTranscriptScroll, timedTranscriptRows, transcriptRows, transcriptWindow, MouseScrollDecoder } from '../src/transcript-viewport.ts';
+import { lastTranscriptScroll, lineAt, timedTranscriptRows, transcriptRows, transcriptWindow, MouseScrollDecoder } from '../src/transcript-viewport.ts';
 
 test('one long paragraph remains reachable row by row at narrow widths', () => {
   const words = Array.from({ length: 100 }, (_, i) => `word${i}`);
@@ -56,12 +56,58 @@ test('a line cut at the top of the view keeps its time and speaker', () => {
   // Stacked: the time and speaker sit on a row of their own above the words that are left.
   const stacked = timedTranscriptRows(timedRecord, 40, options);
   expect(plain(transcriptWindow(stacked, 1, 3))).toEqual(['00:00  You', 'A made-up opening line that is long', 'enough to wrap onto a second row here.']);
-  expect(plain(transcriptWindow(stacked, 2, 3))).toEqual(['00:00  You', 'enough to wrap onto a second row here.', '01:05  Speaker 1']);
+  // A row from the middle of a line starts with "…", so the time and speaker over it never read as one sentence with it.
+  expect(plain(transcriptWindow(stacked, 2, 3))).toEqual(['00:00  You', '…enough to wrap onto a second row here.', '01:05  Speaker 1']);
   // The last scroll leaves room for that row, so the last words are never pushed out of view.
   const last = lastTranscriptScroll(stacked, 3);
   expect(plain(transcriptWindow(stacked, last, 3)).at(-1)).toBe('A short reply.');
+  // There, the opening line's last row would sit at the top under its pinned time and speaker, pushing the
+  // reply out, so the view starts at the reply a row short: at the end, that row goes above, never under
+  // the newest words, which stay on the key bar.
+  expect(plain(transcriptWindow(stacked, last, 3))).toEqual(['01:05  Speaker 1', 'A short reply.']);
+  expect(plain(transcriptWindow(stacked, last, 3, { end: true }))).toEqual(['', '01:05  Speaker 1', 'A short reply.']);
+  // A view that fills, or a transcript shorter than the view, is left as it is.
+  expect(plain(transcriptWindow(stacked, 1, 3, { end: true }))).toEqual(plain(transcriptWindow(stacked, 1, 3)));
+  expect(plain(transcriptWindow(stacked, 0, 9, { end: true }))).toHaveLength(stacked.length);
   // In columns: the cut row takes its line's time and speaker beside it.
   const columns = timedTranscriptRows(timedRecord, 64, options);
-  expect(plain(transcriptWindow(columns, 1, 2))[0]).toMatch(/^00:00  You {8}\S/u);
+  expect(plain(transcriptWindow(columns, 1, 2))[0]).toMatch(/^00:00  You {8}…\S/u);
+  // The rows after a line's first leave a column for "…", so a cut row fits as its line's first does.
+  for (const width of [40, 64]) for (const row of transcriptWindow(timedTranscriptRows(timedRecord, width, options), 2, 3)) {
+    expect(Bun.stringWidth(stripVTControlCharacters(row.text))).toBeLessThanOrEqual(width);
+  }
   expect(lastTranscriptScroll(columns, 2)).toBe(columns.length - 2);
+});
+
+test('something to look at in the notes stays marked on every row it wraps to, so all of it is yellow', async () => {
+  const { wrappedMeetingRows } = await import('../src/transcript-viewport.ts');
+  const { CAUTION, OWNER_NOTES_UNREAD, plainMeetingLines } = await import('../src/meeting-tui.ts');
+  const rows = wrappedMeetingRows([`${CAUTION}${OWNER_NOTES_UNREAD}`], 30);
+  expect(rows.length).toBeGreaterThan(1);
+  expect(rows.every((row) => row.startsWith(CAUTION))).toBe(true);
+  expect(rows.map((row) => row.slice(CAUTION.length)).join(' ')).toBe(OWNER_NOTES_UNREAD);
+  expect(plainMeetingLines([`${CAUTION}${OWNER_NOTES_UNREAD}`])).toEqual([OWNER_NOTES_UNREAD]);
+});
+
+test('"source removed" sits in the time column on its own row, without pushing the other owners left', async () => {
+  const { wrappedMeetingRows } = await import('../src/transcript-viewport.ts');
+  const rows = wrappedMeetingRows(['- Send the summary.\tYou · Fri\t00:35', '- Share the deck.\t\tsource removed'], 60).map((row) => stripVTControlCharacters(row));
+  expect(rows[0]).toEndWith('You · Fri  00:35');
+  expect(rows[1]).toEndWith('source removed');
+  expect(rows.every((row) => Bun.stringWidth(row) === 60)).toBe(true);
+});
+
+test('a cited moment is found in the line it was joined to, not the line after it', () => {
+  // Dana's two sentences a second apart read as one line starting at 0:10.
+  const record = { transcript: [
+    { start: 0, end: 4, text: 'Thanks for making time.', speaker: 'LOCAL' },
+    { start: 10, end: 12, text: 'Sure.', speaker: 'REMOTE_00' },
+    { start: 12.5, end: 15, text: 'I will send the summary by Friday.', speaker: 'REMOTE_00' },
+    { start: 30, end: 33, text: 'Great.', speaker: 'LOCAL' },
+  ], speakers: [{ id: 'LOCAL', label: 'Microphone' }, { id: 'REMOTE_00', label: 'Dana' }] };
+  const rows = timedTranscriptRows(record, 80, { timestamps: true, speakers: true });
+  expect(rows.map((row) => row.start)).toEqual([0, 10, 30]);
+  expect(lineAt(rows, 12.5)).toBe(10);
+  expect(lineAt(rows, 30)).toBe(30);
+  expect(lineAt(rows, -5)).toBe(0);
 });

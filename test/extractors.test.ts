@@ -133,6 +133,13 @@ test('output that skips a field or cites a line the meeting does not have is ref
   await expect(runExtractor(root, record.id, 'Customer pains', { route, env, runner: answer([
     { name: 'Pains', items: [{ text: 'Invented', evidenceSegmentIds: ['s999999'] }] }, { name: 'Tools', items: [] }, { name: 'Budget', items: [] }]) }))
     .rejects.toThrow('cites missing segment s999999');
+  // It reads only the transcript: a point resting on your notes, or on a removed line, cites nothing it was given.
+  for (const item of [{ text: 'From a note', evidenceSegmentIds: [], ownerNoteIds: ['n1'] },
+    { text: 'From a removed line', evidenceSegmentIds: [], removedEvidenceSegmentIds: ['s000001'] }]) {
+    await expect(runExtractor(root, record.id, 'Customer pains', { route, env, runner: answer([
+      { name: 'Pains', items: [item] }, { name: 'Tools', items: [] }, { name: 'Budget', items: [] }]) }))
+      .rejects.toThrow('has a point that cites no line it was given');
+  }
   const older = (async () => { throw new Error('Humain failed: Usage: humain meeting observe|reconcile|chat <request.json>'); }) as unknown as typeof runHumainMeeting;
   await expect(runExtractor(root, record.id, 'Customer pains', { route, env, runner: older })).rejects.toThrow('cannot run extractors yet');
   expect(loadMeetingArtifact(root, record.id)!.insights).toBeUndefined();

@@ -86,6 +86,11 @@ What hurts today.
     expect(existsSync(join(directory, 'interview.md'))).toBeFalse();
     writeFileSync(join(directory, PROFILE_FILE), 'I run a design studio. Keep notes terse.\n');
     expect(loadProfile(root, env)).toBe('I run a design studio. Keep notes terse.');
+    // A name only the frontmatter gives still reaches the AI: who "You" is, and what a follow-up is signed with.
+    writeFileSync(join(directory, PROFILE_FILE), '---\nname: Tyler Stupart\n---\nI run a design studio. Keep notes terse.\n');
+    expect(loadProfile(root, env)).toBe('My name is Tyler Stupart.\nI run a design studio. Keep notes terse.');
+    writeFileSync(join(directory, PROFILE_FILE), '---\nname: Tyler\n---\nI\'m Tyler. I run a design studio.\n');
+    expect(loadProfile(root, env)).toBe("I'm Tyler. I run a design studio.");
   });
 
   test('a meeting\'s own choice wins over its title; "none" turns templated notes off', () => {
@@ -180,7 +185,8 @@ describe('templated meeting notes', () => {
     const saved = loadMeetingArtifact(root, record.id)!;
     expect(saved.analysis?.summary).toBe('S');
     expect(saved.analysis?.notes).toBeUndefined();
-    expect(status.some((message) => message.includes('does not write templated notes yet'))).toBeTrue();
+    // Said in plain words, with no command.
+    expect(status).toContain('This AI engine cannot follow templates yet, so the notes use none.');
   });
 });
 

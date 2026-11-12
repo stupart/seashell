@@ -1,0 +1,312 @@
+import { afterEach, expect, test } from 'bun:test';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { dirname, join } from 'path';
+import { CaptureSessionStore } from '../src/capture-session.ts';
+import type { runHumainMeeting } from '../src/humain-client.ts';
+import { createMeetingArtifact, loadMeetingArtifact, MeetingAiOffError, saveMeetingArtifact } from '../src/meeting-artifact.ts';
+import { askDuringCall, catchUpQuestion, chatWithMeeting, claimsForHumain, enrichMeeting, momentsThatMatter } from '../src/meeting-enrichment.ts';
+import { CAUTION, FROM_YOUR_NOTES, meetingViewLines } from '../src/meeting-tui.ts';
+import {
+  addMeetingNote,
+  addRecordingNote,
+  carryCaptureNotes,
+  consumeNoteCommands,
+  meetingOwnerNotes,
+  noteText,
+  readBundleNotes,
+  recordingBundle,
+  writeNoteCommand,
+} from '../src/owner-notes.ts';
+import { findTranscriptRecord, saveTranscriptRecord } from '../src/transcript-library.ts';
+import { createTranscriptRecord } from '../src/transcript-record.ts';
+
+const roots: string[] = [];
+afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+
+const route = { backend: 'codex' as const, model: 'fixture' };
+const rev4 = async () => new Set(['observe', 'reconcile', 'chat', 'extract', 'brief', 'draft']);
+const rev3 = async () => new Set(['observe', 'reconcile', 'chat', 'extract']);
+
+function library() {
+  const home = mkdtempSync(join(tmpdir(), 'seashell-owner-notes-'));
+  roots.push(home);
+  const root = join(home, 'Transcripts');
+  mkdirSync(root);
+  const record = createTranscriptRecord({
+    transcript: [
+      { start: 0, end: 4, speaker: 'REMOTE_00', text: 'We can start the pilot in November.' },
+      { start: 4, end: 8, speaker: 'LOCAL', text: 'I will send the security summary.' },
+    ],
+    speakers: [{ id: 'LOCAL', label: 'Microphone' }, { id: 'REMOTE_00', label: 'Remote speaker 1' }],
+  }, { id: 'design-review', title: 'Design review', now: new Date('2026-11-10T15:00:00Z') });
+  saveTranscriptRecord(root, record);
+  saveMeetingArtifact(root, createMeetingArtifact(record));
+  return { home, root, record };
+}
+
+/** A recording still in progress: its bundle under _Capture, its clock started at 15:00. */
+function recording(root: string, id = 'design-review') {
+  return new CaptureSessionStore({ libraryDir: root, sessionId: id, startedAtUnixMs: Date.parse('2026-11-10T15:00:00Z') });
+}
+
+/** A fake Humain that records requests and answers reconcile with what it is given. */
+function fake(output: (request: any) => unknown) {
+  const requests: any[] = [];
+  const runner: typeof runHumainMeeting = async (action, request) => {
+    requests.push({ action, ...(request as object) });
+    return { runId: `run-${requests.length}`, compiledRunId: 'c', status: 'succeeded', receipt: {}, output: output(request) };
+  };
+  return { requests, runner };
+}
+
+test('a note is one line of text, up to 2,000 characters', () => {
+  expect(noteText('  Dana sounded\nunsure  ')).toBe('Dana sounded unsure');
+  expect(() => noteText('   ')).toThrow('A note needs some text.');
+  expect(() => noteText('x'.repeat(2_001))).toThrow('up to 2,000 characters');
+});
+
+test('during a call a note is kept beside the audio, on the call\'s clock, and survives a crash', () => {
+  const { root } = library();
+  const store = recording(root);
+  expect(recordingBundle(root, 'design-review')).toBe(store.root);
+  // Typed 2 min 5 s into the call; saved later does not move it.
+  const note = addRecordingNote(store.root, 'Dana sounded unsure about November', Date.parse('2026-11-10T15:02:05Z'));
+  expect(note).toMatchObject({ text: 'Dana sounded unsure about November', at: 125 });
+  // A torn last line, as a crash mid-write leaves, does not lose the notes before it.
+  appendFileSync(join(store.root, 'owner-notes.jsonl'), '{"id":"n-torn","te');
+  expect(readBundleNotes(store.root).map((saved) => saved.text)).toEqual(['Dana sounded unsure about November']);
+  expect(meetingOwnerNotes(root, 'design-review').map((saved) => saved.at)).toEqual([125]);
+});
+
+test('when the meeting is saved its notes move into meeting.json, once, and the readable copy says them', () => {
+  const { root, record } = library();
+  const store = recording(root);
+  addRecordingNote(store.root, 'Ask about the Canada question', Date.parse('2026-11-10T15:00:20Z'));
+  store.setStatus('completed', 'test');
+  const { path } = findTranscriptRecord(root, record.id);
+  store.attachTo(dirname(path));
+  expect(carryCaptureNotes(root, record.id)?.ownerNotes?.map((note) => note.text)).toEqual(['Ask about the Canada question']);
+  expect(carryCaptureNotes(root, record.id)?.ownerNotes).toHaveLength(1);
+  expect(readFileSync(join(dirname(path), 'documents', 'your-notes.md'), 'utf8')).toContain('- 00:20 Ask about the Canada question');
+});
+
+test('after the call a note joins meeting.json, at a moment or about the whole meeting', () => {
+  const { root, record } = library();
+  addMeetingNote(root, record.id, 'Send Priya the admin guide');
+  addMeetingNote(root, record.id, 'This is where the date moved', { at: 4 });
+  expect(loadMeetingArtifact(root, record.id)?.ownerNotes?.map((note) => [note.at, note.text]))
+    .toEqual([[4, 'This is where the date moved'], [undefined, 'Send Priya the admin guide']]);
+  expect(() => addMeetingNote(root, record.id, 'Late', { at: 3_600 })).not.toThrow();
+});
+
+test('notes from a terminal wait as one file each, are read once, and an old one is dropped', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'seashell-note-commands-'));
+  roots.push(directory);
+  writeNoteCommand('First', 1_000_000, directory);
+  writeNoteCommand('Second', 1_000_500, directory);
+  writeNoteCommand('Stale', 1_000_000 - 11 * 60_000, directory);
+  // Ten minutes is the most a recorder can lag; the stale one is gone either way.
+  expect(consumeNoteCommands(directory, 1_001_000)).toEqual([{ text: 'First', createdAtUnixMs: 1_000_000 }, { text: 'Second', createdAtUnixMs: 1_000_500 }]);
+  expect(consumeNoteCommands(directory, 1_001_000)).toEqual([]);
+});
+
+test('final notes read your notes, and a point from them may cite no transcript', async () => {
+  const { root, record } = library();
+  addMeetingNote(root, record.id, 'Check the Canada question before kickoff', { at: 2 });
+  const noteId = loadMeetingArtifact(root, record.id)!.ownerNotes![0]!.id;
+  const humain = fake(() => ({ summary: 'Pilot in November.', claims: [
+    { id: 'c1', type: 'follow_up', text: 'Check the Canada question before kickoff.', evidenceSegmentIds: [], ownerNoteIds: [noteId], confidence: 0.8 },
+    { id: 'c2', type: 'decision', text: 'Pilot in November.', evidenceSegmentIds: ['s000001'], confidence: 0.9 },
+  ] }));
+  const artifact = await enrichMeeting(root, record.id, { mode: 'post-session', route, runner: humain.runner, engine: rev4, instructions: null });
+  expect(humain.requests[0].ownerNotes).toEqual([{ id: noteId, text: 'Check the Canada question before kickoff', at: 2 }]);
+  expect(artifact.analysis?.claims[0]?.ownerNoteIds).toEqual([noteId]);
+  // Sent back to Humain, a point only your notes support stays home; the rest lose the field.
+  expect(claimsForHumain(artifact.analysis!.claims, new Set(['s000001']))).toEqual([{ id: 'c2', type: 'decision', text: 'Pilot in November.', evidenceSegmentIds: ['s000001'], confidence: 0.9 }]);
+  // ✎ leads the time on the right; the note's own time places a point with no transcript to cite.
+  const lines = meetingViewLines(artifact, 'notes', record);
+  expect(lines).toContain(`- Check the Canada question before kickoff.\t\t${FROM_YOUR_NOTES} 00:02`);
+  expect(lines).not.toContain('Your notes');
+});
+
+test('a note about something nobody said stays yours: under Your notes, never "Also said"', async () => {
+  const { root, record } = library();
+  addMeetingNote(root, record.id, 'Ask Dana about the Berlin office');
+  addMeetingNote(root, record.id, 'Ask about a Canada data centre');
+  const [berlin, canada] = loadMeetingArtifact(root, record.id)!.ownerNotes!.map((note) => note.id);
+  // As revision 4 answers: each note kept as its own note claim, citing nothing it heard. The Canada one is
+  // also a point under the template's next steps, so it shows there, marked ✎, and only there.
+  const humain = fake(() => ({ summary: 'Pilot in November.', claims: [
+    { id: 'c1', type: 'decision', text: 'Pilot in November.', evidenceSegmentIds: ['s000001'], confidence: 0.9 },
+    { id: 'c2', type: 'note', text: "Owner's note: ask Dana about the Berlin office.", evidenceSegmentIds: [], ownerNoteIds: [berlin], confidence: 0.6 },
+    { id: 'c3', type: 'note', text: "Owner's note: ask about a Canada data centre.", evidenceSegmentIds: [], ownerNoteIds: [canada], confidence: 0.6 },
+    { id: 'c4', type: 'note', text: 'They can start in November.', evidenceSegmentIds: ['s000001'], confidence: 0.6 },
+  ], notes: [{ heading: 'Next steps', items: [{ text: "Owner's note: ask about a Canada data centre.", evidenceSegmentIds: [], ownerNoteIds: [canada] }] }] }));
+  const template = { name: 'Call', body: '## Next steps\nWhat each side will do.' };
+  const artifact = await enrichMeeting(root, record.id, { mode: 'post-session', route, runner: humain.runner, engine: rev4,
+    instructions: { template } });
+  const lines = meetingViewLines(artifact, 'notes', record);
+  expect(lines.slice(0, 4)).toEqual(['Pilot in November.', '', '# Your notes', '- Ask Dana about the Berlin office']);
+  expect(lines).toContain(`- Owner's note: ask about a Canada data centre.\t\t${FROM_YOUR_NOTES}`);
+  expect(lines.filter((line) => /Canada/u.test(line))).toHaveLength(1);
+  // What was said is still "Also said"; neither note is.
+  expect(lines.slice(lines.indexOf('# Also said'))).toEqual(['# Also said', '- They can start in November.\t\t00:00']);
+});
+
+test('a point citing a note that was not sent, or nothing at all, is refused', async () => {
+  const { root, record } = library();
+  addMeetingNote(root, record.id, 'A note');
+  for (const claim of [
+    { id: 'c1', type: 'note', text: 'Invented.', evidenceSegmentIds: [], ownerNoteIds: ['n-nope'], confidence: 0.5 },
+    { id: 'c1', type: 'note', text: 'Uncited.', evidenceSegmentIds: [], confidence: 0.5 },
+    // Humain is never sent a removed line, so it cannot cite one.
+    { id: 'c1', type: 'note', text: 'Half invented.', evidenceSegmentIds: ['s000001'], removedEvidenceSegmentIds: ['s000777'], confidence: 0.5 },
+  ]) {
+    const humain = fake(() => ({ summary: 'S', claims: [claim] }));
+    await expect(enrichMeeting(root, record.id, { mode: 'post-session', route, runner: humain.runner, engine: rev4, instructions: null }))
+      .rejects.toThrow(/cites (missing owner note n-nope|nothing|missing segment s000777)/u);
+  }
+});
+
+test('an engine before revision 4 is sent no notes and no vocabulary, and the notes say so', async () => {
+  const { root, record } = library();
+  const vocabulary = process.env.SEASHELL_VOCABULARY_FILE!;
+  mkdirSync(dirname(vocabulary), { recursive: true });
+  writeFileSync(vocabulary, 'Priya Raman\n');
+  try {
+    addMeetingNote(root, record.id, 'Dana sounded unsure', { at: 1 });
+    const older = fake(() => ({ summary: 'S', claims: [] }));
+    const statuses: string[] = [];
+    const artifact = await enrichMeeting(root, record.id, { mode: 'post-session', route, runner: older.runner, engine: rev3, onStatus: (status) => statuses.push(status) });
+    expect(older.requests[0].ownerNotes).toBeUndefined();
+    expect(older.requests[0].instructions?.vocabulary).toBeUndefined();
+    // Said in plain words: no command inside the app.
+    expect(statuses).toContain("Writing the notes without yours: this AI can't read them yet.");
+    expect(statuses.join('\n')).not.toContain('seashell');
+    expect(artifact.analysis?.ownerNotesUnread).toBe(true);
+    const lines = meetingViewLines(artifact, 'notes', record);
+    // One yellow line in context, under the notes it left out.
+    expect(lines.slice(lines.indexOf('# Your notes'))).toEqual(['# Your notes', '- Dana sounded unsure\t\t00:01',
+      `${CAUTION}Written without your notes: this AI can't read them yet.`]);
+    // A current engine gets both.
+    const current = fake(() => ({ summary: 'S', claims: [] }));
+    await enrichMeeting(root, record.id, { mode: 'post-session', route, runner: current.runner, engine: rev4 });
+    expect(current.requests[0].instructions.vocabulary).toEqual(['Priya Raman']);
+    expect(current.requests[0].ownerNotes).toHaveLength(1);
+  } finally { rmSync(vocabulary, { force: true }); }
+});
+
+test('a private meeting keeps your notes and shows them, and sends nothing', async () => {
+  const { root, record } = library();
+  addMeetingNote(root, record.id, 'Only for me');
+  saveMeetingArtifact(root, { ...loadMeetingArtifact(root, record.id)!, ai: { off: true } });
+  const humain = fake(() => ({}));
+  await expect(enrichMeeting(root, record.id, { mode: 'post-session', route, runner: humain.runner, engine: rev4 })).rejects.toThrow(MeetingAiOffError);
+  await expect(askDuringCall(root, record.id, 'What did I miss?', route, { runner: humain.runner, engine: rev4 })).rejects.toThrow(MeetingAiOffError);
+  expect(humain.requests).toEqual([]);
+  expect(meetingViewLines(loadMeetingArtifact(root, record.id)!, 'notes', record).slice(-2)).toEqual(['# Your notes', '- Only for me']);
+});
+
+test('a question during the call is refused when meeting.json cannot be read, or turns private while the engine is checked', async () => {
+  const { root, record } = library();
+  const path = join(dirname(findTranscriptRecord(root, record.id).path), 'meeting.json');
+  const humain = fake(() => ({ answer: 'November.', evidenceSegmentIds: ['s000001'] }));
+  // Half-written, or damaged: it might have said AI is off.
+  const saved = readFileSync(path, 'utf8');
+  writeFileSync(path, '{"schemaVersion":1,"ai":{"off":tr');
+  await expect(askDuringCall(root, record.id, 'What did I miss?', route, { runner: humain.runner, engine: rev4 })).rejects.toThrow(MeetingAiOffError);
+  await expect(chatWithMeeting(root, record.id, 'When?', route, undefined, humain.runner, rev4)).rejects.toThrow(MeetingAiOffError);
+  // The owner turns AI off while the engine is checked, which can take 20 seconds.
+  writeFileSync(path, saved);
+  const turnedOff = async () => {
+    writeFileSync(path, `${JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), ai: { off: true } }, null, 2)}\n`);
+    return rev4();
+  };
+  await expect(askDuringCall(root, record.id, 'What did I miss?', route, { runner: humain.runner, engine: turnedOff })).rejects.toThrow(MeetingAiOffError);
+  expect(humain.requests).toEqual([]);
+});
+
+test('a question during the call writes nothing, even when the transcript has grown since meeting.json', async () => {
+  const { root, record } = library();
+  const path = join(dirname(findTranscriptRecord(root, record.id).path), 'meeting.json');
+  const before = readFileSync(path, 'utf8');
+  saveTranscriptRecord(root, { ...record, transcript: [...record.transcript, { start: 8, end: 12, speaker: 'REMOTE_00', text: 'And the budget is fine.' }] });
+  writeFileSync(path, before);
+  const humain = fake(() => ({ answer: 'The budget is fine.', evidenceSegmentIds: ['s000003'] }));
+  const answer = await askDuringCall(root, record.id, 'Budget?', route, { runner: humain.runner, engine: rev4 });
+  expect(answer.moments.map((moment) => moment.id)).toEqual(['s000003']);
+  expect(readFileSync(path, 'utf8')).toBe(before);
+});
+
+test('during the call, the Notes view lists your notes and says when the notes come', () => {
+  const { root, record } = library();
+  const store = recording(root);
+  addRecordingNote(store.root, 'Dana sounded unsure', Date.parse('2026-11-10T15:00:03Z'));
+  const artifact = loadMeetingArtifact(root, record.id)!;
+  expect(meetingViewLines(artifact, 'notes', record, meetingOwnerNotes(root, record.id, artifact), true))
+    .toEqual(['Notes are written when the call ends.', '', '# Your notes', '- Dana sounded unsure\t\t00:03']);
+});
+
+test('every request names your side "You" and each other voice as the screen does, never "Microphone" or a raw id', async () => {
+  const { root } = library();
+  const record = createTranscriptRecord({ transcript: [
+    { start: 0, end: 4, speaker: 'LOCAL', text: "I'll send the security questionnaire to Marcus by Friday." },
+    { start: 4, end: 8, speaker: 'REMOTE_00', text: 'Then I need it back by Friday.' },
+    { start: 8, end: 12, speaker: 'REMOTE_01', text: 'And I will check it with IT.' },
+    { start: 12, end: 16, speaker: 'SPEAKER_02', text: 'I joined late.' },
+  ], speakers: [{ id: 'LOCAL', label: 'Microphone' }, { id: 'REMOTE_00', label: 'Remote speaker 1' }, { id: 'SPEAKER_02', label: 'SPEAKER_02' }] },
+  { id: 'labels', title: 'Labels', now: new Date('2026-11-10T16:00:00Z') });
+  saveTranscriptRecord(root, record);
+  saveMeetingArtifact(root, createMeetingArtifact(record));
+  const humain = fake((request) => request.question ? { answer: 'Friday.', evidenceSegmentIds: ['s000001'] }
+    : { summary: 'You send the questionnaire.', claims: [] });
+  await enrichMeeting(root, record.id, { mode: 'hybrid', route, runner: humain.runner, engine: rev4, instructions: null, minimumNewSegments: 1 });
+  await chatWithMeeting(root, record.id, 'When?', route, undefined, humain.runner, rev4);
+  expect(humain.requests.map((request) => request.action)).toEqual(['observe', 'reconcile', 'chat']);
+  for (const request of humain.requests) {
+    expect(request.segments.map((segment: { speakerLabel?: string }) => segment.speakerLabel)).toEqual(['You', 'Speaker 1', 'Speaker 2', 'Speaker 3']);
+  }
+});
+
+test('catch up shows the moments that matter: one for each point the answer leads with, or the latest, never just the earliest five', () => {
+  const at = (start: number) => ({ id: `s${String(start / 12 + 1).padStart(6, '0')}`, start, text: `Line at ${start}.` });
+  const line = (moment: { start: number }) => moment.start / 12;
+  // From the w9 re-run (made-up): three points, citing six lines, most important first. Marcus's ask and your
+  // "I'll send it" are one point, the decision and your "Agreed" another, and Dana's worry the last.
+  const led = [84, 96, 24, 60, 72, 168].map(at);
+  expect(momentsThatMatter(led, line).map((moment) => moment.start)).toEqual([84, 96, 24, 60, 168]);
+  // The rc35 run's eleven moments: a moment for each point first, still in the answer's order.
+  const many = [96, 108, 48, 60, 72, 120, 168, 144, 156, 132, 84].map(at);
+  expect(momentsThatMatter(many, line).map((moment) => moment.start)).toEqual([96, 48, 120, 168, 144]);
+  expect(momentsThatMatter(led.slice(0, 4), line)).toEqual(led.slice(0, 4));
+  // Cited in the order they were said, they say nothing about what leads: the latest five, still in order.
+  const said = [48, 60, 72, 84, 96, 108, 120, 132, 144, 156, 168].map(at);
+  expect(momentsThatMatter(said, line).map((moment) => moment.start)).toEqual([120, 132, 144, 156, 168]);
+  expect(momentsThatMatter(said.slice(0, 3), line).map((moment) => moment.start)).toEqual([48, 60, 72]);
+  // And the question asks for a short answer, in words a model keeps to.
+  expect(catchUpQuestion(180, 60).question).toContain('at most three short sentences, under 60 words');
+});
+
+test('a question during the call reads the transcript so far, is marked partial, and saves nothing', async () => {
+  const { root, record } = library();
+  const humain = fake(() => ({ answer: 'They want to start in November.', evidenceSegmentIds: ['s000001'] }));
+  const catchUp = catchUpQuestion(20 * 60, 12 * 60);
+  expect(catchUp.from).toBe(12 * 60);
+  expect(catchUp.question).toStartWith('What did I miss? Cover what was said from 12:00 to 20:00');
+  // Looking a minute ago still covers the last five minutes.
+  expect(catchUpQuestion(20 * 60, 19 * 60).from).toBe(15 * 60);
+  const answer = await askDuringCall(root, record.id, catchUp.question, route, { runner: humain.runner, engine: rev4 });
+  expect(humain.requests[0]).toMatchObject({ action: 'chat', partial: true, question: catchUp.question });
+  expect(humain.requests[0].segments).toHaveLength(2);
+  // Asked under the names the app shows beside the answer, so the answer and its quotes name people alike.
+  expect(humain.requests[0].segments.find((segment: { id: string }) => segment.id === 's000001').speakerLabel).toBe('Speaker 1');
+  expect(answer).toEqual({ question: catchUp.question, answer: 'They want to start in November.',
+    moments: [{ id: 's000001', start: 0, speakerId: 'REMOTE_00', speaker: 'Speaker 1', text: 'We can start the pilot in November.' }] });
+  expect(loadMeetingArtifact(root, record.id)?.chat).toEqual([]);
+  // Asked after the call, chat is not partial and is saved.
+  const after = fake(() => ({ answer: 'November.', evidenceSegmentIds: [] }));
+  await chatWithMeeting(root, record.id, 'When?', route, undefined, after.runner, rev4);
+  expect(after.requests[0].partial).toBeUndefined();
+  expect(loadMeetingArtifact(root, record.id)?.chat).toHaveLength(2);
+});
