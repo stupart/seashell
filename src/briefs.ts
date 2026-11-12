@@ -428,11 +428,6 @@ export function upcomingCalendarMeetings(events: readonly MeetingCalendarEvent[]
     .toSorted((left, right) => left.startAt.localeCompare(right.startAt));
 }
 
-/** The next meeting on the calendar, for the home screen and `seashell brief next`. */
-export function nextCalendarMeeting(events: readonly MeetingCalendarEvent[], now = new Date()): MeetingCalendarEvent | undefined {
-  return upcomingCalendarMeetings(events, now)[0];
-}
-
 // MARK: - The next meeting, for the app
 
 /** A meeting coming up, as the app lists it: `history` is how many past meetings a brief would read. */
@@ -495,4 +490,25 @@ export function readNextMeeting(libraryDir: string, now = new Date(), env: NodeJ
   const read = readNextFile(libraryDir, now, env);
   const [nearest, ...later] = read?.meetings ?? [];
   return nearest && { ...nearest, updatedAtUnixMs: read!.updatedAtUnixMs, ...(later.length ? { later } : {}) };
+}
+
+/**
+ * The meeting a brief is for, as the app's Coming up has it: what the recorder last published from
+ * the calendar, so `seashell brief next`, agents and the app agree on which meeting is next. Only
+ * when the recorder has said nothing lately (it is not running) is the calendar read here, a week
+ * ahead. With title words, the soonest meeting whose title has every one of them.
+ */
+export async function upcomingForBrief(
+  libraryDir: string,
+  title: string | undefined,
+  readCalendar: () => Promise<MeetingCalendarEvent[]>,
+  now = new Date(),
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<UpcomingMeeting | undefined> {
+  const words = title?.toLocaleLowerCase('en-US').split(/\s+/u).filter(Boolean) ?? [];
+  const has = (candidate: string) => words.every((word) => candidate.toLocaleLowerCase('en-US').includes(word));
+  const published = readNextFile(libraryDir, now, env)?.meetings.find((meeting) => has(meeting.upcoming.title));
+  if (published) return published.upcoming;
+  const event = upcomingCalendarMeetings(await readCalendar(), now).find((candidate) => has(candidate.title));
+  return event && upcomingFromEvent(event);
 }

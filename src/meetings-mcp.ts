@@ -23,7 +23,7 @@ import {
 } from './extractors.ts';
 import { withNewerEngine, type HumainMeetingRoute, type MeetingEngineCheck, type runHumainMeeting } from './humain-client.ts';
 import { readMacCalendarEventsAsync } from './calendar.ts';
-import { briefCitation, briefReadsPrivate, findBrief, listBriefs, makeBrief, nextCalendarMeeting, upcomingFromEvent, type Brief, type UpcomingMeeting } from './briefs.ts';
+import { briefCitation, briefReadsPrivate, findBrief, listBriefs, makeBrief, upcomingForBrief, type Brief, type UpcomingMeeting } from './briefs.ts';
 import { draftFollowUp } from './drafts.ts';
 import { addMeetingNote } from './owner-notes.ts';
 import { loadVocabulary, readVocabularyFile, writeVocabulary } from './vocabulary.ts';
@@ -200,18 +200,13 @@ function briefResult(brief: Brief) {
   };
 }
 
-/** The upcoming meeting to brief: the next on the calendar, or the next with these title words. */
+/** The upcoming meeting to brief: the next one, or the next with these title words, as the app's Coming up lists them. */
 async function upcomingFor(libraryDir: string, title: string | undefined, deps: MeetingsMcpDependencies): Promise<UpcomingMeeting> {
-  const events = await (deps.calendar ?? (() => readMacCalendarEventsAsync({ leadMinutes: 7 * 24 * 60, lookbackMinutes: 0 })))();
-  if (!title) {
-    const next = nextCalendarMeeting(events);
-    if (!next) throw new Error('Nothing on the calendar in the next week. Pass the meeting\'s title instead.');
-    return upcomingFromEvent(next);
-  }
-  const words = title.toLocaleLowerCase().split(/\s+/u);
-  const has = (candidate: string) => words.every((word) => candidate.toLocaleLowerCase().includes(word));
-  const event = events.filter((candidate) => has(candidate.title)).toSorted((left, right) => left.startAt.localeCompare(right.startAt))[0];
-  return event ? upcomingFromEvent(event) : { title, startsAt: new Date().toISOString(), attendees: [] };
+  const readCalendar = deps.calendar ?? (() => readMacCalendarEventsAsync({ leadMinutes: 7 * 24 * 60, lookbackMinutes: 0 }));
+  const upcoming = await upcomingForBrief(libraryDir, title, readCalendar, new Date(), deps.env);
+  if (upcoming) return upcoming;
+  if (!title) throw new Error('Nothing on the calendar in the next week. Pass the meeting\'s title instead.');
+  return { title, startsAt: new Date().toISOString(), attendees: [] };
 }
 
 async function getBriefTool(libraryDir: string, args: Arguments, deps: MeetingsMcpDependencies) {

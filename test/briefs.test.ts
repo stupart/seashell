@@ -14,6 +14,8 @@ import {
   readNextMeeting,
   recordBriefAttempt,
   relevantMeetings,
+  upcomingForBrief,
+  upcomingFromEvent,
   writeNextMeeting,
   type Brief,
   type UpcomingMeeting,
@@ -331,4 +333,25 @@ test('a follow-up refuses a meeting whose settings cannot be read or that turns 
   await expect(draftFollowUp(root, 'acme-call', 'email', route, { runner: humain.runner, engine: madePrivateDuringCheck(root, 'acme-call') }))
     .rejects.toThrow(MeetingAiOffError);
   expect(humain.requests).toHaveLength(1);
+});
+
+test('"brief next" means the meeting the app lists as next: what the recorder published, the calendar only while it says nothing', async () => {
+  const { root, env } = library();
+  const now = new Date('2026-11-11T22:00:00Z');
+  const event = (title: string, hours: number) => ({ provider: 'macos-eventkit' as const, eventId: title, title, attendees: [dana],
+    startAt: new Date(now.getTime() + hours * 3_600_000).toISOString(), endAt: new Date(now.getTime() + (hours + 0.5) * 3_600_000).toISOString() });
+  let reads = 0;
+  const calendar = async () => { reads += 1; return [event('Dentist', 1), event('Acme weekly sync', 3)]; };
+  // The recorder lists what the app shows; the calendar is not read again.
+  writeNextMeeting(root, { upcoming: upcomingFromEvent(event('Acme weekly sync', 12)), history: 2,
+    later: [{ upcoming: upcomingFromEvent(event('Design review', 20)), history: 0 }] }, now.getTime());
+  expect((await upcomingForBrief(root, undefined, calendar, now, env))?.title).toBe('Acme weekly sync');
+  expect((await upcomingForBrief(root, 'design', calendar, now, env))?.title).toBe('Design review');
+  expect(reads).toBe(0);
+  // A title the recorder has not listed is looked for on the calendar, a week ahead.
+  expect((await upcomingForBrief(root, 'dentist', calendar, now, env))?.title).toBe('Dentist');
+  expect(reads).toBe(1);
+  // The recorder has said nothing for a while: it is not running, so the calendar answers.
+  expect((await upcomingForBrief(root, undefined, calendar, new Date(now.getTime() + 20 * 60_000), env))?.title).toBe('Dentist');
+  expect(await upcomingForBrief(root, 'standup', async () => [], now, env)).toBeUndefined();
 });

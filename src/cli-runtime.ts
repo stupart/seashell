@@ -31,7 +31,7 @@ import {
   updateSpeakerEngine,
   type SeashellConfig,
 } from './config.ts';
-import { findBrief, makeBrief, nextCalendarMeeting, upcomingFromEvent, type UpcomingMeeting } from './briefs.ts';
+import { findBrief, makeBrief, upcomingForBrief, type UpcomingMeeting } from './briefs.ts';
 import { draftFollowUp, draftText } from './drafts.ts';
 import { ensureVocabularyFile, loadVocabulary } from './vocabulary.ts';
 import { sentenceClock } from './tui-state.ts';
@@ -1536,27 +1536,25 @@ async function executeMeetingIntelligence(command: MeetingIntelligenceCommand): 
 }
 
 /**
- * The meeting a brief is for: the next on the calendar, or the next whose title
- * has these words. Without a calendar event, a title still finds its past
+ * The meeting a brief is for: the next one, or the next whose title has these words, as the app's
+ * Coming up lists them (upcomingForBrief). Without a calendar event, a title still finds its past
  * meetings, as a series does.
  */
 async function briefTarget(libraryDir: string, config: SeashellConfig, target: 'next' | { title: string }): Promise<UpcomingMeeting> {
   const calendar = config.meeting?.calendar;
-  const events = calendar?.enabled && (calendar.policy ?? 'ask') !== 'off'
+  const readCalendar = async () => calendar?.enabled && (calendar.policy ?? 'ask') !== 'off'
     ? await readMacCalendarEventsAsync({ leadMinutes: 7 * 24 * 60, lookbackMinutes: 0 }) : [];
-  if (target === 'next') {
+  const title = target === 'next' ? undefined : target.title;
+  const upcoming = await upcomingForBrief(libraryDir, title, readCalendar);
+  if (upcoming) return upcoming;
+  if (title === undefined) {
     if (!calendar?.enabled) throw new Error('Briefs for the next meeting come from your calendar. Turn on calendar titles: seashell meeting calendar setup');
-    const next = nextCalendarMeeting(events);
-    if (!next) throw new Error('Nothing on your calendar in the next week.');
-    return upcomingFromEvent(next);
+    throw new Error('Nothing on your calendar in the next week.');
   }
-  const words = target.title.toLocaleLowerCase('en-US').split(/\s+/u);
-  const has = (title: string) => words.every((word) => title.toLocaleLowerCase('en-US').includes(word));
-  const event = events.filter((candidate) => has(candidate.title)).toSorted((left, right) => left.startAt.localeCompare(right.startAt))[0];
-  if (event) return upcomingFromEvent(event);
   // Not on the calendar: the newest past meeting with those words names the series.
-  const past = listTranscriptRecords(libraryDir).find((entry) => has(entry.title));
-  return { title: past?.title ?? target.title, startsAt: new Date().toISOString(), attendees: [] };
+  const words = title.toLocaleLowerCase('en-US').split(/\s+/u);
+  const past = listTranscriptRecords(libraryDir).find((entry) => words.every((word) => entry.title.toLocaleLowerCase('en-US').includes(word)));
+  return { title: past?.title ?? title, startsAt: new Date().toISOString(), attendees: [] };
 }
 
 /** A notification that needs no answer. The text is an argument, never part of the script. */
