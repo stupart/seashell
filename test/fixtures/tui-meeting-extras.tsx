@@ -124,7 +124,9 @@ try {
   const top = screen().split('\n').find((line) => /^\s*\d\d:\d\d/u.test(line));
   assert.ok(top, 'a timed line is at the top');
   assert.ok(played[1]!.atSeconds! > 0, 'it opens where the transcript was scrolled to');
-  await until(() => screen().includes(`Opened the video at ${top!.trim().slice(0, 5)}`), 'and says where');
+  // The column pads the time; a sentence does not: "00:50" there is "0:50" here.
+  const [minutes, seconds] = top!.trim().slice(0, 5).split(':').map(Number);
+  await until(() => screen().includes(`Opened the video at ${minutes}:${String(seconds).padStart(2, '0')}.`), 'and says where');
 
   // Suggested names: y keeps one, n says it is not them.
   await type('r');
