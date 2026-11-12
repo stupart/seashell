@@ -36,7 +36,9 @@ const config = join(output, 'config.json');
 writeFileSync(config, JSON.stringify({ libraryDir: join(output, 'library'), meeting: { automation: { enabled: false } } }), { mode: 0o600 });
 // The meeting soak runs a real watcher: it must never read, and delete, a stop or a note typed during a real call.
 const environment = { ...process.env, SEASHELL_CONFIG: config, SEASHELL_LIBRARY_DIR: join(output, 'library'), SEASHELL_REQUIRE_MEDIA_TESTS: '1',
-  SEASHELL_MEETING_COMMAND_PATH: join(output, 'meeting-command.json') };
+  SEASHELL_MEETING_COMMAND_PATH: join(output, 'meeting-command.json'),
+  // Nor publish a recording state that other tools on this Mac act on.
+  SEASHELL_RECORDING_STATE_PATH: join(output, 'recording-state.json') };
 type Result = { name: string; status: 'passed' | 'failed'; durationMs: number; error?: string };
 const results: Result[] = [];
 const metadata = {

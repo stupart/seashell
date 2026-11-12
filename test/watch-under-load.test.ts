@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'fs';
 import { tmpdir } from 'os';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import { AutomaticMeetingWatchService, runAutomaticMeetingWatch, type AutomaticMeetingWatchDependencies,
   type AutomaticMeetingWatchEvent } from '../src/automatic-meeting-watch.ts';
 import { readBackgroundWatchStatus } from '../src/background-watch-status.ts';
@@ -332,6 +332,66 @@ test('the microphone is let go of while the call app has let go of its own, and 
     for (let polls = 0; polls < 8 && !finished; polls += 1) finished = await poll() === 'finish';
     expect(finished).toBe(true);
   } finally { await service.shutdown(); }
+});
+
+test('the recorder publishes its phase outside Documents: three fields, 0644, atomic, every few seconds and on every change', async () => {
+  const root = scratch('recording-state');
+  const path = join(root, 'Caches', 'seashell', 'background-watch.json');
+  const previous = process.env.SEASHELL_RECORDING_STATE_PATH;
+  process.env.SEASHELL_RECORDING_STATE_PATH = path;
+  let now = 0;
+  let release: () => void = () => {};
+  const stop = new AbortController();
+  const published = () => JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  try {
+    const run = runAutomaticMeetingWatch({
+      config: { libraryDir: join(root, 'library'), meeting: { automation: { confirmationPolls: 2 } } },
+      lockPath: join(root, 'meeting-watch.lock'), signal: stop.signal, statusHeartbeatMs: 10,
+      dependencies: {
+        now: () => new Date(now),
+        readSignals: () => new Promise<MeetingSignalSnapshot>((resolve) => {
+          release = () => resolve({ schemaVersion: 1, capturedAtUnixMs: now, supported: true, inputProcesses: [] });
+        }),
+        consumeCommand: () => undefined,
+        consumeNotes: () => [],
+      },
+    });
+    await Bun.sleep(40);
+    now = 40_000;
+    await Bun.sleep(40);
+    // Rewritten while the poll waits on a slow detector, with the recorder's own time.
+    expect(Object.keys(published()).toSorted()).toEqual(['mirroredAtUnixMs', 'phase', 'updatedAtUnixMs']);
+    expect(published()).toMatchObject({ phase: 'watching', updatedAtUnixMs: 40_000 });
+    expect(Math.abs(Number(published().mirroredAtUnixMs) - Date.now())).toBeLessThan(5_000);
+    expect(statSync(path).mode & 0o777).toBe(0o644);
+    stop.abort(); release(); await run;
+    expect(published().phase).toBe('stopped');
+    expect(readdirSync(dirname(path))).toEqual(['background-watch.json']);
+  } finally {
+    stop.abort(); release();
+    if (previous === undefined) delete process.env.SEASHELL_RECORDING_STATE_PATH;
+    else process.env.SEASHELL_RECORDING_STATE_PATH = previous;
+  }
+});
+
+test('a recorder that cannot write its library status still publishes that it is recording', async () => {
+  const root = scratch('recording-state-alone');
+  const path = join(root, 'recording-state.json');
+  const previous = process.env.SEASHELL_RECORDING_STATE_PATH;
+  process.env.SEASHELL_RECORDING_STATE_PATH = path;
+  // The library's own status file cannot be replaced, as when Documents access is gone.
+  mkdirSync(join(root, '.background-watch.json', 'blocked'), { recursive: true });
+  const { state, service } = busyWatch(root);
+  try {
+    expect((await service.pollOnce()).kind).toBe('start');
+    expect(JSON.parse(readFileSync(path, 'utf8')).phase).toBe('recording');
+    expect(state.events.some((event) => event.type === 'watch.warning' && event.message.includes('background recorder status'))).toBe(true);
+  } finally {
+    await service.shutdown();
+    if (previous === undefined) delete process.env.SEASHELL_RECORDING_STATE_PATH;
+    else process.env.SEASHELL_RECORDING_STATE_PATH = previous;
+  }
+  expect(JSON.parse(readFileSync(path, 'utf8')).phase).toBe('stopped');
 });
 
 test('a recording still reads as recording until its capture has closed, so "stopped" is never said early', async () => {

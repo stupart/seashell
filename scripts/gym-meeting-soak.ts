@@ -22,6 +22,8 @@ const library = join(output, 'library');
 mkdirSync(library, { recursive: true, mode: 0o700 });
 // A real watcher reads and deletes the command file every poll: never the one a real call's stop is waiting in.
 process.env.SEASHELL_MEETING_COMMAND_PATH ||= join(output, 'meeting-command.json');
+// Nor publish its synthetic meetings as the recording state other tools on this Mac act on.
+process.env.SEASHELL_RECORDING_STATE_PATH ||= join(output, 'recording-state.json');
 const helper = join(output, 'audio-fixture');
 writeFileSync(helper, `
 const pcm = Buffer.alloc(48000);

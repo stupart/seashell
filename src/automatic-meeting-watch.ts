@@ -9,7 +9,7 @@ import { finalizeCaptureTranscript } from './capture-finalizer.ts';
 import { readMacCalendarEventsAsync, suggestCalendarMeeting } from './calendar.ts';
 import { meetBrowserMatchesApp, probeMeetSpeakers } from './meet-speakers.ts';
 import { writeBackgroundMeetingState, type BackgroundMeetingState, type BackgroundMeetingStatusOptions } from './background-meeting-status.ts';
-import { writeBackgroundWatchStatus } from './background-watch-status.ts';
+import { writeBackgroundWatchStatus, writeRecordingState } from './background-watch-status.ts';
 import { startBackgroundLiveTranscript, type BackgroundLiveTranscriptHandle, type BackgroundLiveTranscriptStatus } from './background-live-transcript.ts';
 import type { CommittedCaptureChunk } from './capture-session.ts';
 import { captureHealthTransitionKey } from './capture-health.ts';
@@ -215,6 +215,8 @@ export class AutomaticMeetingWatchService {
   #aheadRead?: Promise<void>;
   #briefing?: Promise<void>;
   readonly #liveTextGuard = new LiveTextGuard();
+  /** Said once, until the recording state can be published again. */
+  #recordingStateFailed = false;
   /** Readings in a row in which the call has let go of the microphone, during its end grace. */
   #microphoneLetGo = 0;
   /** A Meet check that timed out, held instead of checking again at once; each wait doubles, up to a minute. */
@@ -988,19 +990,33 @@ export class AutomaticMeetingWatchService {
     this.projectWatch();
   }
 
-  /** Stamped when written, never when the poll began: a slow poll must not publish a stale time. */
+  /**
+   * Stamped when written, never when the poll began: a slow poll must not
+   * publish a stale time. The phase also goes outside ~/Documents
+   * (writeRecordingState), on its own, so losing one never loses the other.
+   */
   private projectWatch(): void {
     const recording = this.#active ?? this.#closing;
     const candidate = recording?.candidate ?? this.#controller.state.candidate;
+    const phase = this.#shuttingDown ? 'stopped' : recording ? 'recording'
+      : this.#controller.state.phase === 'awaiting-consent' ? 'awaiting-consent' : 'watching';
+    const updatedAtUnixMs = this.#dependencies.now().getTime();
+    try {
+      writeRecordingState(phase, updatedAtUnixMs);
+      this.#recordingStateFailed = false;
+    } catch (error) {
+      if (!this.#recordingStateFailed) this.emit({ type: 'watch.warning', at: new Date(updatedAtUnixMs).toISOString(),
+        message: `Could not publish the recording state outside Documents: ${errorMessage(error)}` });
+      this.#recordingStateFailed = true;
+    }
     try {
       writeBackgroundWatchStatus(this.#libraryDir, {
-        phase: this.#shuttingDown ? 'stopped' : recording ? 'recording'
-          : this.#controller.state.phase === 'awaiting-consent' ? 'awaiting-consent' : 'watching',
+        phase,
         ...(!this.#shuttingDown && candidate ? { candidate: { id: candidate.id, title: candidate.title, appName: candidate.appName } } : {}),
         ...(recording ? { sessionId: recording.capture.sessionId } : {}),
         ...(!this.#shuttingDown && this.#controller.state.phase === 'awaiting-consent' && this.#consentId ? { consentId: this.#consentId } : {}),
         ...(this.#meetWarning ? { warning: this.#meetWarning } : {}),
-      }, this.#dependencies.now().getTime());
+      }, updatedAtUnixMs);
     } catch (error) {
       this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(), message: `Could not save background recorder status: ${errorMessage(error)}` });
     }

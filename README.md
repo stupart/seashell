@@ -408,7 +408,8 @@ bun run benchmark:live-asr -- ./sample.wav
 Seashell records calls by itself. To record anything else, press **Space** in
 Seashell or run `seashell record`; stop with **Space** or `seashell record stop`.
 A recording started by hand runs until you stop it. Stopping a call by hand keeps
-that call stopped until it ends.
+that call stopped until it ends. A stop is never lost: if the recorder is busy,
+`seashell record stop` says so, and it stops as soon as it can.
 
 Whether a call records by itself, asks first, or never records:
 
@@ -1487,6 +1488,26 @@ Operational guarantees:
 - multiple files remain supported for plain-text output;
 - exit code `0` means success and `1` means validation, dependency, media, or
   processing failure; signal exits use the standard `130`/`143` codes.
+
+### Is a call recording? (for other tools)
+
+The background recorder publishes its phase outside `~/Documents`, so a tool
+that macOS has denied Documents access can still check it:
+
+```text
+~/Library/Caches/seashell/background-watch.json
+{"phase":"recording","updatedAtUnixMs":1794450011268,"mirroredAtUnixMs":1794450011270}
+```
+
+- `phase` is `watching`, `awaiting-consent`, `recording` or `stopped`.
+- `updatedAtUnixMs` is the recorder's own status time; `mirroredAtUnixMs` is
+  when the file was written. It is rewritten at least every 5 seconds while the
+  recorder runs, and at once on every phase change.
+- Trust `recording` only while `updatedAtUnixMs` is under 30 seconds old: a
+  recorder that crashed cannot say it stopped. Treat older as unknown.
+- It is replaced atomically and readable by everyone (mode 0644); it holds the
+  phase and nothing about any meeting.
+- `SEASHELL_RECORDING_STATE_PATH` moves it, as tests do.
 
 Example agent workflow:
 
