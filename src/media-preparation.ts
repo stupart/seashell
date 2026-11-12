@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import { existsSync, mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { inferenceCommand } from './inference-priority.ts';
 import {
   beginManagedProcessSession,
   trackChildProcess,
@@ -178,7 +179,8 @@ export function buildFfmpegPreparationArgs(
 
 async function runProcess(command: string, args: string[]): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
-    const process = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const run = inferenceCommand(command, args, 'background');
+    const process = spawn(run.command, run.args, { stdio: ['ignore', 'pipe', 'pipe'] });
     const stopTracking = trackChildProcess(process);
     let stdout = '';
     let stderr = '';

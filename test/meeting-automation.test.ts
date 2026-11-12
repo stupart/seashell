@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -495,3 +495,22 @@ test('only a complete reading without its app, or another call, is evidence the 
   expect(followedCallUnobserved(zoom, undefined, reading(false), true)).toBe(false);
   expect(followedCallUnobserved({ ...zoom, kind: 'manual' }, undefined, reading(false))).toBe(false);
 });
+
+test('a detector that keeps failing is restarted less and less often, not every second', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-signal-backoff-'));
+  temporaryRoots.push(root);
+  const starts = join(root, 'starts');
+  const helper = join(root, 'signal-helper');
+  // Core Audio is too busy to answer: the helper gives up at once, every time.
+  writeFileSync(helper, `import { appendFileSync } from 'fs'; appendFileSync(${JSON.stringify(starts)}, 'x'); process.exit(1);\n`, { mode: 0o600 });
+  const monitor = new MeetingSignalMonitor(process.execPath, 250, [helper]);
+  monitor.onError(() => {});
+  monitor.start();
+  try {
+    await Bun.sleep(3_600);
+    // Started at once, then after 1 s and 2 s more; restarting every second would be four or five.
+    const count = readFileSync(starts, 'utf8').length;
+    expect(count).toBeGreaterThanOrEqual(2);
+    expect(count).toBeLessThanOrEqual(3);
+  } finally { monitor.stop(); }
+}, 10_000);

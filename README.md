@@ -1546,6 +1546,13 @@ seashell doctor
 - **Metal initialization crashes:** Sea Shell automatically retries file and
   live transcription on CPU. Set `SEASHELL_DISABLE_GPU=1` to skip the Metal
   attempt entirely while diagnosing the local whisper.cpp build.
+- **Final transcripts are slow:** Seashell's own heavy work never competes with
+  a call. Live drafts run at utility priority; the final pass, speaker
+  separation and speech detection run at macOS background priority
+  (`taskpolicy`), and wait until nothing is recording. When the Mac is
+  overloaded during a call, live text pauses ("Live text paused: your Mac is
+  busy") while the audio keeps recording. Set `SEASHELL_INFERENCE_PRIORITY=normal`
+  to run them at normal priority, for example to benchmark.
 - **Speaker setup failure:** run `seashell setup --speakers`, verify the pyannote
   packages, accept the model terms, and provide `HF_TOKEN` for the first run.
 - **Aggregate channel mismatch:** verify the channel count and physical routing

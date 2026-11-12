@@ -70,6 +70,8 @@ const service = new AutomaticMeetingWatchService({
     now: () => new Date(now),
     readSignals: () => ({ schemaVersion: 1, capturedAtUnixMs: now, supported: true,
       inputProcesses: signal ? [{ pid: 42, bundleId: 'us.zoom.xos', name: 'Zoom' }] : [] }),
+    // The soak checks every draft; how busy this Mac happens to be must not pause them.
+    readLoad: () => 0,
     // Exercise the real draft scheduler, writer, and shutdown without loading
     // a local model for every synthetic meeting. Canonical ASR is a fixture too.
     startLiveTranscript: options => startBackgroundLiveTranscript({ ...options,

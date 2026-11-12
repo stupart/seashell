@@ -20,7 +20,8 @@ export function meetBrowserMatchesApp(browser: MeetBrowserMode | 'off' | undefin
 export interface MeetParticipant { id: string; name: string; self: boolean; speaking: boolean }
 export interface MeetSnapshot { meeting: string; joined: boolean; participants: MeetParticipant[] }
 export type MeetSpeakerSource = NonNullable<TranscriptSegment['speakerSource']>;
-export interface MeetProbe { state: 'connected' | 'idle' | 'permission' | 'ambiguous' | 'unavailable'; detail: string; snapshot?: MeetSnapshot; browser?: MeetBrowser; source?: MeetSpeakerSource; accessibilityTrusted?: boolean; absenceConfirmed?: boolean }
+/** `timedOut`: the Accessibility helper did not answer in time, as on an overloaded Mac; nothing was learned. */
+export interface MeetProbe { state: 'connected' | 'idle' | 'permission' | 'ambiguous' | 'unavailable'; detail: string; snapshot?: MeetSnapshot; browser?: MeetBrowser; source?: MeetSpeakerSource; accessibilityTrusted?: boolean; absenceConfirmed?: boolean; timedOut?: boolean }
 export interface MeetSample { at: number; meeting: string; speaker?: Speaker; browser?: MeetBrowser; source?: MeetSpeakerSource }
 export interface MeetSpeaker extends Speaker { source?: MeetSpeakerSource }
 const MAX_BYTES = 16 * 1024 * 1024;
@@ -101,10 +102,11 @@ export async function probeMeetAccessibility(mode: MeetBrowserMode, signal?: Abo
     });
     if (signal?.aborted) return { state: 'unavailable', detail: 'Meet connection check cancelled.' };
     return parseMeetAccessibilityProbe(JSON.parse(output));
-  } catch {
+  } catch (error) {
     // Process errors include command text. Never infer a permission denial from it.
+    const timedOut = !signal?.aborted && (error as { killed?: boolean }).killed === true;
     return { state: 'unavailable', detail: signal?.aborted ? 'Meet connection check cancelled.'
-      : 'Meeting detection and speaker names could not be checked. Check [V] Speakers.' };
+      : 'Meeting detection and speaker names could not be checked. Check [V] Speakers.', ...(timedOut ? { timedOut } : {}) };
   }
 }
 

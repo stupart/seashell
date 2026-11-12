@@ -7,7 +7,11 @@ import { AutomaticMeetingWatchService, runAutomaticMeetingWatch, type AutomaticM
 import { readBackgroundWatchStatus } from '../src/background-watch-status.ts';
 import { CaptureSessionStore } from '../src/capture-session.ts';
 import { consumeMeetingCommand, writeMeetingCommand } from '../src/meeting-command.ts';
-import type { MeetingSignalSnapshot } from '../src/meeting-automation.ts';
+import { MeetingSignalTimeout, type MeetingSignalSnapshot } from '../src/meeting-automation.ts';
+import { startBackgroundLiveTranscript } from '../src/background-live-transcript.ts';
+import { readBackgroundMeetingStatus } from '../src/background-meeting-status.ts';
+import { LIVE_TEXT_PAUSED } from '../src/live-text-guard.ts';
+import { listTranscriptRecords } from '../src/transcript-library.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 import type { SeashellConfig } from '../src/config.ts';
 import type { MeetProbe } from '../src/meet-speakers.ts';
@@ -222,6 +226,63 @@ test('a call that pauses and resumes is transcribed once, after it has really en
   } finally { await service.shutdown(); }
   expect(state.finalized).toEqual(['call-1']);
   expect(state.starts).toBe(4);
+});
+
+test('an overloaded Mac pauses live text mid-call and keeps the audio recording; a calm minute brings it back', async () => {
+  const root = scratch('pause-live-text');
+  let load = 0.3;
+  let timeouts = 0;
+  const engines: string[] = [];
+  const { state, snapshot, service } = busyWatch(root, () => ({
+    readLoad: () => load,
+    readSignals: () => {
+      if (timeouts > 0) { timeouts -= 1; throw new MeetingSignalTimeout('Meeting signal detector heartbeat timed out'); }
+      return snapshot();
+    },
+    startLiveTranscript: (options) => startBackgroundLiveTranscript({ ...options, dependencies: {
+      createTranscriber: () => { engines.push('engine'); return { transcribe: async () => 'Hello.', stop: async () => {} }; },
+    } }),
+  }));
+  const draft = () => readBackgroundMeetingStatus(listTranscriptRecords(root)[0]!.directory)?.draftStatus;
+  const poll = async () => { await service.pollOnce(); state.now += 3_000; };
+  try {
+    await poll();
+    expect(draft()?.stage).toBe('waiting');
+    load = 70 / 18;
+    await poll();
+    expect(draft()).toEqual({ stage: 'paused', detail: LIVE_TEXT_PAUSED, queueDepth: 0 });
+    expect(state.events.some((event) => event.type === 'watch.warning' && event.message === LIVE_TEXT_PAUSED)).toBe(true);
+    load = 0.5;
+    for (let calmPoll = 0; calmPoll < 20; calmPoll += 1) await poll();
+    expect(draft()?.stage).toBe('paused');
+    await poll();
+    expect(draft()?.stage).toBe('waiting');
+    // Probes timing out twice in a minute pause it too.
+    timeouts = 2;
+    await poll();
+    await poll();
+    expect(draft()?.stage).toBe('paused');
+    expect(service.phase).toBe('recording');
+    expect([state.starts, state.stops]).toEqual([1, 0]);
+  } finally { await service.shutdown(); }
+});
+
+test('a Meet check that timed out is not run again three seconds later', async () => {
+  const root = scratch('meet-backoff');
+  let checks = 0;
+  const { state, service } = busyWatch(root, () => ({
+    readLoad: () => 0,
+    readMeet: async (): Promise<MeetProbe> => {
+      checks += 1;
+      return { state: 'unavailable', detail: 'Meeting detection and speaker names could not be checked. Check [V] Speakers.', timedOut: true };
+    },
+  }), { speakerBrowser: 'auto' });
+  try {
+    for (state.now = 0; state.now < 120_000; state.now += 3_000) await service.pollOnce();
+    // Checked at 0, then 10, 20, 40 and 60 s apart: not 40 times in two minutes.
+    expect(checks).toBe(4);
+    expect(service.phase).toBe('recording');
+  } finally { await service.shutdown(); }
 });
 
 test('a recording still reads as recording until its capture has closed, so "stopped" is never said early', async () => {

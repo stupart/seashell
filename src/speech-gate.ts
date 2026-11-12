@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { pcmS16leToWav } from './live-system-audio.ts';
 import { DEFAULT_VAD_MODEL_FILENAME } from './model-config.ts';
 import { trackChildProcess, trackTempDirectory } from './process-lifecycle.ts';
+import { inferenceCommand } from './inference-priority.ts';
 import type { TimedTranscriptUnit } from './transcript-types.ts';
 
 /**
@@ -70,8 +71,8 @@ export function parseSpeechRegions(output: string): SpeechRegion[] {
 
 function runSpeechTool(wavPath: string, tool: string, model: string): Promise<SpeechRegion[] | undefined> {
   return new Promise((resolve) => {
-    const child = spawn(tool, ['-f', wavPath, '-vm', model, '-np', '-t', '1', '-vspd', MIN_SPEECH_MS, '-vp', SPEECH_PAD_MS],
-      { stdio: ['ignore', 'pipe', 'ignore'] });
+    const run = inferenceCommand(tool, ['-f', wavPath, '-vm', model, '-np', '-t', '1', '-vspd', MIN_SPEECH_MS, '-vp', SPEECH_PAD_MS], 'background');
+    const child = spawn(run.command, run.args, { stdio: ['ignore', 'pipe', 'ignore'] });
     const stopTracking = trackChildProcess(child);
     const timer = setTimeout(() => child.kill('SIGKILL'), TOOL_TIMEOUT_MS);
     let output = '';

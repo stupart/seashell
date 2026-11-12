@@ -9,6 +9,7 @@ import {
   resetSilentOwnStarts, type AudioChecks,
 } from './audio-checks.ts';
 import { onChildSettled, terminateManagedChild } from './process-lifecycle.ts';
+import { StallClock } from './stall-clock.ts';
 import {
   prepareRuntimeHelper,
   SYSTEM_AUDIO_RUNTIME_HELPER,
@@ -723,13 +724,17 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
   // since its permission was already granted; a first start may be waiting
   // for the person to allow access.
   const stalledTimeoutMs = options.stalledTimeoutMs ?? 8_000;
-  let lastDataAt = attempt.expectAudio ? Date.now() : undefined;
+  const watchdogTickMs = Math.max(10, Math.min(1_000, stalledTimeoutMs / 4));
+  // A late tick is this process lagging, not the tap stalling (stall-clock.ts): rebuilding it can click.
+  const stall = new StallClock(watchdogTickMs);
+  let watching = attempt.expectAudio;
   const watchdog = setInterval(() => {
-    if (requestedStop || lastDataAt === undefined || Date.now() - lastDataAt < stalledTimeoutMs) return;
-    lastDataAt = undefined;
+    const silent = stall.silentFor();
+    if (requestedStop || !watching || silent < stalledTimeoutMs) return;
+    watching = false;
     nativeError = { type: 'error', code: 'system_audio_stalled', message: 'Computer audio stopped arriving.' };
     void terminateManagedChild(child, undefined, { group: true });
-  }, Math.max(10, Math.min(1_000, stalledTimeoutMs / 4)));
+  }, watchdogTickMs);
   watchdog.unref();
 
   const publish = (chunk: PcmChunk) => {
@@ -773,7 +778,11 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
   ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
 
   child.stdout?.on('data', (data: Buffer) => {
-    if (nativeError?.code !== 'system_audio_stalled') lastDataAt = Date.now();
+    if (nativeError?.code !== 'system_audio_stalled') {
+      if (!watching) stall.reset();
+      watching = true;
+      stall.data();
+    }
     try {
       const now = Date.now();
       if (options.onLevel && now - lastLevelUpdate >= 500 && data.byteLength >= 2) {

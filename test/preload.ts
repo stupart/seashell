@@ -22,3 +22,6 @@ process.env.SEASHELL_BRIEFS_DIR ||= join(scratch, 'Briefs');
 // `seashell note` leaves its notes beside the recorder's command file, and every watch poll
 // reads and deletes them. A test's watch must never take a note typed during a real call.
 process.env.SEASHELL_MEETING_COMMAND_PATH ||= join(scratch, 'meeting-command.json');
+
+// Live text pauses when the Mac is overloaded. A test's recording must not change with how busy this Mac is.
+process.env.SEASHELL_LOAD_PER_CORE ||= '0';

@@ -14,6 +14,7 @@ import { detectSpeechRegions, dropPhantomUnits, type SpeechRegion } from './spee
 import { packSpeech, unpackUnits, type SpeechPacking } from './speech-packing.ts';
 import type { TimedTranscriptUnit } from './transcript-types.ts';
 import { defaultWhisperPrompt, whisperPromptTokens } from './vocabulary.ts';
+import { inferenceCommand } from './inference-priority.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -282,7 +283,8 @@ export async function transcribeWithTimestamps(
     const audioPath = packing ? packedPath : filePath;
 
     const runWhisper = (disableGpu: boolean) => new Promise<void>((resolve, reject) => {
-      const proc = spawn(whisperCli, [
+      // The final pass never competes with a call: Darwin background priority.
+      const run = inferenceCommand(whisperCli, [
         ...(disableGpu ? ['-ng'] : []),
         '-m', modelPath,
         '-f', audioPath,
@@ -304,7 +306,8 @@ export async function transcribeWithTimestamps(
         ...(prompt ? ['--carry-initial-prompt', '--prompt', prompt] : []),
         '-ojf',
         '-of', outputBase,
-      ], {
+      ], 'background');
+      const proc = spawn(run.command, run.args, {
         stdio: ['ignore', 'ignore', 'pipe'],
       });
       const stopTrackingChild = trackChildProcess(proc);

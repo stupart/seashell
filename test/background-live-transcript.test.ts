@@ -181,3 +181,53 @@ test('save failure remains a draft warning, preserves audio, and retries the dir
   expect(f.read().transcript[0]?.text).toBe('Save this draft.');
   expect(saves).toBe(2);
 });
+
+test('an overloaded Mac pauses live drafts: the engine goes, chunks are left to the final pass, and drafts resume on a fresh engine', async () => {
+  const f = fixture();
+  const engines: Array<{ transcribed: string[]; stopped: boolean }> = [];
+  let release: (text: string) => void = () => {};
+  const worker = startBackgroundLiveTranscript({ libraryDir: f.root, record: f.record, publishIntervalMs: 5,
+    dependencies: { createTranscriber: () => {
+      const engine = { transcribed: [] as string[], stopped: false };
+      engines.push(engine);
+      return {
+        transcribe: (path, signal) => new Promise<string>((resolve, reject) => {
+          engine.transcribed.push(path);
+          release = resolve;
+          signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        }),
+        stop: async () => { engine.stopped = true; },
+      };
+    } } });
+  handles.push(worker);
+  worker.enqueue(f.chunk('microphone', 0));
+  await until(() => engines[0]?.transcribed.length === 1);
+  worker.pause!('Live text paused: your Mac is busy. The transcript is written after the call.');
+  expect(worker.status).toEqual({ stage: 'paused', queueDepth: 0,
+    detail: 'Live text paused: your Mac is busy. The transcript is written after the call.' });
+  await until(() => engines[0]!.stopped);
+  release('Too late to show.');
+  worker.enqueue(f.chunk('system-audio', 10));
+  await Bun.sleep(30);
+  expect(engines).toHaveLength(1);
+  expect(f.read().transcript).toHaveLength(0);
+  expect(worker.behind).toBe(false);
+  worker.resume!();
+  expect(worker.status.stage).toBe('waiting');
+  worker.enqueue(f.chunk('microphone', 20));
+  await until(() => engines[1]?.transcribed.length === 1);
+  release('Back on a fresh engine.');
+  await until(() => f.read().transcript.length === 1);
+  expect(f.read().transcript[0]).toMatchObject({ start: 20, text: 'Back on a fresh engine.' });
+});
+
+test('a chunk waiting over 30 s for its draft says live text is behind', async () => {
+  const f = fixture();
+  let now = Date.parse('2026-11-11T23:00:00Z');
+  const worker = f.worker({ transcribe: () => new Promise<string>(() => {}), stop: idleStop },
+    { dependencies: { createTranscriber: () => ({ transcribe: () => new Promise<string>(() => {}), stop: idleStop }), now: () => new Date(now) } });
+  worker.enqueue(f.chunk('microphone', 0));
+  expect(worker.behind).toBe(false);
+  now += 30_001;
+  expect(worker.behind).toBe(true);
+});

@@ -4,6 +4,7 @@ import { readFile } from 'fs/promises';
 import { createServer } from 'net';
 import { normalizeQuietCaptureWav } from './live-system-audio.ts';
 import { transcriptionUsesGpu } from './local-asr-profile.ts';
+import { inferenceCommand } from './inference-priority.ts';
 import {
   beginManagedProcessSession,
   trackChildProcess,
@@ -175,7 +176,8 @@ export class OwnedWhisperServer {
     await this.releaseChild();
     const port = await reserveLoopbackPort();
     if (generation !== this.generation) throw new Error('Local Whisper startup cancelled');
-    const child = spawn(this.serverPath, [
+    // Live drafts stay quick, but at utility QoS: the call app and Core Audio go first.
+    const run = inferenceCommand(this.serverPath, [
       ...(this.profile.disableGpu || this.forceCpu ? ['-ng'] : []),
       '-m', this.profile.modelPath,
       '-t', String(this.profile.threads),
@@ -183,7 +185,8 @@ export class OwnedWhisperServer {
       '--port', String(port),
       '-nlp',
       ...liveSpeechGateArguments(),
-    ], { stdio: ['ignore', 'ignore', 'pipe'] });
+    ], 'live');
+    const child = spawn(run.command, run.args, { stdio: ['ignore', 'ignore', 'pipe'] });
     const endManagedSession = beginManagedProcessSession();
     const stopTrackingChild = trackChildProcess(child);
     this.child = child;

@@ -86,6 +86,7 @@ import { stripVTControlCharacters } from 'util';
 import { startMeetSpeakerReader, meetBrowserMatchesApp, probeMeetSpeakers, type MeetSpeakerReader, type MeetProbe } from './meet-speakers.ts';
 import { backgroundMeetingMessage } from './background-meeting-status.ts';
 import { readBackgroundWatchStatus, type BackgroundWatchStatus } from './background-watch-status.ts';
+import { LIVE_TEXT_PAUSED } from './live-text-guard.ts';
 import { writeMeetingConsent } from './meeting-consent.ts';
 import { writeMeetingCommand } from './meeting-command.ts';
 import { CaptureHealthTracker, readMeetingCoverage, yourSideNotice, type CaptureHealthSnapshot } from './capture-health.ts';
@@ -3036,7 +3037,8 @@ export default function App(props: {
       ? backgroundEntry?.captureState === 'ready' ? backgroundEntry.duration : undefined
       : backgroundEntry.audioSavedThroughMs / 1000,
     draftLabel: backgroundEntry?.captureState === 'recording'
-      ? backgroundEntry.draftStatus?.stage === 'delayed' ? 'Live transcript delayed · final pass will retry'
+      ? backgroundEntry.draftStatus?.stage === 'paused' ? LIVE_TEXT_PAUSED
+        : backgroundEntry.draftStatus?.stage === 'delayed' ? 'Live transcript delayed · final pass will retry'
         : backgroundEntry.draftStatus?.stage === 'transcribing' ? 'Live transcript updating…'
         : backgroundEntry.draftStatus?.stage === 'live' ? 'Live draft · updates as people speak'
         : 'Live transcript waiting for speech'

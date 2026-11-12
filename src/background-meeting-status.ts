@@ -5,7 +5,8 @@ import { parseCaptureHealth, type CaptureHealthSnapshot } from './capture-health
 
 export type BackgroundMeetingState = 'recording' | 'processing' | 'ready' | 'failed' | 'interrupted';
 export interface BackgroundDraftStatus {
-  readonly stage: 'waiting' | 'transcribing' | 'live' | 'delayed' | 'stopped';
+  /** `paused`: the Mac is too busy for live text; the audio still records. */
+  readonly stage: 'waiting' | 'transcribing' | 'live' | 'delayed' | 'paused' | 'stopped';
   readonly detail: string;
   readonly queueDepth: number;
 }
@@ -46,7 +47,7 @@ export function readBackgroundMeetingStatus(directory: string): BackgroundMeetin
     }
     const health = parseCaptureHealth(value.captureHealth);
     const draft = value.draftStatus;
-    const draftValid = draft && ['waiting', 'transcribing', 'live', 'delayed', 'stopped'].includes(draft.stage) &&
+    const draftValid = draft && ['waiting', 'transcribing', 'live', 'delayed', 'paused', 'stopped'].includes(draft.stage) &&
       typeof draft.detail === 'string' && draft.detail.length <= 1000 && !/[\p{Cc}\p{Cf}]/u.test(draft.detail) &&
       Number.isSafeInteger(draft.queueDepth) && draft.queueDepth >= 0 && draft.queueDepth <= 1000;
     return { state,

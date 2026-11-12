@@ -3,6 +3,7 @@ import { existsSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { onChildSettled, terminateManagedChild } from './process-lifecycle.ts';
+import { StallClock } from './stall-clock.ts';
 import { prepareMicrophoneRuntimeHelper } from './runtime-host.ts';
 import {
   hasAudiblePcmSignal,
@@ -189,7 +190,9 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
   let lastLevelUpdate = 0;
   let failure: string | undefined;
   let failureReason: MicrophoneAttemptDiagnostic['reason'] = 'process-exit';
-  let lastDataAt = captureStartedAtUnixMs;
+  const watchdogTickMs = Math.max(10, Math.min(1000, options.quietWarningMs ?? 30000, options.stalledTimeoutMs ?? 8000));
+  // A late tick is this process lagging, not the microphone stalling (stall-clock.ts).
+  const stall = new StallClock(watchdogTickMs, captureStartedAtUnixMs);
   let lastAudibleAt = captureStartedAtUnixMs;
   let quietWarning = false;
   let endingForFailure = false;
@@ -211,9 +214,10 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
   }, options.startupTimeoutMs ?? 8_000);
   startupTimer.unref();
   const watchdog = setInterval(() => {
-    if (!clock || requestedStop || endingForFailure) return;
     const now = Date.now();
-    if (now - lastDataAt >= (options.stalledTimeoutMs ?? 8000)) {
+    const silent = stall.silentFor(now);
+    if (!clock || requestedStop || endingForFailure) return;
+    if (silent >= (options.stalledTimeoutMs ?? 8000)) {
       endingForFailure = true;
       failureReason = 'stalled';
       failure = 'Microphone stopped delivering audio. Check Sound → Input and reconnect your microphone.';
@@ -223,7 +227,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
       options.onState({ state: 'active', code: 'microphone_quiet',
         message: 'No clear microphone signal yet. If you’re speaking, check your selected input, mute control, and input level.' });
     }
-  }, Math.max(10, Math.min(1000, options.quietWarningMs ?? 30000, options.stalledTimeoutMs ?? 8000)));
+  }, watchdogTickMs);
   watchdog.unref();
 
   const publish = (chunk: ReturnType<PcmS16leChunker['flush']>) => {
@@ -277,7 +281,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
   child.stderr?.on('data', (data: Buffer) => { stderr = (stderr + data.toString()).slice(-2_000); });
   child.stdout?.on('data', (data: Buffer) => {
     if (endingForFailure) return;
-    lastDataAt = Date.now();
+    stall.data();
     if (clock === undefined) {
       clearTimeout(startupTimer);
       settleStartup();

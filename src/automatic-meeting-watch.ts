@@ -1,4 +1,5 @@
 import type { MeetProbe } from './meet-speakers.ts';
+import { LIVE_TEXT_PAUSED, LiveTextGuard, macLoadPerCore } from './live-text-guard.ts';
 import { setTimeout as sleep } from 'timers/promises';
 import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync, statSync } from 'node:fs';
@@ -42,6 +43,7 @@ import {
 import {
   DEFAULT_MEETING_AUTOMATION,
   MeetingSignalMonitor,
+  MeetingSignalTimeout,
   MeetingAutomationController,
   resolveMeetingCandidate,
   calendarEventIsThisCall,
@@ -110,6 +112,8 @@ export interface AutomaticMeetingWatchDependencies {
   readonly askToRecord?: (candidate: MeetingCandidate, signal: AbortSignal) => Promise<'approve' | 'decline' | undefined>;
   /** Writes a brief before a meeting; tests pass one that sends nothing. */
   readonly makeBrief?: typeof makeBrief;
+  /** The Mac's load per core, for pausing live text when it is overloaded; tests pass their own. */
+  readonly readLoad?: () => number;
   /**
    * Tells the person a brief is ready, once per meeting. Only the login agent
    * passes one: tests and embedders never notify.
@@ -209,6 +213,11 @@ export class AutomaticMeetingWatchService {
   #ahead?: { readAtUnixMs: number; events: Awaited<ReturnType<typeof readMacCalendarEventsAsync>> };
   #aheadRead?: Promise<void>;
   #briefing?: Promise<void>;
+  readonly #liveTextGuard = new LiveTextGuard();
+  /** A Meet check that timed out, held instead of checking again at once; each wait doubles, up to a minute. */
+  #meetHeld?: MeetProbe;
+  #meetRetryAtUnixMs = 0;
+  #meetBackoffMs = 0;
 
   constructor(options: AutomaticMeetingWatchOptions = {}) {
     this.#config = options.config ?? loadConfig();
@@ -235,6 +244,7 @@ export class AutomaticMeetingWatchService {
       askToRecord: options.dependencies?.askToRecord ?? (async () => undefined),
       makeBrief: options.dependencies?.makeBrief ?? makeBrief,
       notify: options.dependencies?.notify ?? (() => {}),
+      readLoad: options.dependencies?.readLoad ?? macLoadPerCore,
     };
   }
 
@@ -259,18 +269,25 @@ export class AutomaticMeetingWatchService {
     const browser = automation?.enabled === false || automation?.mode === 'off'
       ? undefined : this.#config.meeting?.speakerBrowser;
     let snapshot: MeetingSignalSnapshot;
+    let detectorTimedOut = false;
     try {
       snapshot = await this.#dependencies.readSignals();
     } catch (error) {
+      detectorTimedOut = error instanceof MeetingSignalTimeout;
       this.emit({ type: 'watch.warning', at: now.toISOString(), message: errorMessage(error) });
       snapshot = { schemaVersion: 1, capturedAtUnixMs: now.getTime(), supported: false, inputProcesses: [] };
     }
-    const skipMeet = Boolean(browser && browser !== 'off') && !this.meetCallPossible(snapshot, now);
-    if (browser && browser !== 'off' && !skipMeet) this.#meetCheckedAtUnixMs = now.getTime();
-    const meet = browser && browser !== 'off' && !skipMeet
-      ? await this.#dependencies.readMeet(browser, this.#calendarAbort.signal).catch(() => ({
-        state: 'unavailable' as const, detail: 'Could not check Google Meet. Check the connection in Speakers.',
-      })) : undefined;
+    const meetBrowser = browser && browser !== 'off' ? browser : undefined;
+    const skipMeet = meetBrowser !== undefined && !this.meetCallPossible(snapshot, now);
+    const probing = meetBrowser !== undefined && !skipMeet;
+    const holding = probing && this.#meetHeld !== undefined && now.getTime() < this.#meetRetryAtUnixMs;
+    if (probing && !holding) this.#meetCheckedAtUnixMs = now.getTime();
+    const meet = !meetBrowser || skipMeet ? undefined : holding ? this.#meetHeld
+      : await this.#dependencies.readMeet(meetBrowser, this.#calendarAbort.signal).catch((): MeetProbe => ({
+        state: 'unavailable', detail: 'Could not check Google Meet. Check the connection in Speakers.',
+      }));
+    const meetTimedOut = probing && !holding && meet?.timedOut === true;
+    if (probing && !holding) this.holdMeetAfterTimeout(meet, now);
     // Any browser window Accessibility cannot read lands here: with no call
     // running that is routine, and a person cannot act on it. Lost access is not.
     const routine = meet?.state === 'unavailable' && (meet as MeetProbe).accessibilityTrusted === true &&
@@ -296,6 +313,7 @@ export class AutomaticMeetingWatchService {
     const confirmedEnd = hasConfirmedMeetingEnd(state.candidate, meet);
     const action = this.#controller.step(candidate, now.getTime(), confirmedEnd,
       followedCallUnobserved(followed, candidate, snapshot, confirmedEnd));
+    this.guardLiveText(now, detectorTimedOut || meetTimedOut);
     if (action.kind === 'suggest') {
       this.#consentId = randomUUID();
       const why = meet && meet.state !== 'connected' ? meet.detail : undefined;
@@ -352,6 +370,34 @@ export class AutomaticMeetingWatchService {
     if (!started || !this.start(started, now)) return undefined;
     this.projectWatch();
     return { kind: 'start', candidate: started };
+  }
+
+  /**
+   * A Meet check that timed out is held, not run again three seconds later:
+   * walking a browser's Accessibility tree is work for the browser running
+   * the call. Each wait doubles, from 10 s up to a minute, and an answer ends it.
+   * The held result is unreadable, so it never ends a call (followedCallUnobserved).
+   */
+  private holdMeetAfterTimeout(meet: MeetProbe | undefined, now: Date): void {
+    if (!meet?.timedOut) {
+      this.#meetHeld = undefined;
+      this.#meetRetryAtUnixMs = 0;
+      this.#meetBackoffMs = 0;
+      return;
+    }
+    this.#meetBackoffMs = Math.min(60_000, Math.max(10_000, this.#meetBackoffMs * 2));
+    this.#meetRetryAtUnixMs = now.getTime() + this.#meetBackoffMs;
+    this.#meetHeld = meet;
+  }
+
+  /** Live text gives way when the Mac is overloaded (live-text-guard.ts); the audio never does. */
+  private guardLiveText(now: Date, probeTimedOut: boolean): void {
+    const draft = this.#active?.draft;
+    let loadPerCore = 0;
+    try { loadPerCore = this.#dependencies.readLoad(); } catch { /* No reading: judge by the rest. */ }
+    const change = this.#liveTextGuard.observe(now.getTime(), { loadPerCore, draftBehind: draft?.behind === true, probeTimedOut });
+    if (change === 'pause') draft?.pause?.(LIVE_TEXT_PAUSED);
+    else if (change === 'resume') draft?.resume?.();
   }
 
   /**
@@ -575,9 +621,10 @@ export class AutomaticMeetingWatchService {
             message: `Could not save live transcript status: ${errorMessage(error)}` });
         }
       }
-      if (status.stage === 'delayed' && status.detail !== draftWarning) this.emit({ type: 'watch.warning',
+      const warns = status.stage === 'delayed' || status.stage === 'paused';
+      if (warns && status.detail !== draftWarning) this.emit({ type: 'watch.warning',
         at: this.#dependencies.now().toISOString(), message: status.detail });
-      draftWarning = status.stage === 'delayed' ? status.detail : undefined;
+      draftWarning = warns ? status.detail : undefined;
     };
     let writtenAt = -Infinity, writtenKey: string | undefined;
     let warnedKey: string | undefined;
@@ -677,6 +724,8 @@ export class AutomaticMeetingWatchService {
         libraryDir: this.#libraryDir, record, onStatus: onDraftStatus,
         ...(capture.speakerFor ? { speakerFor: capture.speakerFor } : {}),
       });
+      // A Mac still overloaded from the last call gets no live text in this one either, until it calms.
+      if (this.#liveTextGuard.paused) draft.pause?.(LIVE_TEXT_PAUSED);
       for (const chunk of pendingDraftChunks) draft.enqueue(chunk);
     } catch {
       onDraftStatus({ stage: 'delayed', detail: 'Live transcript could not start. Audio is saved for final transcription.', queueDepth: 0 });

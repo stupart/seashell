@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import type { MeetingCalendarEvent } from './meeting-artifact.ts';
 import type { MeetProbe } from './meet-speakers.ts';
 import { terminateManagedChild } from './process-lifecycle.ts';
+import { StallClock } from './stall-clock.ts';
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -239,6 +240,15 @@ export function readMeetingSignalSnapshot(
   }
 }
 
+/**
+ * The detector did not answer in time. On a busy Mac that is a reason to back
+ * off and to pause live text, never a fact about any call.
+ */
+export class MeetingSignalTimeout extends Error {}
+
+/** The longest a failing detector waits before it is started again. */
+const DETECTOR_RESTART_MAX_MS = 30_000;
+
 type SnapshotListener = (snapshot: MeetingSignalSnapshot) => void;
 type ErrorListener = (error: Error) => void;
 
@@ -259,13 +269,17 @@ export class MeetingSignalMonitor {
   #failure?: Error;
   #restartTimer?: ReturnType<typeof setTimeout>;
   #heartbeatTimer?: ReturnType<typeof setInterval>;
-  #lastHeartbeat = 0;
+  /** On receipt time, which a late check does not count against the helper (stall-clock.ts). */
+  #heartbeat: StallClock;
+  /** Restarts since the last snapshot: each waits twice as long, so a struggling Core Audio is not hammered. */
+  #restarts = 0;
   #stopped = true;
 
   constructor(helperPath = MEETING_SIGNALS_HELPER, intervalMs = 3_000, helperArgs: readonly string[] = []) {
     this.#helperPath = helperPath;
     this.#helperArgs = [...helperArgs];
     this.#intervalMs = Math.max(250, Math.min(60_000, Math.round(intervalMs)));
+    this.#heartbeat = new StallClock(this.#intervalMs, performance.now());
   }
 
   start(): void {
@@ -274,7 +288,7 @@ export class MeetingSignalMonitor {
     this.#failure = undefined;
     this.#latest = undefined;
     this.#buffer = '';
-    this.#lastHeartbeat = performance.now();
+    this.#heartbeat.reset(performance.now());
     this.#heartbeatTimer ??= setInterval(() => this.checkHeartbeat(), this.#intervalMs);
     const child = spawn(this.#helperPath, [
       ...this.#helperArgs,
@@ -331,7 +345,7 @@ export class MeetingSignalMonitor {
       };
       const removeSnapshot = this.subscribe((snapshot) => finish(() => resolve(snapshot)));
       const removeError = this.onError((error) => finish(() => reject(error)));
-      const timeout = setTimeout(() => finish(() => reject(new Error(
+      const timeout = setTimeout(() => finish(() => reject(new MeetingSignalTimeout(
         `Meeting signal detector did not become ready within ${Math.ceil(timeoutMs / 1_000)} seconds`,
       ))), timeoutMs);
     });
@@ -369,7 +383,8 @@ export class MeetingSignalMonitor {
       if (!line.trim()) continue;
       try {
         const snapshot = parseMeetingSignalSnapshot(JSON.parse(line));
-        this.#lastHeartbeat = performance.now();
+        this.#heartbeat.data(performance.now());
+        this.#restarts = 0;
         this.#latest = snapshot;
         this.#failure = undefined;
         for (const listener of this.#listeners) listener(snapshot);
@@ -389,21 +404,23 @@ export class MeetingSignalMonitor {
     if (this.#stopped || !this.#child) return;
     // Use receipt time: a native wall-clock adjustment must not extend a lease
     // on stale evidence. Three missed intervals allow normal scheduling jitter.
-    if (performance.now() - this.#lastHeartbeat <= Math.max(1_000, this.#intervalMs * 3)) return;
+    if (this.#heartbeat.silentFor(performance.now()) <= Math.max(1_000, this.#intervalMs * 3)) return;
     const child = this.#child;
     this.#child = undefined;
     this.#latest = undefined;
-    this.fail(new Error('Meeting signal detector heartbeat timed out'));
+    this.fail(new MeetingSignalTimeout('Meeting signal detector heartbeat timed out'));
     void terminateManagedChild(child);
     this.scheduleRestart();
   }
 
   private scheduleRestart(): void {
     if (this.#stopped || this.#restartTimer) return;
+    const delay = Math.min(DETECTOR_RESTART_MAX_MS, 1_000 * 2 ** this.#restarts);
+    this.#restarts += 1;
     this.#restartTimer = setTimeout(() => {
       this.#restartTimer = undefined;
       if (!this.#stopped) this.start();
-    }, 1_000);
+    }, delay);
   }
 }
 
