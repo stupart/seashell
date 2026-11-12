@@ -68,7 +68,9 @@ try {
   await Bun.sleep(200);
   await type('b');
   await until(() => screen().includes('Coming up') && screen().includes('Roadmap review') && screen().includes('Lunch with Sam')
-    && screen().includes('make brief') && screen().includes('no history'), 'b lists every meeting coming up, tomorrow\'s too, and where each brief stands');
+    && screen().includes('Enter make brief') && screen().includes('no past meetings'), 'b lists every meeting coming up, tomorrow\'s too, and where each brief stands');
+  // The list says states only; that Enter makes a brief is the key bar's to say.
+  assert(screen().split('\n').filter((line) => line.includes('make brief')).length === 1, `"make brief" is said once, in the key bar\n${screen()}`);
   await type('\r');
   await until(() => screen().includes('Brief · Roadmap review') && screen().includes('from Roadmap review,') && screen().includes('You · Fri'),
     'Enter makes the brief; it names the one past meeting once, and the owner sits on the right');

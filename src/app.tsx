@@ -3033,7 +3033,7 @@ export default function App(props: {
       <Text dimColor wrap="wrap">Suggested names come from voices you named before.</Text>
     </Box>}
   </Sheet> : null;
-  // Coming up: when, what, and whether its brief is ready, can be made, or has nothing to read.
+  // Coming up: when, what, and whether its brief is ready or has nothing to read.
   const comingUpSheet = comingUpRow !== null ? (() => {
     const now = new Date(statusNow);
     const whens = comingUp.map((meeting) => upcomingWhen(meeting.upcoming.startsAt, now));
@@ -3270,11 +3270,12 @@ function canBrief(meeting: ComingUpMeeting): boolean {
   return Boolean(meeting.brief) || meeting.history > 0;
 }
 
-/** Where a meeting's brief stands: in the Coming up list's few words, or the home screen's longer ones. */
+/** Where a meeting's brief stands: in the Coming up list's few words, or the home screen's longer ones. The list
+ * says only a state; that Enter makes a brief is the key bar's to say, so one still to make says nothing there. */
 function briefState(meeting: ComingUpMeeting, short = false): string {
   if (meeting.brief) return 'brief ready';
-  if (!meeting.history) return 'no history';
-  return short ? 'make brief' : `${meeting.history} past ${meeting.history === 1 ? 'meeting' : 'meetings'} to brief from`;
+  if (!meeting.history) return 'no past meetings';
+  return short ? '' : `${meeting.history} past ${meeting.history === 1 ? 'meeting' : 'meetings'} to brief from`;
 }
 
 /** The microphone is not allowed yet, and Seashell can ask macOS (or open its pane). */
