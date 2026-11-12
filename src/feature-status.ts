@@ -391,7 +391,7 @@ function vocabularyStatus(libraryDir: string, vocabulary: ReturnType<typeof load
     detail: 'Names, companies and words for Seashell to spell right. Transcription and the meeting AI both use them.' } as const;
   const count = `${vocabulary.terms.length} ${vocabulary.terms.length === 1 ? 'word' : 'words'}`;
   if (vocabulary.problems.length) return { ...base, state: 'attention', summary: `${count} · some left out`, fix: vocabulary.problems[0]! };
-  // Optional, so having none is not a step to take: the list is empty and a adds a word.
+  // Optional, so having none is not a step to take: the list is empty and + adds a word.
   if (!vocabulary.terms.length) return { ...base, state: 'off', summary: existsSync(vocabularyPath(libraryDir)) ? 'No words yet' : 'None yet' };
   // Transcription still uses them; only the notes cannot.
   return older ? { ...base, state: 'attention', summary: `${count} · AI engine too old`,

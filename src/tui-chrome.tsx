@@ -229,7 +229,7 @@ export const HELP_ROWS: ReadonlyArray<readonly [string, string]> = [
   ['Recording', 'starts and stops with the call · + note this moment · a catch up: "What did I miss?" · space record or stop by hand · V record with video · i audio help'],
   ['Next', 'b meetings coming up, and their briefs'],
   ['Add', 'f import a file · F import and separate speakers'],
-  ['Setup', ', settings: speakers, AI and more'],
+  ['Setup', ', settings: speakers, AI, vocabulary and more'],
 ];
 
 /** What ✎ means, said once in help rather than beside every point. */

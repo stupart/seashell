@@ -103,12 +103,15 @@ try {
   await type(LEFT, DOWN);
   if (narrow) await type(ENTER);
   await until(() => frame().includes('No words yet') || frame().includes('None yet'), 'the vocabulary has no words yet');
+  // + adds a word, as + adds a note; a only ever asks. A list kept here has nothing to check again.
+  assert.ok(frame().includes('+ add a word') && !frame().includes('a add a word'), `the key bar offers + to add a word\n${frame()}`);
+  assert.ok(!frame().trimEnd().split('\n').at(-1)!.includes('r recheck'), 'and nothing to check again');
   await type(ENTER);
   await until(() => opened.length === 2, 'Enter opens the vocabulary');
   assert.ok(opened[1]!.endsWith('Vocabulary.txt') && existsSync(opened[1]!), 'the file is made beside the library');
-  // Words are added in the app: a, the word, Enter. The list shows it, and d removes it again.
-  await type('a', ...'Humain');
-  await until(() => frame().includes('Add a word: Humain'), 'a asks for a word in the key bar');
+  // Words are added in the app: +, the word, Enter. The list shows it, and d removes it again.
+  await type('+', ...'Humain');
+  await until(() => frame().includes('Add a word: Humain'), '+ asks for a word in the key bar');
   await type(ENTER);
   await until(() => frame().includes('Added "Humain". The next call spells it that way.'), 'adding says what it does');
   assert.ok(readFileSync(opened[1]!, 'utf8').trimEnd().endsWith('\nHumain'), 'the word is in the file, after its notes');

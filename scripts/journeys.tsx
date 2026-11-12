@@ -263,7 +263,7 @@ export const JOURNEYS: Journey[] = [
       { title: 'Edits undone', press: ['y'], keys: 'Y', until: 'Undid' },
       { title: 'Vocabulary', press: [LEFT, DOWN], narrowPress: [ENTER], keys: '← ↓', until: 'spell right',
         note: 'Names and words to spell right, kept in the app; Enter opens them as a file.' },
-      { title: 'Adding a word', press: ['a', ...'Humain'], keys: 'A Humain', until: 'Add a word', note: 'Typed in the key bar.' },
+      { title: 'Adding a word', press: ['+', ...'Humain'], keys: '+ Humain', until: 'Add a word', note: 'Typed in the key bar; + adds, as it adds a note.' },
       { title: 'Word added', press: [ENTER], keys: 'Enter', until: 'Added', note: 'The list shows it; the next call spells it that way.' },
       { title: 'Choosing a word', press: [ENTER], narrowInstead: [DOWN], keys: 'Enter', until: 'd remove', note: 'd removes it again.' },
       { title: 'Extractors', press: [LEFT, DOWN, ENTER], keys: '← ↓ Enter', until: 'Customer pains', note: 'A file that does not load is red. Wide, Enter opens the folder.' },
