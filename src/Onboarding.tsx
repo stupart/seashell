@@ -195,9 +195,13 @@ export default function Onboarding(props: SetupActionProps & {
   useEffect(() => { if (mic.heard) remember('microphone'); }, [mic.heard]);
   useEffect(() => { if (computer.heard) remember('computer'); }, [computer.heard]);
 
+  /** macOS just allowed the microphone here: the step says so before it listens. */
+  const [micJustAllowed, setMicJustAllowed] = useState(false);
   // The step's own ✓ says it worked; only a failure needs words underneath.
   const runQuietly = async (action: NonNullable<FeatureStatus['action']>) => {
-    if (await setup.run(action)) setup.setMessage(undefined);
+    if (!await setup.run(action)) return;
+    setup.setMessage(undefined);
+    if (action === 'allow-microphone') setMicJustAllowed(true);
   };
   const next = () => {
     if (!progress) return;
@@ -293,6 +297,7 @@ export default function Onboarding(props: SetupActionProps & {
         {gap}
         {statusLine(microphone)}
       </> : <>
+        {micJustAllowed && <Text color="green">✓ Allowed</Text>}
         <Paragraph width={width} text='Say something, like "testing, one, two".' />
         {gap}
         {meterBody(mic, 'microphone')}

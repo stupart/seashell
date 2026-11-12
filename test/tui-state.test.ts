@@ -129,3 +129,11 @@ test('a search snippet is cut around what matched', () => {
   expect(cut).toContain('pricing');
   expect(cut.startsWith('…') && cut.endsWith('…')).toBeTrue();
 });
+
+test('a time in a sentence is not zero-padded; only an aligned column pads it', async () => {
+  const { formatTuiClock, sentenceClock } = await import('../src/tui-state.ts');
+  expect(sentenceClock(121)).toBe('2:01');
+  expect(sentenceClock(7)).toBe('0:07');
+  expect(sentenceClock(3723)).toBe('1:02:03');
+  expect(formatTuiClock(121)).toBe('02:01');
+});

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { AutomaticMeetingWatchService, type AutomaticMeetingWatchEvent } from '../src/automatic-meeting-watch.ts';
-import { readBriefAttempts, readNextMeeting, type Brief, type makeBrief } from '../src/briefs.ts';
+import { readBriefAttempts, readComingUp, readNextMeeting, type Brief, type makeBrief } from '../src/briefs.ts';
 import { CaptureSessionStore } from '../src/capture-session.ts';
 import { loadMeetingArtifact } from '../src/meeting-artifact.ts';
 import { NoBriefHistoryError } from '../src/briefs.ts';
@@ -151,4 +151,33 @@ test('briefs turned off, or no AI chosen, means the recorder never writes one', 
     await service.shutdown();
   }
   expect(tries).toBe(0);
+});
+
+test('the recorder tells the app about tomorrow morning too: every meeting in the next 36 hours, the nearest first', async () => {
+  const root = folder('seashell-watch-coming-up-');
+  const at = '2026-11-20T22:00:00Z';
+  const now = Date.parse(at);
+  const reads: number[] = [];
+  const event = (id: string, title: string, start: string) => ({ provider: 'macos-eventkit', eventId: id, title, attendees: [],
+    startAt: start, endAt: new Date(Date.parse(start) + 30 * 60_000).toISOString() });
+  const service = new AutomaticMeetingWatchService({
+    config: { libraryDir: root, meeting: { backend: 'codex', model: 'fixture', mode: 'post-session', calendar: { enabled: true, policy: 'ask' } } },
+    dependencies: {
+      now: () => new Date(now),
+      readSignals: () => ({ schemaVersion: 1, capturedAtUnixMs: now, supported: true, inputProcesses: [] }),
+      readCalendar: async (options: { leadMinutes?: number }) => {
+        reads.push(options.leadMinutes ?? 0);
+        // Out of order, as a calendar may give them; one is already over.
+        return [event('lunch', 'Lunch with Sam', '2026-11-21T12:30:00Z'), event('acme', 'Acme check-in', '2026-11-21T10:00:00Z'),
+          event('done', 'Earlier', '2026-11-20T20:00:00Z')];
+      },
+      consumeCommand: () => undefined, consumeNotes: () => [],
+      makeBrief: (async () => { throw new Error('not due'); }) as unknown as typeof makeBrief, notify: () => {},
+    },
+  } as never);
+  try { await service.pollOnce(); await settle(); } finally { await service.shutdown(); }
+  expect(reads).toContain(36 * 60);
+  expect(readComingUp(root, new Date(now)).map((meeting) => meeting.upcoming.title)).toEqual(['Acme check-in', 'Lunch with Sam']);
+  // An app from before the list still reads the nearest one where it always was.
+  expect(readNextMeeting(root, new Date(now))?.upcoming.title).toBe('Acme check-in');
 });

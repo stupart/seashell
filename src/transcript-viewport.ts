@@ -3,7 +3,7 @@ import { stripVTControlCharacters } from 'util';
 import { coalesceTranscriptSegments, speakerLabel } from './transcript-renderer.ts';
 import type { StructuredTranscript } from './transcript-types.ts';
 import { formatTuiClock, speakerColors, speakerDisplayName, wrapWords, YOUR_SPEAKER_ID } from './tui-state.ts';
-import { bulletParts } from './meeting-tui.ts';
+import { bulletParts, CAUTION, LINE_REMOVED } from './meeting-tui.ts';
 
 const color = new Chalk({ level: 1 });
 const MAX_NAME_COLUMN = 18;
@@ -18,17 +18,32 @@ export interface TranscriptRow {
   pinned?: string;
   /** Where it stacks: its line's time and speaker, on a row of their own above it at the top of the view. */
   heading?: string;
+  /** Not the first row of its line: cut at the top of the view, it starts with "…", so it never reads as the line's start. */
+  continued?: true;
+}
+
+/**
+ * A line wrapped to rows, the rows after its first one column narrower: one cut at the top of the view
+ * starts with "…" under its time and speaker, and still fits.
+ */
+function wrapLine(text: string, columns: number): string[] {
+  const [first = '', ...rest] = wrapWords(text, columns);
+  return rest.length ? [first, ...wrapWords(rest.join(' '), Math.max(1, columns - 1))] : [first];
 }
 
 /**
  * The rows in view from this scroll position. A line cut at the top keeps its time and speaker in
- * view: beside its words where the transcript has columns, on a row above them where it stacks.
+ * view: beside its words where the transcript has columns, on a row above them where it stacks. Its
+ * words start with "…", so "00:00 You" over "you landed on the pilot." never reads as one sentence.
  */
 export function transcriptWindow(rows: readonly TranscriptRow[], scroll: number, count: number): TranscriptRow[] {
   const top = rows[scroll];
   const timed = (text: string): TranscriptRow => top?.start === undefined ? { text } : { text, start: top.start };
   if (top?.pinned !== undefined) return [timed(top.pinned), ...rows.slice(scroll + 1, scroll + count)];
-  if (top?.heading !== undefined) return [timed(top.heading), ...rows.slice(scroll, scroll + count - 1)];
+  if (top?.heading !== undefined) {
+    return [timed(top.heading), ...count > 1 ? [top.continued ? { ...top, text: `…${top.text}` } : top] : [],
+      ...rows.slice(scroll + 1, scroll + count - 1)];
+  }
   return rows.slice(scroll, scroll + count);
 }
 
@@ -79,13 +94,13 @@ export function timedTranscriptRows(
     const timed = (row: string) => ({ text: row, start: segment.start });
     if (stacked) {
       const heading = [clock, styled(id, name)].filter(Boolean).join('  ');
-      return [timed(heading), ...wrapWords(text, width).map((line) => ({ ...timed(line), heading }))];
+      return [timed(heading), ...wrapLine(text, width).map((line, index) => ({ ...timed(line), heading, ...index ? { continued: true as const } : {} }))];
     }
     const label = options.speakers ? styled(id, name.slice(0, nameWidth).padEnd(nameWidth)) : '';
     const prefix = [clock, label].filter(Boolean).join('  ');
     const indent = (clockWidth ? clockWidth + 2 : 0) + (options.speakers ? nameWidth + 2 : 0);
-    return wrapWords(text, Math.max(1, width - indent))
-      .map((line, index) => index === 0 ? timed(`${prefix}  ${line}`) : { ...timed(' '.repeat(indent) + line), pinned: `${prefix}  ${line}` });
+    return wrapLine(text, Math.max(1, width - indent)).map((line, index) => index === 0 ? timed(`${prefix}  ${line}`)
+      : { ...timed(' '.repeat(indent) + line), pinned: `${prefix}  …${line}`, continued: true as const });
   });
 }
 
@@ -101,16 +116,20 @@ const MIN_BULLET_TEXT_COLUMNS = 24;
 export function wrappedMeetingRows(lines: readonly string[], columns: number): string[] {
   const width = Math.max(1, Math.floor(columns));
   const parts = lines.map(bulletParts);
-  const clockColumn = Math.max(0, ...parts.map(({ body, clock }) => body.startsWith('- ') && clock ? clock.length : 0));
+  // The times share one column; "line removed" reaches left past it on its own row rather than widen it for all.
+  const clockColumn = Math.max(0, ...parts.map(({ body, clock }) => body.startsWith('- ') && clock && !clock.includes(LINE_REMOVED) ? clock.length : 0));
   return parts.flatMap(({ body, owner, clock }) => {
     const clean = stripVTControlCharacters(body) || ' ';
+    // Something to look at stays marked on every row, so all of it is yellow.
+    if (clean.startsWith(CAUTION)) return wrapWords(clean.slice(CAUTION.length), width).map((row) => `${CAUTION}${row}`);
     if (!clean.startsWith('- ')) return wrapWords(clean, width);
     const text = clean.slice(2);
     if (!owner && !clock) return wrapWords(text, Math.max(1, width - 2)).map((row, index) => `${index ? '  ' : '- '}${row}`);
-    const time = clock ? color.dim(clock.padStart(clockColumn)) : '';
+    const clockWidth = Math.max(clockColumn, clock ? Bun.stringWidth(clock) : 0);
+    const time = clock ? color.dim(clock.padStart(clockWidth)) : '';
     const shown = owner && clock ? `${owner}  ${time}` : owner ?? time;
     // The time column is kept on a line without a time, so its owner still ends where the others do.
-    const metaWidth = owner ? Bun.stringWidth(owner) + (clockColumn ? 2 + clockColumn : 0) : clockColumn;
+    const metaWidth = owner ? Bun.stringWidth(owner) + (clockWidth ? 2 + clockWidth : 0) : clockWidth;
     const room = width - 2 - metaWidth - 2;
     if (room < MIN_BULLET_TEXT_COLUMNS) {
       return [...wrapWords(text, Math.max(1, width - 2)).map((row, index) => `${index ? '  ' : '- '}${row}`),

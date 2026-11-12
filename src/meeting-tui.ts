@@ -2,7 +2,7 @@ import type { MeetingArtifact, MeetingClaim, MeetingClaimType, OwnerNote } from 
 import { citedSegmentIds, claimOwnerAndDue, sourceLineRemoved, transcriptSegmentId } from './meeting-artifact.ts';
 import { compareMeetingEvidence, meetingEvidence } from './meeting-evidence.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
-import { formatTuiClock } from './tui-state.ts';
+import { formatTuiClock, sentenceClock } from './tui-state.ts';
 
 export type MeetingView = 'notes' | 'transcript' | 'chat';
 
@@ -29,13 +29,9 @@ function createSources(artifact: MeetingArtifact, record?: TranscriptRecord): (i
         previous.text += ` ${segment.text}`;
       } else groups.push({ last: index, start: segment.start, end: segment.end, text: segment.text });
     });
-    const clock = (seconds: number) => {
-      const total = Math.max(0, Math.floor(seconds));
-      return `${Math.floor(total / 60).toString().padStart(2, '0')}:${(total % 60).toString().padStart(2, '0')}`;
-  };
   const lines = groups.slice(0, 3).map((group) => {
     const text = group.text.replace(/\s+/gu, ' ').trim();
-    return `  Source ${clock(group.start)}–${clock(Math.ceil(group.end))}: “${text.length > 100 ? text.slice(0, 99) + '…' : text}”`;
+    return `  Source ${sentenceClock(group.start)}–${sentenceClock(Math.ceil(group.end))}: “${text.length > 100 ? text.slice(0, 99) + '…' : text}”`;
   });
   if (groups.length > 3) lines.push(`  + ${groups.length - 3} more passages in the saved meeting evidence.`);
   if (wanted.size) lines.push('  Some cited passages are unavailable.');
@@ -72,6 +68,10 @@ function contentWords(text: string): Set<string> {
 export const HEADING = '# ';
 /** A heading under a heading: an extractor's name under Insights. */
 export const SUBHEADING = '## ';
+/** Lines starting with this are something to look at, in yellow; wrappedMeetingRows keeps it on every row they wrap to. */
+export const CAUTION = '! ';
+/** Under your notes when the engine that wrote the notes could not read them; the key bar leads with AI settings. */
+export const OWNER_NOTES_UNREAD = "Written without your notes: this AI can't read them yet.";
 /**
  * Splits a bullet from what sits against the right edge: who owns it and by when, then when it was said.
  * A bullet with either reads `- text META owner META clock`, with an empty part where one is unknown.
@@ -83,6 +83,8 @@ export const META = '\t';
  * what it means.
  */
 export const FROM_YOUR_NOTES = '✎';
+/** In the time column of a point whose every cited line was removed from the transcript. */
+export const LINE_REMOVED = 'line removed';
 
 /** A line of the notes taken apart: its text, who owns it and by when, and when it was said. */
 export function bulletParts(line: string): { body: string; owner?: string; clock?: string } {
@@ -95,6 +97,7 @@ export function plainMeetingLines(lines: readonly string[]): string[] {
   return lines.map((line) => {
     if (line.startsWith(SUBHEADING)) return line.slice(SUBHEADING.length);
     if (line.startsWith(HEADING)) return line.slice(HEADING.length);
+    if (line.startsWith(CAUTION)) return line.slice(CAUTION.length);
     const { body, owner, clock } = bulletParts(line);
     return [body, owner, clock].filter(Boolean).join('  ');
   });
@@ -111,13 +114,16 @@ const LEADING_GROUPS: Array<[string, MeetingClaimType[], RegExp]> = [
   ['Risks', ['risk'], /^risks?$/iu],
 ];
 
-/** After the template: everything else the notes found. */
+/**
+ * After the template: everything else the notes found. "Notes" already names the tab, the AI's
+ * notes and yours, so the AI's loose points are what else was said.
+ */
 const TRAILING_GROUPS: Array<[string, MeetingClaimType[]]> = [
   ['Dates', ['date']],
-  ['Notes', ['note', 'highlight']],
+  ['Also said', ['note', 'highlight']],
   ['Facts and feedback', ['fact', 'feedback']],
   ['Resources', ['resource']],
-  ['Speaker identities', ['speaker_identity']],
+  ["Who's who", ['speaker_identity']],
 ];
 
 export function meetingViewLines(
@@ -158,14 +164,13 @@ export function meetingViewLines(
   const at = (item: Item) => start(item.ids) ?? (item.notes ?? []).map((id) => notesById.get(id)?.at)
     .filter((time): time is number => time !== undefined).sort((a, b) => a - b)[0];
   // The time is the citation: it finds the line in the transcript. ✎ before it says the point came from your notes.
-  // A point whose every cited line was removed stays, and says so; one that only ever
-  // rested on your notes cited no line, so it has none removed and is simply yours.
+  // A point whose every cited line was removed stays, and says so where its time would be, dim, so its
+  // words stay as written; one that only ever rested on your notes cited no line, so it is simply yours.
   const bullet = (item: Item) => {
     const said = at(item);
-    const time = said === undefined ? '' : formatTuiClock(said);
+    const time = item.removed ? LINE_REMOVED : said === undefined ? '' : formatTuiClock(said);
     const clock = item.notes?.length ? (time ? `${FROM_YOUR_NOTES} ${time}` : FROM_YOUR_NOTES) : time;
-    const text = item.removed ? `${item.text} (source line removed)` : item.text;
-    return item.owner || clock ? `- ${text}${META}${item.owner ?? ''}${META}${clock}` : `- ${text}`;
+    return item.owner || clock ? `- ${item.text}${META}${item.owner ?? ''}${META}${clock}` : `- ${item.text}`;
   };
   // In the order they were said; anything Seashell cannot place keeps its place at the end.
   const inOrder = (items: Item[]) => items.map((item, index) => ({ item, index, at: at(item) ?? Number.POSITIVE_INFINITY }))
@@ -258,7 +263,7 @@ export function meetingViewLines(
     ...sections.flatMap((section) => section.items.flatMap((item) => item.ownerNoteIds ?? []))]);
   const unused = ownerNotes.filter((note) => !used.has(note.id));
   const yours = unused.length ? ['', `${HEADING}Your notes`, ...unused.map(noteBullet),
-    ...(artifact.analysis?.ownerNotesUnread ? ['The AI engine that wrote these notes could not read yours. Install a newer AI engine: seashell ai install <humain-package.tgz>'] : [])] : [];
+    ...(artifact.analysis?.ownerNotesUnread ? [`${CAUTION}${OWNER_NOTES_UNREAD}`] : [])] : [];
   return [
     summary,
     ...yours,

@@ -10,14 +10,18 @@ export type MicrophoneAuthorization = HelperAuthorization;
 export type MicrophonePermissionStatus = HelperPermissionStatus;
 export type MicrophonePermissionOptions = HelperPermissionOptions;
 
+// Plain words only: these are said in the app, so they name no command.
 const DETAILS = {
   authorized: 'Seashell Microphone can record your side of meetings, including in the background.',
-  notDetermined: 'macOS has not asked yet. Run seashell meeting microphone setup and choose Allow.',
+  notDetermined: 'macOS has not asked yet. Choose Allow when it asks about Seashell Microphone.',
   denied: 'Microphone access is off for Seashell Microphone. Turn it on in System Settings → Privacy & Security → Microphone.',
   restricted: 'This Mac restricts microphone access (for example by a device-management profile).',
   unknown: 'macOS reported an unknown microphone permission state.',
-  unavailable: 'The Seashell microphone helper is missing. Reinstall or run bash scripts/build-native.sh.',
+  unavailable: 'The Seashell microphone recorder is missing. Update or reinstall Seashell.',
 };
+
+/** Said as macOS's Privacy pane opens, once it has said no: macOS never asks twice. */
+export const MICROPHONE_PRIVACY_OPENING = 'Opening Privacy & Security: turn on Seashell Microphone.';
 
 export function microphonePermission(options: MicrophonePermissionOptions = {}): Promise<MicrophonePermissionStatus> {
   return helperPermission(options.helperPath ?? MICROPHONE_HELPER, MICROPHONE_RUNTIME_HELPER, DETAILS, options);
@@ -62,6 +66,20 @@ export function microphoneStartNotifier(notify: (message: string) => void,
   };
 }
 
+/** Where the recorder notes which copy of Seashell Microphone macOS last allowed. */
+function microphoneCopyPath(env: NodeJS.ProcessEnv): string {
+  return join(dirname(defaultConfigPath(env)), 'microphone-copy.json');
+}
+
+/**
+ * An earlier copy of Seashell Microphone was allowed: one that macOS has not decided on is a new copy,
+ * from an update, which needs your OK again, not a microphone never allowed.
+ */
+export function microphoneAllowedBefore(env: NodeJS.ProcessEnv = process.env): boolean {
+  try { return typeof (JSON.parse(readFileSync(microphoneCopyPath(env), 'utf8')) as Record<string, unknown>).allowedCopy === 'string'; }
+  catch { return false; }
+}
+
 interface MicrophoneCopyNotes {
   /** The Runtime copy macOS last allowed. */
   readonly allowedCopy?: string;
@@ -85,7 +103,7 @@ export async function microphoneUpdateNotice(options: {
   let copy: string;
   try { const info = statSync(status.executable); copy = `${info.dev}:${info.ino}:${info.mtimeMs}:${info.size}`; }
   catch { return undefined; }
-  const path = join(dirname(defaultConfigPath(env)), 'microphone-copy.json');
+  const path = microphoneCopyPath(env);
   let notes: MicrophoneCopyNotes = {};
   try {
     const value = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;

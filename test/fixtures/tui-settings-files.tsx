@@ -55,12 +55,15 @@ const opened: string[] = [];
 const folders: string[] = [];
 let screenRequests = 0;
 let computerChecks = 0;
+let calendarRequests = 0;
+let calendarsEnabled = 0;
 const app = render(<SettingsScreen config={loadConfig()} libraryDir={library} columns={columns} rows={30} dependencies={dependencies}
   actions={{ openFile: (path) => { opened.push(path); }, openFolder: (path) => { folders.push(path); },
     allowScreenRecording: async () => { screenRequests++; screenAllowed = true; return { authorization: 'authorized', detail: 'Allowed.' }; },
+    allowCalendar: async () => { calendarRequests++; return { authorization: 'authorized', detail: 'Allowed.' }; },
     checkComputerAudio: async () => { computerChecks++;
       return { heard: true, refused: false, detail: 'Heard your Mac. Meetings use it from the next call.' }; } }}
-  onConnectMeet={() => {}} onEnableCalendar={() => {}} onOpenSpeakers={() => {}} onOpenAI={() => {}} onClose={() => {}} />,
+  onConnectMeet={() => {}} onEnableCalendar={() => { calendarsEnabled++; }} onOpenSpeakers={() => {}} onOpenAI={() => {}} onClose={() => {}} />,
 { stdin: input as any, stdout: output as any, stderr: output as any, debug: true, patchConsole: false, exitOnCtrlC: false });
 const frame = () => stripVTControlCharacters(rendered.slice(rendered.lastIndexOf('Settings') - 4));
 const until = async (check: () => boolean, label: string) => {
@@ -103,6 +106,19 @@ try {
   await type(ENTER);
   await until(() => opened.length === 2, 'Enter opens the vocabulary');
   assert.ok(opened[1]!.endsWith('Vocabulary.txt') && existsSync(opened[1]!), 'the file is made beside the library');
+  // Words are added in the app: a, the word, Enter. The list shows it, and d removes it again.
+  await type('a', ...'Humain');
+  await until(() => frame().includes('Add a word: Humain'), 'a asks for a word in the key bar');
+  await type(ENTER);
+  await until(() => frame().includes('Added "Humain". The next call spells it that way.'), 'adding says what it does');
+  assert.ok(readFileSync(opened[1]!, 'utf8').trimEnd().endsWith('\nHumain'), 'the word is in the file, after its notes');
+  await until(() => frame().includes('Humain') && frame().includes('1 word'), 'the list shows it');
+  // Wide, Enter goes into the words; narrow, they are already being chosen, and any key clears the toast.
+  await type(narrow ? DOWN : ENTER);
+  await until(() => frame().includes('d remove') && frame().includes(narrow ? 'Enter TextEdit' : 'Enter open in TextEdit'), 'a chosen word can be removed');
+  await type('d');
+  await until(() => frame().includes('Removed "Humain".'), 'd removes the word');
+  assert.ok(!readFileSync(opened[1]!, 'utf8').includes('\nHumain'), 'and it is gone from the file');
 
   // Extractors: Enter opens the folder, made with its example the first time.
   await type(LEFT, DOWN, ENTER);
@@ -110,15 +126,22 @@ try {
   await until(() => folders.length === 1, 'Enter opens the extractors folder');
   assert.ok(existsSync(join(folders[0]!, 'customer-pains.md')), 'the folder starts with an example');
 
-  // Briefs: on by default, and Enter turns them off.
+  // Briefs: on by default, waiting for calendar titles, which is something to check. Enter turns those on,
+  // as the calendar row does, and ←→ switch briefs off and on. No command is shown.
   await type(LEFT, DOWN, DOWN);
   if (narrow) await type(ENTER);
-  await until(() => frame().includes('Enter turn off'), 'briefs are on and offer to turn off');
+  await until(() => frame().includes('! On · needs calendar titles') && frame().includes('Enter turn on calendar titles')
+    && frame().includes('←→ on/off'), 'briefs wait for calendar titles, and Enter turns them on');
+  assert.ok(!frame().includes('Run:') && !frame().includes('seashell'), `no command in Settings\n${frame()}`);
   await type(ENTER);
-  await until(() => JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.briefs?.enabled === false, 'Enter turns briefs off');
+  await until(() => calendarRequests === 1 && calendarsEnabled === 1, 'Enter asks for Calendar and turns on titles, as the calendar row does');
+  await type(LEFT);
+  await until(() => JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.briefs?.enabled === false, '← turns briefs off');
+  await until(() => frame().includes('Briefs off.') && frame().includes('– Off'), 'says briefs are off');
 
   // Video: Enter switches it. Off, then on again, which asks macOS for Screen Recording.
-  await type(LEFT, DOWN, DOWN);
+  // On the Briefs row ←→ switch it, so Esc leaves its detail on a narrow window.
+  await type(...(narrow ? ['\x1b'] : []), DOWN, DOWN);
   if (narrow) await type(ENTER);
   await until(() => frame().includes('needs Screen Recording'), 'video is on but not allowed');
   await type(ENTER);

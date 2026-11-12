@@ -80,7 +80,8 @@ try {
   await type('\r'); assert.equal(setups, 0, 'Do not install while recording');
   assert.equal(stops, 0, 'Opening speaker settings preserves capture');
   // Back to Settings, which opened it, then back to the app.
-  await type('\x1b'); await type('\x1b'); await type(' '); await until(() => stops === 1);
+  // Stopping the recording asks first.
+  await type('\x1b'); await type('\x1b'); await type(' '); await type('y'); await until(() => stops === 1);
   await type('F'); await until(() => plain().lastIndexOf('Not set up') > plain().lastIndexOf('? help'));
   for (let n = 0; n < 2; n++) await type('\x1b[B');
   await until(() => plain().includes('contact sharing'));

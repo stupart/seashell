@@ -9,14 +9,16 @@ import {
   makeBrief,
   NoBriefHistoryError,
   ownerKeys,
+  readComingUp,
   readNextMeeting,
   recordBriefAttempt,
   relevantMeetings,
   writeNextMeeting,
   type UpcomingMeeting,
 } from '../src/briefs.ts';
-import { draftFollowUp, draftText, mailtoUrl } from '../src/drafts.ts';
-import type { runHumainMeeting } from '../src/humain-client.ts';
+import { draftAsk, draftFollowUp, draftText, mailtoUrl } from '../src/drafts.ts';
+import { addMeetingNote } from '../src/owner-notes.ts';
+import { OlderEngineError, withNewerEngine, type runHumainMeeting } from '../src/humain-client.ts';
 import { createMeetingArtifact, MeetingAiOffError, saveMeetingArtifact, type MeetingAttendee } from '../src/meeting-artifact.ts';
 import { findTranscriptRecord, saveTranscriptRecord } from '../src/transcript-library.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
@@ -118,9 +120,12 @@ test('a brief is asked for with the contract\'s shape, saved as Markdown with ci
   expect(brief.path).toBe(join(env.SEASHELL_BRIEFS_DIR!, `${new Date(next.startsAt).getFullYear()}-11-20 ${String(new Date(next.startsAt).getHours()).padStart(2, '0')}00 Acme pilot kickoff.md`));
   const markdown = readFileSync(brief.path, 'utf8');
   expect(markdown).toContain('# Brief: Acme pilot kickoff');
-  expect(markdown).toContain('- Send the security summary. _(Acme discovery call, Nov 5, 00:04)_');
+  expect(markdown).toContain('- Send the security summary. _(Acme discovery call, Nov 5, 0:04)_');
   expect(markdown).toContain('(acme-call)');
   expect(findBrief(root, next, env)?.path).toBe(brief.path);
+  // Coming up says it is ready at once, before the recorder next looks at the calendar.
+  writeNextMeeting(root, { upcoming: next, history: 1 });
+  expect(readComingUp(root, new Date(), env)[0]?.brief).toBe(brief.path);
 });
 
 test('nothing to read is said plainly, and an older engine is told to update before anything is sent', async () => {
@@ -129,7 +134,11 @@ test('nothing to read is said plainly, and an older engine is told to update bef
   add('acme-call', 'Acme discovery call', 5, [you, dana]);
   const humain = fakeBrief();
   await expect(makeBrief(root, upcoming('Acme pilot', [dana]), { route, runner: humain.runner, engine: rev3, env }))
-    .rejects.toThrow('This AI engine cannot write briefs yet. Install a newer AI engine: seashell ai install <humain-package.tgz>');
+    .rejects.toThrow(new OlderEngineError('This AI engine cannot write briefs yet.'));
+  // The command line and agents are told how to install a newer one; the app never shows a command.
+  const refused = await makeBrief(root, upcoming('Acme pilot', [dana]), { route, runner: humain.runner, engine: rev3, env }).catch((error) => error);
+  expect(refused).toBeInstanceOf(OlderEngineError);
+  expect(withNewerEngine(refused)).toBe('This AI engine cannot write briefs yet. Install a newer AI engine: seashell ai install <humain-package.tgz>');
   expect(humain.requests).toEqual([]);
   // An engine that cannot say prints its usage instead: the same plain answer.
   const usage: typeof runHumainMeeting = async () => { throw new Error('Humain failed: Usage: humain meeting observe|reconcile|chat|extract <request.json>'); };
@@ -158,6 +167,11 @@ test('the recorder makes a brief once, about 15 minutes ahead, and the app learn
   expect(readNextMeeting(root, now)).toMatchObject({ history: 2, upcoming: { title: 'Weekly sync' } });
   // Stale once the recorder stops saying it, or long after it started.
   expect(readNextMeeting(root, new Date(now.getTime() + 20 * 60_000))).toBeUndefined();
+  // Later meetings follow the nearest, soonest first; one that has started long since drops off.
+  const later = (title: string, minutes: number) => ({ upcoming: { ...due!, title, startsAt: new Date(now.getTime() + minutes * 60_000).toISOString() }, history: 0 });
+  writeNextMeeting(root, { upcoming: due!, history: 2, later: [later('Tomorrow', 20 * 60), later('Long started', -11), later('Tonight', 6 * 60)] }, now.getTime());
+  expect(readComingUp(root, now).map((meeting) => meeting.upcoming.title)).toEqual(['Weekly sync', 'Tonight', 'Tomorrow']);
+  expect(readNextMeeting(root, now)?.later?.map((meeting) => meeting.upcoming.title)).toEqual(['Tonight', 'Tomorrow']);
 });
 
 /** A fake Humain that drafts a short follow-up citing the meeting. */
@@ -191,14 +205,36 @@ test('a follow-up is the chat request plus a draft, addressed to everyone but yo
   expect(request.segments).toHaveLength(2);
   expect(request.question).toBeUndefined();
   expect(draft.to).toEqual(['dana@acme.example']);
+  expect(draft.names).toEqual(['Dana Whitfield']);
   expect(draft.moments).toEqual({ s000002: 4 });
-  expect(draftText(draft)).toBe('Subject: Security summary\n\nHi Dana,\n\nI will send the security summary by Friday.\n\nThanks & talk soon,');
+  // About me gives no name, so a sign-off waiting for one is left off.
+  expect(draftText(draft)).toBe('Subject: Security summary\n\nHi Dana,\n\nI will send the security summary by Friday.');
   expect(mailtoUrl(draft)).toBe('mailto:dana@acme.example?subject=Security%20summary&body=' +
-    encodeURIComponent('Hi Dana,\r\n\r\nI will send the security summary by Friday.\r\n\r\nThanks & talk soon,'));
+    encodeURIComponent('Hi Dana,\r\n\r\nI will send the security summary by Friday.'));
   // Slack has no subject and no To line.
   const slack = await draftFollowUp(root, 'acme-call', 'slack', route, { runner: fakeDraft().runner, engine: rev4 });
   expect(slack.subject).toBeUndefined();
   expect(slack.to).toEqual([]);
+});
+
+test('a follow-up reads what you typed about the meeting, and signs off with your name from About me', async () => {
+  const { home, root, add } = library();
+  add('acme-call', 'Acme discovery call', 5, [you, dana]);
+  addMeetingNote(root, 'acme-call', 'Send Priya the admin guide', { at: 6 });
+  const humain = fakeDraft();
+  const draft = await draftFollowUp(root, 'acme-call', 'email', route, { ask: 'keep it short', runner: humain.runner, engine: rev4 });
+  // Humain's draft takes no owner notes of its own, so they travel in the ask.
+  expect(humain.requests[0].draft.ask).toBe('keep it short My notes: Send Priya the admin guide');
+  expect(humain.requests[0].ownerNotes).toBeUndefined();
+  expect(draft.paragraphs.map((paragraph) => paragraph.kind)).toEqual(['greeting', 'body']);
+  mkdirSync(join(home, 'Templates'), { recursive: true });
+  writeFileSync(join(home, 'Templates', 'About me.md'), "I'm Sam Owner. I run a two-person design studio.\n");
+  const signed = await draftFollowUp(root, 'acme-call', 'email', route, { runner: fakeDraft().runner, engine: rev4 });
+  expect(signed.paragraphs.at(-1)).toMatchObject({ kind: 'closing', text: 'Thanks & talk soon, Sam' });
+  // However much was typed, the ask stays within Humain's limit, whole notes first.
+  expect(draftAsk('a'.repeat(1_000), [{ text: 'b'.repeat(900) }, { text: 'c'.repeat(900) }])!.length).toBeLessThanOrEqual(2_000);
+  expect(draftAsk(undefined, [{ text: 'one' }, { text: 'two' }])).toBe('My notes: one; two');
+  expect(draftAsk('as is', [])).toBe('as is');
 });
 
 test('a follow-up from a private meeting, or with an older engine, sends nothing and says why', async () => {
@@ -208,7 +244,7 @@ test('a follow-up from a private meeting, or with an older engine, sends nothing
   const humain = fakeDraft();
   await expect(draftFollowUp(root, 'private', 'email', route, { runner: humain.runner, engine: rev4 })).rejects.toThrow(MeetingAiOffError);
   await expect(draftFollowUp(root, 'acme-call', 'email', route, { runner: humain.runner, engine: rev3 }))
-    .rejects.toThrow('This AI engine cannot write follow-ups yet. Install a newer AI engine');
+    .rejects.toThrow(new OlderEngineError('This AI engine cannot write follow-ups yet.'));
   expect(humain.requests).toEqual([]);
 });
 

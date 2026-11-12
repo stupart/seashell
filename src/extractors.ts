@@ -12,7 +12,7 @@ import {
 } from './meeting-artifact.ts';
 import { claimsForHumain, engineCheck, meetingSegments, ownerInstructions, retryableRun, runSafeId, stableKey } from './meeting-enrichment.ts';
 import { meaningful, parseFrontmatter, phraseMatches } from './meeting-templates.ts';
-import { humainRouteRequest, NEWER_ENGINE, olderHumainEngine, olderThanRevision4, runHumainMeeting, type HumainMeetingRoute,
+import { humainRouteRequest, olderHumainEngine, OlderEngineError, olderThanRevision4, runHumainMeeting, type HumainMeetingRoute,
   type MeetingEngineCheck } from './humain-client.ts';
 import { meetingEvidence } from './meeting-evidence.ts';
 import { findTranscriptRecord } from './transcript-library.ts';
@@ -335,7 +335,7 @@ export async function runExtractor(
   const result = await run.catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     throw olderHumainEngine(message)
-      ? new Error(`This AI engine cannot run extractors yet. ${NEWER_ENGINE}`)
+      ? new OlderEngineError('This AI engine cannot run extractors yet.')
       : error;
   });
   const insight: MeetingInsight = {

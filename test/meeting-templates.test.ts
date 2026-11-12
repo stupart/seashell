@@ -180,7 +180,8 @@ describe('templated meeting notes', () => {
     const saved = loadMeetingArtifact(root, record.id)!;
     expect(saved.analysis?.summary).toBe('S');
     expect(saved.analysis?.notes).toBeUndefined();
-    expect(status.some((message) => message.includes('does not write templated notes yet'))).toBeTrue();
+    // Said in plain words, with no command.
+    expect(status).toContain('This AI engine cannot follow templates yet, so the notes use none.');
   });
 });
 

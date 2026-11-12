@@ -27,7 +27,6 @@ import { rolePrompt, type PromptRole } from './prompts.ts';
 import {
   humainRouteRequest,
   meetingEngineActions,
-  NEWER_ENGINE,
   olderThanRevision4,
   runHumainMeeting,
   type HumainMeetingRoute,
@@ -37,6 +36,7 @@ import { carryCaptureNotes, meetingOwnerNotes, ownerNotesForAi } from './owner-n
 import { loadVocabulary } from './vocabulary.ts';
 import { findTranscriptRecord } from './transcript-library.ts';
 import { speakerLabel } from './transcript-renderer.ts';
+import { sentenceClock, speakerDisplayName } from './tui-state.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
 
 /** A little longer than Humain's own per-role limits (3, 15 and 5 minutes), so
@@ -113,6 +113,9 @@ export function retryableRun(storeDir: string, runId: string, idempotencyKey: st
   }
   throw new Error('This meeting step failed too many times. Check the AI provider in Settings (,).');
 }
+
+/** Said while an engine too old to read the owner's notes writes the notes: they are kept, and listed as written. */
+export const OWNER_NOTES_UNREAD_STATUS = "Writing the notes without yours: this AI can't read them yet.";
 
 export function meetingSegments(record: TranscriptRecord) {
   return record.transcript.map((segment, index) => ({
@@ -392,7 +395,7 @@ export async function enrichMeeting(
       // The owner's own account of the meeting. An engine before revision 4 would ignore them, so it is not sent them.
       const written = meetingOwnerNotes(libraryDir, transcriptId, artifact);
       const ownerNotes = older ? [] : ownerNotesForAi(artifact, written);
-      if (older && written.length) options.onStatus?.(`Your notes are kept, but this AI engine cannot read them. ${NEWER_ENGINE}`);
+      if (older && written.length) options.onStatus?.(OWNER_NOTES_UNREAD_STATUS);
       artifact = { ...artifact, status: 'reconciling', mode };
       saveMeetingArtifact(libraryDir, artifact);
       options.onStatus?.('Writing the notes…');
@@ -426,7 +429,7 @@ export async function enrichMeeting(
       const output = parseEnrichmentOutput(result.output, validIds, new Set(ownerNotes.map((note) => note.id)));
       if (instructions?.template && output.notes === undefined) {
         // An engine from before templates ignores them and returns plain claims.
-        options.onStatus?.('This Humain version does not write templated notes yet; run `seashell ai install` with a newer engine.');
+        options.onStatus?.('This AI engine cannot follow templates yet, so the notes use none.');
       }
       const analysis: MeetingAnalysis = {
         final: true,
@@ -511,7 +514,10 @@ async function askHumain(
   if (artifact?.ai?.off) throw new MeetingAiOffError();
   const trimmed = question.trim();
   if (!trimmed) throw new Error('Meeting question cannot be empty');
-  const segments = meetingSegments(record);
+  // During the call the answer is shown beside the lines it quotes, under the names the transcript shows,
+  // so it is asked under those names: "You" and "Speaker 2", never "Microphone" and "Remote speaker 2".
+  const segments = options.partial ? meetingSegments(record).map((segment) => segment.speakerLabel === undefined ? segment
+    : { ...segment, speakerLabel: speakerDisplayName(segment.speakerId, segment.speakerLabel) }) : meetingSegments(record);
   if (options.partial && !segments.length) throw new Error('Nothing has been said yet.');
   const validIds = new Set(segments.map((segment) => segment.id));
   const approvedContext = {
@@ -617,14 +623,9 @@ export const CATCH_UP_SECONDS = 5 * 60;
  */
 export function catchUpQuestion(nowSeconds: number, lastLookedSeconds?: number): { question: string; from: number } {
   const from = Math.max(0, Math.min(nowSeconds - CATCH_UP_SECONDS, lastLookedSeconds ?? Infinity));
-  const clock = (seconds: number) => {
-    const whole = Math.max(0, Math.floor(seconds));
-    const minutes = `${Math.floor(whole % 3600 / 60)}`.padStart(whole >= 3600 ? 2 : 1, '0');
-    return `${whole >= 3600 ? `${Math.floor(whole / 3600)}:` : ''}${minutes}:${String(whole % 60).padStart(2, '0')}`;
-  };
   return {
     from,
-    question: `What did I miss? Cover what was said from ${clock(from)} to ${clock(nowSeconds)} on the transcript clock: ` +
+    question: `What did I miss? Cover what was said from ${sentenceClock(from)} to ${sentenceClock(nowSeconds)} on the transcript clock: ` +
       'anything decided, anything asked of me or still waiting on me, and anything I should answer, most important first. Keep it short.',
   };
 }
@@ -646,8 +647,9 @@ export async function askDuringCall(
   const byId = new Map(meetingSegments(record).map((segment) => [segment.id, segment]));
   const moments = evidenceSegmentIds.flatMap((id) => {
     const segment = byId.get(id);
+    // Named as the answer names them.
     return segment ? [{ id, start: segment.start, text: segment.text, ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
-      ...(segment.speakerLabel ? { speaker: segment.speakerLabel } : {}) }] : [];
+      ...(segment.speakerLabel ? { speaker: speakerDisplayName(segment.speakerId, segment.speakerLabel) } : {}) }] : [];
   }).toSorted((left, right) => left.start - right.start);
   return { question: question.trim(), answer, moments };
 }

@@ -3,8 +3,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { dirname, join } from 'path';
 import {
   humainRouteRequest,
-  NEWER_ENGINE,
   olderHumainEngine,
+  OlderEngineError,
   olderThanRevision4,
   runHumainMeeting,
   type HumainMeetingRoute,
@@ -16,7 +16,7 @@ import { isPrivate, readListed } from './meeting-memory.ts';
 import { loadProfile } from './meeting-templates.ts';
 import { listTranscriptRecords } from './transcript-library.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
-import { formatTuiClock } from './tui-state.ts';
+import { sentenceClock } from './tui-state.ts';
 import { loadVocabulary } from './vocabulary.ts';
 
 /**
@@ -208,7 +208,7 @@ export function briefCitation(brief: Pick<Brief, 'meetings'>, source: BriefSourc
   if (!meeting) return '';
   const times = source.evidenceSegmentIds.flatMap((id) => meeting.moments[id] === undefined ? [] : [meeting.moments[id]!])
     .sort((a, b) => a - b);
-  return `${meeting.title}, ${day(meeting.startedAt)}${times.length ? `, ${formatTuiClock(times[0]!)}` : ''}`;
+  return `${meeting.title}, ${day(meeting.startedAt)}${times.length ? `, ${sentenceClock(times[0]!)}` : ''}`;
 }
 
 export function briefMarkdown(brief: Omit<Brief, 'path'>): string {
@@ -310,7 +310,7 @@ export async function makeBrief(libraryDir: string, upcoming: UpcomingMeeting, o
   const env = options.env ?? process.env;
   const found = relevantMeetings(libraryDir, upcoming);
   if (!found.length) throw new NoBriefHistoryError(upcoming.title);
-  if (await olderThanRevision4(engineCheck(options))) throw new Error(`This AI engine cannot write briefs yet. ${NEWER_ENGINE}`);
+  if (await olderThanRevision4(engineCheck(options))) throw new OlderEngineError('This AI engine cannot write briefs yet.');
   // Privacy again, just before anything leaves: checking the engine can take 20 seconds,
   // and a meeting made private meanwhile, or whose settings stopped reading, is not sent.
   const chosen = found.filter((meeting) => !meetingIsPrivateAt(meeting.directory));
@@ -354,7 +354,7 @@ export async function makeBrief(libraryDir: string, upcoming: UpcomingMeeting, o
       timeoutMs: BRIEF_TIMEOUT_MS })
     .catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
-      throw olderHumainEngine(message) ? new Error(`This AI engine cannot write briefs yet. ${NEWER_ENGINE}`) : error;
+      throw olderHumainEngine(message) ? new OlderEngineError('This AI engine cannot write briefs yet.') : error;
     });
   const output = parseBriefOutput(result.output, sent);
   const brief: Omit<Brief, 'path'> = {
@@ -405,25 +405,41 @@ export function briefDue(events: readonly MeetingCalendarEvent[], libraryDir: st
     .toSorted((left, right) => left.startsAt.localeCompare(right.startsAt))[0];
 }
 
-/** The next meeting on the calendar today, for the home screen and `seashell brief next`. */
-export function nextCalendarMeeting(events: readonly MeetingCalendarEvent[], now = new Date()): MeetingCalendarEvent | undefined {
+/** How far ahead the recorder tells the app about meetings: far enough that tomorrow morning's is there tonight. */
+export const COMING_UP_HOURS = 36;
+/** At most this many meetings coming up, so counting each one's history stays quick. */
+export const COMING_UP_LIMIT = 12;
+
+/** The meetings still to come, soonest first: started a moment ago at most, and not over. */
+export function upcomingCalendarMeetings(events: readonly MeetingCalendarEvent[], now = new Date()): MeetingCalendarEvent[] {
   return events.filter((event) => Date.parse(event.startAt) > now.getTime() - 5 * 60_000 && Date.parse(event.endAt) > now.getTime())
-    .toSorted((left, right) => left.startAt.localeCompare(right.startAt))[0];
+    .toSorted((left, right) => left.startAt.localeCompare(right.startAt));
+}
+
+/** The next meeting on the calendar, for the home screen and `seashell brief next`. */
+export function nextCalendarMeeting(events: readonly MeetingCalendarEvent[], now = new Date()): MeetingCalendarEvent | undefined {
+  return upcomingCalendarMeetings(events, now)[0];
 }
 
 // MARK: - The next meeting, for the app
 
-/**
- * The recorder reads the calendar; the app does not, so the app learns the
- * next meeting from this file beside the library, as it learns the recorder's
- * state. `history` is how many past meetings a brief would read.
- */
-export interface NextMeeting {
+/** A meeting coming up, as the app lists it: `history` is how many past meetings a brief would read. */
+export interface ComingUpMeeting {
   upcoming: UpcomingMeeting;
   history: number;
   /** The brief's Markdown file, once there is one. */
   brief?: string;
+}
+
+/**
+ * The recorder reads the calendar; the app does not, so the app learns what is
+ * coming up from this file beside the library, as it learns the recorder's
+ * state. The nearest meeting is at the top, as it always was, so an older app
+ * still reads it; the rest of the next 36 hours follow in `later`.
+ */
+export interface NextMeeting extends ComingUpMeeting {
   updatedAtUnixMs: number;
+  later?: ComingUpMeeting[];
 }
 
 const NEXT_FILE = '.next-meeting.json';
@@ -434,12 +450,37 @@ export function writeNextMeeting(libraryDir: string, next: Omit<NextMeeting, 'up
   atomicWrite(path, `${JSON.stringify({ ...next, updatedAtUnixMs: nowUnixMs })}\n`);
 }
 
-/** The next meeting while it is still to come and the recorder said so recently. */
-export function readNextMeeting(libraryDir: string, now = new Date()): NextMeeting | undefined {
+/**
+ * A meeting from the file, while it is still to come, with its brief only while the file is there.
+ * A brief made since the recorder last looked, from the app or an agent, counts at once.
+ */
+function stillComing(libraryDir: string, meeting: ComingUpMeeting | undefined, now: Date, env: NodeJS.ProcessEnv): ComingUpMeeting | undefined {
+  if (!meeting?.upcoming?.title || typeof meeting.upcoming.startsAt !== 'string' || !Number.isSafeInteger(meeting.history)) return undefined;
+  if (Date.parse(meeting.upcoming.startsAt) < now.getTime() - 10 * 60_000) return undefined;
+  const { upcoming, history } = meeting;
+  const brief = meeting.brief && existsSync(meeting.brief) ? meeting.brief : findBrief(libraryDir, upcoming, env)?.path;
+  return { upcoming, history, ...(brief ? { brief } : {}) };
+}
+
+/** The meetings coming up, soonest first, while the recorder said so recently, and when it did. */
+function readNextFile(libraryDir: string, now: Date, env: NodeJS.ProcessEnv): { meetings: ComingUpMeeting[]; updatedAtUnixMs: number } | undefined {
   try {
     const next = JSON.parse(readFileSync(join(libraryDir, NEXT_FILE), 'utf8')) as NextMeeting;
-    if (!next?.upcoming?.title || typeof next.upcoming.startsAt !== 'string' || !Number.isSafeInteger(next.updatedAtUnixMs)) return undefined;
-    if (now.getTime() - next.updatedAtUnixMs > 15 * 60_000 || Date.parse(next.upcoming.startsAt) < now.getTime() - 10 * 60_000) return undefined;
-    return { ...next, ...(next.brief && !existsSync(next.brief) ? { brief: undefined } : {}) };
+    if (!next || !Number.isSafeInteger(next.updatedAtUnixMs) || now.getTime() - next.updatedAtUnixMs > 15 * 60_000) return undefined;
+    const meetings = [next, ...Array.isArray(next.later) ? next.later : []].flatMap((meeting) => stillComing(libraryDir, meeting, now, env) ?? [])
+      .toSorted((left, right) => left.upcoming.startsAt.localeCompare(right.upcoming.startsAt));
+    return { meetings, updatedAtUnixMs: next.updatedAtUnixMs };
   } catch { return undefined; }
+}
+
+/** Every meeting coming up in the next 36 hours, soonest first, for the app's Coming up list. */
+export function readComingUp(libraryDir: string, now = new Date(), env: NodeJS.ProcessEnv = process.env): ComingUpMeeting[] {
+  return readNextFile(libraryDir, now, env)?.meetings ?? [];
+}
+
+/** The next meeting while it is still to come and the recorder said so recently. */
+export function readNextMeeting(libraryDir: string, now = new Date(), env: NodeJS.ProcessEnv = process.env): NextMeeting | undefined {
+  const read = readNextFile(libraryDir, now, env);
+  const [nearest, ...later] = read?.meetings ?? [];
+  return nearest && { ...nearest, updatedAtUnixMs: read!.updatedAtUnixMs, ...(later.length ? { later } : {}) };
 }

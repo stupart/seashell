@@ -56,12 +56,35 @@ test('a line cut at the top of the view keeps its time and speaker', () => {
   // Stacked: the time and speaker sit on a row of their own above the words that are left.
   const stacked = timedTranscriptRows(timedRecord, 40, options);
   expect(plain(transcriptWindow(stacked, 1, 3))).toEqual(['00:00  You', 'A made-up opening line that is long', 'enough to wrap onto a second row here.']);
-  expect(plain(transcriptWindow(stacked, 2, 3))).toEqual(['00:00  You', 'enough to wrap onto a second row here.', '01:05  Speaker 1']);
+  // A row from the middle of a line starts with "…", so the time and speaker over it never read as one sentence with it.
+  expect(plain(transcriptWindow(stacked, 2, 3))).toEqual(['00:00  You', '…enough to wrap onto a second row here.', '01:05  Speaker 1']);
   // The last scroll leaves room for that row, so the last words are never pushed out of view.
   const last = lastTranscriptScroll(stacked, 3);
   expect(plain(transcriptWindow(stacked, last, 3)).at(-1)).toBe('A short reply.');
   // In columns: the cut row takes its line's time and speaker beside it.
   const columns = timedTranscriptRows(timedRecord, 64, options);
-  expect(plain(transcriptWindow(columns, 1, 2))[0]).toMatch(/^00:00  You {8}\S/u);
+  expect(plain(transcriptWindow(columns, 1, 2))[0]).toMatch(/^00:00  You {8}…\S/u);
+  // The rows after a line's first leave a column for "…", so a cut row fits as its line's first does.
+  for (const width of [40, 64]) for (const row of transcriptWindow(timedTranscriptRows(timedRecord, width, options), 2, 3)) {
+    expect(Bun.stringWidth(stripVTControlCharacters(row.text))).toBeLessThanOrEqual(width);
+  }
   expect(lastTranscriptScroll(columns, 2)).toBe(columns.length - 2);
+});
+
+test('something to look at in the notes stays marked on every row it wraps to, so all of it is yellow', async () => {
+  const { wrappedMeetingRows } = await import('../src/transcript-viewport.ts');
+  const { CAUTION, OWNER_NOTES_UNREAD, plainMeetingLines } = await import('../src/meeting-tui.ts');
+  const rows = wrappedMeetingRows([`${CAUTION}${OWNER_NOTES_UNREAD}`], 30);
+  expect(rows.length).toBeGreaterThan(1);
+  expect(rows.every((row) => row.startsWith(CAUTION))).toBe(true);
+  expect(rows.map((row) => row.slice(CAUTION.length)).join(' ')).toBe(OWNER_NOTES_UNREAD);
+  expect(plainMeetingLines([`${CAUTION}${OWNER_NOTES_UNREAD}`])).toEqual([OWNER_NOTES_UNREAD]);
+});
+
+test('"line removed" sits in the time column on its own row, without pushing the other owners left', async () => {
+  const { wrappedMeetingRows } = await import('../src/transcript-viewport.ts');
+  const rows = wrappedMeetingRows(['- Send the summary.\tYou · Fri\t00:35', '- Share the deck.\t\tline removed'], 60).map((row) => stripVTControlCharacters(row));
+  expect(rows[0]).toEndWith('You · Fri  00:35');
+  expect(rows[1]).toEndWith('line removed');
+  expect(rows.every((row) => Bun.stringWidth(row) === 60)).toBe(true);
 });

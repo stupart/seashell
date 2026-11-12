@@ -106,6 +106,40 @@ export function writeVocabulary(libraryDir: string, text: string, env: NodeJS.Pr
   return loadVocabulary(libraryDir, env);
 }
 
+/** One word or name typed in the app, as the file keeps it, or a plain reason it cannot be one. */
+function vocabularyTerm(text: string): string {
+  const term = text.replace(/\s+/gu, ' ').trim();
+  if (!term) throw new Error('Type a word or a name to add.');
+  if (term.startsWith('#')) throw new Error('A word cannot start with #: the file keeps those lines as notes to you.');
+  if (term.length > VOCABULARY_LIMITS.termLength) throw new Error(`Keep a word under ${VOCABULARY_LIMITS.termLength} characters.`);
+  return term;
+}
+
+/**
+ * Add a word from the app, at the end of the file, so the next call spells it that way. A word
+ * already there, in any case, is left as it is. The file keeps everything else the owner wrote.
+ */
+export function addVocabularyTerm(libraryDir: string, text: string, env: NodeJS.ProcessEnv = process.env): { term: string; added: boolean; vocabulary: Vocabulary } {
+  const term = vocabularyTerm(text);
+  const current = loadVocabulary(libraryDir, env);
+  if (current.terms.some((known) => known.toLocaleLowerCase('en-US') === term.toLocaleLowerCase('en-US'))) return { term, added: false, vocabulary: current };
+  if (current.terms.length >= VOCABULARY_LIMITS.terms) throw new Error(`Vocabulary holds ${VOCABULARY_LIMITS.terms} words. Remove one first.`);
+  const path = ensureVocabularyFile(libraryDir, env);
+  const written = readFileSync(path, 'utf8');
+  writeFileSync(path, `${written}${written && !written.endsWith('\n') ? '\n' : ''}${term}\n`, { mode: 0o600 });
+  return { term, added: true, vocabulary: loadVocabulary(libraryDir, env) };
+}
+
+/** Remove a word from the app: every line that is that word, in any case. Notes to you stay. */
+export function removeVocabularyTerm(libraryDir: string, term: string, env: NodeJS.ProcessEnv = process.env): Vocabulary {
+  const path = vocabularyPath(libraryDir, env);
+  if (!existsSync(path)) return loadVocabulary(libraryDir, env);
+  const key = term.replace(/\s+/gu, ' ').trim().toLocaleLowerCase('en-US');
+  const kept = readFileSync(path, 'utf8').split(/\r?\n/u).filter((line) => line.replace(/\s+/gu, ' ').trim().toLocaleLowerCase('en-US') !== key);
+  writeFileSync(path, kept.join('\n'), { mode: 0o600 });
+  return loadVocabulary(libraryDir, env);
+}
+
 /**
  * Whisper reads at most half its 448-token context as a prompt, and unusual
  * names cost about a token for every three characters. Terms go in file order,

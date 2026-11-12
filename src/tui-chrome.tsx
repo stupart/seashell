@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box, Text, useStdout } from 'ink';
-import { wrapWords } from './tui-state.ts';
+import { COMPACT_TUI_COLUMNS, wrapWords } from './tui-state.ts';
 
 export type Hint = readonly [key: string, label: string];
 type Tone = 'red' | 'yellow' | 'green' | 'cyan';
@@ -171,10 +171,16 @@ export function ScreenTitle(props: { name: string; color?: Tone; bold?: boolean;
   </Box>;
 }
 
-/** Help, audio help, notes setup and speaker naming take the body instead of pushing it around.
- * The sheet's name goes on the title line, as every screen's does. */
+/** How far a sheet sits in from the frame: where the reader's notes start, a column in on a wide window. */
+export function sheetInset(columns: number): number {
+  return columns >= COMPACT_TUI_COLUMNS ? 1 : 0;
+}
+
+/** Help, audio help, notes setup and speaker naming take the body instead of pushing it around, starting
+ * in the column the body they cover starts in. The sheet's name goes on the title line, as every screen's does. */
 export function Sheet(props: { children: React.ReactNode }) {
-  return <Box flexDirection="column" flexGrow={1} overflow="hidden">
+  const { stdout } = useStdout();
+  return <Box flexDirection="column" flexGrow={1} overflow="hidden" paddingLeft={sheetInset(stdout?.columns ?? 80)}>
     {props.children}
   </Box>;
 }
@@ -203,11 +209,11 @@ export const HELP_ROWS: ReadonlyArray<readonly [string, string]> = [
   ['Meeting', '1 notes · 2 transcript · 3 chat · a ask · + add a note · u draft a follow-up · g write notes, with a template · r name speakers · w watch video · c copy · e export · o open folder · d move to Trash'],
   ['Transcript', 't show/hide times · s show/hide speakers · l latest words · n next match'],
   ['When asked', 'y record · n ignore'],
-  ['Recording', 'starts and stops with the call · + note this moment · a catch up on what you missed · space record or stop by hand · V record with video · i audio help'],
-  ['Next', 'b brief for your next meeting'],
+  ['Recording', 'starts and stops with the call · + note this moment · a catch up: "What did I miss?" · space record or stop by hand · V record with video · i audio help'],
+  ['Next', 'b meetings coming up, and their briefs'],
   ['Add', 'f import a file · F import and separate speakers'],
   ['Setup', ', settings: speakers, AI and more'],
 ];
 
 /** What ✎ means, said once in help rather than beside every point. */
-export const FROM_YOUR_NOTES_HELP = '✎ in the notes: it came from your own notes.';
+export const FROM_YOUR_NOTES_HELP = '✎ marks a point from your own notes.';

@@ -6,6 +6,7 @@ import AIProviderPicker from './AISettings.tsx';
 import { loadConfig, updateMeetingConfig } from './config.ts';
 import { CLI_HELP, parseCliArgs } from './cli-args.ts';
 import { executeCliCommand } from './cli-runtime.ts';
+import { withNewerEngine } from './humain-client.ts';
 
 try {
   const command = parseCliArgs(process.argv.slice(2));
@@ -35,6 +36,6 @@ try {
     process.exitCode = await executeCliCommand(command);
   }
 } catch (error) {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(`${withNewerEngine(error)}\n`);
   process.exitCode = 1;
 }
