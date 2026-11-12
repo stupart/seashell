@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { createMeetingArtifact } from '../src/meeting-artifact.ts';
-import { META, meetingViewLines, plainMeetingLines, SUBHEADING, whosWhoNames } from '../src/meeting-tui.ts';
+import { CITED_TOO, META, meetingViewLines, plainMeetingLines, SUBHEADING, whosWhoNames } from '../src/meeting-tui.ts';
 import { wrappedMeetingRows } from '../src/transcript-viewport.ts';
 import { stripVTControlCharacters } from 'util';
 import { readFileSync } from 'fs';
@@ -299,4 +299,19 @@ test('a line and an action with a different owner or due date are two points, ho
   // The same owner, in fewer words, and the same day: one point.
   artifact.analysis.notes = notes('Dana: send the pilot user list by Monday.');
   expect(section(meetingViewLines(artifact, 'notes', record), 'Actions')).toEqual(['- Send the pilot user list.  Dana Whitfield · by Monday  00:12']);
+});
+
+test('a point cited in several meetings lists each down the time column, one a row, and copies them in a line', () => {
+  const lines = [`- Run the 30-minute training for the support team.${META}You${META}Nov 3 04:00${CITED_TOO}Nov 10 01:36`,
+    `- Training is booked for November 18 at 10am.${META}${META}Nov 10 01:36`];
+  // The times share one column, so "Nov 3" lines up under "Nov 10", and every owner ends in one place.
+  expect(wrappedMeetingRows(lines, 60).map((row) => stripVTControlCharacters(row))).toEqual([
+    '- Run the 30-minute training for the       You   Nov 3 04:00',
+    '  support team.                                 Nov 10 01:36',
+    '- Training is booked for November 18 at 10am.   Nov 10 01:36',
+  ]);
+  // More times than rows of words: the rest go down the column on rows of their own.
+  expect(wrappedMeetingRows([`- Short.${META}${META}Nov 3 04:00${CITED_TOO}Nov 10 01:36`], 40).map((row) => stripVTControlCharacters(row)))
+    .toEqual(['- Short.                     Nov 3 04:00', '                            Nov 10 01:36']);
+  expect(plainMeetingLines(lines)[0]).toBe('- Run the 30-minute training for the support team.  You  Nov 3 04:00; Nov 10 01:36');
 });

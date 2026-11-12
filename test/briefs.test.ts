@@ -5,6 +5,7 @@ import { dirname, join } from 'path';
 import {
   briefDue,
   briefKey,
+  briefPointOwner,
   findBrief,
   makeBrief,
   newestSource,
@@ -23,7 +24,7 @@ import {
 import { draftAsk, draftFollowUp, draftText, mailtoUrl } from '../src/drafts.ts';
 import { addMeetingNote } from '../src/owner-notes.ts';
 import { OlderEngineError, withNewerEngine, type runHumainMeeting } from '../src/humain-client.ts';
-import { createMeetingArtifact, MeetingAiOffError, saveMeetingArtifact, type MeetingAttendee } from '../src/meeting-artifact.ts';
+import { createMeetingArtifact, MeetingAiOffError, saveMeetingArtifact, type MeetingAttendee, type MeetingClaim } from '../src/meeting-artifact.ts';
 import { findTranscriptRecord, saveTranscriptRecord } from '../src/transcript-library.ts';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 
@@ -163,6 +164,36 @@ test('a point citing several meetings is shown at the newest, which supersedes t
   // A meeting the brief does not list never wins over one it does.
   expect(newestSource(brief, { sources: [{ meetingId: 'gone', evidenceSegmentIds: ['s1'] }, kickoff] })).toEqual(kickoff);
   expect(newestSource(brief, { sources: [] })).toBeUndefined();
+});
+
+test("a brief's point shows the owner and due date of its own action only, never one that shares a cited line", () => {
+  // The rc35 acceptance brief before the Acme weekly sync (made-up), and the sync's own notes.
+  const brief: Pick<Brief, 'meetings'> = { meetings: [
+    { id: 'sync', title: 'Acme weekly sync', startedAt: '2026-11-10T20:00:00Z', moments: {} },
+    { id: 'kickoff', title: 'Acme pilot kickoff', startedAt: '2026-11-03T20:00:00Z', moments: {} },
+  ] };
+  const claim = (type: MeetingClaim['type'], text: string, ids: number[], extra: Partial<MeetingClaim> = {}): MeetingClaim =>
+    ({ id: text, type, text, evidenceSegmentIds: ids.map((id) => `s${String(id).padStart(6, '0')}`), confidence: 0.9, ...extra });
+  const sync = [
+    claim('decision', 'The pilot user list deadline moved to Wednesday because two team leads still need to send names.', [5, 6, 7]),
+    claim('action_item', 'Finish the pilot user list.', [5, 6, 7], { speakerId: 'REMOTE_00', due: 'by Wednesday' }),
+    claim('open_question', 'Is a data processing agreement needed? Legal hasn\'t answered yet.', [14]),
+    claim('follow_up', 'Chase legal on the data processing agreement.', [14, 15], { person: 'You', due: 'before the pilot starts' }),
+    claim('follow_up', 'Next weekly sync at the same time next week.', [16], { due: 'same time next week' }),
+  ];
+  const point = (text: string, ids: number[]) => ({ text, sources: [{ meetingId: 'sync', evidenceSegmentIds: ids.map((id) => `s${String(id).padStart(6, '0')}`) }] });
+  const owner = (heading: string, text: string, ids: number[]) => briefPointOwner(brief, heading, point(text, ids), (id) => id === 'sync' ? sync : []);
+  expect(owner('Open actions', 'Dana: finish the pilot user list, due by Wednesday (two team leads still need to send names).', [5, 6, 7])).toBe('by Wednesday');
+  expect(owner('Open actions', 'You: chase legal on the data processing agreement before the pilot starts.', [14, 15])).toBe('You · before the pilot starts');
+  // The question shares a line with the follow-up to chase legal, but it is not that follow-up.
+  expect(owner('Open questions', 'Is a separate data processing agreement needed for the pilot? Legal hasn\'t answered yet.', [14])).toBeUndefined();
+  expect(owner('Since last time', 'Legal still hasn\'t said whether a data processing agreement is needed.', [14])).toBeUndefined();
+  // A decision has no owner, even when an action rests on the same lines.
+  expect(owner('Decisions so far', 'Changed: the pilot user list deadline moved from Monday to Wednesday.', [6, 7])).toBeUndefined();
+  expect(owner('Decisions so far', 'Weekly progress sync at the same time each week.', [16])).toBeUndefined();
+  // "Since last time" holds any kind of point: an action's own words find it.
+  expect(owner('Since last time', 'The pilot user list slipped and is now due Wednesday.', [5, 6, 7])).toBe('by Wednesday');
+  expect(owner('Since last time', 'Legal still hasn\'t answered, and you\'ll chase them.', [14, 15])).toBe('You · before the pilot starts');
 });
 
 test('a brief citing a meeting or moment it was not given is refused', async () => {

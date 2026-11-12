@@ -30,7 +30,6 @@ import {
 import { createTranscriptRecord } from './transcript-record.ts';
 import { loadMeetingTemplates, meetingInstructions, NO_TEMPLATE } from './meeting-templates.ts';
 import {
-  claimOwnerAndDue,
   createChatMessage,
   createMeetingArtifact,
   loadMeetingArtifact,
@@ -41,10 +40,10 @@ import {
 } from './meeting-artifact.ts';
 import { askDuringCall, catchUpQuestion, chatWithMeeting, enrichMeeting, type LiveAnswer } from './meeting-enrichment.ts';
 import { addMeetingNote, addRecordingNote, meetingOwnerNotes, recordingBundle } from './owner-notes.ts';
-import { briefKey, findBrief, makeBrief, newestSource, NoBriefHistoryError, readComingUp, type Brief, type ComingUpMeeting } from './briefs.ts';
+import { briefKey, briefPointOwner, findBrief, makeBrief, newestSource, NoBriefHistoryError, readComingUp, type Brief, type BriefSource, type ComingUpMeeting } from './briefs.ts';
 import { draftFollowUp, draftText, mailtoUrl, type DraftKind, type FollowUpDraft } from './drafts.ts';
 import { Chalk } from 'chalk';
-import { CAUTION, HEADING, META, meetingViewLines, OWNER_NOTES_UNREAD, plainMeetingLines, SUBHEADING, whosWhoNames, type MeetingView } from './meeting-tui.ts';
+import { CAUTION, CITED_TOO, HEADING, META, meetingViewLines, OWNER_NOTES_UNREAD, plainMeetingLines, SUBHEADING, whosWhoNames, type MeetingView } from './meeting-tui.ts';
 import { FROM_YOUR_NOTES_HELP, HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, sheetInset, SOURCE_REMOVED_HELP, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
 import { lastTranscriptScroll, lineAt, timedTranscriptRows, transcriptWindow, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
@@ -2034,16 +2033,20 @@ export default function App(props: {
     try { const artifact = loadMeetingArtifact(libraryRoot, meeting.id); return [meeting.id, artifact?.analysis?.claims ?? artifact?.provisionalClaims ?? []]; }
     catch { return [meeting.id, []]; }
   })), [briefSheet?.brief?.key, libraryRoot]);
-  // The points a brief cites, in order: which past meeting, and when in it. A point citing several is shown
-  // at the newest, which supersedes the rest.
-  const briefPoints = (briefSheet?.brief?.sections ?? []).flatMap((section) => section.items).map((item) => {
-    const source = newestSource(briefSheet!.brief!, item);
-    const meeting = source && briefSheet!.brief!.meetings.find((candidate) => candidate.id === source.meetingId);
-    const times = source?.evidenceSegmentIds.flatMap((id) => meeting?.moments[id] === undefined ? [] : [meeting.moments[id]!]).sort((a, b) => a - b) ?? [];
-    const claim = source && briefClaims.get(source.meetingId)?.find((candidate) => (candidate.type === 'action_item' || candidate.type === 'follow_up')
-      && candidate.evidenceSegmentIds.some((id) => source.evidenceSegmentIds.includes(id)));
-    return { meeting, at: times[0], owner: claim ? claimOwnerAndDue(claim) : undefined };
-  });
+  // The points a brief cites, in order: every past meeting each cites and when in it, as the saved brief
+  // lists them. Enter opens the newest, which supersedes the rest, and its owner is read there.
+  const briefPoints = (briefSheet?.brief?.sections ?? []).flatMap((section) => section.items.map((item) => ({ section, item })))
+    .map(({ section, item }) => {
+      const brief = briefSheet!.brief!;
+      const cite = (source: BriefSource) => {
+        const meeting = brief.meetings.find((candidate) => candidate.id === source.meetingId);
+        const times = source.evidenceSegmentIds.flatMap((id) => meeting?.moments[id] === undefined ? [] : [meeting.moments[id]!]).sort((a, b) => a - b);
+        return { meeting, at: times[0] };
+      };
+      const newest = newestSource(brief, item);
+      return { ...newest ? cite(newest) : { meeting: undefined, at: undefined }, cites: item.sources.map(cite),
+        owner: briefPointOwner(brief, section.heading, item, (id) => briefClaims.get(id) ?? []) };
+    });
   const briefLines = briefSheet ? (() => {
     const brief = briefSheet.brief;
     if (!brief) return sheetLines([briefSheet.error ? { text: briefSheet.error, color: 'red' } : { text: `◐ ${briefSheet.status ?? 'Writing the brief…'}`, dim: true }], sheetColumns);
@@ -2060,8 +2063,10 @@ export default function App(props: {
         const first = point;
         point += section.items.length;
         const bullets = section.items.map((item, index) => {
-          const { meeting, at, owner } = briefPoints[first + index]!;
-          const when = meeting ? [...(single ? [] : [listWhen(meeting.startedAt, now)]), ...(at === undefined ? [] : [formatTuiClock(at)])].join(' ') : '';
+          const { cites, owner } = briefPoints[first + index]!;
+          const when = cites.flatMap(({ meeting, at }) => meeting
+            ? [[...(single ? [] : [listWhen(meeting.startedAt, now)]), ...(at === undefined ? [] : [formatTuiClock(at)])].join(' ')] : [])
+            .filter(Boolean).join(CITED_TOO);
           return owner || when ? `- ${item.text}${META}${owner ?? ''}${META}${when}` : `- ${item.text}`;
         });
         let index = first - 1;

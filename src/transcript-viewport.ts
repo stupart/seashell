@@ -3,7 +3,7 @@ import { stripVTControlCharacters } from 'util';
 import { coalesceTranscriptSegments, speakerLabel } from './transcript-renderer.ts';
 import type { StructuredTranscript } from './transcript-types.ts';
 import { formatTuiClock, speakerColors, speakerDisplayName, wrapWords, YOUR_SPEAKER_ID } from './tui-state.ts';
-import { bulletParts, CAUTION, LINE_REMOVED } from './meeting-tui.ts';
+import { bulletParts, CAUTION, CITED_TOO, LINE_REMOVED } from './meeting-tui.ts';
 
 const color = new Chalk({ level: 1 });
 const MAX_NAME_COLUMN = 18;
@@ -135,14 +135,18 @@ const MIN_BULLET_TEXT_COLUMNS = 24;
 /**
  * Notes and chat as terminal rows, in one layout at every width. A bullet's text wraps under itself;
  * on its first row, against the right edge, sits who owns it and by when, in the text's own weight,
- * then when it was said, dim. The times share one column, so every owner ends in one place. Where
- * that leaves the text too little room, owner and time go on the row under the text, indented.
+ * then when it was said, dim. The times share one column, so every owner ends in one place. A point
+ * said at several times (a brief's, from several meetings) lists them down that column, one a row
+ * (CITED_TOO between them). Where that leaves the text too little room, owner and time go on the
+ * row under the text, indented.
  */
 export function wrappedMeetingRows(lines: readonly string[], columns: number): string[] {
   const width = Math.max(1, Math.floor(columns));
   const parts = lines.map(bulletParts);
+  const timesOf = (clock: string | undefined) => clock ? clock.split(CITED_TOO) : [];
   // The times share one column; "source removed" reaches left past it on its own row rather than widen it for all.
-  const clockColumn = Math.max(0, ...parts.map(({ body, clock }) => body.startsWith('- ') && clock && !clock.includes(LINE_REMOVED) ? clock.length : 0));
+  const clockColumn = Math.max(0, ...parts.flatMap(({ body, clock }) => body.startsWith('- ') && clock && !clock.includes(LINE_REMOVED)
+    ? timesOf(clock).map((time) => Bun.stringWidth(time)) : [0]));
   return parts.flatMap(({ body, owner, clock }) => {
     const clean = stripVTControlCharacters(body) || ' ';
     // Something to look at stays marked on every row, so all of it is yellow.
@@ -150,19 +154,24 @@ export function wrappedMeetingRows(lines: readonly string[], columns: number): s
     if (!clean.startsWith('- ')) return wrapWords(clean, width);
     const text = clean.slice(2);
     if (!owner && !clock) return wrapWords(text, Math.max(1, width - 2)).map((row, index) => `${index ? '  ' : '- '}${row}`);
-    const clockWidth = Math.max(clockColumn, clock ? Bun.stringWidth(clock) : 0);
-    const time = clock ? color.dim(clock.padStart(clockWidth)) : '';
-    const shown = owner && clock ? `${owner}  ${time}` : owner ?? time;
+    const [first, ...more] = timesOf(clock);
+    const clockWidth = Math.max(clockColumn, first ? Bun.stringWidth(first) : 0);
+    const time = first ? color.dim(first.padStart(clockWidth)) : '';
+    const shown = owner && first ? `${owner}  ${time}` : owner ?? time;
     // The time column is kept on a line without a time, so its owner still ends where the others do.
     const metaWidth = owner ? Bun.stringWidth(owner) + (clockWidth ? 2 + clockWidth : 0) : clockWidth;
     const room = width - 2 - metaWidth - 2;
     if (room < MIN_BULLET_TEXT_COLUMNS) {
       return [...wrapWords(text, Math.max(1, width - 2)).map((row, index) => `${index ? '  ' : '- '}${row}`),
-        `  ${owner && clock ? `${owner}  ${color.dim(clock)}` : owner ?? color.dim(clock!)}`];
+        `  ${owner && first ? `${owner}  ${color.dim(first)}` : owner ?? color.dim(first!)}`, ...more.map((later) => `  ${color.dim(later)}`)];
     }
-    return wrapWords(text, room).map((row, index) => index
-      ? `  ${row}`
-      : `- ${row}${' '.repeat(width - 2 - Bun.stringWidth(row) - metaWidth)}${shown}`);
+    const rows = wrapWords(text, room);
+    return Array.from({ length: Math.max(rows.length, 1 + more.length) }, (_, index) => {
+      const row = rows[index] ?? '';
+      if (index === 0) return `- ${row}${' '.repeat(width - 2 - Bun.stringWidth(row) - metaWidth)}${shown}`;
+      const later = more[index - 1];
+      return later ? `  ${row}${' '.repeat(Math.max(0, width - 2 - Bun.stringWidth(row) - clockWidth))}${color.dim(later.padStart(clockWidth))}` : `  ${row}`;
+    });
   });
 }
 

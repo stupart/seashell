@@ -60,7 +60,7 @@ function wordsOf(text: string): Set<string> {
 }
 
 /** The words that tell one point from another. */
-function contentWords(text: string): Set<string> {
+export function contentWords(text: string): Set<string> {
   return new Set([...wordsOf(text)].filter((word) => !STOP_WORDS.has(word)));
 }
 
@@ -83,6 +83,8 @@ export const META = '\t';
  * what it means.
  */
 export const FROM_YOUR_NOTES = '✎';
+/** Between the times of a point said at several (a brief's, from several meetings): one a row, down the time column. */
+export const CITED_TOO = '\n';
 /** In the time column of a point whose every cited line was removed from the transcript: its source, as help says. */
 export const LINE_REMOVED = 'source removed';
 
@@ -99,7 +101,7 @@ export function plainMeetingLines(lines: readonly string[]): string[] {
     if (line.startsWith(HEADING)) return line.slice(HEADING.length);
     if (line.startsWith(CAUTION)) return line.slice(CAUTION.length);
     const { body, owner, clock } = bulletParts(line);
-    return [body, owner, clock].filter(Boolean).join('  ');
+    return [body, owner, clock?.split(CITED_TOO).join('; ')].filter(Boolean).join('  ');
   });
 }
 

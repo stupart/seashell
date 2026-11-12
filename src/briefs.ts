@@ -10,9 +10,10 @@ import {
   type HumainMeetingRoute,
   type MeetingEngineCheck,
 } from './humain-client.ts';
-import { meetingIsPrivateAt, type MeetingArtifact, type MeetingAttendee, type MeetingCalendarEvent } from './meeting-artifact.ts';
+import { claimOwnerAndDue, meetingIsPrivateAt, type MeetingArtifact, type MeetingAttendee, type MeetingCalendarEvent, type MeetingClaim } from './meeting-artifact.ts';
 import { claimsForHumain, engineCheck, meetingSegments, retryableRun, runSafeId, stableKey } from './meeting-enrichment.ts';
 import { isPrivate, readListed } from './meeting-memory.ts';
+import { contentWords } from './meeting-tui.ts';
 import { loadProfile } from './meeting-templates.ts';
 import { listTranscriptRecords } from './transcript-library.ts';
 import type { TranscriptRecord } from './transcript-types.ts';
@@ -221,6 +222,42 @@ export function newestSource(brief: Pick<Brief, 'meetings'>, item: Pick<BriefIte
     return meeting ? Date.parse(meeting.startedAt) : Number.NEGATIVE_INFINITY;
   };
   return item.sources.toSorted((left, right) => started(right) - started(left))[0];
+}
+
+/** What a brief's section lists, by its heading: actions have an owner and a due date; decisions, questions and risks do not. */
+function sectionHolds(heading: string): 'actions' | 'other' | 'any' {
+  if (/\b(?:actions?|next steps?|to[- ]?dos?|follow[- ]?ups?|owed|waiting on)\b/iu.test(heading)) return 'actions';
+  if (/\b(?:decisions?|decided|questions?|risks?|concerns?)\b/iu.test(heading)) return 'other';
+  return 'any';
+}
+
+/**
+ * Who owns a brief's point and by when, as the past meeting's notes say: "You · by Friday". Only
+ * for the point's own action or follow-up, never one that merely shares a cited line with it: a
+ * question about the data agreement is not the action to chase legal about it. The point's own
+ * claim, in the newest meeting it cites, is the one citing the same lines (most alike first), then
+ * the one whose words it says; under Decisions, Open questions and Risks, a point has no owner.
+ */
+export function briefPointOwner(
+  brief: Pick<Brief, 'meetings'>, heading: string, item: Pick<BriefItem, 'text' | 'sources'>,
+  claimsOf: (meetingId: string) => readonly MeetingClaim[],
+): string | undefined {
+  const holds = sectionHolds(heading);
+  const source = newestSource(brief, item);
+  if (!source || holds === 'other') return undefined;
+  const cited = new Set(source.evidenceSegmentIds);
+  const words = contentWords(item.text);
+  const action = (claim: MeetingClaim) => claim.type === 'action_item' || claim.type === 'follow_up';
+  const ranked = claimsOf(source.meetingId).flatMap((claim) => {
+    if (holds === 'actions' && !action(claim)) return [];
+    const shared = claim.evidenceSegmentIds.filter((id) => cited.has(id)).length;
+    if (!shared) return [];
+    const said = contentWords(claim.text);
+    return [{ claim, overlap: shared / new Set([...cited, ...claim.evidenceSegmentIds]).size,
+      words: said.size ? [...said].filter((word) => words.has(word)).length / said.size : 0 }];
+  }).sort((left, right) => right.overlap - left.overlap || right.words - left.words);
+  const own = ranked[0]?.claim;
+  return own && action(own) ? claimOwnerAndDue(own) : undefined;
 }
 
 export function briefMarkdown(brief: Omit<Brief, 'path'>): string {
