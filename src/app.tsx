@@ -1992,7 +1992,7 @@ export default function App(props: {
         // The times are the citation: where to look in the transcript.
         ...(liveAnswer.answer.moments.length ? ['' as const, { text: 'From the call', dim: true },
           // As the transcript shows them: the time, who, then the words, wrapped under the words.
-          ...liveAnswer.answer.moments.slice(0, 5).flatMap((moment) => {
+          ...liveAnswer.answer.moments.flatMap((moment) => {
             const lead = `${formatTuiClock(moment.start)}  ${moment.speaker ? `${speakerDisplayName(moment.speakerId, moment.speaker)}: ` : ''}`;
             const room = Math.max(8, sheetColumns - Bun.stringWidth(lead));
             return wrapWords(moment.text.replace(/\s+/gu, ' ').trim(), room).map((text, index) =>

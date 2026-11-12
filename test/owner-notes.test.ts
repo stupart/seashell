@@ -5,7 +5,7 @@ import { dirname, join } from 'path';
 import { CaptureSessionStore } from '../src/capture-session.ts';
 import type { runHumainMeeting } from '../src/humain-client.ts';
 import { createMeetingArtifact, loadMeetingArtifact, MeetingAiOffError, saveMeetingArtifact } from '../src/meeting-artifact.ts';
-import { askDuringCall, catchUpQuestion, chatWithMeeting, claimsForHumain, enrichMeeting } from '../src/meeting-enrichment.ts';
+import { askDuringCall, catchUpQuestion, chatWithMeeting, claimsForHumain, enrichMeeting, momentsThatMatter } from '../src/meeting-enrichment.ts';
 import { CAUTION, FROM_YOUR_NOTES, meetingViewLines } from '../src/meeting-tui.ts';
 import {
   addMeetingNote,
@@ -267,6 +267,19 @@ test('every request names your side "You" and each other voice as the screen doe
   for (const request of humain.requests) {
     expect(request.segments.map((segment: { speakerLabel?: string }) => segment.speakerLabel)).toEqual(['You', 'Speaker 1', 'Speaker 2', 'Speaker 3']);
   }
+});
+
+test('catch up shows the moments that matter: the ones the answer leads with, or the latest, never just the earliest five', () => {
+  // From the rc35 acceptance run (made-up): the answer cited its eleven moments most important first.
+  const at = (start: number) => ({ id: `s${String(start / 12 + 1).padStart(6, '0')}`, start, text: `Line at ${start}.` });
+  const led = [96, 108, 48, 60, 72, 120, 168, 144, 156, 132, 84].map(at);
+  expect(momentsThatMatter(led).map((moment) => moment.start)).toEqual([96, 108, 48, 60, 72]);
+  // Cited in the order they were said, they say nothing about what leads: the latest five, still in order.
+  const said = [48, 60, 72, 84, 96, 108, 120, 132, 144, 156, 168].map(at);
+  expect(momentsThatMatter(said).map((moment) => moment.start)).toEqual([120, 132, 144, 156, 168]);
+  expect(momentsThatMatter(said.slice(0, 3)).map((moment) => moment.start)).toEqual([48, 60, 72]);
+  // And the question asks for a short answer, in words a model keeps to.
+  expect(catchUpQuestion(180, 60).question).toContain('at most three short sentences, under 60 words');
 });
 
 test('a question during the call reads the transcript so far, is marked partial, and saves nothing', async () => {

@@ -615,6 +615,7 @@ export interface CitedMoment {
 export interface LiveAnswer {
   question: string;
   answer: string;
+  /** The moments to show under it, at most MOMENTS_SHOWN (momentsThatMatter). */
   moments: CitedMoment[];
 }
 
@@ -630,7 +631,8 @@ export function catchUpQuestion(nowSeconds: number, lastLookedSeconds?: number):
   return {
     from,
     question: `What did I miss? Cover what was said from ${sentenceClock(from)} to ${sentenceClock(nowSeconds)} on the transcript clock: ` +
-      'anything decided, anything asked of me or still waiting on me, and anything I should answer, most important first. Keep it short.',
+      'anything decided, anything asked of me or still waiting on me, and anything I should answer, most important first. ' +
+      'Answer in at most three short sentences, under 60 words, and leave out anything that needs nothing from me.',
   };
 }
 
@@ -649,11 +651,25 @@ export async function askDuringCall(
   const { record, answer, evidenceSegmentIds } = await askHumain(libraryDir, transcriptId, question, route,
     { onStatus: options.onStatus, runner: options.runner ?? runHumainMeeting, engine: options.engine, partial: true, signal: options.signal });
   const byId = new Map(meetingSegments(record).map((segment) => [segment.id, segment]));
-  const moments = evidenceSegmentIds.flatMap((id) => {
+  const moments = [...new Set(evidenceSegmentIds)].flatMap((id) => {
     const segment = byId.get(id);
     // Named as the answer names them.
     return segment ? [{ id, start: segment.start, text: segment.text, ...(segment.speakerId ? { speakerId: segment.speakerId } : {}),
-      ...(segment.speakerLabel ? { speaker: speakerDisplayName(segment.speakerId, segment.speakerLabel) } : {}) }] : [];
-  }).toSorted((left, right) => left.start - right.start);
-  return { question: question.trim(), answer, moments };
+      ...(segment.speakerLabel ? { speaker: segment.speakerLabel } : {}) }] : [];
+  });
+  return { question: question.trim(), answer, moments: momentsThatMatter(moments) };
+}
+
+/** How many of an answer's moments a sheet shows under it. */
+export const MOMENTS_SHOWN = 5;
+
+/**
+ * The moments an answer rests on that a sheet has room for, the ones that matter: those it cites
+ * first, since it was asked for the most important first. Cited simply in the order they were said,
+ * they say nothing about what leads, so the latest are shown, still in that order: the earliest are
+ * what you saw before you looked away.
+ */
+export function momentsThatMatter(moments: readonly CitedMoment[], limit = MOMENTS_SHOWN): CitedMoment[] {
+  const said = moments.every((moment, index) => index === 0 || moments[index - 1]!.start <= moment.start);
+  return said ? moments.slice(-limit) : moments.slice(0, limit);
 }
