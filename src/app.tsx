@@ -44,7 +44,7 @@ import { addMeetingNote, addRecordingNote, meetingOwnerNotes, recordingBundle } 
 import { briefKey, findBrief, makeBrief, NoBriefHistoryError, readComingUp, type Brief, type ComingUpMeeting } from './briefs.ts';
 import { draftFollowUp, draftText, mailtoUrl, type DraftKind, type FollowUpDraft } from './drafts.ts';
 import { Chalk } from 'chalk';
-import { CAUTION, HEADING, META, meetingViewLines, OWNER_NOTES_UNREAD, plainMeetingLines, SUBHEADING, type MeetingView } from './meeting-tui.ts';
+import { CAUTION, HEADING, META, meetingViewLines, OWNER_NOTES_UNREAD, plainMeetingLines, SUBHEADING, whosWhoNames, type MeetingView } from './meeting-tui.ts';
 import { FROM_YOUR_NOTES_HELP, HELP_ROWS, HelpRow, KeyBar, Paragraph, Prompt, ScreenTitle, Sheet, sheetInset, SOURCE_REMOVED_HELP, Toast, withFix, type Hint, type TitleStatus } from './tui-chrome.tsx';
 import { lastTranscriptScroll, lineAt, timedTranscriptRows, transcriptWindow, wrappedMeetingRows, MouseScrollDecoder } from './transcript-viewport.ts';
 import {
@@ -1535,6 +1535,19 @@ export default function App(props: {
   [currentMeeting, meetingView, currentRecord, ownerNotes, recordingNow]);
   // The notes left out what you typed: the line under your notes says so, and the key bar leads with AI settings.
   const notesUnread = meetingLines.includes(`${CAUTION}${OWNER_NOTES_UNREAD}`);
+  // Who's who in the notes names speakers still without one: the speaker picker suggests those names, one key from kept.
+  const whosWho = useMemo(() => currentMeeting && currentRecord
+    ? whosWhoNames(currentMeeting.analysis?.claims ?? currentMeeting.provisionalClaims, currentRecord.speakers) : new Map<string, string>(),
+  [currentMeeting, currentRecord?.speakers]);
+  /** Who's who names said not to be someone, by meeting, speaker and name, so n is not asked again. */
+  const [declinedNames, setDeclinedNames] = useState<ReadonlySet<string>>(() => new Set());
+  const declinedKey = (speakerId: string, name: string) => `${currentRecord?.id}\n${speakerId}\n${name}`;
+  /** A name the picker suggests: from a voice named before, already in place, or from Who's who, not yet. */
+  const nameSuggestion = (speaker: TranscriptRecord['speakers'][number]): { name: string; from: 'voice' | 'notes' } | undefined => {
+    if (speaker.suggestion) return { name: speaker.label, from: 'voice' };
+    const named = whosWho.get(speaker.id);
+    return named && !declinedNames.has(declinedKey(speaker.id, named)) ? { name: named, from: 'notes' } : undefined;
+  };
   const auxiliaryMeetingLines = useMemo(() => (
     currentMeeting && meetingView !== 'transcript'
       ? wrappedMeetingRows([...(yourSide && view === 'record' && meetingView === 'notes' ? [`${CAUTION}${yourSide}`, ''] : []), ...meetingLines], contentColumns)
@@ -2241,13 +2254,21 @@ export default function App(props: {
     if (speakerPickerOpen) {
       if (key.escape || input === 'r') { setSpeakerPickerOpen(false); return; }
       const speakers = currentRecord?.speakers ?? [];
-      const suggested = speakers[speakerSelection]?.suggestion ? speakers[speakerSelection] : undefined;
+      const chosen = speakers[speakerSelection];
+      const suggestion = chosen && nameSuggestion(chosen);
       if (key.upArrow) setSpeakerSelection((index) => moveSelection(index, -1, speakers.length));
       else if (key.downArrow) setSpeakerSelection((index) => moveSelection(index, 1, speakers.length));
       // A name Seashell suggested from a known voice: keep it, which also teaches the voice, or say it is not them.
-      else if (input === 'y' && suggested) renameSpeaker(suggested.id, suggested.label, `Kept ${suggested.label}.`);
-      else if (input === 'n' && suggested) renameSpeaker(suggested.id, suggested.suggestion!.previous,
-        `${suggested.label} is ${speakerDisplayName(suggested.id, suggested.suggestion!.previous)} again.`);
+      else if (input === 'y' && chosen?.suggestion) renameSpeaker(chosen.id, chosen.label, `Kept ${chosen.label}.`);
+      else if (input === 'n' && chosen?.suggestion) renameSpeaker(chosen.id, chosen.suggestion.previous,
+        `${chosen.label} is ${speakerDisplayName(chosen.id, chosen.suggestion.previous)} again.`);
+      // A name from Who's who: y names them with it, n leaves them unnamed and stops suggesting it.
+      else if (input === 'y' && chosen && suggestion) renameSpeaker(chosen.id, suggestion.name,
+        `${speakerDisplayName(chosen.id, chosen.label)} is now ${suggestion.name}.`);
+      else if (input === 'n' && chosen && suggestion) {
+        setDeclinedNames((current) => new Set([...current, declinedKey(chosen.id, suggestion.name)]));
+        setNotice(`Left ${speakerDisplayName(chosen.id, chosen.label)} unnamed.`);
+      }
       else if (key.return) {
         const speaker = speakers[speakerSelection];
         setSpeakerPickerOpen(false);
@@ -3031,8 +3052,12 @@ export default function App(props: {
     </Sheet>;
   })() : null;
   const namedSpeakers = currentRecord?.speakers ?? [];
-  const speakerName = (speaker: (typeof namedSpeakers)[number]) =>
-    `${speakerDisplayName(speaker.id, speaker.label)}${speaker.suggestion ? ' · suggested' : ''}`;
+  const speakerName = (speaker: (typeof namedSpeakers)[number]) => {
+    const suggestion = nameSuggestion(speaker);
+    return suggestion ? `${speakerDisplayName(speaker.id, suggestion.name)} · suggested` : speakerDisplayName(speaker.id, speaker.label);
+  };
+  // Where the suggested names come from, said once under the list.
+  const suggestedFrom = new Set(namedSpeakers.flatMap((speaker) => nameSuggestion(speaker)?.from ?? []));
   const speakerColumn = Math.min(32, Math.max(18, ...namedSpeakers.map((speaker) => speakerName(speaker).length))) + 2;
   const speakerSheet = speakerPickerOpen && currentRecord ? <Sheet>
     {namedSpeakers.map((speaker, index) => {
@@ -3042,8 +3067,9 @@ export default function App(props: {
         <Text dimColor={index !== speakerSelection}>“{said}”</Text>
       </Text>;
     })}
-    {namedSpeakers.some((speaker) => speaker.suggestion) && <Box marginTop={1}>
-      <Text dimColor wrap="wrap">Suggested names come from voices you named before.</Text>
+    {suggestedFrom.size > 0 && <Box marginTop={1}>
+      <Paragraph width={sheetColumns} dimColor text={suggestedFrom.size > 1 ? "Suggested names come from voices you named before, and from Who's who in the notes."
+        : suggestedFrom.has('notes') ? "Suggested names come from Who's who in the notes." : 'Suggested names come from voices you named before.'} />
     </Box>}
   </Sheet> : null;
   // Coming up: when, what, and whether its brief is ready or has nothing to read.
@@ -3071,7 +3097,8 @@ export default function App(props: {
   </Sheet> : null;
 
   // Questions and typed answers take the key bar's row. Their keys are never cut.
-  const suggested = speakerPickerOpen ? currentRecord?.speakers[speakerSelection]?.suggestion ? currentRecord.speakers[speakerSelection] : undefined : undefined;
+  const pickedSpeaker = speakerPickerOpen ? currentRecord?.speakers[speakerSelection] : undefined;
+  const suggested = pickedSpeaker && nameSuggestion(pickedSpeaker);
   const noteClock = noteInput?.typedAtUnixMs !== undefined && recordingInView
     ? sentenceClock((noteInput.typedAtUnixMs - recordingInView.startedAtUnixMs) / 1000)
     : noteInput?.at !== undefined ? sentenceClock(noteInput.at) : undefined;
@@ -3184,7 +3211,7 @@ export default function App(props: {
   const micHelpTests = finding?.source !== 'computer' && micStatus !== undefined && micStatus.action !== 'allow-microphone' && summary?.alert?.fix !== ALLOW_MIC;
   const sheetHints: Hint[] | undefined = notesSetup ? notesSetup.editing !== undefined ? [['Enter', 'save'], ['Esc', 'cancel']]
       : [...(notesSetup.row === 1 ? [['Enter', 'edit note'] as Hint] : [...write, ['←→', 'change'] as Hint]), ['↑↓', 'choose'], ['Esc', 'back']]
-    : speakerPickerOpen ? suggested ? [['y', 'keep'], ['n', `not ${suggested.label}`], ['Enter', 'rename'], ['↑↓', 'choose'], ['Esc', 'back']]
+    : speakerPickerOpen ? suggested ? [['y', 'keep'], ['n', `not ${suggested.name}`], ['Enter', 'rename'], ['↑↓', 'choose'], ['Esc', 'back']]
       : [['Enter', 'name'], ['↑↓', 'choose'], ['Esc', 'back']]
     : liveAnswer ? liveAnswer.answer || liveAnswer.error ? [...(liveAnswer.answer && !liveAnswer.saved ? [['+', 'save as note'] as Hint] : []),
       ...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']] : [['Esc', 'cancel']]
