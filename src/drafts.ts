@@ -41,6 +41,8 @@ export interface FollowUpDraft {
   to: string[];
   /** Who it is for, by name, for the app to show above the subject. */
   names: string[];
+  /** Who it is for, each with an address when the invite has one: the To line where there is room for them. */
+  people: Array<{ name: string; email?: string }>;
 }
 
 export interface DraftOptions {
@@ -106,12 +108,13 @@ function parseDraftOutput(value: unknown, kind: DraftKind, validIds: ReadonlySet
 }
 
 /** The people invited, except you: their names for the AI, their addresses for the To line. */
-function recipients(libraryDir: string, artifact: MeetingArtifact): { names: string[]; to: string[] } {
+function recipients(libraryDir: string, artifact: MeetingArtifact): { names: string[]; to: string[]; people: FollowUpDraft['people'] } {
   const you = ownerKeys(libraryDir, artifact.calendar);
   const people = [...(artifact.calendar?.attendees ?? []), ...artifact.attendees]
     .filter((person, index, all) => all.findIndex((other) => (other.email || other.name) === (person.email || person.name)) === index)
     .filter((person) => !you.has((person.email?.trim() || person.name.trim()).toLocaleLowerCase('en-US')));
-  return { names: people.map((person) => person.name), to: people.flatMap((person) => person.email ? [person.email] : []) };
+  return { names: people.map((person) => person.name), to: people.flatMap((person) => person.email ? [person.email] : []),
+    people: people.map((person) => ({ name: person.name, ...(person.email ? { email: person.email } : {}) })) };
 }
 
 /**
@@ -174,6 +177,7 @@ export async function draftFollowUp(
     moments: Object.fromEntries(segments.filter((segment) => cited.has(segment.id)).map((segment) => [segment.id, segment.start])),
     to: kind === 'email' ? people.to : [],
     names: people.names,
+    people: people.people,
   };
 }
 

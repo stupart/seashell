@@ -359,7 +359,7 @@ export const JOURNEYS: Journey[] = [
       { title: 'A point whose line was removed', press: [ESC, ...Array(7).fill(DOWN)], narrowInstead: [ESC, ESC, ...Array(9).fill(DOWN)], keys: 'Esc ↓ × 7',
         until: 'source removed',
         note: 'Its words stay as written; the time column says its source is gone.' },
-      { title: 'What "source removed" means', press: ['?'], keys: '?', until: 'no longer in the transcript', note: 'Said once in help, beside what ✎ means.' },
+      { title: 'What "source removed" means', press: ['?'], keys: '?', until: 'whose line is gone', note: 'Said once in help, beside what ✎ means.' },
     ],
   },
   {

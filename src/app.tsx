@@ -1985,19 +1985,33 @@ export default function App(props: {
           })] : [])]
       : [{ text: '◐ Reading the call so far…', dim: true }]),
   ], sheetColumns) : [];
-  const draftLines = draft ? sheetLines(draft.error ? [{ text: draft.error, color: 'red' }]
-    : !draft.result ? [{ text: draft.kind === 'email' ? '◐ Writing the email…' : '◐ Writing the message…', dim: true }]
-    : [
-      // Who it is for, dim, as a mail app shows it above the subject.
-      ...(draft.result.kind === 'email' && draft.result.names.length ? [{ text: `To: ${draft.result.names.join(', ')}`, dim: true }] : []),
-      ...(draft.result.subject ? [{ text: `Subject: ${draft.result.subject}`, bold: true }, '' as const] : []),
-      ...draft.result.paragraphs.flatMap((paragraph, index) => {
-        const times = paragraph.evidenceSegmentIds.flatMap((id) => draft.result!.moments[id] === undefined ? [] : [draft.result!.moments[id]!])
-          .sort((a, b) => a - b).map(sentenceClock);
-        return [...(index ? ['' as const] : []), { text: paragraph.text },
-          ...(draft.sources && times.length ? [{ text: `  ${[...new Set(times)].join(', ')}`, dim: true }] : [])];
-      }),
-    ], sheetColumns) : [];
+  const draftLines = draft ? (() => {
+    if (draft.error) return sheetLines([{ text: draft.error, color: 'red' }], sheetColumns);
+    if (!draft.result) return sheetLines([{ text: draft.kind === 'email' ? '◐ Writing the email…' : '◐ Writing the message…', dim: true }], sheetColumns);
+    const result = draft.result;
+    // Who it is for, dim, as a mail app shows it above the subject: with their addresses where the row has room.
+    const addressed = `To: ${result.people.map((person) => person.email ? `${person.name} <${person.email}>` : person.name).join(', ')}`;
+    const to = Bun.stringWidth(addressed) <= sheetColumns ? addressed : `To: ${result.names.join(', ')}`;
+    // Where each paragraph came from, as the notes say it: zero-padded times in one column against the right edge,
+    // one to a row, so a paragraph that cites several lists them down the column.
+    const times = result.paragraphs.map((paragraph) => [...new Set(paragraph.evidenceSegmentIds
+      .flatMap((id) => result.moments[id] === undefined ? [] : [result.moments[id]!]).sort((a, b) => a - b).map(formatTuiClock))]);
+    const clockWidth = Math.max(0, ...times.flat().map((time) => time.length));
+    const room = Math.max(8, sheetColumns - (clockWidth ? clockWidth + 2 : 0));
+    const timed = (text: string, index: number): SheetLine[] => {
+      const rows = wrapWords(text, room);
+      return Array.from({ length: Math.max(rows.length, times[index]!.length) }, (_, row) => {
+        const words = rows[row] ?? '', time = times[index]![row];
+        return { raw: true, text: time ? `${words}${' '.repeat(Math.max(0, room - Bun.stringWidth(words)))}  ${DIM(time.padStart(clockWidth))}` : words };
+      });
+    };
+    return sheetLines([
+      ...(result.kind === 'email' && result.names.length ? [{ text: to, dim: true }] : []),
+      ...(result.subject ? [{ text: `Subject: ${result.subject}`, bold: true }, '' as const] : []),
+      ...result.paragraphs.flatMap((paragraph, index) => [...(index ? ['' as const] : []),
+        ...(draft.sources && clockWidth ? timed(paragraph.text, index) : [{ text: paragraph.text }])]),
+    ], sheetColumns);
+  })() : [];
   // Who owns each point a brief cites, from the past meeting's own notes: "You · Fri".
   const briefClaims = useMemo(() => new Map((briefSheet?.brief?.meetings ?? []).map((meeting): [string, MeetingClaim[]] => {
     try { const artifact = loadMeetingArtifact(libraryRoot, meeting.id); return [meeting.id, artifact?.analysis?.claims ?? artifact?.provisionalClaims ?? []]; }
@@ -2161,8 +2175,7 @@ export default function App(props: {
       } else if (draft?.result && input === 't') {
         setDraft((current) => current && { ...current, sources: !current.sources });
       } else if (draft && (draft.result || draft.error) && input === 'g') {
-        // Write it again: "Anything to add?" comes back with what was typed last time.
-        setDraft(null);
+        // Write it again: "Anything to add?" comes back with what was typed last time, over the email it rewrites.
         setDraftPrompt({ kind: draft.kind, input: draft.ask });
       } else if (draft?.error && key.return) {
         writeDraft(draft.kind, draft.ask);
@@ -3177,7 +3190,7 @@ export default function App(props: {
       ...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']] : [['Esc', 'cancel']]
     : draft ? draft.result ? [['c', 'copy'], ...(draft.result.kind === 'email' ? [['o', 'open in Mail'] as Hint] : []), ['g', 'write again'],
       ['t', draft.sources ? 'hide times' : 'show times'], ...(sheetScrolls ? [['↑↓', 'scroll'] as Hint] : []), ['Esc', 'back']]
-      : draft.error ? [['Enter', 'try again'], ['g', 'write again'], ['Esc', 'back']] : [['Esc', 'cancel']]
+      : draft.error ? [['Enter', 'try again'], ['g', 'change what to add'], ['Esc', 'back']] : [['Esc', 'cancel']]
     : briefSheet ? briefSheet.brief ? [...(briefPoints[briefSheet.point ?? 0]?.meeting ? [['Enter', 'where it was said'] as Hint] : []), ['c', 'copy'],
       ...(briefPoints.length > 1 ? [['↑↓', 'choose'] as Hint] : []), ['o', 'open the file'], ['Esc', 'back']]
       : briefSheet.retry ? [['Enter', 'try again'], ['Esc', 'back']]
