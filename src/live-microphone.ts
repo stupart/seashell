@@ -4,7 +4,7 @@ import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
 import { onChildSettled, terminateManagedChild } from './process-lifecycle.ts';
 import { StallClock } from './stall-clock.ts';
-import { prepareMicrophoneRuntimeHelper } from './runtime-host.ts';
+import { helperProtocolAtLeast, MICROPHONE_RUNTIME_HELPER, prepareMicrophoneRuntimeHelper } from './runtime-host.ts';
 import {
   hasAudiblePcmSignal,
   LIVE_CAPTURE_CHUNK_MILLISECONDS,
@@ -49,6 +49,9 @@ export interface StartMicrophoneOptions {
   readonly onChunk: (chunk: MicrophoneChunk) => void;
   readonly onState: (update: MicrophoneStateUpdate) => void;
   readonly onLevel?: (level: PcmSignalLevel) => void;
+  /** Record this input device (its Core Audio UID) instead of the default, and the default while it is
+   * disconnected. Only helpers from MICROPHONE_DEVICE_UID_PROTOCOL know it; older ones record the default. */
+  readonly deviceUid?: string;
   /** Test/development override; production uses defaultMicrophoneRecorder(). */
   readonly command?: string;
   readonly commandArgs?: readonly string[];
@@ -88,6 +91,14 @@ const SOX_ARGUMENTS = Object.freeze([
   '-',
 ]);
 
+/** From this protocol, Seashell Microphone takes --device-uid (native/macos-microphone.swift). */
+export const MICROPHONE_DEVICE_UID_PROTOCOL = 4;
+
+/** An older helper rejects --device-uid and records nothing: pass it only to one that knows it. */
+export function microphoneHelperSupportsDeviceUid(command: string): boolean {
+  return helperProtocolAtLeast(command, MICROPHONE_RUNTIME_HELPER, MICROPHONE_DEVICE_UID_PROTOCOL);
+}
+
 let preparedHelper: string | undefined;
 
 /**
@@ -97,13 +108,14 @@ let preparedHelper: string | undefined;
  * CoreAudio driver also exits on buffer overruns. SEASHELL_MICROPHONE_RECORDER=sox
  * restores the old recorder for diagnosis.
  */
-export function defaultMicrophoneRecorder(): { readonly command: string; readonly args: readonly string[] } {
+export function defaultMicrophoneRecorder(options: { readonly deviceUid?: string } = {}): { readonly command: string; readonly args: readonly string[] } {
   if (process.platform === 'darwin' && process.env.SEASHELL_MICROPHONE_RECORDER !== 'sox' && existsSync(MICROPHONE_HELPER)) {
     if (!preparedHelper || !existsSync(preparedHelper)) {
       try { preparedHelper = prepareMicrophoneRuntimeHelper(MICROPHONE_HELPER); }
       catch { preparedHelper = MICROPHONE_HELPER; }
     }
-    return { command: preparedHelper, args: ['--sample-rate', String(LIVE_CAPTURE_SAMPLE_RATE)] };
+    return { command: preparedHelper, args: ['--sample-rate', String(LIVE_CAPTURE_SAMPLE_RATE),
+      ...(options.deviceUid && microphoneHelperSupportsDeviceUid(preparedHelper) ? ['--device-uid', options.deviceUid] : [])] };
   }
   return { command: 'sox', args: SOX_ARGUMENTS };
 }
@@ -270,7 +282,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
   options.onState({ state: 'starting', message: 'Opening microphone…' });
   const recorder = options.command
     ? { command: options.command, args: options.commandArgs ?? SOX_ARGUMENTS }
-    : defaultMicrophoneRecorder();
+    : defaultMicrophoneRecorder(options.deviceUid ? { deviceUid: options.deviceUid } : {});
   const child = spawn(recorder.command, [...recorder.args], {
     // Its own process group: the helper relaunches itself, and only a group
     // signal reaches that copy once its proxy can no longer forward one.

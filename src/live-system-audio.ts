@@ -11,6 +11,7 @@ import {
 import { onChildSettled, terminateManagedChild } from './process-lifecycle.ts';
 import { StallClock } from './stall-clock.ts';
 import {
+  helperProtocolAtLeast,
   prepareRuntimeHelper,
   SYSTEM_AUDIO_RUNTIME_HELPER,
   systemAudioRuntimeHelperPath,
@@ -43,6 +44,25 @@ export function defaultSystemAudioHelper(options: { bundled?: string; runtimeHos
   try { path = prepareRuntimeHelper(bundled, SYSTEM_AUDIO_RUNTIME_HELPER, options.runtimeHost); } catch { path = bundled; }
   if (shared) preparedHelper = path;
   return path;
+}
+
+/**
+ * From this protocol, Seashell System Audio pauses and resumes without tearing
+ * down its tap and private aggregate (native/macos-system-audio.swift).
+ */
+export const SYSTEM_AUDIO_PAUSE_PROTOCOL = 2;
+/**
+ * Sent to the helper's process group, process.kill(-child.pid, signal), after
+ * its start event. Each is answered by a paused or resumed event carrying the
+ * stream's length; wait for the answer before sending the next. After a resume
+ * a first-buffer event says where in the stream the new audio starts
+ * (outputFrames) with new clock evidence. A paused helper sends no PCM.
+ */
+export const SYSTEM_AUDIO_PAUSE_SIGNALS = { pause: 'SIGUSR1', resume: 'SIGUSR2' } as const satisfies Record<string, NodeJS.Signals>;
+
+/** An older helper, and its proxy, die of either signal: send them only to one that speaks the protocol. */
+export function systemAudioHelperCanPause(helperPath: string): boolean {
+  return helperProtocolAtLeast(helperPath, SYSTEM_AUDIO_RUNTIME_HELPER, SYSTEM_AUDIO_PAUSE_PROTOCOL);
 }
 
 /**
@@ -182,13 +202,20 @@ export type NativeSystemAudioEvent =
       readonly hostTime?: string;
       readonly sampleTime?: number;
       readonly bufferFrames?: number;
+      /** Where in the stream this buffer's audio starts: 0, or where a resume picks up. */
+      readonly outputFrames?: number;
     }
   | {
       readonly type: 'discontinuity';
       readonly droppedFrames: number;
       readonly outputFrames: number;
       readonly reason: 'capture-overrun';
+      /** Who fell behind: the helper's consumer ("capture") or stdout's reader ("output"). Either way the stream holds silence there. */
+      readonly stage?: 'capture' | 'output';
     }
+  /** Answers to SYSTEM_AUDIO_PAUSE_SIGNALS: every frame before outputFrames was captured before the pause. */
+  | { readonly type: 'paused'; readonly outputFrames: number }
+  | { readonly type: 'resumed'; readonly outputFrames: number }
   | {
       readonly type: 'error';
       readonly code: string;
@@ -256,17 +283,30 @@ export function parseNativeSystemAudioEvent(line: string): NativeSystemAudioEven
       ...(value.bufferFrames === undefined
         ? {}
         : { bufferFrames: integer(value.bufferFrames, 'System-audio first-buffer frame count', 1) }),
+      ...(value.outputFrames === undefined
+        ? {}
+        : { outputFrames: integer(value.outputFrames, 'System-audio first-buffer output frame', 0) }),
     });
   }
   if (value.type === 'discontinuity') {
     if (value.reason !== 'capture-overrun') {
       throw new Error('System-audio discontinuity reason is invalid');
     }
+    if (value.stage !== undefined && value.stage !== 'capture' && value.stage !== 'output') {
+      throw new Error('System-audio discontinuity stage is invalid');
+    }
     return Object.freeze({
       type: 'discontinuity' as const,
       droppedFrames: integer(value.droppedFrames, 'System-audio dropped frame count', 1),
       outputFrames: integer(value.outputFrames, 'System-audio discontinuity output frame', 0),
       reason: 'capture-overrun' as const,
+      ...(value.stage === undefined ? {} : { stage: value.stage }),
+    });
+  }
+  if (value.type === 'paused' || value.type === 'resumed') {
+    return Object.freeze({
+      type: value.type,
+      outputFrames: integer(value.outputFrames, `System-audio ${value.type} output frame`, 0),
     });
   }
   if (value.type === 'error') {
@@ -865,6 +905,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
         options.onState({ state: firstBufferAtUnixMs !== undefined ? 'active' : helperReady ? 'ready' : 'starting',
           code: event.code, message: event.message });
       }
+      // paused and resumed answer SYSTEM_AUDIO_PAUSE_SIGNALS; nothing here sends them yet.
     } catch (error) {
       nativeError = {
         type: 'error',

@@ -26,6 +26,20 @@ test('native system-audio events are strict and preserve first-buffer clock evid
   }))).toEqual({
     type: 'discontinuity', reason: 'capture-overrun', droppedFrames: 320, outputFrames: 640,
   });
+  // Protocol 2: who fell behind, where a resume picks up, and the answers to pause and resume.
+  expect(parseNativeSystemAudioEvent(JSON.stringify({
+    type: 'discontinuity', reason: 'capture-overrun', stage: 'output', droppedFrames: 1600, outputFrames: 32000,
+  }))).toEqual({
+    type: 'discontinuity', reason: 'capture-overrun', stage: 'output', droppedFrames: 1600, outputFrames: 32000,
+  });
+  expect(() => parseNativeSystemAudioEvent(JSON.stringify({
+    type: 'discontinuity', reason: 'capture-overrun', stage: 'somewhere', droppedFrames: 1, outputFrames: 0,
+  }))).toThrow('stage');
+  expect(parseNativeSystemAudioEvent(JSON.stringify({ type: 'first-buffer', capturedAtUnixMs: 1, outputFrames: 48000 })))
+    .toEqual({ type: 'first-buffer', capturedAtUnixMs: 1, outputFrames: 48000 });
+  expect(parseNativeSystemAudioEvent('{"type":"paused","outputFrames":48000}')).toEqual({ type: 'paused', outputFrames: 48000 });
+  expect(parseNativeSystemAudioEvent('{"type":"resumed","outputFrames":48000}')).toEqual({ type: 'resumed', outputFrames: 48000 });
+  expect(() => parseNativeSystemAudioEvent('{"type":"paused"}')).toThrow('output frame');
   expect(() => parseNativeSystemAudioEvent('{bad')).toThrow('malformed JSON');
   expect(() => parseNativeSystemAudioEvent('{"type":"mystery"}')).toThrow('Unknown');
   expect(() => parseNativeSystemAudioEvent(JSON.stringify({
