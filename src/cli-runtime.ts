@@ -90,6 +90,8 @@ import {
   SEASHELL_LAUNCH_AGENT_LABEL,
   meetingLaunchAtLoginStatus,
   meetingWatchLogFiles,
+  refreshMeetingLaunchAgent,
+  waitForMeetingLaunchAgentRefresh,
 } from './launch-at-login.ts';
 import { WarningRateLimit, watchLogWriter } from './watch-log.ts';
 import { MEETING_SIGNALS_HELPER, readMeetingSignalSnapshot } from './meeting-automation.ts';
@@ -885,6 +887,23 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       process.once('SIGINT', stop);
       process.once('SIGTERM', stop);
       const writeEvent = command.json ? watchLogWriter(meetingWatchLogFiles(), { fallback: print }) : print;
+      // An upgrade from a version that wrote another plist reloads the agent
+      // with this one before anything records (launch-at-login.ts).
+      if (process.env.XPC_SERVICE_NAME === SEASHELL_LAUNCH_AGENT_LABEL && !once) {
+        const refreshing = refreshMeetingLaunchAgent();
+        if (refreshing) {
+          writeEvent(JSON.stringify({ type: 'watch.restarting', at: new Date().toISOString(), reason: 'Updating the recorder\'s login settings' }));
+          const outcome = await waitForMeetingLaunchAgentRefresh(refreshing, controller.signal);
+          if (outcome === 'stopped') {
+            process.off('SIGINT', stop);
+            process.off('SIGTERM', stop);
+            return 0;
+          }
+          writeEvent(JSON.stringify({ type: 'watch.warning', at: new Date().toISOString(),
+            message: outcome === 'late' ? 'The recorder\'s login settings are still updating; it keeps watching for calls meanwhile.'
+              : 'The recorder\'s login settings could not be updated; it keeps running as before. See meeting-watch.error.log.' }));
+        }
+      }
       // A warning that stopped recurring is forgotten with how often it came back unseen.
       const warnings = new WarningRateLimit(undefined, (message, repeats) => command.json
         ? writeEvent(JSON.stringify({ type: 'watch.warning', at: new Date().toISOString(), message, repeats, final: true }))

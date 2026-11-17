@@ -14,6 +14,12 @@ export const TASKPOLICY = '/usr/sbin/taskpolicy';
  *   media preparation, at Darwin background priority (PRIO_DARWIN_BG: the
  *   lowest CPU priority, throttled disk, efficiency cores). Nobody is waiting
  *   on it while a call runs.
+ *
+ * The recorder itself, and so its audio helpers, runs at standard priority
+ * (launch-at-login.ts): the helpers must drain Core Audio as fast as it
+ * fills. These lanes are what put inference below it, so both are real
+ * reductions from the recorder's own priority. Live drafts are utility, not
+ * background, because they have to keep up with the call to be any use.
  */
 export type InferenceLane = 'live' | 'background';
 
