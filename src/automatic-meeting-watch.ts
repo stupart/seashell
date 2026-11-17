@@ -86,7 +86,8 @@ export type AutomaticMeetingWatchEvent =
   | { readonly type: 'meeting.stopped'; readonly at: string; readonly candidate: MeetingCandidate }
   | { readonly type: 'meeting.started'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string }
   | { readonly type: 'meeting.resumed'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string; readonly pausedSeconds: number }
-  | { readonly type: 'meeting.capture-finished'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string }
+  /** `computerAudioLostSeconds`: the other side lost so far to a Mac too busy to keep it (capture-overrun), when any was. */
+  | { readonly type: 'meeting.capture-finished'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string; readonly computerAudioLostSeconds?: number }
   | { readonly type: 'meeting.ready'; readonly at: string; readonly candidate: MeetingCandidate; readonly transcriptId: string; readonly directory: string }
   | { readonly type: 'brief.ready'; readonly at: string; readonly title: string; readonly path: string }
   | { readonly type: 'watch.warning'; readonly at: string; readonly message: string }
@@ -749,7 +750,9 @@ export class AutomaticMeetingWatchService {
       }
       const warnings = status.health ? [status.health.microphone, status.health.systemAudio]
         .flatMap(source => source.warnings.filter(w => w.resolvedAtUnixMs === undefined && w.kind !== 'unavailable')) : [];
-      const warningKey = JSON.stringify(warnings.map(w => [w.kind, w.code, w.message]));
+      // A loss is said when it first passes the threshold, not again for every second it grows by:
+      // its running total is in the meeting's health, and its end total in meeting.capture-finished.
+      const warningKey = JSON.stringify(warnings.map(w => [w.kind, w.code, w.kind === 'dropped' ? undefined : w.message]));
       if (warnings.length && warningKey !== warnedKey) this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(),
         message: warnings.map(w => w.message).join(' ') });
       warnedKey = warningKey;
@@ -860,6 +863,13 @@ export class AutomaticMeetingWatchService {
     return true;
   }
 
+  /** Said each time a recording stops or pauses, with how much of the other side a busy Mac has lost so far. */
+  private emitCaptureFinished(candidate: MeetingCandidate, capture: DurableLiveCaptureHandle): void {
+    const lost = capture.health?.systemAudio.lostSeconds;
+    this.emit({ type: 'meeting.capture-finished', at: this.#dependencies.now().toISOString(), candidate,
+      sessionId: capture.sessionId, ...(lost ? { computerAudioLostSeconds: Math.round(lost * 10) / 10 } : {}) });
+  }
+
   /** How long a meeting that stops waits to resume before its final pass. */
   private resumeWindowMs(): number {
     return (this.#config.meeting?.automation?.resumeWindowSeconds ?? DEFAULT_MEETING_AUTOMATION.resumeWindowSeconds) * 1_000;
@@ -925,7 +935,7 @@ export class AutomaticMeetingWatchService {
       this.#parked = { ...active, parkedAtUnixMs, resumeUntilUnixMs: parkedAtUnixMs + this.resumeWindowMs(), open: true };
       active.capture.pause(reason);
       this.markCapture(active.directory, 'processing', { draftStatus: this.pausedStatus() });
-      this.emit({ type: 'meeting.capture-finished', at: this.#dependencies.now().toISOString(), candidate, sessionId: active.capture.sessionId });
+      this.emitCaptureFinished(candidate, active.capture);
       this.gateHeavyWork(this.#dependencies.now());
       this.projectWatch();
       return;
@@ -952,12 +962,7 @@ export class AutomaticMeetingWatchService {
         this.#parked = { ...active, parkedAtUnixMs, resumeUntilUnixMs: parkedAtUnixMs + resumeWindowMs };
         this.markCapture(active.directory, 'processing', { draftStatus: this.pausedStatus() });
       } else this.markCapture(active.directory, 'processing');
-      this.emit({
-        type: 'meeting.capture-finished',
-        at: this.#dependencies.now().toISOString(),
-        candidate,
-        sessionId: active.capture.sessionId,
-      });
+      this.emitCaptureFinished(candidate, active.capture);
       // Nothing records now: whether a final pass may start is up to everyone else's calls.
       this.gateHeavyWork(this.#dependencies.now());
       if (!park) this.enqueueFinalization(active);

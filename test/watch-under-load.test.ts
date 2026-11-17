@@ -13,6 +13,7 @@ import { readBackgroundMeetingStatus } from '../src/background-meeting-status.ts
 import { LIVE_TEXT_PAUSED } from '../src/live-text-guard.ts';
 import { listTranscriptRecords } from '../src/transcript-library.ts';
 import { HeavyWorkGate } from '../src/heavy-work.ts';
+import { CaptureHealthTracker } from '../src/capture-health.ts';
 import { spawn } from 'child_process';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 import type { SeashellConfig } from '../src/config.ts';
@@ -373,6 +374,32 @@ test('a call that pauses and comes back carries on in the same capture and live 
     expect(state.finalized).toEqual(['held-call']);
   } finally { await service.shutdown(); }
   expect(held.stops).toBe(1);
+});
+
+test('audio a busy Mac lost is said once as it passes five seconds, and its total when the recording stops', async () => {
+  const root = scratch('lost-audio');
+  const health = new CaptureHealthTracker({ nowUnixMs: 0 });
+  let report: (() => void) | undefined;
+  const { state, service } = busyWatch(root, (state) => ({
+    startCapture: (options) => {
+      state.starts += 1;
+      const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'lost-call', startedAtUnixMs: options.startedAt!.getTime(),
+        createdAt: options.startedAt!.toISOString() });
+      report = () => options.onStatus?.({ microphone: 'active', systemAudio: 'active', durableChunks: 0, health: health.snapshot });
+      return { store, sessionId: 'lost-call', manifestPath: store.manifestPath, get health() { return health.snapshot; },
+        async stop() { state.stops += 1; return store.setStatus('captured', 'test'); } };
+    },
+  }));
+  try {
+    await service.pollOnce();
+    for (const seconds of [3, 3, 1.5, 4.5]) { health.dropped('systemAudio', seconds); report!(); }
+    const said = state.events.filter((event) => event.type === 'watch.warning' && event.message.includes('too busy'));
+    expect(said).toHaveLength(1);
+    expect(said[0]).toMatchObject({ message: 'Your Mac was too busy: 6 s of the other side was not recorded.' });
+    state.input = [];
+    for (let poll = 0; poll < 8; poll += 1) { state.now += 3_000; await service.pollOnce(); }
+    expect(state.events.find((event) => event.type === 'meeting.capture-finished')).toMatchObject({ computerAudioLostSeconds: 12 });
+  } finally { await service.shutdown(); }
 });
 
 test('an overloaded Mac pauses live text mid-call and keeps the audio recording; a calm minute brings it back', async () => {

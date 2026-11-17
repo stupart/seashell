@@ -83,6 +83,24 @@ test('microphone controller exposes a stoppable continuous capture lifecycle', a
   for (const path of chunks) await Bun.file(path).delete();
 });
 
+test('a microphone that opens says so, and that its helper names no device, transport, rate or buffer', async () => {
+  const opened: unknown[] = [];
+  const chunks: string[] = [];
+  const handle = startMicrophoneCapture({
+    sessionStartedAtUnixMs: Date.now(), maxRestarts: 0, chunkMilliseconds: 100, minimumChunkMilliseconds: 50,
+    command: process.execPath, commandArgs: ['-e', 'setInterval(() => process.stdout.write(Buffer.alloc(3200, 1)), 50)'],
+    onState() {}, onChunk: (chunk) => chunks.push(chunk.path), onOpened: (source) => opened.push(source),
+  });
+  try {
+    const deadline = Date.now() + 3_000;
+    while (!opened.length && Date.now() < deadline) await Bun.sleep(10);
+    expect(opened).toEqual([{ reason: 'start', missing: ['deviceId', 'transport', 'sampleRate', 'bufferFrames'] }]);
+  } finally {
+    handle.stop(); await handle.done;
+    for (const path of chunks) rmSync(path, { force: true });
+  }
+});
+
 test('microphone sample clock is anchored before delayed stdout delivery', async () => {
   const startedAt = Date.now();
   let firstStart: number | undefined;

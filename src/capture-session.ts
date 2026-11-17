@@ -30,6 +30,7 @@ import {
   writeFile,
 } from 'fs/promises';
 import { basename, dirname, join, resolve } from 'path';
+import type { AudioSourceOpened } from './live-system-audio.ts';
 
 export const CAPTURE_SESSION_SCHEMA_VERSION = '0.1' as const;
 
@@ -147,6 +148,8 @@ export interface CaptureSessionManifest {
 
 type CaptureSessionEvent =
   | { readonly type: 'session.started'; readonly at: string; readonly manifest: CaptureSessionManifest }
+  /** A capture source opened (live-system-audio.ts AudioSourceOpened): diagnostics, never replayed into the manifest. */
+  | { readonly type: 'source.opened'; readonly at: string; readonly trackId: CaptureTrackId; readonly source: AudioSourceOpened }
   | { readonly type: 'chunk.committed'; readonly at: string; readonly chunk: CaptureChunk }
   | { readonly type: 'capture.discontinuity'; readonly at: string; readonly discontinuity: CaptureDiscontinuity }
   | { readonly type: 'video.segment'; readonly at: string; readonly segment: CaptureVideoSegment }
@@ -638,6 +641,15 @@ export class CaptureSessionStore {
     });
     this.project();
     return discontinuity;
+  }
+
+  /** Note in the journal which device a source opened on, and what its helper could not say. */
+  recordSourceOpenedAsync(trackId: CaptureTrackId, source: AudioSourceOpened): Promise<void> {
+    const task = this.commitTail.then(() => appendDurablyAsync(this.journalPath, {
+      type: 'source.opened', at: new Date().toISOString(), trackId, source,
+    }));
+    this.commitTail = task.then(() => {}, () => {});
+    return task;
   }
 
   recordDiscontinuityAsync(options: {

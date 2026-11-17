@@ -33,6 +33,9 @@ function stalePcm(source: CaptureSourceHealth, now: number): boolean {
 }
 
 const oneSided = (source: CaptureSourceHealth) => source.warnings.some(w => w.kind === 'one-sided' && w.resolvedAtUnixMs === undefined);
+/** What a busy Mac could not keep, in full: "Your Mac was too busy: 12 s of the other side was not recorded." */
+const lostAudio = (health?: CaptureHealthSnapshot): string[] => health
+  ? [health.microphone, health.systemAudio].flatMap(source => source.warnings.filter(w => w.kind === 'dropped').map(w => w.message)) : [];
 
 function sourceLabel(source: CaptureSourceHealth | undefined, finished: boolean, now: number, missing = false): string {
   if (!source) return 'status unconfirmed';
@@ -87,7 +90,7 @@ export function sourceFinding(health: CaptureHealthSnapshot | undefined, started
 
 export function recordingNeedsAttention(health?: CaptureHealthSnapshot, finished = false, nowUnixMs = Date.now()): boolean {
   if (!health) return false;
-  if (finished && health.coverage?.yourSideMissing) return true;
+  if (finished && (health.coverage?.yourSideMissing || lostAudio(health).length)) return true;
   return [health.microphone, health.systemAudio].some(source => source.state !== 'disabled' && (
     finished ? source.lastSignalAtUnixMs === undefined || source.warnings.some(w => w.kind === 'unavailable' || w.kind === 'no-audio' || (w.kind === 'reconnecting' && w.resolvedAtUnixMs === undefined))
       : ['quiet', 'unavailable', 'reconnecting', 'stopped'].includes(source.state) || (source.state === 'receiving' && stalePcm(source, nowUnixMs)) || oneSided(source)
@@ -187,7 +190,9 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
       : attention && !finished ? ['Check your input if expected sound is missing · i audio help'] : []),
     ...(props.warning ? [props.warning] : []),
     ...(draftProblem(props.draftLabel) ? [props.draftLabel!] : []),
+    ...lostAudio(props.health),
   ];
+  const lost = Math.round(props.health?.systemAudio.lostSeconds ?? 0);
   // Not capturing at all is a failure; quiet, one-sided or unconfirmed sound needs a look.
   const failed = (source?: CaptureSourceHealth) => !finished && (source?.state === 'unavailable' || source?.state === 'stopped');
   // One name for a microphone Seashell cannot hear, whether it stopped or sends silence.
@@ -205,7 +210,10 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
       color: failed(props.health?.microphone) || failed(props.health?.systemAudio) ? 'red' as const : 'yellow' as const }
     : props.warning ? { ...warningAlert(props.warning), color: 'yellow' as const }
     : draftProblem(props.draftLabel) ? { text: props.draftLabel!.startsWith(LIVE_TEXT_PAUSED_LEAD) ? 'Live text paused' : 'Live text delayed',
-      color: 'yellow' as const } : undefined;
+      color: 'yellow' as const }
+    // Nothing to fix but the load: no key.
+    : lostAudio(props.health).length ? { text: lost ? `Mac too busy · ${lost} s of the call not recorded` : 'Mac too busy · audio lost',
+      short: 'Mac too busy', color: 'yellow' as const } : undefined;
   return {
     headline,
     label,

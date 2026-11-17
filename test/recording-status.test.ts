@@ -157,3 +157,18 @@ test('live text paused is said in yellow with no key: nothing fixes it but time,
   expect(paused.problems).toEqual([LIVE_TEXT_PAUSED]);
   expect(LIVE_TEXT_PAUSED).toContain('Audio is still recording');
 });
+
+test('audio a busy Mac lost is said during the call and after it, and a saved meeting asks for review', () => {
+  const health = new CaptureHealthTracker({ nowUnixMs: 0 });
+  health.pcm('microphone', undefined, true, 1_000);
+  health.pcm('systemAudio', undefined, true, 1_000);
+  health.dropped('systemAudio', 12, 2_000);
+  health.pcm('microphone', undefined, true, 2_500);
+  health.pcm('systemAudio', undefined, true, 2_500);
+  const live = recordingSummary({ mode: 'recording', health: health.snapshot, nowUnixMs: 3_000 });
+  expect(live.problems).toContain('Your Mac was too busy: 12 s of the other side was not recorded.');
+  expect(live.alert).toMatchObject({ text: 'Mac too busy · 12 s of the call not recorded', color: 'yellow' });
+  const saved = recordingSummary({ mode: 'ready', health: health.stop(4_000, []), nowUnixMs: 5_000 });
+  expect(saved.label).toBe('Saved · audio needs review');
+  expect(saved.problems).toContain('Your Mac was too busy: 12 s of the other side was not recorded.');
+});

@@ -186,6 +186,8 @@ export function startDurableLiveCapture(
           if (!current()) return;
           microphoneLevel = level; health.pcm('microphone', level); status();
         },
+        // Diagnostics: never allowed to stop the audio.
+        onOpened: (opened) => { void store.recordSourceOpenedAsync('microphone', opened).catch(() => {}); },
         onState: (update) => {
           if (!current()) return;
           microphoneState = update.state;
@@ -221,6 +223,10 @@ export function startDurableLiveCapture(
           });
         },
         onDiscontinuity: (event) => {
+          if (event.reason === 'capture-overrun') {
+            health.dropped('systemAudio', event.durationFrames / LIVE_CAPTURE_SAMPLE_RATE);
+            status();
+          }
           void store.recordDiscontinuityAsync({
             trackId: 'system-audio',
             atSeconds: event.atFrame / LIVE_CAPTURE_SAMPLE_RATE,
@@ -229,6 +235,7 @@ export function startDurableLiveCapture(
           }).catch(fail);
         },
         onLevel: (level) => { systemAudioLevel = level; health.pcm('systemAudio', level); status(); },
+        onOpened: (opened) => { void store.recordSourceOpenedAsync('system-audio', opened).catch(() => {}); },
         // Said, never fatal: the audio carries on under the other permission.
         onWarning: (message) => options.onError?.(new Error(message)),
         onState: (update) => {

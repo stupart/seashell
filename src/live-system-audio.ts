@@ -150,6 +150,24 @@ export interface LiveCaptureDiscontinuity {
   readonly reason: 'capture-overrun' | 'device-reset' | 'clock-reset';
 }
 
+/** What a capture helper can say about the device it opened. */
+export type AudioSourceDetail = 'deviceId' | 'transport' | 'sampleRate' | 'bufferFrames';
+
+/**
+ * A capture source opened: when a recording starts, when its output route
+ * changes, or after a restart. Kept with the meeting, so a recording that
+ * lost audio can be read against the device it ran on.
+ */
+export interface AudioSourceOpened {
+  readonly reason: 'start' | 'route-change' | 'restart';
+  /** The device's own rate, before conversion to 16 kHz. */
+  readonly sampleRate?: number;
+  /** Frames in its first IO buffer: the device's buffer size. */
+  readonly bufferFrames?: number;
+  /** What the helper does not report, so it reads as not seen rather than not logged. */
+  readonly missing: readonly AudioSourceDetail[];
+}
+
 export interface SystemAudioChunk {
   readonly path: string;
   readonly startSeconds: number;
@@ -499,6 +517,8 @@ export interface StartSystemAudioOptions {
   readonly onState: (update: SystemAudioStateUpdate) => void;
   readonly onLevel?: (level: PcmSignalLevel) => void;
   readonly onDiscontinuity?: (event: LiveCaptureDiscontinuity) => void;
+  /** Each attempt's device, once its first buffer arrives. */
+  readonly onOpened?: (opened: AudioSourceOpened) => void;
 }
 
 export interface SystemAudioCaptureHandle {
@@ -581,6 +601,8 @@ export function startSystemAudioCapture(
   let lastChunkEnd: number | undefined;
   let waitingForRestartChunk = false;
   let paused = false;
+  /** Why the next attempt opens: the last one's failure says. */
+  let opening: AudioSourceOpened['reason'] = 'start';
   /** The current attempt's silence so far, forgotten on resume: a pause is not the tap hearing nothing. */
   let forgetSilence = () => {};
   // The audio never waits on the helper's own identity: anything that looks
@@ -651,6 +673,7 @@ export function startSystemAudioCapture(
         fallBack(update.code === 'permission_denied' ? 'refused' : attemptActive ? 'silence' : 'failed', undefined);
         return;
       }
+      if (update.state === 'unavailable') opening = update.code === 'device_changed' ? 'route-change' : 'restart';
       retryEligible = update.state === 'unavailable' && systemAudioCanRecover(update.code, heard);
       if (retryEligible && !stopped && restarts < maximumRestarts) {
         options.onState({ state: 'starting', code: 'system_audio_reconnecting',
@@ -658,7 +681,7 @@ export function startSystemAudioCapture(
             : update.code === 'device_changed' ? 'Computer audio device changed · reconnecting…'
             : 'Computer audio stopped · reconnecting…' });
       } else options.onState(update);
-    } }, { expectAudio: heard });
+    } }, { expectAudio: heard, reason: opening });
     if (paused) attempt.pause?.();
     return attempt;
   };
@@ -726,7 +749,8 @@ export function systemAudioCanRecover(code: string | undefined, heard: boolean):
   return heard && !permanentFailures.has(code ?? '');
 }
 
-function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { readonly expectAudio: boolean }): SystemAudioCaptureHandle {
+function startSystemAudioAttempt(options: StartSystemAudioOptions,
+  attempt: { readonly expectAudio: boolean; readonly reason?: AudioSourceOpened['reason'] }): SystemAudioCaptureHandle {
   const helperPath = options.helperPath ?? defaultSystemAudioHelper();
   if (!existsSync(helperPath)) {
     options.onState({
@@ -894,6 +918,17 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
           ...(event.sampleTime === undefined ? {} : { sampleTime: event.sampleTime }),
         });
         options.onState({ state: 'active', message: 'Receiving computer audio' });
+        // The helper names no device and no transport; its tap's rate and first buffer are what it says.
+        options.onOpened?.(Object.freeze({
+          reason: attempt.reason ?? 'start',
+          ...(event.sourceSampleRate === undefined ? {} : { sampleRate: event.sourceSampleRate }),
+          ...(event.bufferFrames === undefined ? {} : { bufferFrames: event.bufferFrames }),
+          missing: Object.freeze([
+            'deviceId', 'transport',
+            ...(event.sourceSampleRate === undefined ? ['sampleRate' as const] : []),
+            ...(event.bufferFrames === undefined ? ['bufferFrames' as const] : []),
+          ] as AudioSourceDetail[]),
+        }));
         for (const gap of pendingDiscontinuities.splice(0)) publishDiscontinuity(gap);
         for (const chunk of waiting.splice(0)) publish(chunk);
       } else if (event.type === 'discontinuity') {

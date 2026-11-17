@@ -14,6 +14,7 @@ import {
   writeLivePcmChunk,
   type PcmSignalLevel,
   type LiveCaptureClock,
+  type AudioSourceOpened,
   type SystemAudioCaptureState,
   type SystemAudioStateUpdate,
 } from './live-system-audio.ts';
@@ -49,6 +50,8 @@ export interface StartMicrophoneOptions {
   readonly onChunk: (chunk: MicrophoneChunk) => void;
   readonly onState: (update: MicrophoneStateUpdate) => void;
   readonly onLevel?: (level: PcmSignalLevel) => void;
+  /** Each attempt's input, once its first samples arrive. */
+  readonly onOpened?: (opened: AudioSourceOpened) => void;
   /** Test/development override; production uses defaultMicrophoneRecorder(). */
   readonly command?: string;
   readonly commandArgs?: readonly string[];
@@ -317,6 +320,10 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
         uncertaintyMs: Math.max(1, firstDataAtUnixMs - captureStartedAtUnixMs),
       });
       options.onState({ state: 'active', message: 'Microphone input connected' });
+      // The helper sends samples and nothing about its input: no device, transport, rate or buffer.
+      // Its own rebuilds on an input change are not seen here either.
+      options.onOpened?.(Object.freeze({ reason: attempt === 1 ? 'start' as const : 'restart' as const,
+        missing: Object.freeze(['deviceId', 'transport', 'sampleRate', 'bufferFrames'] as const) }));
     }
     const now = Date.now();
     if (options.onLevel && !paused && now - lastLevelUpdate >= 500 && data.byteLength >= 2) {
