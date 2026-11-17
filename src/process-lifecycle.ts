@@ -58,6 +58,8 @@ export async function terminateManagedChild(
   const askedAt = Date.now();
   // A helper that relaunched itself forwards this to its relaunched copy.
   try { child.kill(options.signal ?? 'SIGTERM'); } catch { return; }
+  // One stopped for a call (heavy-work.ts) must run to act on it.
+  try { child.kill('SIGCONT'); } catch {}
   await Promise.race([
     closed,
     new Promise((resolve) => setTimeout(resolve, graceMilliseconds)),
@@ -115,7 +117,7 @@ export function onChildSettled(
 export function cleanupManagedResources(): void {
   for (const child of activeChildren) {
     try {
-      if (!child.killed) child.kill('SIGTERM');
+      if (!child.killed) { child.kill('SIGTERM'); child.kill('SIGCONT'); }
     } catch {}
   }
   activeChildren.clear();

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { pcmS16leToWav } from './live-system-audio.ts';
 import { DEFAULT_VAD_MODEL_FILENAME } from './model-config.ts';
 import { trackChildProcess, trackTempDirectory } from './process-lifecycle.ts';
+import { heavyWork } from './heavy-work.ts';
 import { inferenceCommand } from './inference-priority.ts';
 import type { TimedTranscriptUnit } from './transcript-types.ts';
 
@@ -69,7 +70,9 @@ export function parseSpeechRegions(output: string): SpeechRegion[] {
     .toSorted((left, right) => left.start - right.start);
 }
 
-function runSpeechTool(wavPath: string, tool: string, model: string): Promise<SpeechRegion[] | undefined> {
+async function runSpeechTool(wavPath: string, tool: string, model: string): Promise<SpeechRegion[] | undefined> {
+  // Short, one thread at background priority: not stopped mid-run, but not started during a call (heavy-work.ts).
+  await heavyWork.ready();
   return new Promise((resolve) => {
     const run = inferenceCommand(tool, ['-f', wavPath, '-vm', model, '-np', '-t', '1', '-vspd', MIN_SPEECH_MS, '-vp', SPEECH_PAD_MS], 'background');
     const child = spawn(run.command, run.args, { stdio: ['ignore', 'pipe', 'ignore'] });

@@ -160,3 +160,14 @@ test('an audio helper gets five seconds to take its device down before any SIGKI
   expect(child.signalCode).toBeNull();
   expect(child.exitCode).toBe(0);
 }, 10_000);
+
+test('a child stopped for a call is continued so it can act on its stop, not killed after the grace', async () => {
+  const child = spawn(process.execPath, ['-e', "process.stdout.write('ready'); setInterval(() => {}, 1000)"],
+    { stdio: ['ignore', 'pipe', 'ignore'] });
+  await new Promise<void>((resolve) => child.stdout!.once('data', () => resolve()));
+  process.kill(child.pid!, 'SIGSTOP');
+  const started = Date.now();
+  await terminateManagedChild(child, 3_000);
+  expect(child.signalCode).toBe('SIGTERM');
+  expect(Date.now() - started).toBeLessThan(2_000);
+});
