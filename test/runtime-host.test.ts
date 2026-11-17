@@ -196,7 +196,7 @@ test('every launcher of computer audio runs one stable copy that answers for its
     const bundled = helperBinary(root, 'seashell-system-audio', plist, 'sdk-27');
     const path = defaultSystemAudioHelper({ bundled, runtimeHost });
     expect(path).toBe(join(root, 'Runtime', 'Seashell System Audio'));
-    expect(embeddedHelperProtocol(path, SYSTEM_AUDIO_RUNTIME_HELPER.identifier)).toBe(1);
+    expect(embeddedHelperProtocol(path, SYSTEM_AUDIO_RUNTIME_HELPER.identifier)).toBe(2);
     // Rebuilt with the same protocol: the copy macOS already allowed stays.
     expect(defaultSystemAudioHelper({ bundled: helperBinary(root, 'rebuilt', plist, 'sdk-26.5'), runtimeHost })).toBe(path);
     expect(readFileSync(path, 'latin1')).toContain('sdk-27');
@@ -204,6 +204,29 @@ test('every launcher of computer audio runs one stable copy that answers for its
     const missing = join(root, 'missing');
     expect(defaultSystemAudioHelper({ bundled: missing, runtimeHost })).toBe(missing);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('the capture helpers that keep off their audio threads replace installed copies, and only they get the new controls', async () => {
+  const { MICROPHONE_RUNTIME_HELPER, SYSTEM_AUDIO_RUNTIME_HELPER } = await import('../src/runtime-host.ts');
+  const { systemAudioHelperCanPause, SYSTEM_AUDIO_PAUSE_PROTOCOL } = await import('../src/live-system-audio.ts');
+  const { microphoneHelperSupportsDeviceUid, MICROPHONE_DEVICE_UID_PROTOCOL } = await import('../src/live-microphone.ts');
+  const plist = (name: string) => fileURLToPath(new URL(`../native/${name}`, import.meta.url));
+  // The bump replaces the copies macOS allowed: the old ones block on stdout and run the IO block on a queue.
+  expect(embeddedHelperProtocol(plist('macos-system-audio-Info.plist'), SYSTEM_AUDIO_RUNTIME_HELPER.identifier)).toBe(SYSTEM_AUDIO_PAUSE_PROTOCOL);
+  expect(embeddedHelperProtocol(plist('macos-microphone-Info.plist'), MICROPHONE_RUNTIME_HELPER.identifier)).toBe(MICROPHONE_DEVICE_UID_PROTOCOL);
+  const root = mkdtempSync(join(tmpdir(), 'seashell-helper-protocols-'));
+  roots.push(root);
+  const realSystem = helperBinary(root, 'system-new', readFileSync(plist('macos-system-audio-Info.plist'), 'utf8'), 'new');
+  const realMicrophone = helperBinary(root, 'microphone-new', readFileSync(plist('macos-microphone-Info.plist'), 'utf8'), 'new');
+  // An older copy dies of SIGUSR1, and rejects --device-uid: neither is sent to it.
+  expect(systemAudioHelperCanPause(helperBinary(root, 'system-old', helperPlist(1, SYSTEM_AUDIO_RUNTIME_HELPER.identifier), 'old'))).toBe(false);
+  expect(systemAudioHelperCanPause(helperBinary(root, 'system-unmarked', helperPlist(undefined, SYSTEM_AUDIO_RUNTIME_HELPER.identifier), 'old'))).toBe(false);
+  expect(systemAudioHelperCanPause(realSystem)).toBe(true);
+  expect(microphoneHelperSupportsDeviceUid(helperBinary(root, 'microphone-old', helperPlist(3), 'old'))).toBe(false);
+  expect(microphoneHelperSupportsDeviceUid(realMicrophone)).toBe(true);
+  // A file that is some other helper, or none at all, speaks no protocol.
+  expect(systemAudioHelperCanPause(realMicrophone)).toBe(false);
+  expect(microphoneHelperSupportsDeviceUid(join(root, 'missing'))).toBe(false);
 });
 
 test('the screen recorder that never films the display instead replaces an installed copy that would', () => {

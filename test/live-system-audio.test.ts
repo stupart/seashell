@@ -26,6 +26,20 @@ test('native system-audio events are strict and preserve first-buffer clock evid
   }))).toEqual({
     type: 'discontinuity', reason: 'capture-overrun', droppedFrames: 320, outputFrames: 640,
   });
+  // Protocol 2: who fell behind, where a resume picks up, and the answers to pause and resume.
+  expect(parseNativeSystemAudioEvent(JSON.stringify({
+    type: 'discontinuity', reason: 'capture-overrun', stage: 'output', droppedFrames: 1600, outputFrames: 32000,
+  }))).toEqual({
+    type: 'discontinuity', reason: 'capture-overrun', stage: 'output', droppedFrames: 1600, outputFrames: 32000,
+  });
+  expect(() => parseNativeSystemAudioEvent(JSON.stringify({
+    type: 'discontinuity', reason: 'capture-overrun', stage: 'somewhere', droppedFrames: 1, outputFrames: 0,
+  }))).toThrow('stage');
+  expect(parseNativeSystemAudioEvent(JSON.stringify({ type: 'first-buffer', capturedAtUnixMs: 1, outputFrames: 48000 })))
+    .toEqual({ type: 'first-buffer', capturedAtUnixMs: 1, outputFrames: 48000 });
+  expect(parseNativeSystemAudioEvent('{"type":"paused","outputFrames":48000}')).toEqual({ type: 'paused', outputFrames: 48000 });
+  expect(parseNativeSystemAudioEvent('{"type":"resumed","outputFrames":48000}')).toEqual({ type: 'resumed', outputFrames: 48000 });
+  expect(() => parseNativeSystemAudioEvent('{"type":"paused"}')).toThrow('output frame');
   expect(() => parseNativeSystemAudioEvent('{bad')).toThrow('malformed JSON');
   expect(() => parseNativeSystemAudioEvent('{"type":"mystery"}')).toThrow('Unknown');
   expect(() => parseNativeSystemAudioEvent(JSON.stringify({
@@ -95,3 +109,16 @@ test('digital silence is skipped without discarding quiet but audible speech', (
   expect(hasAudiblePcmSignal(audible)).toBe(true);
   expect(pcmS16leSignalLevel(audible).peak).toBe(600);
 });
+
+test.skipIf(process.platform !== 'darwin' || !Bun.file(`${import.meta.dir}/../native/bin/seashell-system-audio`).size)(
+  'computer audio never holds up the device: the IO thread only copies, and nothing downstream waits for anyone', () => {
+    // Synthetic packets through the real ring, conversion and stdout; no device is opened.
+    const result = Bun.spawnSync([`${import.meta.dir}/../native/bin/seashell-system-audio`, '--handoff-check'], { timeout: 60_000 });
+    const report = JSON.parse(result.stdout.toString());
+    expect(report.failures).toEqual([]);
+    expect(report.ring.seconds).toBeGreaterThanOrEqual(4);
+    expect(report.ring.droppedFrames).toBe(report.ring.countedDrops);
+    expect(report.stdout.nonblocking).toBe(true);
+    expect(report.pipeline.streamFrames).toBe(report.pipeline.expectedFrames);
+    expect(result.exitCode).toBe(0);
+  }, 90_000);

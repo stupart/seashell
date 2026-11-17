@@ -8,17 +8,24 @@ fi
 mkdir -p native/bin
 BUILD_DIR="$(mktemp -d native/bin/.build.XXXXXX)"
 trap 'rm -rf "$BUILD_DIR"' EXIT
+# The audio handoff both capture helpers share: a lock-free ring the audio
+# thread only copies into, and a stdout writer that never waits for its reader.
+AUDIO_RING_OBJECT="$BUILD_DIR/audio-ring.o"
+audio_ring_object() {
+    [ -f "$AUDIO_RING_OBJECT" ] || xcrun clang -std=c11 -O2 -Wall -Wextra -Werror \
+        -c native/seashell-audio-ring.c -o "$AUDIO_RING_OBJECT"
+}
 SYSTEM_AUDIO_BINARY=native/bin/seashell-system-audio
 if [ ! -x "$SYSTEM_AUDIO_BINARY" ] || \
    [ native/macos-system-audio.swift -nt "$SYSTEM_AUDIO_BINARY" ] || \
    [ native/macos-system-audio-Info.plist -nt "$SYSTEM_AUDIO_BINARY" ] || \
-   [ native/seashell-atomic.c -nt "$SYSTEM_AUDIO_BINARY" ] || \
-   [ native/seashell-atomic.h -nt "$SYSTEM_AUDIO_BINARY" ]; then
+   [ native/seashell-audio-ring.c -nt "$SYSTEM_AUDIO_BINARY" ] || \
+   [ native/seashell-audio-ring.h -nt "$SYSTEM_AUDIO_BINARY" ]; then
     # Same pattern as the microphone helper: its own System Audio Recording
     # permission, the same whether the background recorder or a terminal starts it.
-    xcrun clang -std=c11 -O2 -c native/seashell-atomic.c -o "$BUILD_DIR/atomic.o"
-    xcrun swiftc native/macos-system-audio.swift "$BUILD_DIR/atomic.o" -O -module-name SeashellSystemAudio \
-        -import-objc-header native/seashell-atomic.h \
+    audio_ring_object
+    xcrun swiftc native/macos-system-audio.swift "$AUDIO_RING_OBJECT" -O -module-name SeashellSystemAudio \
+        -import-objc-header native/seashell-audio-ring.h \
         -framework AVFoundation -framework AudioToolbox -framework CoreAudio \
         -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
         -Xlinker native/macos-system-audio-Info.plist \
@@ -44,13 +51,17 @@ fi
 MICROPHONE_BINARY=native/bin/seashell-microphone
 if [ ! -x "$MICROPHONE_BINARY" ] || \
    [ native/macos-microphone.swift -nt "$MICROPHONE_BINARY" ] || \
-   [ native/macos-microphone-Info.plist -nt "$MICROPHONE_BINARY" ]; then
+   [ native/macos-microphone-Info.plist -nt "$MICROPHONE_BINARY" ] || \
+   [ native/seashell-audio-ring.c -nt "$MICROPHONE_BINARY" ] || \
+   [ native/seashell-audio-ring.h -nt "$MICROPHONE_BINARY" ]; then
     # The embedded Info.plist supplies the usage string macOS requires before
     # it will ask for Microphone access on this helper's own behalf. A fixed
     # module name keeps the build reproducible: macOS ties that permission to
     # the code hash, so identical sources must yield identical bytes.
-    xcrun swiftc native/macos-microphone.swift -O -module-name SeashellMicrophone \
-        -framework AVFoundation -framework CoreAudio \
+    audio_ring_object
+    xcrun swiftc native/macos-microphone.swift "$AUDIO_RING_OBJECT" -O -module-name SeashellMicrophone \
+        -import-objc-header native/seashell-audio-ring.h \
+        -framework AVFoundation -framework AudioToolbox -framework CoreAudio \
         -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
         -Xlinker native/macos-microphone-Info.plist \
         -o "$BUILD_DIR/seashell-microphone"
