@@ -1,12 +1,14 @@
 import { expect, test } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 import type { MicrophonePermissionStatus } from '../src/microphone-permission.ts';
 import {
-  MICROPHONE_START_NOTICES, MICROPHONE_UPDATE_NOTICE, microphoneAllowedBefore, microphoneStartNotifier, microphoneUpdateNotice,
+  MICROPHONE_START_NOTICES, MICROPHONE_UPDATE_NOTICE, microphoneAllowedBefore, microphonePermission, microphoneStartNotifier,
+  microphoneUpdateNotice, replacedMicrophonePermission,
 } from '../src/microphone-permission.ts';
+import { embeddedHelperProtocol, MICROPHONE_RUNTIME_HELPER, microphoneRuntimeHelperPath, prepareMicrophoneRuntimeHelper } from '../src/runtime-host.ts';
 import { readFeatureStatuses } from '../src/feature-status.ts';
 import { ALLOW_MIC, recordingSummary } from '../src/RecordingStatus.tsx';
 import type { CaptureHealthSnapshot } from '../src/capture-health.ts';
@@ -75,6 +77,35 @@ test('after an update replaced Seashell Microphone, the login agent asks once at
     install('copy three');
     authorization = 'denied';
     expect(await microphoneUpdateNotice({ env, check })).toBeUndefined();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('this update\'s Seashell Microphone is asked for once at the agent\'s start, even if no start noted the copy it replaces', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-mic-bump-'));
+  const env = { SEASHELL_CONFIG: join(root, 'config.json') };
+  const runtimeHost = { hostDirectory: join(root, 'Runtime'), platform: 'darwin' as const };
+  // Stand-ins that answer --status like the helper, with the plist macOS reads; the shell stops at exit.
+  const helper = (name: string, plist: string, authorization: string) => {
+    const path = join(root, name);
+    writeFileSync(path, `#!/bin/sh\necho '{"authorization":"${authorization}"}'\nexit 0\n${plist}\n`, { mode: 0o755 });
+    return path;
+  };
+  const previous = `<plist><dict><key>CFBundleIdentifier</key><string>${MICROPHONE_RUNTIME_HELPER.identifier}</string>` +
+    '<key>SeashellHelperProtocol</key><string>3</string></dict></plist>';
+  const current = readFileSync(fileURLToPath(new URL('../native/macos-microphone-Info.plist', import.meta.url)), 'utf8');
+  try {
+    // rc35's copy, allowed, with nothing noted about it.
+    prepareMicrophoneRuntimeHelper(helper('microphone-rc35', previous, 'authorized'), runtimeHost);
+    const bundled = helper('microphone-next', current, 'notDetermined');
+    const options = { env, check: () => microphonePermission({ helperPath: bundled, runtimeHost }),
+      checkReplaced: () => replacedMicrophonePermission({ bundled, runtimeHost }) };
+    expect(await microphoneUpdateNotice(options)).toBe(MICROPHONE_UPDATE_NOTICE);
+    // The check installed the new copy, and the settings call it one needing your OK again.
+    expect(embeddedHelperProtocol(microphoneRuntimeHelperPath(runtimeHost), MICROPHONE_RUNTIME_HELPER.identifier)).toBe(4);
+    expect(microphoneAllowedBefore(env)).toBe(true);
+    // Once per copy; and nothing is left to replace.
+    expect(await microphoneUpdateNotice(options)).toBeUndefined();
+    expect(await replacedMicrophonePermission({ bundled, runtimeHost })).toBeUndefined();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

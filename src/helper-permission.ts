@@ -18,6 +18,8 @@ export interface HelperPermissionOptions {
   readonly helperPath?: string;
   readonly runtimeHost?: RuntimeHostOptions;
   readonly signal?: AbortSignal;
+  /** Ask the file as it is, without installing the stable copy first (an installed copy an update is about to replace). */
+  readonly asIs?: boolean;
 }
 
 /**
@@ -31,7 +33,9 @@ export async function helperPermission(bundled: string, helper: StableRuntimeHel
   const detail = (authorization: HelperAuthorization) => details[authorization] ?? `${helper.name} reported "${authorization}".`;
   if (process.platform !== 'darwin' || !existsSync(bundled)) return { authorization: 'unavailable', detail: detail('unavailable') };
   let executable = bundled;
-  try { executable = prepareRuntimeHelper(bundled, helper, options.runtimeHost); } catch { /* Use the packaged copy. */ }
+  if (!options.asIs) {
+    try { executable = prepareRuntimeHelper(bundled, helper, options.runtimeHost); } catch { /* Use the packaged copy. */ }
+  }
   const { stdout, failure } = await new Promise<{ stdout: string; failure?: string }>((resolve) => {
     execFile(executable, [options.request ? '--request-permission' : '--status'], {
       encoding: 'utf8',
