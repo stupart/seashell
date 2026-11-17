@@ -4,7 +4,9 @@ import { existsSync, mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
+  AUDIO_HELPER_STOP_GRACE_MS,
   cleanupManagedResources,
+  stopAudioHelper,
   terminateManagedChild,
   trackChildProcess,
   trackTempDirectory,
@@ -116,3 +118,45 @@ test('nested ownership removes already-installed hooks and restores them only af
   expect(result).toMatchObject({ code: 0, signal: null, stderr: '' });
   expect(JSON.parse(result.stdout)).toEqual({ installed: 1, removed: 0, nested: 0, restored: 1, ended: 0 });
 });
+
+test('a helper still writing its last output after the grace is not killed; one that never stops is, at the limit', async () => {
+  // Stops in order: keeps writing for 600 ms after SIGTERM, then exits by itself.
+  const finishingChild = spawn(process.execPath, ['-e', `
+    process.on('SIGTERM', () => {
+      const writing = setInterval(() => process.stdout.write('pcm'), 50);
+      setTimeout(() => { clearInterval(writing); process.stdout.write('stop'); process.exit(0); }, 600);
+    });
+    process.stdout.write('ready'); setInterval(() => {}, 1000);
+  `], { stdio: ['ignore', 'pipe', 'ignore'] });
+  let lastOutputAt = 0;
+  await new Promise<void>((resolve) => finishingChild.stdout!.once('data', () => resolve()));
+  finishingChild.stdout!.on('data', () => { lastOutputAt = Date.now(); });
+  await terminateManagedChild(finishingChild, 100, { finishing: () => Date.now() - lastOutputAt < 200, finishingLimitMs: 5_000 });
+  expect(finishingChild.signalCode).toBeNull();
+  expect(finishingChild.exitCode).toBe(0);
+
+  // Ignores SIGTERM and keeps writing forever: the limit still ends it.
+  const stuck = spawn(process.execPath, ['-e', `
+    process.on('SIGTERM', () => {}); setInterval(() => process.stdout.write('pcm'), 20); process.stdout.write('ready');
+  `], { stdio: ['ignore', 'pipe', 'ignore'] });
+  let stuckOutputAt = 0;
+  await new Promise<void>((resolve) => stuck.stdout!.once('data', () => resolve()));
+  stuck.stdout!.on('data', () => { stuckOutputAt = Date.now(); });
+  const started = Date.now();
+  await terminateManagedChild(stuck, 100, { finishing: () => Date.now() - stuckOutputAt < 200, finishingLimitMs: 400 });
+  expect(stuck.signalCode).toBe('SIGKILL');
+  expect(Date.now() - started).toBeLessThan(2_000);
+});
+
+test('an audio helper gets five seconds to take its device down before any SIGKILL', async () => {
+  expect(AUDIO_HELPER_STOP_GRACE_MS).toBe(5_000);
+  // Takes 2 s to stop, silently: the old 1.5 s grace killed it partway through.
+  const child = spawn(process.execPath, ['-e', `
+    process.on('SIGTERM', () => setTimeout(() => process.exit(0), 2_000));
+    process.stdout.write('ready'); setInterval(() => {}, 1000);
+  `], { stdio: ['ignore', 'pipe', 'ignore'], detached: true });
+  await new Promise<void>((resolve) => child.stdout!.once('data', () => resolve()));
+  await stopAudioHelper(child, () => false);
+  expect(child.signalCode).toBeNull();
+  expect(child.exitCode).toBe(0);
+}, 10_000);

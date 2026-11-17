@@ -23,8 +23,8 @@ import { screenFilmedNotice, startVideoTrack, type VideoCaptureRequest, type Vid
 import { signalProcessGroup } from './process-lifecycle.ts';
 
 /**
- * The longest a stop waits for its sources. Each settles well before this on
- * its own (a helper is killed within a few seconds); past it, whatever still
+ * The longest a stop waits for its sources. Each settles before this on its
+ * own (a helper is killed by AUDIO_HELPER_STOP_LIMIT_MS); past it, whatever still
  * holds on is killed and the meeting is saved with the audio that arrived, so
  * no helper can keep a recording, or the watcher behind it, open forever.
  */

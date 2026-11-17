@@ -27,6 +27,32 @@ test('a microphone that produces no PCM releases optional capture startup and ex
   } finally { handle.stop(); await handle.done; }
 });
 
+test('a Mac too busy to run the recorder on time does not kill a microphone whose first samples come just after', async () => {
+  const states: Array<{ state: string; code?: string }> = [];
+  const chunks: string[] = [];
+  const handle = startMicrophoneCapture({
+    sessionStartedAtUnixMs: Date.now(), startupTimeoutMs: 1_000, maxRestarts: 0,
+    chunkMilliseconds: 100, minimumChunkMilliseconds: 50,
+    command: process.execPath,
+    // A healthy helper, slow to open its input on the same busy Mac.
+    commandArgs: ['-e', 'setTimeout(() => setInterval(() => process.stdout.write(Buffer.alloc(3200, 1)), 100), 2_700)'],
+    onState: (state) => states.push(state), onChunk: (chunk) => chunks.push(chunk.path),
+  });
+  try {
+    // The recorder itself is not scheduled for well past the startup deadline.
+    const until = Date.now() + 2_500;
+    while (Date.now() < until) { /* busy */ }
+    const deadline = Date.now() + 4_000;
+    while (!states.some((state) => state.state === 'active' || state.code === 'microphone_no_audio') && Date.now() < deadline) await Bun.sleep(10);
+    expect(states.map((state) => state.code)).not.toContain('microphone_no_audio');
+    expect(states.some((state) => state.state === 'active')).toBe(true);
+    expect(handle.process.exitCode).toBeNull();
+  } finally {
+    handle.stop(); await handle.done;
+    for (const path of chunks) rmSync(path, { force: true });
+  }
+}, 15_000);
+
 test('microphone controller exposes a stoppable continuous capture lifecycle', async () => {
   const states: string[] = [];
   const chunks: string[] = [];

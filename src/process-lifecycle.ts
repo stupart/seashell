@@ -21,6 +21,31 @@ export function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals):
 export interface TerminateOptions {
   /** The child was spawned with `detached: true`: a SIGKILL takes its whole process group. */
   readonly group?: boolean;
+  /** The signal that asks it to stop. SIGTERM unless the program stops cleanly on another. */
+  readonly signal?: NodeJS.Signals;
+  /**
+   * The child is still stopping in order, as an audio helper writing its last
+   * audio and its `stop` event is. No SIGKILL lands while this holds, until
+   * finishingLimitMs after the stop was asked for.
+   */
+  readonly finishing?: () => boolean;
+  readonly finishingLimitMs?: number;
+}
+
+/**
+ * An audio helper's stop takes down its tap and aggregate device, or its
+ * engine, then writes its last audio and says `stop`. On a busy Mac that
+ * takes seconds. A SIGKILL partway through loses that audio and leaves Core
+ * Audio to clean up after a process that vanished mid-teardown, which can be
+ * heard on the speakers.
+ */
+export const AUDIO_HELPER_STOP_GRACE_MS = 5_000;
+/** The longest a helper still finishing its stop is waited for, from the stop request; within CAPTURE_STOP_DEADLINE_MS. */
+export const AUDIO_HELPER_STOP_LIMIT_MS = 15_000;
+
+/** Stop an audio helper spawned `detached: true`: AUDIO_HELPER_STOP_GRACE_MS, then longer while it is still finishing. */
+export function stopAudioHelper(child: ChildProcess, finishing: () => boolean, signal?: NodeJS.Signals): Promise<void> {
+  return terminateManagedChild(child, AUDIO_HELPER_STOP_GRACE_MS, { group: true, finishing, ...(signal ? { signal } : {}) });
 }
 
 export async function terminateManagedChild(
@@ -30,12 +55,17 @@ export async function terminateManagedChild(
 ): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const closed = childClosed(child);
+  const askedAt = Date.now();
   // A helper that relaunched itself forwards this to its relaunched copy.
-  try { child.kill('SIGTERM'); } catch { return; }
+  try { child.kill(options.signal ?? 'SIGTERM'); } catch { return; }
   await Promise.race([
     closed,
     new Promise((resolve) => setTimeout(resolve, graceMilliseconds)),
   ]);
+  const limit = askedAt + Math.max(graceMilliseconds, options.finishingLimitMs ?? AUDIO_HELPER_STOP_LIMIT_MS);
+  while (child.exitCode === null && child.signalCode === null && options.finishing?.() && Date.now() < limit) {
+    await Promise.race([closed, new Promise((resolve) => setTimeout(resolve, Math.min(250, limit - Date.now())))]);
+  }
   if (child.exitCode === null && child.signalCode === null) {
     // A SIGKILL cannot be forwarded: only the group reaches a relaunched copy.
     if (options.group) signalProcessGroup(child, 'SIGKILL');

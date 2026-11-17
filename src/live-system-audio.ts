@@ -8,7 +8,7 @@ import {
   computerAudioConfirmed, countSilentOwnStart, forgetAudioCheck, readAudioChecks, rememberInheritedComputerAudio,
   resetSilentOwnStarts, type AudioChecks,
 } from './audio-checks.ts';
-import { onChildSettled, terminateManagedChild } from './process-lifecycle.ts';
+import { onChildSettled, stopAudioHelper } from './process-lifecycle.ts';
 import { StallClock } from './stall-clock.ts';
 import {
   prepareRuntimeHelper,
@@ -716,6 +716,10 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
   let stderr = '';
   const waiting: PcmChunk[] = [];
   let lastLevelUpdate = 0;
+  let lastOutputAt = Number.NEGATIVE_INFINITY;
+  let stopSaid = false;
+  /** Its stop is under way: it said `stop`, or its last audio is still arriving. Never killed then. */
+  const finishing = () => stopSaid || Date.now() - lastOutputAt < 1_000;
   let resolveDone: () => void = () => {};
   const done = new Promise<void>((resolve) => { resolveDone = resolve; });
   // The helper sends audio continuously, silence included. If it stops, its
@@ -733,7 +737,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
     if (requestedStop || !watching || silent < stalledTimeoutMs) return;
     watching = false;
     nativeError = { type: 'error', code: 'system_audio_stalled', message: 'Computer audio stopped arriving.' };
-    void terminateManagedChild(child, undefined, { group: true });
+    void stopAudioHelper(child, finishing);
   }, watchdogTickMs);
   watchdog.unref();
 
@@ -778,6 +782,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
   ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
 
   child.stdout?.on('data', (data: Buffer) => {
+    lastOutputAt = Date.now();
     if (nativeError?.code !== 'system_audio_stalled') {
       if (!watching) stall.reset();
       watching = true;
@@ -796,7 +801,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
         code: 'chunk_failed',
         message: error instanceof Error ? error.message : String(error),
       };
-      void terminateManagedChild(child, undefined, { group: true });
+      void stopAudioHelper(child, finishing);
     }
   });
 
@@ -861,6 +866,8 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
         publishDiscontinuity(event);
       } else if (event.type === 'error') {
         nativeError = event;
+      } else if (event.type === 'stop') {
+        stopSaid = true;
       } else if (event.type === 'warning') {
         options.onState({ state: firstBufferAtUnixMs !== undefined ? 'active' : helperReady ? 'ready' : 'starting',
           code: event.code, message: event.message });
@@ -875,6 +882,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
   };
 
   child.stderr?.on('data', (data: Buffer) => {
+    lastOutputAt = Date.now();
     stderr += data.toString('utf8');
     const lines = stderr.split('\n');
     stderr = lines.pop() ?? '';
@@ -915,7 +923,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
     stop() {
       if (requestedStop) return;
       requestedStop = true;
-      void terminateManagedChild(child, undefined, { group: true });
+      void stopAudioHelper(child, finishing);
     },
   };
 }

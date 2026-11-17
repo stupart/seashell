@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from 'child_process';
 import { existsSync } from 'fs';
 import { dirname, join } from 'path';
 import { fileURLToPath } from 'url';
-import { onChildSettled, terminateManagedChild } from './process-lifecycle.ts';
+import { onChildSettled, stopAudioHelper } from './process-lifecycle.ts';
 import { StallClock } from './stall-clock.ts';
 import { prepareMicrophoneRuntimeHelper } from './runtime-host.ts';
 import {
@@ -190,38 +190,45 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
   let lastLevelUpdate = 0;
   let failure: string | undefined;
   let failureReason: MicrophoneAttemptDiagnostic['reason'] = 'process-exit';
-  const watchdogTickMs = Math.max(10, Math.min(1000, options.quietWarningMs ?? 30000, options.stalledTimeoutMs ?? 8000));
+  const startupTimeoutMs = options.startupTimeoutMs ?? 8_000;
+  const watchdogTickMs = Math.max(10, Math.min(1000, startupTimeoutMs, options.quietWarningMs ?? 30000, options.stalledTimeoutMs ?? 8000));
   // A late tick is this process lagging, not the microphone stalling (stall-clock.ts).
   const stall = new StallClock(watchdogTickMs, captureStartedAtUnixMs);
   let lastAudibleAt = captureStartedAtUnixMs;
   let quietWarning = false;
   let endingForFailure = false;
+  let lastOutputAt = Number.NEGATIVE_INFINITY;
+  /** Its last audio is still arriving: a stop under way, never killed then. */
+  const finishing = () => Date.now() - lastOutputAt < 1_000;
   let resolveDone: () => void = () => {};
   const done = new Promise<void>((resolve) => { resolveDone = resolve; });
   let settleStartup = () => {};
   const startup = new Promise<void>((resolve) => { settleStartup = resolve; });
-  const startupTimer = setTimeout(() => {
-    if (clock || requestedStop) return;
-    endingForFailure = true;
-    failureReason = 'startup-timeout';
-    failure = 'No microphone samples arrived before the startup deadline. Check the selected input and microphone access.';
-    // Optional system audio must not wait forever for a microphone that never
-    // opens. Release it before waiting for this child to terminate and retry.
-    settleStartup();
-    options.onState({ state: 'starting', code: 'microphone_no_audio',
-      message: failure });
-    void terminateManagedChild(child, undefined, { group: true });
-  }, options.startupTimeoutMs ?? 8_000);
-  startupTimer.unref();
+  // Both deadlines are judged on the same watchdog tick, by the stall clock:
+  // a Mac too busy to run this process on time must not kill a helper whose
+  // first samples are waiting in the pipe.
   const watchdog = setInterval(() => {
     const now = Date.now();
     const silent = stall.silentFor(now);
-    if (!clock || requestedStop || endingForFailure) return;
+    if (requestedStop || endingForFailure) return;
+    if (!clock) {
+      if (silent < startupTimeoutMs) return;
+      endingForFailure = true;
+      failureReason = 'startup-timeout';
+      failure = 'No microphone samples arrived before the startup deadline. Check the selected input and microphone access.';
+      // Optional system audio must not wait forever for a microphone that never
+      // opens. Release it before waiting for this child to terminate and retry.
+      settleStartup();
+      options.onState({ state: 'starting', code: 'microphone_no_audio',
+        message: failure });
+      void stopAudioHelper(child, finishing);
+      return;
+    }
     if (silent >= (options.stalledTimeoutMs ?? 8000)) {
       endingForFailure = true;
       failureReason = 'stalled';
       failure = 'Microphone stopped delivering audio. Check Sound → Input and reconnect your microphone.';
-      void terminateManagedChild(child, undefined, { group: true });
+      void stopAudioHelper(child, finishing);
     } else if (!quietWarning && now - lastAudibleAt >= (options.quietWarningMs ?? 30000)) {
       quietWarning = true;
       options.onState({ state: 'active', code: 'microphone_quiet',
@@ -263,7 +270,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
       failure = error instanceof Error ? error.message : String(error);
       failureReason = 'chunk-error';
       endingForFailure = true;
-      void terminateManagedChild(child, undefined, { group: true });
+      void stopAudioHelper(child, finishing);
     }
   };
 
@@ -278,12 +285,15 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
   });
 
   let stderr = '';
-  child.stderr?.on('data', (data: Buffer) => { stderr = (stderr + data.toString()).slice(-2_000); });
+  child.stderr?.on('data', (data: Buffer) => {
+    lastOutputAt = Date.now();
+    stderr = (stderr + data.toString()).slice(-2_000);
+  });
   child.stdout?.on('data', (data: Buffer) => {
+    lastOutputAt = Date.now();
     if (endingForFailure) return;
     stall.data();
     if (clock === undefined) {
-      clearTimeout(startupTimer);
       settleStartup();
       const firstDataAtUnixMs = Date.now();
       clock = Object.freeze({
@@ -303,7 +313,6 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
   });
   child.on('error', (error) => { failure = error.message; failureReason = 'spawn-error'; });
   onChildSettled(child, (code, signal) => {
-    clearTimeout(startupTimer);
     clearInterval(watchdog);
     settleStartup();
     publish(chunker.flush());
@@ -339,14 +348,9 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
     stop() {
       if (requestedStop) return;
       requestedStop = true;
-      clearTimeout(startupTimer);
       clearInterval(watchdog);
-      child.kill('SIGINT');
-      const terminate = setTimeout(() => {
-        void terminateManagedChild(child, undefined, { group: true });
-      }, 1_500);
-      terminate.unref();
-      void done.then(() => clearTimeout(terminate));
+      // SIGINT is the clean stop for the native helper and for SoX alike.
+      void stopAudioHelper(child, finishing, 'SIGINT');
     },
   };
 }

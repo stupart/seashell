@@ -203,3 +203,30 @@ test('once computer audio has worked, a failed reopen is retried; permission and
     expect(systemAudioCanRecover(code, true)).toBe(false);
   }
 });
+
+test('a computer-audio helper that takes seconds to take its tap down stops by itself and keeps its last audio', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-slow-stop-'));
+  // Like the helper on a busy Mac: its teardown takes over two seconds, then it
+  // writes its last audio and says stop.
+  const fake = helper(root, `
+event({type:'first-buffer',capturedAtUnixMs:Date.now(),bufferStartUnixMs:Date.now()});
+process.stdout.write(Buffer.alloc(3200,1));
+process.on('SIGTERM',()=>setTimeout(()=>{process.stdout.write(Buffer.alloc(3200,2));event({type:'stop'});process.exit(0);},2_500));
+setInterval(()=>{},1000);
+`);
+  const states: SystemAudioStateUpdate[] = [];
+  const chunks: number[] = [];
+  const capture = startSystemAudioCapture({ helperPath: process.execPath, helperArgs: [fake.path], sessionStartedAtUnixMs: Date.now(),
+    chunkMilliseconds: 100, minimumChunkMilliseconds: 20, maxRestarts: 0,
+    onState: state => states.push(state), onChunk: chunk => { chunks.push(readFileSync(chunk.path)[44]!); rmSync(chunk.path, { force: true }); } });
+  try {
+    await until(() => chunks.length === 1);
+    const helperProcess = capture.process!;
+    capture.stop();
+    await capture.done;
+    expect(helperProcess.signalCode).toBeNull();
+    expect(helperProcess.exitCode).toBe(0);
+    expect(chunks).toEqual([1, 2]);
+    expect(states.at(-1)).toMatchObject({ state: 'stopped' });
+  } finally { capture.stop(); await capture.done; rmSync(root, { recursive: true, force: true }); }
+}, 15_000);
