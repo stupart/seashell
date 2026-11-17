@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test';
 import { spawn, type ChildProcess } from 'child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { startDurableLiveCapture, type DurableLiveCaptureStatus } from '../src/durable-live-capture.ts';
@@ -12,6 +12,7 @@ import { readVerifiedCaptureChunk } from '../src/capture-session.ts';
 import { startMicrophoneCapture, type StartMicrophoneOptions } from '../src/live-microphone.ts';
 import {
   pcmS16leToWav,
+  startSystemAudioCapture,
   type StartSystemAudioOptions,
 } from '../src/live-system-audio.ts';
 import { screenFilmedNotifier, startVideoTrack, type VideoCaptureRequest, type VideoCaptureResult } from '../src/video-capture.ts';
@@ -428,3 +429,58 @@ test('letting go of the microphone keeps the session recording, and reopening it
   // Both microphones' last chunks are kept.
   expect(manifest.chunks.filter((chunk) => chunk.trackId === 'microphone')).toHaveLength(2);
 });
+
+test('a pause keeps both helpers running and keeps nothing they hear; resume carries on in the same processes, on the same clock', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-held-open-'));
+  roots.push(root);
+  const launches = join(root, 'launches');
+  writeFileSync(launches, '');
+  // Both helpers stream 100 ms of sound every 100 ms, and note each launch.
+  const mic = join(root, 'mic.ts');
+  writeFileSync(mic, `import { appendFileSync } from 'fs'; appendFileSync(${JSON.stringify(launches)}, 'm');
+setInterval(() => process.stdout.write(Buffer.alloc(3200, 7)), 100);`);
+  const computer = join(root, 'computer.ts');
+  writeFileSync(computer, `import { appendFileSync } from 'fs'; appendFileSync(${JSON.stringify(launches)}, 's');
+process.stderr.write(JSON.stringify({ type: 'first-buffer', capturedAtUnixMs: Date.now(), bufferStartUnixMs: Date.now() }) + '\\n');
+setInterval(() => process.stdout.write(Buffer.alloc(3200, 9)), 100);`);
+  const startedAt = Date.now();
+  const capture = startDurableLiveCapture({
+    libraryDir: root, sessionId: 'held-open', startedAt: new Date(startedAt), chunkMilliseconds: 200,
+    microphoneStarter: (options) => startMicrophoneCapture({ ...options, command: process.execPath, commandArgs: [mic], minimumChunkMilliseconds: 20 }),
+    systemAudioStarter: (options) => startSystemAudioCapture({ ...options, helperPath: process.execPath, helperArgs: [computer], minimumChunkMilliseconds: 20 }),
+  });
+  const chunks = (track: string) => capture.store.manifest.chunks.filter((chunk) => chunk.trackId === track);
+  try {
+    const deadline = Date.now() + 5_000;
+    while ((chunks('microphone').length < 2 || chunks('system-audio').length < 2) && Date.now() < deadline) await Bun.sleep(20);
+    capture.pause!('signal-ended');
+    const pausedAt = Date.now() - startedAt;
+    await capture.store.drainCommits();
+    await Bun.sleep(0);
+    expect(capture.store.manifest.status).toBe('paused');
+    const kept = capture.store.manifest.chunks.length;
+    await Bun.sleep(700);
+    await capture.store.drainCommits();
+    // Nothing heard while paused is kept.
+    expect(capture.store.manifest.chunks.length).toBe(kept);
+    capture.resume!();
+    const resumedAt = Date.now() - startedAt;
+    while ((chunks('microphone').at(-1)!.startMs < resumedAt - 50 || chunks('system-audio').at(-1)!.startMs < resumedAt - 50) &&
+      Date.now() < deadline + 5_000) await Bun.sleep(20);
+    expect(capture.store.manifest.status).toBe('recording');
+    for (const track of ['microphone', 'system-audio']) {
+      const saved = chunks(track);
+      const before = saved.filter((chunk) => chunk.startMs < pausedAt);
+      const after = saved.filter((chunk) => chunk.startMs >= pausedAt);
+      // Up to the pause, then from the resume: the pause is a gap at its true time.
+      expect(before.at(-1)!.endMs).toBeLessThanOrEqual(pausedAt + 150);
+      expect(after[0]!.startMs).toBeGreaterThanOrEqual(resumedAt - 150);
+    }
+    // The same two processes throughout: no tap, aggregate device or microphone was opened again.
+    expect(readFileSync(launches, 'utf8').split('').sort().join('')).toBe('ms');
+    expect(capture.store.manifest.discontinuities).toEqual([]);
+  } finally {
+    const manifest = await capture.stop();
+    expect(manifest.status).toBe('captured');
+  }
+}, 20_000);

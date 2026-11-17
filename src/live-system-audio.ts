@@ -504,6 +504,14 @@ export interface StartSystemAudioOptions {
 export interface SystemAudioCaptureHandle {
   readonly process?: ChildProcess;
   readonly done: Promise<void>;
+  /**
+   * Keep the helper, its tap and its aggregate device open, but keep nothing
+   * they hear, until resume: the audio up to now is saved, and the sample
+   * clock runs on, so what follows lands at its true time.
+   */
+  pause?(): void;
+  /** Keep what it hears again, from now. */
+  resume?(): void;
   stop(): void;
 }
 
@@ -513,6 +521,7 @@ export function startSystemAudioCapture(
   if (options.startAfter) {
     let capture: SystemAudioCaptureHandle | undefined;
     let stopped = false;
+    let paused = false;
     let settleWait = () => {};
     const wait = new Promise<void>((resolve) => { settleWait = resolve; });
     const timer = setTimeout(settleWait, options.startupWaitMs ?? 5_000);
@@ -523,6 +532,7 @@ export function startSystemAudioCapture(
       if (stopped) return;
       try {
         capture = startSystemAudioCapture({ ...options, startAfter: undefined });
+        if (paused) capture.pause?.();
         await capture.done;
       } catch (error) {
         options.onState({ state: 'unavailable', code: 'spawn_failed',
@@ -532,6 +542,8 @@ export function startSystemAudioCapture(
     return {
       get process() { return capture?.process; },
       done,
+      pause() { paused = true; capture?.pause?.(); },
+      resume() { paused = false; capture?.resume?.(); },
       stop() {
         if (stopped) return;
         stopped = true;
@@ -568,6 +580,9 @@ export function startSystemAudioCapture(
   let cancelDelay: (() => void) | undefined;
   let lastChunkEnd: number | undefined;
   let waitingForRestartChunk = false;
+  let paused = false;
+  /** The current attempt's silence so far, forgotten on resume: a pause is not the tap hearing nothing. */
+  let forgetSilence = () => {};
   // The audio never waits on the helper's own identity: anything that looks
   // like macOS refusing it goes straight back to the inherited one, which works.
   const fallBack = (reason: keyof typeof OWN_IDENTITY_WARNINGS | 'silence', attempt: { stop(): void } | undefined) => {
@@ -606,6 +621,7 @@ export function startSystemAudioCapture(
     let attemptActive = false;
     let audible = false;
     let silentFrom: number | undefined;
+    forgetSilence = () => { silentFrom = undefined; if (verdict) verdict.from = undefined; };
     const attempt: SystemAudioCaptureHandle = startSystemAudioAttempt({ ...options, helperPath,
       helperArgs: [...(options.helperArgs ?? []), ...systemAudioIdentityArguments(attemptIdentity)], onChunk(chunk) {
       if (waitingForRestartChunk && lastChunkEnd !== undefined) {
@@ -643,6 +659,7 @@ export function startSystemAudioCapture(
             : 'Computer audio stopped · reconnecting…' });
       } else options.onState(update);
     } }, { expectAudio: heard });
+    if (paused) attempt.pause?.();
     return attempt;
   };
   let current = start();
@@ -672,6 +689,21 @@ export function startSystemAudioCapture(
   })();
   return {
     get process() { return current.process; }, done,
+    pause() {
+      if (stopped || paused) return;
+      paused = true;
+      current.pause?.();
+    },
+    resume() {
+      if (stopped || !paused) return;
+      paused = false;
+      forgetSilence();
+      // The pause is a gap on purpose. Only time lost after it, to a restart meanwhile, is a reset.
+      if (lastChunkEnd !== undefined) {
+        lastChunkEnd = Math.max(lastChunkEnd, (Date.now() - options.sessionStartedAtUnixMs) / 1_000);
+      }
+      current.resume?.();
+    },
     stop() {
       if (stopped) return;
       stopped = true;
@@ -712,6 +744,8 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
   let clock: LiveCaptureClock | undefined;
   const pendingDiscontinuities: Extract<NativeSystemAudioEvent, { type: 'discontinuity' }>[] = [];
   let requestedStop = false;
+  /** Held for a resume: samples are counted, so the clock runs on, but not kept. */
+  let paused = false;
   let nativeError: Extract<NativeSystemAudioEvent, { type: 'error' }> | undefined;
   let stderr = '';
   const waiting: PcmChunk[] = [];
@@ -790,11 +824,11 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
     }
     try {
       const now = Date.now();
-      if (options.onLevel && now - lastLevelUpdate >= 500 && data.byteLength >= 2) {
+      if (options.onLevel && !paused && now - lastLevelUpdate >= 500 && data.byteLength >= 2) {
         lastLevelUpdate = now;
         options.onLevel(pcmS16leSignalLevel(data.subarray(0, data.byteLength - data.byteLength % 2)));
       }
-      for (const chunk of chunker.append(data)) publish(chunk);
+      for (const chunk of chunker.append(data)) if (!paused) publish(chunk);
     } catch (error) {
       nativeError = {
         type: 'error',
@@ -863,7 +897,8 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
         for (const gap of pendingDiscontinuities.splice(0)) publishDiscontinuity(gap);
         for (const chunk of waiting.splice(0)) publish(chunk);
       } else if (event.type === 'discontinuity') {
-        publishDiscontinuity(event);
+        // Audio lost while paused was not being kept anyway.
+        if (!paused) publishDiscontinuity(event);
       } else if (event.type === 'error') {
         nativeError = event;
       } else if (event.type === 'stop') {
@@ -896,7 +931,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
     clearInterval(watchdog);
     if (stderr.trim()) consumeEventLine(stderr);
     const final = chunker.flush();
-    if (final) {
+    if (final && !paused) {
       try { publish(final); } catch {}
     }
     if (requestedStop) {
@@ -920,6 +955,19 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
   return {
     process: child,
     done,
+    pause() {
+      if (requestedStop || paused) return;
+      // Everything heard up to the pause is kept.
+      const final = chunker.flush();
+      if (final) { try { publish(final); } catch { /* Lost to a full disk; the tap stays open. */ } }
+      paused = true;
+    },
+    resume() {
+      if (requestedStop || !paused) return;
+      // What arrived during the pause, still short of a chunk, goes with the pause.
+      chunker.flush();
+      paused = false;
+    },
     stop() {
       if (requestedStop) return;
       requestedStop = true;

@@ -113,6 +113,14 @@ export interface MicrophoneCaptureHandle {
   readonly done: Promise<void>;
   /** Settles when the input opens or fails, so CoreAudio sources open in order. */
   readonly startup?: Promise<void>;
+  /**
+   * Keep the helper and its input open, but keep nothing it hears, until
+   * resume: the audio up to now is saved, and the sample clock runs on, so
+   * what follows lands at its true time. A restart meanwhile starts paused.
+   */
+  pause?(): void;
+  /** Keep what it hears again, from now. */
+  resume?(): void;
   stop(): void;
 }
 
@@ -126,6 +134,7 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
   const maximumDelay = Math.max(firstDelay, options.restartDelayMaxMs ?? 15_000);
   let restarts = 0;
   let stopped = false;
+  let paused = false;
   /** The last attempt ended because macOS has not allowed the microphone. */
   let refused = false;
   /** That was said, and rechecks say nothing until the microphone opens or fails another way. */
@@ -147,7 +156,8 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
         message: `${update.message ?? 'Microphone capture failed.'} Retrying (${retryLabel()})…` });
     } else options.onState(update);
   } }, restarts + 1);
-  let current = start();
+  const open = () => { const attempt = start(); if (paused) attempt.pause?.(); return attempt; };
+  let current = open();
   const startup = current.startup;
   const done = (async () => {
     while (true) {
@@ -168,12 +178,14 @@ export function startMicrophoneCapture(options: StartMicrophoneOptions): Microph
         cancelDelay = () => { clearTimeout(timer); cancelDelay = undefined; resolve(); };
       });
       if (stopped) { options.onState({ state: 'stopped' }); return; }
-      current = start();
+      current = open();
     }
   })();
   return {
     get process() { return current.process; },
     startup, done,
+    pause() { if (stopped || paused) return; paused = true; current.pause?.(); },
+    resume() { if (stopped || !paused) return; paused = false; current.resume?.(); },
     stop() { stopped = true; cancelDelay?.(); current.stop(); },
   };
 }
@@ -187,6 +199,8 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
   const captureStartedAtUnixMs = Date.now();
   let clock: LiveCaptureClock | undefined;
   let requestedStop = false;
+  /** Held for a resume: samples are counted, so the clock runs on, but not kept. */
+  let paused = false;
   let lastLevelUpdate = 0;
   let failure: string | undefined;
   let failureReason: MicrophoneAttemptDiagnostic['reason'] = 'process-exit';
@@ -229,7 +243,7 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
       failureReason = 'stalled';
       failure = 'Microphone stopped delivering audio. Check Sound → Input and reconnect your microphone.';
       void stopAudioHelper(child, finishing);
-    } else if (!quietWarning && now - lastAudibleAt >= (options.quietWarningMs ?? 30000)) {
+    } else if (!quietWarning && !paused && now - lastAudibleAt >= (options.quietWarningMs ?? 30000)) {
       quietWarning = true;
       options.onState({ state: 'active', code: 'microphone_quiet',
         message: 'No clear microphone signal yet. If you’re speaking, check your selected input, mute control, and input level.' });
@@ -305,17 +319,18 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
       options.onState({ state: 'active', message: 'Microphone input connected' });
     }
     const now = Date.now();
-    if (options.onLevel && now - lastLevelUpdate >= 500 && data.byteLength >= 2) {
+    if (options.onLevel && !paused && now - lastLevelUpdate >= 500 && data.byteLength >= 2) {
       lastLevelUpdate = now;
       options.onLevel(pcmS16leSignalLevel(data.subarray(0, data.byteLength - data.byteLength % 2)));
     }
-    for (const chunk of chunker.append(data)) publish(chunk);
+    for (const chunk of chunker.append(data)) if (!paused) publish(chunk);
   });
   child.on('error', (error) => { failure = error.message; failureReason = 'spawn-error'; });
   onChildSettled(child, (code, signal) => {
     clearInterval(watchdog);
     settleStartup();
-    publish(chunker.flush());
+    const last = chunker.flush();
+    if (!paused) publish(last);
     const state: SystemAudioCaptureState = requestedStop ? 'stopped' : 'unavailable';
     const recordedStderr = stderr.trim();
     if (!requestedStop && code === MICROPHONE_PERMISSION_EXIT_CODE) {
@@ -345,6 +360,19 @@ function startMicrophoneAttempt(options: StartMicrophoneOptions, attempt: number
     process: child,
     done,
     startup,
+    pause() {
+      if (requestedStop || paused) return;
+      // Everything heard up to the pause is kept.
+      try { publish(chunker.flush()); } catch { /* Lost to a full disk; the input stays open. */ }
+      paused = true;
+    },
+    resume() {
+      if (requestedStop || !paused) return;
+      // What arrived during the pause, still short of a chunk, goes with the pause.
+      chunker.flush();
+      paused = false;
+      lastAudibleAt = Date.now();
+    },
     stop() {
       if (requestedStop) return;
       requestedStop = true;

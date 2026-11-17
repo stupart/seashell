@@ -87,6 +87,8 @@ export class CaptureHealthTracker {
   readonly #quietAfterMs: number;
   readonly #oneSidedAfterMs: number;
   #microphoneSince?: number;
+  /** When a pause for resume last ended: silence is judged from then, not across the pause. */
+  #resumedAt = 0;
   constructor(options: { microphone?: boolean; systemAudio?: boolean; nowUnixMs?: number; quietAfterMs?: number; oneSidedAfterMs?: number } = {}) {
     this.#startedAt = options.nowUnixMs ?? Date.now();
     this.#quietAfterMs = options.quietAfterMs ?? 30_000;
@@ -130,7 +132,7 @@ export class CaptureHealthTracker {
     const now = Math.max(this.#value.updatedAtUnixMs, nowUnixMs);
     // This mirrors only the capture meter's signal floor, not speech recognition.
     const signal = audible === true || (audible === undefined && Boolean(level && level.peak >= 64 && level.rmsDbfs >= -60));
-    const quiet = !signal && now - (previous.lastSignalAtUnixMs ?? this.#startedAt) >= this.#quietAfterMs;
+    const quiet = !signal && now - Math.max(previous.lastSignalAtUnixMs ?? this.#startedAt, this.#resumedAt) >= this.#quietAfterMs;
     let value: CaptureSourceHealth = {
       ...previous, state: quiet ? 'quiet' : 'receiving', lastPcmAtUnixMs: now,
       ...(signal ? { lastSignalAtUnixMs: now } : {}),
@@ -156,6 +158,16 @@ export class CaptureHealthTracker {
     const othersTalking = now - (others.lastSignalAtUnixMs ?? -Infinity) <= OTHERS_TALKING_MS;
     if (!delivering || !othersTalking || now - silentSince < this.#oneSidedAfterMs) return this.#value;
     return this.set('microphone', this.warn(mic, 'one-sided', ONE_SIDED_MESSAGE, now, 'microphone_one_sided'), now);
+  }
+  /**
+   * The recording kept nothing while it waited for the call to resume, and
+   * now keeps it again. Quiet and one-sided are judged from here, as for a
+   * fresh start; warnings already raised stay with the meeting.
+   */
+  resume(nowUnixMs = Date.now()): CaptureHealthSnapshot {
+    this.#resumedAt = Math.max(this.#value.updatedAtUnixMs, nowUnixMs);
+    this.#microphoneSince = undefined;
+    return this.#value;
   }
   /**
    * Seashell let go of the source on purpose: the call app released its

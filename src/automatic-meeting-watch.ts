@@ -190,6 +190,14 @@ interface ActiveMeeting {
   readonly draft?: BackgroundLiveTranscriptHandle;
 }
 
+/** A stopped meeting whose final pass waits briefly in case the call resumes. */
+interface ParkedMeeting extends ActiveMeeting {
+  readonly parkedAtUnixMs: number;
+  readonly resumeUntilUnixMs: number;
+  /** Its capture and live draft are held open for the resume, not stopped (finish). */
+  readonly open?: boolean;
+}
+
 export class AutomaticMeetingWatchService {
   readonly #config: SeashellConfig;
   readonly #libraryDir: string;
@@ -201,7 +209,7 @@ export class AutomaticMeetingWatchService {
   /** A recording whose capture is still closing: it still reads as recording until it has. */
   #closing?: ActiveMeeting;
   /** A stopped meeting whose final pass waits briefly in case the call resumes. */
-  #parked?: ActiveMeeting & { readonly parkedAtUnixMs: number; readonly resumeUntilUnixMs: number };
+  #parked?: ParkedMeeting;
   #finalizationTail: Promise<void> = Promise.resolve();
   /** Final passes waiting for every recording, and every meeting paused for resume, to end. */
   #quietWaiters: Array<() => void> = [];
@@ -329,7 +337,10 @@ export class AutomaticMeetingWatchService {
     const confirmedEnd = hasConfirmedMeetingEnd(state.candidate, meet);
     const unobserved = followedCallUnobserved(followed, candidate, snapshot, confirmedEnd);
     const action = this.#controller.step(candidate, now.getTime(), confirmedEnd, unobserved);
-    this.followMicrophone(callReleasedMicrophone(followed, candidate, snapshot), unobserved);
+    // A meeting held open for resume still holds the microphone, so it follows its call's app too.
+    const heldCall = !followed && this.#parked?.open ? this.#parked.candidate : undefined;
+    this.followMicrophone(callReleasedMicrophone(followed ?? heldCall, candidate, snapshot),
+      heldCall ? followedCallUnobserved(heldCall, candidate, snapshot) : unobserved, action.kind === 'finish');
     this.guardLiveText(now, detectorTimedOut || meetTimedOut);
     if (action.kind === 'suggest') {
       this.#consentId = randomUUID();
@@ -422,15 +433,18 @@ export class AutomaticMeetingWatchService {
    * again the moment the call comes back. Two readings in a row confirm it, so
    * a blip as the call switches devices does not cycle the microphone.
    */
-  private followMicrophone(released: boolean, unobserved: boolean): void {
-    const capture = this.#active?.capture;
+  private followMicrophone(released: boolean, unobserved: boolean, finishing = false): void {
+    const capture = this.#active?.capture ?? (this.#parked?.open ? this.#parked.capture : undefined);
     if (!capture) return;
-    const ending = this.#controller.state.phase === 'ending';
+    // Held open for resume, the call has already ended once: as in its end grace,
+    // and so is the poll that ends that grace.
+    const ending = !this.#active || finishing || this.#controller.state.phase === 'ending';
     // A reading that told nothing changes nothing.
     if (ending && unobserved) return;
     this.#microphoneLetGo = ending && released ? this.#microphoneLetGo + 1 : 0;
     if (this.#microphoneLetGo >= 2) capture.releaseMicrophone?.();
-    else capture.reopenMicrophone?.();
+    // Held open, it opens again only once the call is back (start).
+    else if (this.#active) capture.reopenMicrophone?.();
   }
 
   /**
@@ -692,6 +706,7 @@ export class AutomaticMeetingWatchService {
     if (!resumed) this.finalizeParked();
     const startedAt = resumed?.startedAt ?? now;
     if (resumed) candidate = Object.freeze({ ...resumed.candidate, pid: candidate.pid });
+    if (resumed?.open) return this.resumeHeld(resumed, candidate, now);
     let capture: DurableLiveCaptureHandle;
     let directory: string | undefined;
     let latestStatus: DurableLiveCaptureStatus | undefined;
@@ -700,8 +715,10 @@ export class AutomaticMeetingWatchService {
     let initializingDraft = true;
     const pendingDraftChunks: CommittedCaptureChunk[] = [];
     let draftWarning: string | undefined;
+    /** Held open for resume, the meeting shows as paused: nothing it reports may say it records. */
+    const held = () => directory !== undefined && this.#parked?.directory === directory;
     const onDraftStatus = (status: BackgroundLiveTranscriptStatus) => {
-      if (directory) {
+      if (directory && !held()) {
         try { writeBackgroundMeetingState(directory, 'recording', { draftStatus: status }); }
         catch (error) {
           this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(),
@@ -719,7 +736,7 @@ export class AutomaticMeetingWatchService {
       latestStatus = status;
       const key = status.health ? captureHealthTransitionKey(status.health) : undefined;
       const at = Date.now();
-      if (directory && (key !== writtenKey || at - writtenAt >= 1000)) {
+      if (directory && !held() && (key !== writtenKey || at - writtenAt >= 1000)) {
         try {
           writeBackgroundMeetingState(directory, 'recording', {
             ...(status.health ? { captureHealth: status.health } : {}),
@@ -810,6 +827,8 @@ export class AutomaticMeetingWatchService {
       draft = this.#dependencies.startLiveTranscript({
         libraryDir: this.#libraryDir, record, onStatus: onDraftStatus,
         ...(capture.speakerFor ? { speakerFor: capture.speakerFor } : {}),
+        // Loaded through a pause, so a call that comes back does not load the model again.
+        engineIdleMs: Math.max(60_000, this.resumeWindowMs() + 30_000),
       });
       // A Mac still overloaded from the last call gets no live text in this one either, until it calms.
       if (this.#liveTextGuard.paused) draft.pause?.(LIVE_TEXT_PAUSED);
@@ -841,12 +860,77 @@ export class AutomaticMeetingWatchService {
     return true;
   }
 
+  /** How long a meeting that stops waits to resume before its final pass. */
+  private resumeWindowMs(): number {
+    return (this.#config.meeting?.automation?.resumeWindowSeconds ?? DEFAULT_MEETING_AUTOMATION.resumeWindowSeconds) * 1_000;
+  }
+
+  private pausedStatus(): BackgroundLiveTranscriptStatus {
+    return { stage: 'stopped', queueDepth: 0,
+      detail: `Meeting paused. If it resumes within ${Math.round(this.resumeWindowMs() / 60_000) || 1} min it continues here; otherwise the final transcript starts.` };
+  }
+
+  /**
+   * The same call is back within its resume window: the capture and live
+   * draft held open for it carry on in the same processes. No tap or
+   * aggregate device is rebuilt, the microphone helper keeps running, and the
+   * live engine keeps its model.
+   */
+  private resumeHeld(resumed: ParkedMeeting, candidate: MeetingCandidate, now: Date): boolean {
+    this.#parked = undefined;
+    const { capture, directory, startedAt, draft } = resumed;
+    this.#active = { candidate, capture, directory, startedAt, ...(draft ? { draft } : {}) };
+    this.#microphoneLetGo = 0;
+    this.#dependencies.heavyWork.hold();
+    capture.resume?.();
+    // Let go of while the call had let go of its own; the call is back.
+    capture.reopenMicrophone?.();
+    if (this.#liveTextGuard.paused) draft?.pause?.(LIVE_TEXT_PAUSED);
+    this.markCapture(directory, 'recording', {
+      ...(capture.health ? { captureHealth: capture.health } : {}),
+      ...(draft ? { draftStatus: draft.status } : {}),
+      meetingKey: candidate.id,
+    });
+    this.projectWatch();
+    this.emit({ type: 'meeting.resumed', at: now.toISOString(), candidate, sessionId: capture.sessionId,
+      pausedSeconds: Math.round((now.getTime() - resumed.parkedAtUnixMs) / 1_000) });
+    return true;
+  }
+
+  /**
+   * A meeting held open for resume is over: let go of everything it held,
+   * then save it. Resolves once its capture has closed.
+   */
+  private async closeHeld(meeting: ActiveMeeting): Promise<void> {
+    try { await meeting.capture.stop('signal-ended'); }
+    finally {
+      try { await meeting.draft?.close(); }
+      catch (error) {
+        this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(),
+          message: `Live transcript cleanup needs attention: ${errorMessage(error)}. Final transcription will continue.` });
+      }
+    }
+  }
+
   private async finish(candidate: MeetingCandidate, reason: string): Promise<void> {
     const active = this.#active;
     if (!active) return;
     this.#active = undefined;
-    this.#closing = active;
     this.#consentId = undefined;
+    // A call whose signal ended may come back: hold its capture open rather
+    // than stopping it, so a resume rebuilds nothing (resumeHeld).
+    if (reason === 'signal-ended' && !this.#shuttingDown && this.resumeWindowMs() > 0 && active.capture.pause && active.capture.resume) {
+      const parkedAtUnixMs = this.#dependencies.now().getTime();
+      // Parked first, so nothing the capture reports as it pauses reads as recording.
+      this.#parked = { ...active, parkedAtUnixMs, resumeUntilUnixMs: parkedAtUnixMs + this.resumeWindowMs(), open: true };
+      active.capture.pause(reason);
+      this.markCapture(active.directory, 'processing', { draftStatus: this.pausedStatus() });
+      this.emit({ type: 'meeting.capture-finished', at: this.#dependencies.now().toISOString(), candidate, sessionId: active.capture.sessionId });
+      this.gateHeavyWork(this.#dependencies.now());
+      this.projectWatch();
+      return;
+    }
+    this.#closing = active;
     try {
       try {
         await active.capture.stop(reason);
@@ -861,16 +945,12 @@ export class AutomaticMeetingWatchService {
             message: `Live transcript cleanup needs attention: ${errorMessage(error)}. Final transcription will continue.` });
         }
       }
-      const resumeWindowMs = (this.#config.meeting?.automation?.resumeWindowSeconds ??
-        DEFAULT_MEETING_AUTOMATION.resumeWindowSeconds) * 1_000;
+      const resumeWindowMs = this.resumeWindowMs();
       const parkedAtUnixMs = this.#dependencies.now().getTime();
       const park = reason === 'signal-ended' && !this.#shuttingDown && resumeWindowMs > 0;
       if (park) {
         this.#parked = { ...active, parkedAtUnixMs, resumeUntilUnixMs: parkedAtUnixMs + resumeWindowMs };
-        this.markCapture(active.directory, 'processing', { draftStatus: {
-          stage: 'stopped', queueDepth: 0,
-          detail: `Meeting paused. If it resumes within ${Math.round(resumeWindowMs / 60_000) || 1} min it continues here; otherwise the final transcript starts.`,
-        } });
+        this.markCapture(active.directory, 'processing', { draftStatus: this.pausedStatus() });
       } else this.markCapture(active.directory, 'processing');
       this.emit({
         type: 'meeting.capture-finished',
@@ -926,17 +1006,22 @@ export class AutomaticMeetingWatchService {
       stage: 'stopped', queueDepth: 0, detail: 'Live draft stopped. Preparing the final transcript.',
     } });
     this.gateHeavyWork(this.#dependencies.now());
-    this.enqueueFinalization(parked);
+    const closed = parked.open ? this.closeHeld(parked) : undefined;
+    // Its failure is the final pass's to report, whenever that runs.
+    closed?.catch(() => {});
+    this.enqueueFinalization(parked, closed);
     this.releaseIfQuiet();
   }
 
-  private enqueueFinalization(meeting: ActiveMeeting): void {
+  /** `closed`: a capture still closing, which the final pass waits for. */
+  private enqueueFinalization(meeting: ActiveMeeting, closed?: Promise<void>): void {
     if (!this.quiet) this.markCapture(meeting.directory, 'processing', { draftStatus: {
       stage: 'stopped', queueDepth: 0, detail: this.#active || this.#parked
         ? 'The final transcript starts when the call now recording ends.'
         : 'The final transcript starts when the call on this Mac ends.',
     } });
     const task = async () => {
+      if (closed) await closed;
       if (!this.quiet) await this.untilQuiet();
       return this.finalize(meeting.candidate, meeting.capture);
     };

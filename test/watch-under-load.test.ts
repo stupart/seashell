@@ -317,6 +317,64 @@ test('a call that starts while a final pass runs stops that pass where it stands
   expect(state.finalized).toContain('call-1');
 }, 15_000);
 
+test('a call that pauses and comes back carries on in the same capture and live draft; only the end of its window stops them', async () => {
+  const root = scratch('held-open');
+  const held = { starts: 0, pauses: 0, resumes: 0, stops: 0, drafts: 0, closes: 0, microphoneOpen: true, engineIdleMs: 0 };
+  const { state, service } = busyWatch(root, (state) => ({
+    startCapture: (options) => {
+      held.starts += 1;
+      const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'held-call', startedAtUnixMs: options.startedAt!.getTime(),
+        createdAt: options.startedAt!.toISOString() });
+      const report = () => options.onStatus?.({ microphone: 'active', systemAudio: 'active', durableChunks: 0, audioSavedThroughMs: 0 });
+      return { store, sessionId: 'held-call', manifestPath: store.manifestPath,
+        // Its helpers carry on reporting while paused, as real ones do.
+        pause() { held.pauses += 1; report(); },
+        resume() { held.resumes += 1; },
+        releaseMicrophone() { held.microphoneOpen = false; },
+        reopenMicrophone() { held.microphoneOpen = true; },
+        async stop() { held.stops += 1; state.stops += 1; return store.setStatus('captured', 'test'); } };
+    },
+    startLiveTranscript: (options) => {
+      held.drafts += 1;
+      held.engineIdleMs = options.engineIdleMs ?? 0;
+      return { status: { stage: 'waiting', detail: 'Waiting for speech.', queueDepth: 0 }, enqueue() {},
+        async close() { held.closes += 1; } };
+    },
+  }));
+  const shown = () => readBackgroundMeetingStatus(listTranscriptRecords(root)[0]!.directory);
+  try {
+    expect((await service.pollOnce()).kind).toBe('start');
+    for (let pause = 1; pause <= 3; pause += 1) {
+      // Safari lets go for the end grace: the meeting pauses, held open.
+      state.input = [];
+      for (let poll = 0; poll < 8; poll += 1) { state.now += 3_000; await service.pollOnce(); }
+      expect(held.pauses).toBe(pause);
+      // Safari let go of its microphone, so Seashell has too (a headset leaves call mode).
+      expect(held.microphoneOpen).toBe(false);
+      expect(shown()?.state).toBe('processing');
+      expect(shown()?.draftStatus?.detail).toContain('Meeting paused');
+      // The call comes back: the same capture and draft carry on.
+      state.input = [SAFARI];
+      state.now += 3_000;
+      expect((await service.pollOnce()).kind).toBe('start');
+      expect(held.resumes).toBe(pause);
+      expect(held.microphoneOpen).toBe(true);
+      expect(shown()?.state).toBe('recording');
+    }
+    expect(held).toMatchObject({ starts: 1, drafts: 1, stops: 0, closes: 0 });
+    expect(state.events.filter((event) => event.type === 'meeting.resumed')).toHaveLength(3);
+    // Its live engine keeps the model loaded through a whole resume window.
+    expect(held.engineIdleMs).toBeGreaterThan(180_000);
+    // It ends for good: past the resume window everything it held open stops, once, and it is saved once.
+    state.input = [];
+    for (let poll = 0; poll < 80; poll += 1) { state.now += 3_000; await service.pollOnce(); }
+    await Bun.sleep(10);
+    expect(held).toMatchObject({ starts: 1, drafts: 1, stops: 1, closes: 1 });
+    expect(state.finalized).toEqual(['held-call']);
+  } finally { await service.shutdown(); }
+  expect(held.stops).toBe(1);
+});
+
 test('an overloaded Mac pauses live text mid-call and keeps the audio recording; a calm minute brings it back', async () => {
   const root = scratch('pause-live-text');
   let load = 0.3;
