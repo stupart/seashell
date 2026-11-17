@@ -5,6 +5,7 @@ import { join } from 'path';
 import { startDurableLiveCapture } from '../src/durable-live-capture.ts';
 import { startMicrophoneCapture } from '../src/live-microphone.ts';
 import { startSystemAudioCapture } from '../src/live-system-audio.ts';
+import { AUDIO_HELPER_STOP_GRACE_MS } from '../src/process-lifecycle.ts';
 
 for (const source of ['microphone', 'system-audio'] as const) {
   test(`${source} stop kills a capture child that ignores graceful termination`, async () => {
@@ -45,14 +46,16 @@ setInterval(() => {}, 100);
       capture.stop();
       await capture.done;
       expect(capture.process?.signalCode).toBe('SIGKILL');
-      expect(performance.now() - stoppingAt).toBeLessThan(4_500);
+      // It gets its grace to take its device down, then no longer.
+      expect(performance.now() - stoppingAt).toBeGreaterThanOrEqual(AUDIO_HELPER_STOP_GRACE_MS - 50);
+      expect(performance.now() - stoppingAt).toBeLessThan(AUDIO_HELPER_STOP_GRACE_MS + 3_000);
     } finally {
       capture.stop();
       if (capture.process?.exitCode === null && capture.process.signalCode === null) capture.process.kill('SIGKILL');
       await capture.done;
       rmSync(root, { recursive: true, force: true });
     }
-  }, 8_000);
+  }, 15_000);
 }
 
 /** Whether a process is still running. */

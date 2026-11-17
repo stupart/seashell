@@ -199,4 +199,4 @@ test('a never-PCM child ignoring normal termination is forcibly bounded', async 
     await capture.done;
     expect(states.at(-1)?.diagnostic).toMatchObject({ reason: 'startup-timeout', signal: 'SIGKILL' });
   } finally { capture.stop(); await capture.done; }
-}, 5000);
+}, 12_000);

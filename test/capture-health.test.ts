@@ -191,3 +191,43 @@ test('the one-sided notice goes out once per meeting, pauses included, and only 
   notify({ type: 'watch.warning', message: ONE_SIDED_MESSAGE });
   expect(sent).toHaveLength(2);
 });
+
+test('a pause for resume is not silence: quiet and one-sided are judged from the resume', () => {
+  const loud = { peak: 9_000, rms: 2_000, rmsDbfs: -24 };
+  const tracker = new CaptureHealthTracker({ nowUnixMs: 0 });
+  tracker.pcm('microphone', loud, true, 1_000);
+  tracker.pcm('systemAudio', loud, true, 1_000);
+  // Paused for two minutes, then the call is back.
+  tracker.resume(121_000);
+  // The others talk at once; you have not yet, and the pause before is not you being muted.
+  const after = tracker.pcm('systemAudio', loud, true, 122_000);
+  const mic = tracker.pcm('microphone', undefined, false, 122_500).microphone;
+  expect(after.systemAudio.state).toBe('receiving');
+  expect(mic.state).toBe('receiving');
+  expect(mic.warnings).toEqual([]);
+  // Silence after the resume still counts, from the resume.
+  const later = tracker.pcm('microphone', undefined, false, 152_000).microphone;
+  expect(later.state).toBe('quiet');
+});
+
+test('seconds a busy Mac lost are counted over the meeting and said past five, with the running total', () => {
+  const tracker = new CaptureHealthTracker({ nowUnixMs: 0 });
+  tracker.pcm('systemAudio', undefined, true, 1_000);
+  // A few dropped buffers are not said.
+  for (let gap = 0; gap < 4; gap += 1) tracker.dropped('systemAudio', 1.2, 2_000 + gap);
+  expect(tracker.snapshot.systemAudio.lostSeconds).toBe(4.8);
+  expect(tracker.snapshot.systemAudio.warnings).toEqual([]);
+  tracker.dropped('systemAudio', 7.3, 3_000);
+  const said = tracker.snapshot.systemAudio.warnings.find((warning) => warning.kind === 'dropped');
+  expect(said?.message).toBe('Your Mac was too busy: 12 s of the other side was not recorded.');
+  // Audio that arrives later does not bring the lost audio back.
+  tracker.pcm('systemAudio', undefined, true, 4_000);
+  const after = tracker.stop(5_000, []);
+  expect(after.systemAudio.warnings.find((warning) => warning.kind === 'dropped')?.resolvedAtUnixMs).toBeUndefined();
+  expect(after.systemAudio.lostSeconds).toBe(12.1);
+  // Kept with the meeting, as written and read back.
+  const read = parseCaptureHealth(JSON.parse(JSON.stringify(after)));
+  expect(read?.systemAudio.lostSeconds).toBe(12.1);
+  expect(read?.systemAudio.warnings.map((warning) => warning.kind)).toEqual(['dropped']);
+  expect(parseCaptureHealth({ ...after, systemAudio: { ...after.systemAudio, lostSeconds: -1 } })).toBeUndefined();
+});

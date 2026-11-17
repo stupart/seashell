@@ -514,3 +514,47 @@ test('a detector that keeps failing is restarted less and less often, not every 
     expect(count).toBeLessThanOrEqual(3);
   } finally { monitor.stop(); }
 }, 10_000);
+
+test('a detector whose heartbeat is late is waited for, not replaced; a long-silent one is', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-signal-slow-'));
+  temporaryRoots.push(root);
+  const starts = join(root, 'starts');
+  const helper = join(root, 'signal-helper');
+  // Core Audio takes 1.5 s, six intervals, to answer once, then answers on time again.
+  writeFileSync(helper, `
+import { appendFileSync } from 'fs';
+appendFileSync(${JSON.stringify(starts)}, 'x');
+const snapshot = (at) => console.log(JSON.stringify({schemaVersion:1,capturedAtUnixMs:at,supported:true,inputProcesses:[]}));
+snapshot(1000);
+await Bun.sleep(1_500);
+snapshot(2000);
+setInterval(() => snapshot(3000), 250);
+`, { mode: 0o600 });
+  const monitor = new MeetingSignalMonitor(process.execPath, 250, [helper], { respawnAfterMs: 10_000 });
+  const errors: string[] = [];
+  monitor.onError((error) => errors.push(error.message));
+  try {
+    expect((await monitor.waitForSnapshot()).capturedAtUnixMs).toBe(1000);
+    await Bun.sleep(1_100);
+    // Late: said, and the stale snapshot is no longer evidence…
+    expect(() => monitor.latest()).toThrow('heartbeat');
+    expect(errors.filter((message) => message.includes('heartbeat'))).toHaveLength(1);
+    // …but the same detector answers, and is never replaced.
+    await Bun.sleep(1_000);
+    expect(monitor.latest().capturedAtUnixMs).toBeGreaterThanOrEqual(2000);
+    expect(readFileSync(starts, 'utf8')).toBe('x');
+  } finally { monitor.stop(); }
+
+  const silentStarts = join(root, 'silent-starts');
+  writeFileSync(silentStarts, '');
+  const silent = join(root, 'silent-helper');
+  writeFileSync(silent, `import { appendFileSync } from 'fs'; appendFileSync(${JSON.stringify(silentStarts)}, 'x'); setInterval(() => {}, 1000);\n`, { mode: 0o600 });
+  const stuck = new MeetingSignalMonitor(process.execPath, 250, [silent], { respawnAfterMs: 400 });
+  stuck.onError(() => {});
+  stuck.start();
+  try {
+    const deadline = Date.now() + 5_000;
+    while (!readFileSync(silentStarts, 'utf8').includes('xx') && Date.now() < deadline) await Bun.sleep(20);
+    expect(readFileSync(silentStarts, 'utf8')).toBe('xx');
+  } finally { stuck.stop(); }
+}, 15_000);

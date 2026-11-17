@@ -8,7 +8,7 @@ import {
   computerAudioConfirmed, countSilentOwnStart, forgetAudioCheck, readAudioChecks, rememberInheritedComputerAudio,
   resetSilentOwnStarts, type AudioChecks,
 } from './audio-checks.ts';
-import { onChildSettled, terminateManagedChild } from './process-lifecycle.ts';
+import { onChildSettled, stopAudioHelper } from './process-lifecycle.ts';
 import { StallClock } from './stall-clock.ts';
 import {
   prepareRuntimeHelper,
@@ -148,6 +148,24 @@ export interface LiveCaptureDiscontinuity {
   readonly atFrame: number;
   readonly durationFrames: number;
   readonly reason: 'capture-overrun' | 'device-reset' | 'clock-reset';
+}
+
+/** What a capture helper can say about the device it opened. */
+export type AudioSourceDetail = 'deviceId' | 'transport' | 'sampleRate' | 'bufferFrames';
+
+/**
+ * A capture source opened: when a recording starts, when its output route
+ * changes, or after a restart. Kept with the meeting, so a recording that
+ * lost audio can be read against the device it ran on.
+ */
+export interface AudioSourceOpened {
+  readonly reason: 'start' | 'route-change' | 'restart';
+  /** The device's own rate, before conversion to 16 kHz. */
+  readonly sampleRate?: number;
+  /** Frames in its first IO buffer: the device's buffer size. */
+  readonly bufferFrames?: number;
+  /** What the helper does not report, so it reads as not seen rather than not logged. */
+  readonly missing: readonly AudioSourceDetail[];
 }
 
 export interface SystemAudioChunk {
@@ -499,11 +517,21 @@ export interface StartSystemAudioOptions {
   readonly onState: (update: SystemAudioStateUpdate) => void;
   readonly onLevel?: (level: PcmSignalLevel) => void;
   readonly onDiscontinuity?: (event: LiveCaptureDiscontinuity) => void;
+  /** Each attempt's device, once its first buffer arrives. */
+  readonly onOpened?: (opened: AudioSourceOpened) => void;
 }
 
 export interface SystemAudioCaptureHandle {
   readonly process?: ChildProcess;
   readonly done: Promise<void>;
+  /**
+   * Keep the helper, its tap and its aggregate device open, but keep nothing
+   * they hear, until resume: the audio up to now is saved, and the sample
+   * clock runs on, so what follows lands at its true time.
+   */
+  pause?(): void;
+  /** Keep what it hears again, from now. */
+  resume?(): void;
   stop(): void;
 }
 
@@ -513,6 +541,7 @@ export function startSystemAudioCapture(
   if (options.startAfter) {
     let capture: SystemAudioCaptureHandle | undefined;
     let stopped = false;
+    let paused = false;
     let settleWait = () => {};
     const wait = new Promise<void>((resolve) => { settleWait = resolve; });
     const timer = setTimeout(settleWait, options.startupWaitMs ?? 5_000);
@@ -523,6 +552,7 @@ export function startSystemAudioCapture(
       if (stopped) return;
       try {
         capture = startSystemAudioCapture({ ...options, startAfter: undefined });
+        if (paused) capture.pause?.();
         await capture.done;
       } catch (error) {
         options.onState({ state: 'unavailable', code: 'spawn_failed',
@@ -532,6 +562,8 @@ export function startSystemAudioCapture(
     return {
       get process() { return capture?.process; },
       done,
+      pause() { paused = true; capture?.pause?.(); },
+      resume() { paused = false; capture?.resume?.(); },
       stop() {
         if (stopped) return;
         stopped = true;
@@ -568,6 +600,11 @@ export function startSystemAudioCapture(
   let cancelDelay: (() => void) | undefined;
   let lastChunkEnd: number | undefined;
   let waitingForRestartChunk = false;
+  let paused = false;
+  /** Why the next attempt opens: the last one's failure says. */
+  let opening: AudioSourceOpened['reason'] = 'start';
+  /** The current attempt's silence so far, forgotten on resume: a pause is not the tap hearing nothing. */
+  let forgetSilence = () => {};
   // The audio never waits on the helper's own identity: anything that looks
   // like macOS refusing it goes straight back to the inherited one, which works.
   const fallBack = (reason: keyof typeof OWN_IDENTITY_WARNINGS | 'silence', attempt: { stop(): void } | undefined) => {
@@ -606,6 +643,7 @@ export function startSystemAudioCapture(
     let attemptActive = false;
     let audible = false;
     let silentFrom: number | undefined;
+    forgetSilence = () => { silentFrom = undefined; if (verdict) verdict.from = undefined; };
     const attempt: SystemAudioCaptureHandle = startSystemAudioAttempt({ ...options, helperPath,
       helperArgs: [...(options.helperArgs ?? []), ...systemAudioIdentityArguments(attemptIdentity)], onChunk(chunk) {
       if (waitingForRestartChunk && lastChunkEnd !== undefined) {
@@ -635,6 +673,7 @@ export function startSystemAudioCapture(
         fallBack(update.code === 'permission_denied' ? 'refused' : attemptActive ? 'silence' : 'failed', undefined);
         return;
       }
+      if (update.state === 'unavailable') opening = update.code === 'device_changed' ? 'route-change' : 'restart';
       retryEligible = update.state === 'unavailable' && systemAudioCanRecover(update.code, heard);
       if (retryEligible && !stopped && restarts < maximumRestarts) {
         options.onState({ state: 'starting', code: 'system_audio_reconnecting',
@@ -642,7 +681,8 @@ export function startSystemAudioCapture(
             : update.code === 'device_changed' ? 'Computer audio device changed · reconnecting…'
             : 'Computer audio stopped · reconnecting…' });
       } else options.onState(update);
-    } }, { expectAudio: heard });
+    } }, { expectAudio: heard, reason: opening });
+    if (paused) attempt.pause?.();
     return attempt;
   };
   let current = start();
@@ -672,6 +712,21 @@ export function startSystemAudioCapture(
   })();
   return {
     get process() { return current.process; }, done,
+    pause() {
+      if (stopped || paused) return;
+      paused = true;
+      current.pause?.();
+    },
+    resume() {
+      if (stopped || !paused) return;
+      paused = false;
+      forgetSilence();
+      // The pause is a gap on purpose. Only time lost after it, to a restart meanwhile, is a reset.
+      if (lastChunkEnd !== undefined) {
+        lastChunkEnd = Math.max(lastChunkEnd, (Date.now() - options.sessionStartedAtUnixMs) / 1_000);
+      }
+      current.resume?.();
+    },
     stop() {
       if (stopped) return;
       stopped = true;
@@ -694,7 +749,8 @@ export function systemAudioCanRecover(code: string | undefined, heard: boolean):
   return heard && !permanentFailures.has(code ?? '');
 }
 
-function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { readonly expectAudio: boolean }): SystemAudioCaptureHandle {
+function startSystemAudioAttempt(options: StartSystemAudioOptions,
+  attempt: { readonly expectAudio: boolean; readonly reason?: AudioSourceOpened['reason'] }): SystemAudioCaptureHandle {
   const helperPath = options.helperPath ?? defaultSystemAudioHelper();
   if (!existsSync(helperPath)) {
     options.onState({
@@ -712,10 +768,16 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
   let clock: LiveCaptureClock | undefined;
   const pendingDiscontinuities: Extract<NativeSystemAudioEvent, { type: 'discontinuity' }>[] = [];
   let requestedStop = false;
+  /** Held for a resume: samples are counted, so the clock runs on, but not kept. */
+  let paused = false;
   let nativeError: Extract<NativeSystemAudioEvent, { type: 'error' }> | undefined;
   let stderr = '';
   const waiting: PcmChunk[] = [];
   let lastLevelUpdate = 0;
+  let lastOutputAt = Number.NEGATIVE_INFINITY;
+  let stopSaid = false;
+  /** Its stop is under way: it said `stop`, or its last audio is still arriving. Never killed then. */
+  const finishing = () => stopSaid || Date.now() - lastOutputAt < 1_000;
   let resolveDone: () => void = () => {};
   const done = new Promise<void>((resolve) => { resolveDone = resolve; });
   // The helper sends audio continuously, silence included. If it stops, its
@@ -733,7 +795,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
     if (requestedStop || !watching || silent < stalledTimeoutMs) return;
     watching = false;
     nativeError = { type: 'error', code: 'system_audio_stalled', message: 'Computer audio stopped arriving.' };
-    void terminateManagedChild(child, undefined, { group: true });
+    void stopAudioHelper(child, finishing);
   }, watchdogTickMs);
   watchdog.unref();
 
@@ -778,6 +840,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
   ], { stdio: ['ignore', 'pipe', 'pipe'], detached: true });
 
   child.stdout?.on('data', (data: Buffer) => {
+    lastOutputAt = Date.now();
     if (nativeError?.code !== 'system_audio_stalled') {
       if (!watching) stall.reset();
       watching = true;
@@ -785,18 +848,18 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
     }
     try {
       const now = Date.now();
-      if (options.onLevel && now - lastLevelUpdate >= 500 && data.byteLength >= 2) {
+      if (options.onLevel && !paused && now - lastLevelUpdate >= 500 && data.byteLength >= 2) {
         lastLevelUpdate = now;
         options.onLevel(pcmS16leSignalLevel(data.subarray(0, data.byteLength - data.byteLength % 2)));
       }
-      for (const chunk of chunker.append(data)) publish(chunk);
+      for (const chunk of chunker.append(data)) if (!paused) publish(chunk);
     } catch (error) {
       nativeError = {
         type: 'error',
         code: 'chunk_failed',
         message: error instanceof Error ? error.message : String(error),
       };
-      void terminateManagedChild(child, undefined, { group: true });
+      void stopAudioHelper(child, finishing);
     }
   });
 
@@ -855,12 +918,26 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
           ...(event.sampleTime === undefined ? {} : { sampleTime: event.sampleTime }),
         });
         options.onState({ state: 'active', message: 'Receiving computer audio' });
+        // The helper names no device and no transport; its tap's rate and first buffer are what it says.
+        options.onOpened?.(Object.freeze({
+          reason: attempt.reason ?? 'start',
+          ...(event.sourceSampleRate === undefined ? {} : { sampleRate: event.sourceSampleRate }),
+          ...(event.bufferFrames === undefined ? {} : { bufferFrames: event.bufferFrames }),
+          missing: Object.freeze([
+            'deviceId', 'transport',
+            ...(event.sourceSampleRate === undefined ? ['sampleRate' as const] : []),
+            ...(event.bufferFrames === undefined ? ['bufferFrames' as const] : []),
+          ] as AudioSourceDetail[]),
+        }));
         for (const gap of pendingDiscontinuities.splice(0)) publishDiscontinuity(gap);
         for (const chunk of waiting.splice(0)) publish(chunk);
       } else if (event.type === 'discontinuity') {
-        publishDiscontinuity(event);
+        // Audio lost while paused was not being kept anyway.
+        if (!paused) publishDiscontinuity(event);
       } else if (event.type === 'error') {
         nativeError = event;
+      } else if (event.type === 'stop') {
+        stopSaid = true;
       } else if (event.type === 'warning') {
         options.onState({ state: firstBufferAtUnixMs !== undefined ? 'active' : helperReady ? 'ready' : 'starting',
           code: event.code, message: event.message });
@@ -875,6 +952,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
   };
 
   child.stderr?.on('data', (data: Buffer) => {
+    lastOutputAt = Date.now();
     stderr += data.toString('utf8');
     const lines = stderr.split('\n');
     stderr = lines.pop() ?? '';
@@ -888,7 +966,7 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
     clearInterval(watchdog);
     if (stderr.trim()) consumeEventLine(stderr);
     const final = chunker.flush();
-    if (final) {
+    if (final && !paused) {
       try { publish(final); } catch {}
     }
     if (requestedStop) {
@@ -912,10 +990,23 @@ function startSystemAudioAttempt(options: StartSystemAudioOptions, attempt: { re
   return {
     process: child,
     done,
+    pause() {
+      if (requestedStop || paused) return;
+      // Everything heard up to the pause is kept.
+      const final = chunker.flush();
+      if (final) { try { publish(final); } catch { /* Lost to a full disk; the tap stays open. */ } }
+      paused = true;
+    },
+    resume() {
+      if (requestedStop || !paused) return;
+      // What arrived during the pause, still short of a chunk, goes with the pause.
+      chunker.flush();
+      paused = false;
+    },
     stop() {
       if (requestedStop) return;
       requestedStop = true;
-      void terminateManagedChild(child, undefined, { group: true });
+      void stopAudioHelper(child, finishing);
     },
   };
 }

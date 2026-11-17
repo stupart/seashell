@@ -12,6 +12,9 @@ import { startBackgroundLiveTranscript } from '../src/background-live-transcript
 import { readBackgroundMeetingStatus } from '../src/background-meeting-status.ts';
 import { LIVE_TEXT_PAUSED } from '../src/live-text-guard.ts';
 import { listTranscriptRecords } from '../src/transcript-library.ts';
+import { HeavyWorkGate } from '../src/heavy-work.ts';
+import { CaptureHealthTracker } from '../src/capture-health.ts';
+import { spawn } from 'child_process';
 import { createTranscriptRecord } from '../src/transcript-record.ts';
 import type { SeashellConfig } from '../src/config.ts';
 import type { MeetProbe } from '../src/meet-speakers.ts';
@@ -228,6 +231,177 @@ test('a call that pauses and resumes is transcribed once, after it has really en
   expect(state.starts).toBe(4);
 });
 
+test('a final pass waits while any other app holds the microphone, Seashell\'s own helpers aside', async () => {
+  const root = scratch('final-waits-for-others');
+  const gate = new HeavyWorkGate();
+  const DICTATION = { pid: 77, bundleId: 'com.example.dictation', name: 'Dictation' };
+  const OWN = { pid: 78, bundleId: 'com.humain.seashell.microphone', name: 'Seashell Microphone' };
+  const { state, service } = busyWatch(root, () => ({ heavyWork: gate }));
+  const settle = () => Bun.sleep(10);
+  try {
+    state.input = [SAFARI, OWN];
+    expect((await service.pollOnce()).kind).toBe('start');
+    expect(gate.held).toBe(true);
+    // Safari hangs up, but another app keeps listening, past the resume window.
+    state.input = [DICTATION, OWN];
+    for (state.now = 3_000; state.now <= 240_000; state.now += 3_000) await service.pollOnce();
+    await settle();
+    expect(state.events.map((event) => event.type)).toContain('meeting.capture-finished');
+    expect(state.finalized).toEqual([]);
+    expect(gate.held).toBe(true);
+    // Seashell's own helper still listed, as its capture closes: it does not count.
+    state.input = [OWN];
+    state.now += 3_000;
+    await service.pollOnce();
+    await settle();
+    expect(gate.held).toBe(false);
+    expect(state.finalized).toEqual(['call-1']);
+  } finally { await service.shutdown(); }
+});
+
+test('an app that never lets go of the microphone holds the final pass no longer than a recording may last', async () => {
+  const root = scratch('final-always-listening');
+  const gate = new HeavyWorkGate();
+  const ALWAYS = { pid: 79, bundleId: 'com.example.always-listening', name: 'Always' };
+  const { state, service } = busyWatch(root, () => ({ heavyWork: gate }));
+  try {
+    expect((await service.pollOnce()).kind).toBe('start');
+    state.input = [ALWAYS];
+    for (state.now = 3_000; state.now <= 300_000; state.now += 3_000) await service.pollOnce();
+    await Bun.sleep(10);
+    expect(state.finalized).toEqual([]);
+    // Four hours, the longest a recording may run, and it still listens: not a call.
+    for (; state.now <= 4 * 3_600_000 + 60_000; state.now += 60_000) await service.pollOnce();
+    await Bun.sleep(10);
+    expect(state.finalized).toEqual(['call-1']);
+    expect(gate.held).toBe(false);
+  } finally { await service.shutdown(); }
+});
+
+test('a call that starts while a final pass runs stops that pass where it stands until the call ends', async () => {
+  const root = scratch('final-stopped-mid-pass');
+  const gate = new HeavyWorkGate();
+  let counted = 0;
+  let pass: ReturnType<typeof spawn> | undefined;
+  const { state, service } = busyWatch(root, (state) => ({
+    heavyWork: gate,
+    // A final pass whose Whisper counts for as long as it runs.
+    finalizeCapture: async (path) => {
+      const id = path.split('/').at(-2)!;
+      await gate.ready();
+      pass = spawn(process.execPath, ['-e', 'setInterval(() => process.stdout.write("x"), 10); setTimeout(() => process.exit(0), 800)'],
+        { stdio: ['ignore', 'pipe', 'ignore'] });
+      pass.stdout!.on('data', (data: Buffer) => { counted += data.length; });
+      gate.follow(pass);
+      await new Promise((resolve) => pass!.once('exit', resolve));
+      state.finalized.push(id);
+      return createTranscriptRecord({ transcript: [{ start: 0, end: 1, text: 'Saved.' }], speakers: [] }, { id, now: new Date(0) });
+    },
+  }));
+  try {
+    expect((await service.pollOnce()).kind).toBe('start');
+    state.input = [];
+    for (state.now = 3_000; state.now <= 210_000; state.now += 3_000) await service.pollOnce();
+    while (counted < 5) await Bun.sleep(10);
+    // Another call: its first poll stops the pass.
+    state.input = [{ pid: 90, bundleId: 'us.zoom.xos', name: 'Zoom' }];
+    state.now += 3_000;
+    await service.pollOnce();
+    expect(gate.held).toBe(true);
+    await Bun.sleep(50);
+    const stoppedAt = counted;
+    await Bun.sleep(400);
+    expect(counted - stoppedAt).toBeLessThanOrEqual(1);
+    expect(pass!.exitCode).toBeNull();
+  } finally { await service.shutdown(); }
+  // Shutting down lets it finish rather than leaving it stopped.
+  expect(state.finalized).toContain('call-1');
+}, 15_000);
+
+test('a call that pauses and comes back carries on in the same capture and live draft; only the end of its window stops them', async () => {
+  const root = scratch('held-open');
+  const held = { starts: 0, pauses: 0, resumes: 0, stops: 0, drafts: 0, closes: 0, microphoneOpen: true, engineIdleMs: 0 };
+  const { state, service } = busyWatch(root, (state) => ({
+    startCapture: (options) => {
+      held.starts += 1;
+      const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'held-call', startedAtUnixMs: options.startedAt!.getTime(),
+        createdAt: options.startedAt!.toISOString() });
+      const report = () => options.onStatus?.({ microphone: 'active', systemAudio: 'active', durableChunks: 0, audioSavedThroughMs: 0 });
+      return { store, sessionId: 'held-call', manifestPath: store.manifestPath,
+        // Its helpers carry on reporting while paused, as real ones do.
+        pause() { held.pauses += 1; report(); },
+        resume() { held.resumes += 1; },
+        releaseMicrophone() { held.microphoneOpen = false; },
+        reopenMicrophone() { held.microphoneOpen = true; },
+        async stop() { held.stops += 1; state.stops += 1; return store.setStatus('captured', 'test'); } };
+    },
+    startLiveTranscript: (options) => {
+      held.drafts += 1;
+      held.engineIdleMs = options.engineIdleMs ?? 0;
+      return { status: { stage: 'waiting', detail: 'Waiting for speech.', queueDepth: 0 }, enqueue() {},
+        async close() { held.closes += 1; } };
+    },
+  }));
+  const shown = () => readBackgroundMeetingStatus(listTranscriptRecords(root)[0]!.directory);
+  try {
+    expect((await service.pollOnce()).kind).toBe('start');
+    for (let pause = 1; pause <= 3; pause += 1) {
+      // Safari lets go for the end grace: the meeting pauses, held open.
+      state.input = [];
+      for (let poll = 0; poll < 8; poll += 1) { state.now += 3_000; await service.pollOnce(); }
+      expect(held.pauses).toBe(pause);
+      // Safari let go of its microphone, so Seashell has too (a headset leaves call mode).
+      expect(held.microphoneOpen).toBe(false);
+      expect(shown()?.state).toBe('processing');
+      expect(shown()?.draftStatus?.detail).toContain('Meeting paused');
+      // The call comes back: the same capture and draft carry on.
+      state.input = [SAFARI];
+      state.now += 3_000;
+      expect((await service.pollOnce()).kind).toBe('start');
+      expect(held.resumes).toBe(pause);
+      expect(held.microphoneOpen).toBe(true);
+      expect(shown()?.state).toBe('recording');
+    }
+    expect(held).toMatchObject({ starts: 1, drafts: 1, stops: 0, closes: 0 });
+    expect(state.events.filter((event) => event.type === 'meeting.resumed')).toHaveLength(3);
+    // Its live engine keeps the model loaded through a whole resume window.
+    expect(held.engineIdleMs).toBeGreaterThan(180_000);
+    // It ends for good: past the resume window everything it held open stops, once, and it is saved once.
+    state.input = [];
+    for (let poll = 0; poll < 80; poll += 1) { state.now += 3_000; await service.pollOnce(); }
+    await Bun.sleep(10);
+    expect(held).toMatchObject({ starts: 1, drafts: 1, stops: 1, closes: 1 });
+    expect(state.finalized).toEqual(['held-call']);
+  } finally { await service.shutdown(); }
+  expect(held.stops).toBe(1);
+});
+
+test('audio a busy Mac lost is said once as it passes five seconds, and its total when the recording stops', async () => {
+  const root = scratch('lost-audio');
+  const health = new CaptureHealthTracker({ nowUnixMs: 0 });
+  let report: (() => void) | undefined;
+  const { state, service } = busyWatch(root, (state) => ({
+    startCapture: (options) => {
+      state.starts += 1;
+      const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'lost-call', startedAtUnixMs: options.startedAt!.getTime(),
+        createdAt: options.startedAt!.toISOString() });
+      report = () => options.onStatus?.({ microphone: 'active', systemAudio: 'active', durableChunks: 0, health: health.snapshot });
+      return { store, sessionId: 'lost-call', manifestPath: store.manifestPath, get health() { return health.snapshot; },
+        async stop() { state.stops += 1; return store.setStatus('captured', 'test'); } };
+    },
+  }));
+  try {
+    await service.pollOnce();
+    for (const seconds of [3, 3, 1.5, 4.5]) { health.dropped('systemAudio', seconds); report!(); }
+    const said = state.events.filter((event) => event.type === 'watch.warning' && event.message.includes('too busy'));
+    expect(said).toHaveLength(1);
+    expect(said[0]).toMatchObject({ message: 'Your Mac was too busy: 6 s of the other side was not recorded.' });
+    state.input = [];
+    for (let poll = 0; poll < 8; poll += 1) { state.now += 3_000; await service.pollOnce(); }
+    expect(state.events.find((event) => event.type === 'meeting.capture-finished')).toMatchObject({ computerAudioLostSeconds: 12 });
+  } finally { await service.shutdown(); }
+});
+
 test('an overloaded Mac pauses live text mid-call and keeps the audio recording; a calm minute brings it back', async () => {
   const root = scratch('pause-live-text');
   let load = 0.3;
@@ -281,6 +455,25 @@ test('a Meet check that timed out is not run again three seconds later', async (
     for (state.now = 0; state.now < 120_000; state.now += 3_000) await service.pollOnce();
     // Checked at 0, then 10, 20, 40 and 60 s apart: not 40 times in two minutes.
     expect(checks).toBe(4);
+    expect(service.phase).toBe('recording');
+  } finally { await service.shutdown(); }
+});
+
+test('a Meet page the browser only partly answers for is walked again at most every 30 s', async () => {
+  const root = scratch('meet-incomplete');
+  const checked: number[] = [];
+  const { state, service } = busyWatch(root, () => ({
+    readLoad: () => 0,
+    readMeet: async (): Promise<MeetProbe> => {
+      checked.push(state.now);
+      return { state: 'unavailable', accessibilityTrusted: true, source: 'google-meet-accessibility',
+        detail: 'Browser Accessibility inspection was incomplete. Speaker names are off, and browser calls ask before recording.' };
+    },
+  }), { speakerBrowser: 'auto' });
+  try {
+    for (state.now = 0; state.now < 90_000; state.now += 3_000) await service.pollOnce();
+    expect(checked).toEqual([0, 30_000, 60_000]);
+    // Held, and unreadable: the call records on.
     expect(service.phase).toBe('recording');
   } finally { await service.shutdown(); }
 });

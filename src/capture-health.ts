@@ -7,8 +7,8 @@ import type { PcmSignalLevel, SystemAudioStateUpdate } from './live-system-audio
 export type CaptureHealthSource = 'microphone' | 'systemAudio';
 /** `released`: Seashell let go of the source on purpose, as when the call app released its microphone. Not a failure. */
 export type CaptureHealthState = 'starting' | 'receiving' | 'quiet' | 'reconnecting' | 'unavailable' | 'stopped' | 'disabled' | 'released';
-/** one-sided: the others are talking and your microphone hears nothing. */
-export type CaptureHealthWarningKind = 'quiet' | 'reconnecting' | 'unavailable' | 'no-audio' | 'one-sided';
+/** one-sided: the others are talking and your microphone hears nothing. dropped: the Mac was too busy to keep some of it. */
+export type CaptureHealthWarningKind = 'quiet' | 'reconnecting' | 'unavailable' | 'no-audio' | 'one-sided' | 'dropped';
 export interface CaptureHealthWarning {
   readonly kind: CaptureHealthWarningKind;
   readonly message: string;
@@ -26,6 +26,12 @@ export interface CaptureSourceHealth {
   readonly lastSignalAtUnixMs?: number;
   readonly code?: string;
   readonly message?: string;
+  /**
+   * Seconds of this source the Mac was too busy to keep, over the whole
+   * meeting: the capture helper's ring filled before Seashell could drain it
+   * (capture-overrun). Absent when none was lost.
+   */
+  readonly lostSeconds?: number;
   /** At most one entry per kind, retained through recovery and finalization. */
   readonly warnings: readonly CaptureHealthWarning[];
 }
@@ -74,10 +80,18 @@ const YOUR_SIDE_MISSING_SHARE = 0.1;
 
 const sources = ['microphone', 'systemAudio'] as const;
 const states: readonly CaptureHealthState[] = ['starting', 'receiving', 'quiet', 'reconnecting', 'unavailable', 'stopped', 'disabled', 'released'];
-const kinds: readonly CaptureHealthWarningKind[] = ['quiet', 'reconnecting', 'unavailable', 'no-audio', 'one-sided'];
+const kinds: readonly CaptureHealthWarningKind[] = ['quiet', 'reconnecting', 'unavailable', 'no-audio', 'one-sided', 'dropped'];
 const videoStates: readonly CaptureVideoState[] = ['starting', 'recording', 'waiting', 'stopped', 'unavailable'];
 /** Warnings that only sound, not just more PCM, resolves. */
 const untilSignal: readonly CaptureHealthWarningKind[] = ['quiet', 'one-sided'];
+/** Warnings about audio already lost: nothing that arrives later resolves them. */
+const lasting: readonly CaptureHealthWarningKind[] = ['dropped'];
+/** More than this many seconds of a source lost to a busy Mac is said. A few dropped buffers are not. */
+export const DROPPED_WARNING_SECONDS = 5;
+/** "Your Mac was too busy: 12 s of the other side was not recorded." */
+export function droppedMessage(source: CaptureHealthSource, seconds: number): string {
+  return `Your Mac was too busy: ${Math.round(seconds)} s of ${source === 'microphone' ? 'your side' : 'the other side'} was not recorded.`;
+}
 const timestamp = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
 const clean = (text: string | undefined, limit = 600): string | undefined => text?.replace(/[\p{Cc}\p{Cf}]/gu, ' ').trim().slice(0, limit) || undefined;
 const label = (source: CaptureHealthSource) => source === 'microphone' ? 'Microphone' : 'Computer audio';
@@ -89,6 +103,8 @@ export class CaptureHealthTracker {
   readonly #quietAfterMs: number;
   readonly #oneSidedAfterMs: number;
   #microphoneSince?: number;
+  /** When a pause for resume last ended: silence is judged from then, not across the pause. */
+  #resumedAt = 0;
   constructor(options: { microphone?: boolean; systemAudio?: boolean; nowUnixMs?: number; quietAfterMs?: number; oneSidedAfterMs?: number } = {}) {
     this.#startedAt = options.nowUnixMs ?? Date.now();
     this.#quietAfterMs = options.quietAfterMs ?? 30_000;
@@ -132,14 +148,14 @@ export class CaptureHealthTracker {
     const now = Math.max(this.#value.updatedAtUnixMs, nowUnixMs);
     // This mirrors only the capture meter's signal floor, not speech recognition.
     const signal = audible === true || (audible === undefined && Boolean(level && level.peak >= 64 && level.rmsDbfs >= -60));
-    const quiet = !signal && now - (previous.lastSignalAtUnixMs ?? this.#startedAt) >= this.#quietAfterMs;
+    const quiet = !signal && now - Math.max(previous.lastSignalAtUnixMs ?? this.#startedAt, this.#resumedAt) >= this.#quietAfterMs;
     let value: CaptureSourceHealth = {
       ...previous, state: quiet ? 'quiet' : 'receiving', lastPcmAtUnixMs: now,
       ...(signal ? { lastSignalAtUnixMs: now } : {}),
       code: quiet ? `${source === 'microphone' ? 'microphone' : 'system_audio'}_quiet` : undefined,
       message: quiet ? `${label(source)} is quiet. This may be silence or mute; check the input if sound is expected.` : undefined,
-      warnings: previous.warnings.map(warning => warning.resolvedAtUnixMs === undefined && (!untilSignal.includes(warning.kind) || signal)
-        ? { ...warning, resolvedAtUnixMs: now } : warning),
+      warnings: previous.warnings.map(warning => warning.resolvedAtUnixMs === undefined && !lasting.includes(warning.kind) &&
+        (!untilSignal.includes(warning.kind) || signal) ? { ...warning, resolvedAtUnixMs: now } : warning),
     };
     if (quiet && (previous.state !== 'quiet' || !previous.warnings.some(warning => warning.kind === 'quiet' && warning.resolvedAtUnixMs === undefined))) {
       value = this.warn(value, 'quiet', value.message!, now, value.code);
@@ -158,6 +174,32 @@ export class CaptureHealthTracker {
     const othersTalking = now - (others.lastSignalAtUnixMs ?? -Infinity) <= OTHERS_TALKING_MS;
     if (!delivering || !othersTalking || now - silentSince < this.#oneSidedAfterMs) return this.#value;
     return this.set('microphone', this.warn(mic, 'one-sided', ONE_SIDED_MESSAGE, now, 'microphone_one_sided'), now);
+  }
+  /**
+   * Audio the Mac was too busy to keep: the capture helper's ring filled
+   * before Seashell drained it. Counted over the meeting, and said once it
+   * passes DROPPED_WARNING_SECONDS, with the running total.
+   */
+  dropped(source: CaptureHealthSource, seconds: number, nowUnixMs = Date.now()): CaptureHealthSnapshot {
+    const previous = this.#value[source];
+    if (previous.state === 'disabled' || !Number.isFinite(seconds) || seconds <= 0) return this.#value;
+    const now = Math.max(this.#value.updatedAtUnixMs, nowUnixMs);
+    const lostSeconds = Math.round(((previous.lostSeconds ?? 0) + seconds) * 1_000) / 1_000;
+    let value: CaptureSourceHealth = { ...previous, lostSeconds };
+    const said = previous.warnings.find(warning => warning.kind === 'dropped')?.message;
+    const message = droppedMessage(source, lostSeconds);
+    if (lostSeconds > DROPPED_WARNING_SECONDS && said !== message) value = this.warn(value, 'dropped', message, now, `${source === 'microphone' ? 'microphone' : 'system_audio'}_dropped`);
+    return this.set(source, value, now);
+  }
+  /**
+   * The recording kept nothing while it waited for the call to resume, and
+   * now keeps it again. Quiet and one-sided are judged from here, as for a
+   * fresh start; warnings already raised stay with the meeting.
+   */
+  resume(nowUnixMs = Date.now()): CaptureHealthSnapshot {
+    this.#resumedAt = Math.max(this.#value.updatedAtUnixMs, nowUnixMs);
+    this.#microphoneSince = undefined;
+    return this.#value;
   }
   /**
    * Seashell let go of the source on purpose: the call app released its
@@ -268,6 +310,7 @@ export function parseCaptureHealth(value: unknown): CaptureHealthSnapshot | unde
   for (const source of sources) {
     const item = raw[source];
     if (!item || !states.includes(item.state) || !timestamp(item.updatedAtUnixMs) || !optionalTime(item.lastPcmAtUnixMs) ||
+        (item.lostSeconds !== undefined && !seconds(item.lostSeconds)) ||
         !optionalTime(item.lastSignalAtUnixMs) || !optionalText(item.code, 100) || !optionalText(item.message, 600) ||
         !Array.isArray(item.warnings) || item.warnings.length > kinds.length) return;
     const seen = new Set<string>();
@@ -286,6 +329,7 @@ export function parseCaptureHealth(value: unknown): CaptureHealthSnapshot | unde
     ...(item.lastPcmAtUnixMs === undefined ? {} : { lastPcmAtUnixMs: item.lastPcmAtUnixMs }),
     ...(item.lastSignalAtUnixMs === undefined ? {} : { lastSignalAtUnixMs: item.lastSignalAtUnixMs }),
     ...(item.code === undefined ? {} : { code: item.code }), ...(item.message === undefined ? {} : { message: item.message }),
+    ...(item.lostSeconds === undefined ? {} : { lostSeconds: item.lostSeconds }),
   });
   const coverage = raw.coverage && { yourSideAudibleSeconds: raw.coverage.yourSideAudibleSeconds, otherSideAudibleSeconds: raw.coverage.otherSideAudibleSeconds,
     ...(raw.coverage.yourSideAudibleShare === undefined ? {} : { yourSideAudibleShare: raw.coverage.yourSideAudibleShare }),

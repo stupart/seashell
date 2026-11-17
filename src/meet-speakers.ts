@@ -30,6 +30,21 @@ const MAX_GAP = 1.75;
 export const MEETING_ACCESSIBILITY_HELPER = join(dirname(fileURLToPath(import.meta.url)), '..', 'native', 'bin', 'seashell-meeting-accessibility');
 const NATIVE_TIMEOUT_MS = 2500;
 
+/** What the Accessibility helper says when the browser left parts of its tree unanswered. */
+export const INCOMPLETE_INSPECTION = 'Browser Accessibility inspection was incomplete.';
+/**
+ * A page the browser could only partly answer for is walked again at most this
+ * often. Every walk is work for the browser running the call, and a browser
+ * too busy to answer in full is busy with the call: walking it again three
+ * seconds later only adds to that, and learns nothing new.
+ */
+export const INCOMPLETE_REWALK_MS = 30_000;
+
+/** The browser did not answer for its whole tree, in any probe that passes the helper's words on. */
+export function inspectionIncomplete(probe: MeetProbe | undefined): boolean {
+  return probe?.state === 'unavailable' && probe.detail.includes(INCOMPLETE_INSPECTION);
+}
+
 function clean(value: unknown, limit: number): string | undefined {
   if (typeof value !== 'string' || value.length > limit) return undefined;
   const result = value.replace(/[\p{Cc}\p{Cf}]/gu, '').trim();
@@ -327,6 +342,8 @@ export interface MeetSpeakerReader { stop(): void; speakerFor(segment: Transcrip
 export function startMeetSpeakerReader(options: {
   browser: MeetBrowserMode; store: CaptureSessionStore; onStatus?: (probe: MeetProbe) => void;
   probe?: typeof probeMeetSpeakers; now?: () => number; pollMs?: number;
+  /** Tests only: INCOMPLETE_REWALK_MS. */
+  incompleteRewalkMs?: number;
 }): MeetSpeakerReader {
   const now = options.now ?? Date.now;
   const path = join(options.store.root, 'meet-speakers.jsonl');
@@ -375,6 +392,7 @@ export function startMeetSpeakerReader(options: {
     catch { probe = { state: 'unavailable', detail: 'Meet speaker names are unavailable: the reader could not be checked.' }; }
     if (stopped) return;
     const end = now();
+    const incomplete = inspectionIncomplete(probe);
     let snapshot = probe.state === 'connected' && end - start <= 750 ? probe.snapshot : undefined;
     if (probe.state === 'connected' && end - start > 750) probe = {
       state: 'unavailable', detail: 'Meet updates are too slow to match speech; using audio source labels.',
@@ -390,7 +408,11 @@ export function startMeetSpeakerReader(options: {
     try { write(sampleAt(snapshot, (end - origin) / 1000, probe.browser, probe.source)); }
     catch { stop(); probe = { state: 'unavailable', detail: 'Meet speaker names are unavailable: speaker evidence could not be saved.' }; }
     options.onStatus?.(probe);
-    if (!stopped) { timer = setTimeout(poll, probe.state === 'connected' ? options.pollMs ?? 500 : 5000); timer.unref(); }
+    if (!stopped) {
+      timer = setTimeout(poll, probe.state === 'connected' ? options.pollMs ?? 500
+        : incomplete ? options.incompleteRewalkMs ?? INCOMPLETE_REWALK_MS : 5000);
+      timer.unref();
+    }
   };
   if (!stopped) void poll();
   return { stop, speakerFor: segment => segment.speaker === 'SYSTEM' ? meetSpeakerForSegment(samples, segment) : undefined };

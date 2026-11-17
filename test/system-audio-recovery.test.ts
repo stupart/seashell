@@ -203,3 +203,59 @@ test('once computer audio has worked, a failed reopen is retried; permission and
     expect(systemAudioCanRecover(code, true)).toBe(false);
   }
 });
+
+test('a computer-audio helper that takes seconds to take its tap down stops by itself and keeps its last audio', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-slow-stop-'));
+  // Like the helper on a busy Mac: its teardown takes over two seconds, then it
+  // writes its last audio and says stop.
+  const fake = helper(root, `
+event({type:'first-buffer',capturedAtUnixMs:Date.now(),bufferStartUnixMs:Date.now()});
+process.stdout.write(Buffer.alloc(3200,1));
+process.on('SIGTERM',()=>setTimeout(()=>{process.stdout.write(Buffer.alloc(3200,2));event({type:'stop'});process.exit(0);},2_500));
+setInterval(()=>{},1000);
+`);
+  const states: SystemAudioStateUpdate[] = [];
+  const chunks: number[] = [];
+  const capture = startSystemAudioCapture({ helperPath: process.execPath, helperArgs: [fake.path], sessionStartedAtUnixMs: Date.now(),
+    chunkMilliseconds: 100, minimumChunkMilliseconds: 20, maxRestarts: 0,
+    onState: state => states.push(state), onChunk: chunk => { chunks.push(readFileSync(chunk.path)[44]!); rmSync(chunk.path, { force: true }); } });
+  try {
+    await until(() => chunks.length === 1);
+    const helperProcess = capture.process!;
+    capture.stop();
+    await capture.done;
+    expect(helperProcess.signalCode).toBeNull();
+    expect(helperProcess.exitCode).toBe(0);
+    expect(chunks).toEqual([1, 2]);
+    expect(states.at(-1)).toMatchObject({ state: 'stopped' });
+  } finally { capture.stop(); await capture.done; rmSync(root, { recursive: true, force: true }); }
+}, 15_000);
+
+test('each computer-audio start and route change is kept with the meeting: its rate, its buffer, what the helper cannot say, and audio a busy Mac lost', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-source-opened-'));
+  const fake = helper(root, `
+event({type:'first-buffer',capturedAtUnixMs:Date.now(),bufferStartUnixMs:Date.now(),sourceSampleRate:48000,bufferFrames:512});
+process.stdout.write(Buffer.alloc(3200,attempt));
+await Bun.sleep(120);
+if(attempt===1){event({type:'error',code:'device_changed',message:'Output route changed'});process.exit(1);}
+// Twelve seconds the ring could not hold, as on Nov 11.
+event({type:'discontinuity',reason:'capture-overrun',droppedFrames:192000,outputFrames:1600});
+setInterval(()=>process.stdout.write(Buffer.alloc(3200,attempt)),100);
+`);
+  const capture = startDurableLiveCapture({ libraryDir: root, sessionId: 'source-opened', microphone: false, chunkMilliseconds: 100,
+    systemAudioStarter: options => startSystemAudioCapture({ ...options, helperPath: process.execPath, helperArgs: [fake.path],
+      minimumChunkMilliseconds: 20, restartDelayMs: 100 }),
+  });
+  try {
+    await until(() => capture.health?.systemAudio.lostSeconds === 12);
+    await capture.stop();
+    const opened = readFileSync(join(capture.store.root, 'events.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
+      .filter(event => event.type === 'source.opened');
+    expect(opened.map(event => ({ trackId: event.trackId, ...event.source }))).toEqual([
+      { trackId: 'system-audio', reason: 'start', sampleRate: 48000, bufferFrames: 512, missing: ['deviceId', 'transport'] },
+      { trackId: 'system-audio', reason: 'route-change', sampleRate: 48000, bufferFrames: 512, missing: ['deviceId', 'transport'] },
+    ]);
+    expect(capture.health?.systemAudio.warnings.find(warning => warning.kind === 'dropped')?.message)
+      .toBe('Your Mac was too busy: 12 s of the other side was not recorded.');
+  } finally { await capture.stop(); rmSync(root, { recursive: true, force: true }); }
+});

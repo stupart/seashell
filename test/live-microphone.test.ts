@@ -27,6 +27,32 @@ test('a microphone that produces no PCM releases optional capture startup and ex
   } finally { handle.stop(); await handle.done; }
 });
 
+test('a Mac too busy to run the recorder on time does not kill a microphone whose first samples come just after', async () => {
+  const states: Array<{ state: string; code?: string }> = [];
+  const chunks: string[] = [];
+  const handle = startMicrophoneCapture({
+    sessionStartedAtUnixMs: Date.now(), startupTimeoutMs: 1_000, maxRestarts: 0,
+    chunkMilliseconds: 100, minimumChunkMilliseconds: 50,
+    command: process.execPath,
+    // A healthy helper, slow to open its input on the same busy Mac.
+    commandArgs: ['-e', 'setTimeout(() => setInterval(() => process.stdout.write(Buffer.alloc(3200, 1)), 100), 2_700)'],
+    onState: (state) => states.push(state), onChunk: (chunk) => chunks.push(chunk.path),
+  });
+  try {
+    // The recorder itself is not scheduled for well past the startup deadline.
+    const until = Date.now() + 2_500;
+    while (Date.now() < until) { /* busy */ }
+    const deadline = Date.now() + 4_000;
+    while (!states.some((state) => state.state === 'active' || state.code === 'microphone_no_audio') && Date.now() < deadline) await Bun.sleep(10);
+    expect(states.map((state) => state.code)).not.toContain('microphone_no_audio');
+    expect(states.some((state) => state.state === 'active')).toBe(true);
+    expect(handle.process.exitCode).toBeNull();
+  } finally {
+    handle.stop(); await handle.done;
+    for (const path of chunks) rmSync(path, { force: true });
+  }
+}, 15_000);
+
 test('microphone controller exposes a stoppable continuous capture lifecycle', async () => {
   const states: string[] = [];
   const chunks: string[] = [];
@@ -55,6 +81,24 @@ test('microphone controller exposes a stoppable continuous capture lifecycle', a
   expect(states[0]).toBe('starting');
   expect(states.at(-1)).toBe('stopped');
   for (const path of chunks) await Bun.file(path).delete();
+});
+
+test('a microphone that opens says so, and that its helper names no device, transport, rate or buffer', async () => {
+  const opened: unknown[] = [];
+  const chunks: string[] = [];
+  const handle = startMicrophoneCapture({
+    sessionStartedAtUnixMs: Date.now(), maxRestarts: 0, chunkMilliseconds: 100, minimumChunkMilliseconds: 50,
+    command: process.execPath, commandArgs: ['-e', 'setInterval(() => process.stdout.write(Buffer.alloc(3200, 1)), 50)'],
+    onState() {}, onChunk: (chunk) => chunks.push(chunk.path), onOpened: (source) => opened.push(source),
+  });
+  try {
+    const deadline = Date.now() + 3_000;
+    while (!opened.length && Date.now() < deadline) await Bun.sleep(10);
+    expect(opened).toEqual([{ reason: 'start', missing: ['deviceId', 'transport', 'sampleRate', 'bufferFrames'] }]);
+  } finally {
+    handle.stop(); await handle.done;
+    for (const path of chunks) rmSync(path, { force: true });
+  }
 });
 
 test('microphone sample clock is anchored before delayed stdout delivery', async () => {

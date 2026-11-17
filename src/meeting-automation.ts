@@ -248,6 +248,15 @@ export class MeetingSignalTimeout extends Error {}
 
 /** The longest a failing detector waits before it is started again. */
 const DETECTOR_RESTART_MAX_MS = 30_000;
+/**
+ * A detector whose heartbeat is late is slow, not gone: Core Audio's process
+ * list can take seconds to answer on a busy Mac, and each new detector is one
+ * more Core Audio client starting up. It is respawned only after this long
+ * without a snapshot, and each respawn that brings none back waits twice as
+ * long, up to DETECTOR_RESPAWN_MAX_MS.
+ */
+export const DETECTOR_RESPAWN_AFTER_MS = 60_000;
+const DETECTOR_RESPAWN_MAX_MS = 5 * 60_000;
 
 type SnapshotListener = (snapshot: MeetingSignalSnapshot) => void;
 type ErrorListener = (error: Error) => void;
@@ -273,13 +282,20 @@ export class MeetingSignalMonitor {
   #heartbeat: StallClock;
   /** Restarts since the last snapshot: each waits twice as long, so a struggling Core Audio is not hammered. */
   #restarts = 0;
+  /** Silent detectors replaced since the last snapshot: each is given twice as long. */
+  #respawns = 0;
+  /** The heartbeat is late and that was said; cleared by the next snapshot. */
+  #slow = false;
+  readonly #respawnAfterMs: number;
   #stopped = true;
 
-  constructor(helperPath = MEETING_SIGNALS_HELPER, intervalMs = 3_000, helperArgs: readonly string[] = []) {
+  constructor(helperPath = MEETING_SIGNALS_HELPER, intervalMs = 3_000, helperArgs: readonly string[] = [],
+    options: { readonly respawnAfterMs?: number } = {}) {
     this.#helperPath = helperPath;
     this.#helperArgs = [...helperArgs];
     this.#intervalMs = Math.max(250, Math.min(60_000, Math.round(intervalMs)));
     this.#heartbeat = new StallClock(this.#intervalMs, performance.now());
+    this.#respawnAfterMs = options.respawnAfterMs ?? DETECTOR_RESPAWN_AFTER_MS;
   }
 
   start(): void {
@@ -288,6 +304,7 @@ export class MeetingSignalMonitor {
     this.#failure = undefined;
     this.#latest = undefined;
     this.#buffer = '';
+    this.#slow = false;
     this.#heartbeat.reset(performance.now());
     this.#heartbeatTimer ??= setInterval(() => this.checkHeartbeat(), this.#intervalMs);
     const child = spawn(this.#helperPath, [
@@ -385,6 +402,8 @@ export class MeetingSignalMonitor {
         const snapshot = parseMeetingSignalSnapshot(JSON.parse(line));
         this.#heartbeat.data(performance.now());
         this.#restarts = 0;
+        this.#respawns = 0;
+        this.#slow = false;
         this.#latest = snapshot;
         this.#failure = undefined;
         for (const listener of this.#listeners) listener(snapshot);
@@ -404,11 +423,19 @@ export class MeetingSignalMonitor {
     if (this.#stopped || !this.#child) return;
     // Use receipt time: a native wall-clock adjustment must not extend a lease
     // on stale evidence. Three missed intervals allow normal scheduling jitter.
-    if (this.#heartbeat.silentFor(performance.now()) <= Math.max(1_000, this.#intervalMs * 3)) return;
+    const silent = this.#heartbeat.silentFor(performance.now());
+    if (silent <= Math.max(1_000, this.#intervalMs * 3)) return;
+    // Late: the last snapshot is no longer evidence, and polls hear why. The
+    // detector keeps running; its next snapshot ends this.
+    this.#latest = undefined;
+    if (!this.#slow) {
+      this.#slow = true;
+      this.fail(new MeetingSignalTimeout('Meeting signal detector heartbeat timed out'));
+    }
+    if (silent < Math.min(DETECTOR_RESPAWN_MAX_MS, this.#respawnAfterMs * 2 ** this.#respawns)) return;
     const child = this.#child;
     this.#child = undefined;
-    this.#latest = undefined;
-    this.fail(new MeetingSignalTimeout('Meeting signal detector heartbeat timed out'));
+    this.#respawns += 1;
     void terminateManagedChild(child);
     this.scheduleRestart();
   }

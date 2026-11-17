@@ -153,6 +153,30 @@ test('slow browser reads cannot be presented as a healthy timing signal', async 
   } finally { reader.stop(); cleanup(root); }
 });
 
+test('during a call, a page the browser only partly answers for is read again in 30 s, not 5', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-meet-incomplete-'));
+  const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'incomplete', startedAtUnixMs: 1000 });
+  const waits: number[] = [];
+  const original = globalThis.setTimeout;
+  globalThis.setTimeout = ((callback: () => void, milliseconds?: number) => {
+    waits.push(milliseconds ?? 0);
+    return original(callback, milliseconds);
+  }) as typeof setTimeout;
+  let answered!: () => void;
+  const done = new Promise<void>(resolve => { answered = resolve; });
+  const reader = startMeetSpeakerReader({ browser: 'safari', store, now: () => 2000,
+    probe: async () => ({ state: 'unavailable', accessibilityTrusted: true,
+      detail: 'Meet detected; speaker names are paused. Browser Accessibility inspection was incomplete.' }),
+    onStatus: () => answered(),
+  });
+  try {
+    await done;
+    await Bun.sleep(0);
+    expect(waits).toContain(30_000);
+    expect(waits).not.toContain(5_000);
+  } finally { globalThis.setTimeout = original; reader.stop(); cleanup(root); }
+});
+
 test('reader keeps independent participant IDs even for matching names; overlap is unnamed', async () => {
   const root = mkdtempSync(join(tmpdir(), 'seashell-meet-reader-'));
   const store = new CaptureSessionStore({ libraryDir: root, sessionId: 'reader', startedAtUnixMs: 1000 });

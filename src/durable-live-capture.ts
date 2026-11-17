@@ -23,8 +23,8 @@ import { screenFilmedNotice, startVideoTrack, type VideoCaptureRequest, type Vid
 import { signalProcessGroup } from './process-lifecycle.ts';
 
 /**
- * The longest a stop waits for its sources. Each settles well before this on
- * its own (a helper is killed within a few seconds); past it, whatever still
+ * The longest a stop waits for its sources. Each settles before this on its
+ * own (a helper is killed by AUDIO_HELPER_STOP_LIMIT_MS); past it, whatever still
  * holds on is killed and the meeting is saved with the audio that arrived, so
  * no helper can keep a recording, or the watcher behind it, open forever.
  */
@@ -56,6 +56,16 @@ export interface DurableLiveCaptureHandle {
   releaseMicrophone?(): void;
   /** Open the microphone again after releaseMicrophone, when the call comes back. */
   reopenMicrophone?(): void;
+  /**
+   * Hold the recording for a possible resume. The helpers keep running, so
+   * the tap, the aggregate device and the microphone stay open, and nothing
+   * is rebuilt when the call comes back; but nothing they hear is kept. The
+   * session clock runs on, so the pause is a gap in one timeline. The Meet
+   * reader and any video stop meanwhile: neither may watch a call that ended.
+   */
+  pause?(reason?: string): void;
+  /** Keep what the helpers hear again, from now, in the same processes. */
+  resume?(): void;
   stop(reason?: string): Promise<CaptureSessionManifest>;
 }
 
@@ -107,6 +117,9 @@ export function startDurableLiveCapture(
   let microphoneReleased = false;
   let systemAudio: SystemAudioCaptureHandle | undefined;
   let video: VideoTrackHandle | undefined;
+  /** Videos stopped by a pause; stop waits for them to close too. */
+  const pausedVideos: VideoTrackHandle[] = [];
+  let paused = false;
   let videoState: VideoState | undefined = options.video ? 'starting' : undefined;
   let stopping: Promise<CaptureSessionManifest> | undefined;
   let captureFailure: Error | undefined;
@@ -173,6 +186,8 @@ export function startDurableLiveCapture(
           if (!current()) return;
           microphoneLevel = level; health.pcm('microphone', level); status();
         },
+        // Diagnostics: never allowed to stop the audio.
+        onOpened: (opened) => { void store.recordSourceOpenedAsync('microphone', opened).catch(() => {}); },
         onState: (update) => {
           if (!current()) return;
           microphoneState = update.state;
@@ -181,6 +196,7 @@ export function startDurableLiveCapture(
           status();
         },
       });
+      if (paused) microphone.pause?.();
     } catch (error) {
       microphoneState = 'unavailable';
       const normalized = error instanceof Error ? error : new Error(String(error));
@@ -207,6 +223,10 @@ export function startDurableLiveCapture(
           });
         },
         onDiscontinuity: (event) => {
+          if (event.reason === 'capture-overrun') {
+            health.dropped('systemAudio', event.durationFrames / LIVE_CAPTURE_SAMPLE_RATE);
+            status();
+          }
           void store.recordDiscontinuityAsync({
             trackId: 'system-audio',
             atSeconds: event.atFrame / LIVE_CAPTURE_SAMPLE_RATE,
@@ -215,6 +235,7 @@ export function startDurableLiveCapture(
           }).catch(fail);
         },
         onLevel: (level) => { systemAudioLevel = level; health.pcm('systemAudio', level); status(); },
+        onOpened: (opened) => { void store.recordSourceOpenedAsync('system-audio', opened).catch(() => {}); },
         // Said, never fatal: the audio carries on under the other permission.
         onWarning: (message) => options.onError?.(new Error(message)),
         onState: (update) => {
@@ -234,7 +255,8 @@ export function startDurableLiveCapture(
       fail(error);
     }
   }
-  if (options.video) {
+  const openVideo = () => {
+    if (!options.video) return;
     // A warning, not fail(): a missing video must never mark the audio as failed.
     const warn = (message: string) => options.onError?.(new Error(message));
     try {
@@ -258,18 +280,21 @@ export function startDurableLiveCapture(
       health.video('unavailable');
       warn(`Video was not recorded: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }
+  };
+  openVideo();
   status();
 
-  const meetReader = options.systemAudio !== false && options.speakerBrowser && options.speakerBrowser !== 'off'
-    ? startMeetSpeakerReader({ browser: options.speakerBrowser, store, onStatus: options.onMeetStatus }) : undefined;
+  const readsMeet = options.systemAudio !== false && options.speakerBrowser !== undefined && options.speakerBrowser !== 'off';
+  const startMeet = () => readsMeet
+    ? startMeetSpeakerReader({ browser: options.speakerBrowser as MeetBrowserMode, store, onStatus: options.onMeetStatus }) : undefined;
+  let meetReader = startMeet();
 
   return Object.freeze({
     sessionId: store.manifest.sessionId,
     manifestPath: store.manifestPath,
     store,
     get health() { return health.snapshot; },
-    ...(meetReader ? { speakerFor: meetReader.speakerFor } : {}),
+    ...(readsMeet ? { speakerFor: (segment: TranscriptSegment) => meetReader?.speakerFor(segment) } : {}),
     releaseMicrophone() {
       if (stopping || microphoneReleased || !microphone) return;
       microphoneReleased = true;
@@ -289,6 +314,34 @@ export function startDurableLiveCapture(
       openMicrophone();
       status(true);
     },
+    pause(reason = 'meeting-paused') {
+      if (stopping || paused) return;
+      paused = true;
+      meetReader?.stop();
+      meetReader = undefined;
+      if (video) { pausedVideos.push(video); video.stop(); video = undefined; }
+      microphone?.pause?.();
+      systemAudio?.pause?.();
+      microphoneLevel = undefined;
+      systemAudioLevel = undefined;
+      // After the audio up to the pause is saved: each saved chunk marks the session recording.
+      void store.drainCommits().then(() => {
+        if (paused && !stopping) store.setStatus('paused', reason);
+      }).catch((error: unknown) => options.onError?.(error instanceof Error ? error : new Error(String(error))));
+      status(true);
+    },
+    resume() {
+      if (stopping || !paused) return;
+      paused = false;
+      health.resume();
+      microphone?.resume?.();
+      systemAudio?.resume?.();
+      meetReader = startMeet();
+      openVideo();
+      try { store.setStatus('recording', 'resumed'); }
+      catch (error) { options.onError?.(error instanceof Error ? error : new Error(String(error))); }
+      status(true);
+    },
     stop(reason = 'meeting-signal-ended') {
       if (stopping) return stopping;
       meetReader?.stop();
@@ -301,7 +354,9 @@ export function startDurableLiveCapture(
         deadline = setTimeout(() => resolve('late'), options.stopDeadlineMs ?? CAPTURE_STOP_DEADLINE_MS);
       });
       const microphones = [...releasedMicrophones, ...(microphone ? [microphone] : [])];
-      stopping = Promise.race([Promise.all([...microphones.map((handle) => handle.done), systemAudio?.done, video?.done]), late]).then(async (outcome) => {
+      const videos = [...pausedVideos, ...(video ? [video] : [])];
+      stopping = Promise.race([Promise.all([...microphones.map((handle) => handle.done), systemAudio?.done,
+        ...videos.map((handle) => handle.done)]), late]).then(async (outcome) => {
         clearTimeout(deadline);
         if (outcome === 'late') {
           for (const handle of [...microphones, systemAudio]) if (handle?.process) signalProcessGroup(handle.process, 'SIGKILL');

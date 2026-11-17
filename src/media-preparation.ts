@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import { existsSync, mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { heavyWork } from './heavy-work.ts';
 import { inferenceCommand } from './inference-priority.ts';
 import {
   beginManagedProcessSession,
@@ -178,6 +179,8 @@ export function buildFfmpegPreparationArgs(
 }
 
 async function runProcess(command: string, args: string[]): Promise<ProcessResult> {
+  // Short CPU work at background priority: not stopped mid-run, but not started during a call (heavy-work.ts).
+  await heavyWork.ready();
   return new Promise((resolve, reject) => {
     const run = inferenceCommand(command, args, 'background');
     const process = spawn(run.command, run.args, { stdio: ['ignore', 'pipe', 'pipe'] });
