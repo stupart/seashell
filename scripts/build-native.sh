@@ -51,13 +51,17 @@ fi
 MICROPHONE_BINARY=native/bin/seashell-microphone
 if [ ! -x "$MICROPHONE_BINARY" ] || \
    [ native/macos-microphone.swift -nt "$MICROPHONE_BINARY" ] || \
-   [ native/macos-microphone-Info.plist -nt "$MICROPHONE_BINARY" ]; then
+   [ native/macos-microphone-Info.plist -nt "$MICROPHONE_BINARY" ] || \
+   [ native/seashell-audio-ring.c -nt "$MICROPHONE_BINARY" ] || \
+   [ native/seashell-audio-ring.h -nt "$MICROPHONE_BINARY" ]; then
     # The embedded Info.plist supplies the usage string macOS requires before
     # it will ask for Microphone access on this helper's own behalf. A fixed
     # module name keeps the build reproducible: macOS ties that permission to
     # the code hash, so identical sources must yield identical bytes.
-    xcrun swiftc native/macos-microphone.swift -O -module-name SeashellMicrophone \
-        -framework AVFoundation -framework CoreAudio \
+    audio_ring_object
+    xcrun swiftc native/macos-microphone.swift "$AUDIO_RING_OBJECT" -O -module-name SeashellMicrophone \
+        -import-objc-header native/seashell-audio-ring.h \
+        -framework AVFoundation -framework AudioToolbox -framework CoreAudio \
         -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist \
         -Xlinker native/macos-microphone-Info.plist \
         -o "$BUILD_DIR/seashell-microphone"

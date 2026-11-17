@@ -145,10 +145,15 @@ test.skipIf(process.platform !== 'darwin' || !Bun.file(`${import.meta.dir}/../na
   'every input shape, from AirPods to aggregate devices, comes out as sound on the meeting timeline', () => {
     // Int16, Int32 and Float32, interleaved or not, mono to 8 channels
     // (spatial, discrete and partly silent), 8 to 192 kHz: 336 cases.
-    const result = Bun.spawnSync([`${import.meta.dir}/../native/bin/seashell-microphone`, '--mix-check']);
+    // Then the handoff out of the tap: the ring with nothing reading it, stdout with nothing reading it, and the
+    // whole consumer through both stalls and an engine rebuild.
+    const result = Bun.spawnSync([`${import.meta.dir}/../native/bin/seashell-microphone`, '--mix-check'], { timeout: 60_000 });
     const report = JSON.parse(result.stdout.toString());
     expect(report.failures).toEqual([]);
     expect(report.cases).toBe(336);
     expect(report.peak).toBeGreaterThan(7_000);
+    expect(report.handoff.ring.seconds).toBeGreaterThanOrEqual(4);
+    expect(report.handoff.stdout.nonblocking).toBe(true);
+    expect(report.handoff.pipeline.silentFrames).toBe(report.handoff.pipeline.droppedSilenceFrames + report.handoff.pipeline.replacedFrames);
     expect(result.exitCode).toBe(0);
-  });
+  }, 90_000);
