@@ -33,6 +33,9 @@ function stalePcm(source: CaptureSourceHealth, now: number): boolean {
 }
 
 const oneSided = (source: CaptureSourceHealth) => source.warnings.some(w => w.kind === 'one-sided' && w.resolvedAtUnixMs === undefined);
+/** What a busy Mac could not keep, in full: "Your Mac was too busy: 12 s of the other side was not recorded." */
+const lostAudio = (health?: CaptureHealthSnapshot): string[] => health
+  ? [health.microphone, health.systemAudio].flatMap(source => source.warnings.filter(w => w.kind === 'dropped').map(w => w.message)) : [];
 
 function sourceLabel(source: CaptureSourceHealth | undefined, finished: boolean, now: number, missing = false): string {
   if (!source) return 'status unconfirmed';
@@ -87,7 +90,7 @@ export function sourceFinding(health: CaptureHealthSnapshot | undefined, started
 
 export function recordingNeedsAttention(health?: CaptureHealthSnapshot, finished = false, nowUnixMs = Date.now()): boolean {
   if (!health) return false;
-  if (finished && health.coverage?.yourSideMissing) return true;
+  if (finished && (health.coverage?.yourSideMissing || lostAudio(health).length)) return true;
   return [health.microphone, health.systemAudio].some(source => source.state !== 'disabled' && (
     finished ? source.lastSignalAtUnixMs === undefined || source.warnings.some(w => w.kind === 'unavailable' || w.kind === 'no-audio' || (w.kind === 'reconnecting' && w.resolvedAtUnixMs === undefined))
       : ['quiet', 'unavailable', 'reconnecting', 'stopped'].includes(source.state) || (source.state === 'receiving' && stalePcm(source, nowUnixMs)) || oneSided(source)
@@ -100,6 +103,8 @@ export interface RecordingSummary {
   headline: string;
   /** The headline without the meeting's title: what is happening. */
   label: string;
+  /** Part of the label said calmly, in dim: " · filming your screen", which the person chose for every call. */
+  calm?: string;
   /** Mic, computer audio and saved audio, for a wide title line. */
   detail?: string;
   /** The headline for a title line with no room for the detail, when the detail says something the title must keep:
@@ -132,11 +137,15 @@ function warningAlert(warning: string): { text: string; short?: string; fix?: Hi
 /** What the video films while a call records: always said, so it is never a surprise. */
 export function videoStatus(video: CaptureVideoHealth | undefined): string | undefined {
   if (!video) return undefined;
-  if (video.state === 'recording') return video.filming ? `Filming ${video.filming}` : 'Filming the call';
-  if (video.state === 'waiting') return 'Not filming: no call window showing';
+  // A screen the person films during every call is said in the title itself, calmly: never twice.
+  if (video.state === 'recording') return video.screenChosen ? undefined : video.filming ? `Filming ${video.filming}` : 'Filming the call';
+  if (video.state === 'waiting') return video.screenFilmed ? 'Not filming: the screen is not available' : 'Not filming: no call window showing';
   if (video.state === 'starting') return 'Video starting…';
   return video.state === 'unavailable' ? 'No video' : undefined;
 }
+
+/** Filming a screen the person chose to film during calls: no notice, never yellow or red. */
+const CALM_SCREEN = ' · filming your screen';
 
 /** "Live text paused while your Mac is busy…": drafts stopped on purpose, while the audio records. Nothing fixes it but
  * time, so its alert offers no key; the transcript's last row says why. */
@@ -153,6 +162,9 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
   const finished = props.mode === 'ready' || props.mode === 'processing';
   const now = props.nowUnixMs ?? Date.now();
   const attention = recordingNeedsAttention(props.health, finished, now);
+  // Filming a whole display is said in the title itself, where nothing cuts it off: as asked for by one recording, or,
+  // dim, as the person's own choice for every call.
+  const screen = props.health?.video?.screenChosen ? CALM_SCREEN : props.health?.video?.screenFilmed ? ' · filming the whole screen' : '';
   // A call that was noticed is asked about in the key bar; the title only says what is happening.
   const label = props.mode === 'watching' ? 'Ready · watching for calls'
     : props.mode === 'awaiting-consent' ? props.approvalPending ? 'Starting the recording…' : 'Call noticed'
@@ -162,8 +174,7 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
     : props.mode === 'starting' ? 'Starting recording…'
     : props.mode === 'processing' ? 'Call ended'
     : props.mode === 'ready' ? attention ? 'Saved · audio needs review' : 'Saved · transcript ready'
-    // Filming a whole display is said in the title itself, where nothing cuts it off.
-    : `● Recording ${recordingClock(props.elapsedSeconds)}${props.health?.video?.screenFilmed ? ' · filming the whole screen' : ''}`;
+    : `● Recording ${recordingClock(props.elapsedSeconds)}${screen}`;
   const headline = props.title ? `${label} · ${props.title}` : label;
   const showSources = ['starting', 'recording', 'no-audio', 'processing', 'ready'].includes(props.mode);
   const mic = sourceLabel(props.health?.microphone, finished, now, props.health?.coverage?.yourSideMissing);
@@ -187,7 +198,9 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
       : attention && !finished ? ['Check your input if expected sound is missing · i audio help'] : []),
     ...(props.warning ? [props.warning] : []),
     ...(draftProblem(props.draftLabel) ? [props.draftLabel!] : []),
+    ...lostAudio(props.health),
   ];
+  const lost = Math.round(props.health?.systemAudio.lostSeconds ?? 0);
   // Not capturing at all is a failure; quiet, one-sided or unconfirmed sound needs a look.
   const failed = (source?: CaptureSourceHealth) => !finished && (source?.state === 'unavailable' || source?.state === 'stopped');
   // One name for a microphone Seashell cannot hear, whether it stopped or sends silence.
@@ -205,10 +218,14 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
       color: failed(props.health?.microphone) || failed(props.health?.systemAudio) ? 'red' as const : 'yellow' as const }
     : props.warning ? { ...warningAlert(props.warning), color: 'yellow' as const }
     : draftProblem(props.draftLabel) ? { text: props.draftLabel!.startsWith(LIVE_TEXT_PAUSED_LEAD) ? 'Live text paused' : 'Live text delayed',
-      color: 'yellow' as const } : undefined;
+      color: 'yellow' as const }
+    // Nothing to fix but the load: no key.
+    : lostAudio(props.health).length ? { text: lost ? `Mac too busy · ${lost} s of the call not recorded` : 'Mac too busy · audio lost',
+      short: 'Mac too busy', color: 'yellow' as const } : undefined;
   return {
     headline,
     label,
+    ...(screen === CALM_SCREEN && label.endsWith(CALM_SCREEN) ? { calm: CALM_SCREEN } : {}),
     ...(alert ? { alert } : {}),
     ...(showSources ? { detail: saved } : {}),
     // Narrow, that the notes are on their way matters more than which meeting it is: the list and the transcript say that.

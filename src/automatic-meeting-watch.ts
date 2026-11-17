@@ -5,9 +5,10 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { claimManagedProcessSignalOwnership } from './process-lifecycle.ts';
+import { heavyWork, type HeavyWorkGate } from './heavy-work.ts';
 import { finalizeCaptureTranscript } from './capture-finalizer.ts';
 import { readMacCalendarEventsAsync, suggestCalendarMeeting } from './calendar.ts';
-import { meetBrowserMatchesApp, probeMeetSpeakers } from './meet-speakers.ts';
+import { INCOMPLETE_REWALK_MS, inspectionIncomplete, meetBrowserMatchesApp, probeMeetSpeakers } from './meet-speakers.ts';
 import { writeBackgroundMeetingState, type BackgroundMeetingState, type BackgroundMeetingStatusOptions } from './background-meeting-status.ts';
 import { writeBackgroundWatchStatus, writeRecordingState } from './background-watch-status.ts';
 import { startBackgroundLiveTranscript, type BackgroundLiveTranscriptHandle, type BackgroundLiveTranscriptStatus } from './background-live-transcript.ts';
@@ -85,7 +86,8 @@ export type AutomaticMeetingWatchEvent =
   | { readonly type: 'meeting.stopped'; readonly at: string; readonly candidate: MeetingCandidate }
   | { readonly type: 'meeting.started'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string }
   | { readonly type: 'meeting.resumed'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string; readonly pausedSeconds: number }
-  | { readonly type: 'meeting.capture-finished'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string }
+  /** `computerAudioLostSeconds`: the other side lost so far to a Mac too busy to keep it (capture-overrun), when any was. */
+  | { readonly type: 'meeting.capture-finished'; readonly at: string; readonly candidate: MeetingCandidate; readonly sessionId: string; readonly computerAudioLostSeconds?: number }
   | { readonly type: 'meeting.ready'; readonly at: string; readonly candidate: MeetingCandidate; readonly transcriptId: string; readonly directory: string }
   | { readonly type: 'brief.ready'; readonly at: string; readonly title: string; readonly path: string }
   | { readonly type: 'watch.warning'; readonly at: string; readonly message: string }
@@ -115,6 +117,8 @@ export interface AutomaticMeetingWatchDependencies {
   readonly makeBrief?: typeof makeBrief;
   /** The Mac's load per core, for pausing live text when it is overloaded; tests pass their own. */
   readonly readLoad?: () => number;
+  /** What the final pass and speaker separation wait at while anyone is on a call (heavy-work.ts); tests pass their own. */
+  readonly heavyWork?: HeavyWorkGate;
   /**
    * Tells the person a brief is ready, once per meeting. Only the login agent
    * passes one: tests and embedders never notify.
@@ -162,6 +166,8 @@ export function watchRestartReason(options: { readonly configPath: string; reado
   };
 }
 
+/** Seashell's own helpers, by bundle ID (runtime-host.ts). */
+const SEASHELL_BUNDLE_PREFIX = 'com.humain.seashell.';
 /** A browser that was in front this recently may still hold a call joined just before switching away. */
 const BROWSER_RECENT_MS = 5 * 60_000;
 /** How often a video call on the calendar is checked for, whatever is in front. */
@@ -185,6 +191,14 @@ interface ActiveMeeting {
   readonly draft?: BackgroundLiveTranscriptHandle;
 }
 
+/** A stopped meeting whose final pass waits briefly in case the call resumes. */
+interface ParkedMeeting extends ActiveMeeting {
+  readonly parkedAtUnixMs: number;
+  readonly resumeUntilUnixMs: number;
+  /** Its capture and live draft are held open for the resume, not stopped (finish). */
+  readonly open?: boolean;
+}
+
 export class AutomaticMeetingWatchService {
   readonly #config: SeashellConfig;
   readonly #libraryDir: string;
@@ -196,7 +210,7 @@ export class AutomaticMeetingWatchService {
   /** A recording whose capture is still closing: it still reads as recording until it has. */
   #closing?: ActiveMeeting;
   /** A stopped meeting whose final pass waits briefly in case the call resumes. */
-  #parked?: ActiveMeeting & { readonly parkedAtUnixMs: number; readonly resumeUntilUnixMs: number };
+  #parked?: ParkedMeeting;
   #finalizationTail: Promise<void> = Promise.resolve();
   /** Final passes waiting for every recording, and every meeting paused for resume, to end. */
   #quietWaiters: Array<() => void> = [];
@@ -219,10 +233,14 @@ export class AutomaticMeetingWatchService {
   #recordingStateFailed = false;
   /** Readings in a row in which the call has let go of the microphone, during its end grace. */
   #microphoneLetGo = 0;
-  /** A Meet check that timed out, held instead of checking again at once; each wait doubles, up to a minute. */
+  /** A Meet check that timed out or read a page only in part, held instead of checking again at once (holdMeet). */
   #meetHeld?: MeetProbe;
   #meetRetryAtUnixMs = 0;
   #meetBackoffMs = 0;
+  /** Whether another app holds the microphone, by the last reading that could say; for gateHeavyWork. */
+  #othersListening?: boolean;
+  /** Since when another app has held it. */
+  #othersListeningSinceUnixMs?: number;
 
   constructor(options: AutomaticMeetingWatchOptions = {}) {
     this.#config = options.config ?? loadConfig();
@@ -250,6 +268,7 @@ export class AutomaticMeetingWatchService {
       makeBrief: options.dependencies?.makeBrief ?? makeBrief,
       notify: options.dependencies?.notify ?? (() => {}),
       readLoad: options.dependencies?.readLoad ?? macLoadPerCore,
+      heavyWork: options.dependencies?.heavyWork ?? heavyWork,
     };
   }
 
@@ -257,9 +276,9 @@ export class AutomaticMeetingWatchService {
     return this.#controller.state.phase;
   }
 
-  /** No meeting is recording, paused for resume, awaiting consent or being confirmed. */
+  /** No meeting is recording, paused for resume, awaiting consent or being confirmed, and nobody is on a call. */
   get idle(): boolean {
-    return !this.#active && !this.#parked && this.#controller.state.phase === 'watching';
+    return !this.#active && !this.#parked && this.#controller.state.phase === 'watching' && !this.#dependencies.heavyWork.held;
   }
 
   async pollOnce(): Promise<MeetingAutomationAction> {
@@ -282,6 +301,7 @@ export class AutomaticMeetingWatchService {
       this.emit({ type: 'watch.warning', at: now.toISOString(), message: errorMessage(error) });
       snapshot = { schemaVersion: 1, capturedAtUnixMs: now.getTime(), supported: false, inputProcesses: [] };
     }
+    this.observeMicrophone(snapshot, detectorTimedOut, now);
     const meetBrowser = browser && browser !== 'off' ? browser : undefined;
     const skipMeet = meetBrowser !== undefined && !this.meetCallPossible(snapshot, now);
     const probing = meetBrowser !== undefined && !skipMeet;
@@ -292,7 +312,7 @@ export class AutomaticMeetingWatchService {
         state: 'unavailable', detail: 'Could not check Google Meet. Check the connection in Speakers.',
       }));
     const meetTimedOut = probing && !holding && meet?.timedOut === true;
-    if (probing && !holding) this.holdMeetAfterTimeout(meet, now);
+    if (probing && !holding) this.holdMeet(meet, now);
     // Any browser window Accessibility cannot read lands here: with no call
     // running that is routine, and a person cannot act on it. Lost access is not.
     const routine = meet?.state === 'unavailable' && (meet as MeetProbe).accessibilityTrusted === true &&
@@ -318,7 +338,10 @@ export class AutomaticMeetingWatchService {
     const confirmedEnd = hasConfirmedMeetingEnd(state.candidate, meet);
     const unobserved = followedCallUnobserved(followed, candidate, snapshot, confirmedEnd);
     const action = this.#controller.step(candidate, now.getTime(), confirmedEnd, unobserved);
-    this.followMicrophone(callReleasedMicrophone(followed, candidate, snapshot), unobserved);
+    // A meeting held open for resume still holds the microphone, so it follows its call's app too.
+    const heldCall = !followed && this.#parked?.open ? this.#parked.candidate : undefined;
+    this.followMicrophone(callReleasedMicrophone(followed ?? heldCall, candidate, snapshot),
+      heldCall ? followedCallUnobserved(heldCall, candidate, snapshot) : unobserved, action.kind === 'finish');
     this.guardLiveText(now, detectorTimedOut || meetTimedOut);
     if (action.kind === 'suggest') {
       this.#consentId = randomUUID();
@@ -330,6 +353,7 @@ export class AutomaticMeetingWatchService {
     } else if (action.kind === 'finish') {
       await this.finish(action.candidate, action.reason);
     }
+    this.gateHeavyWork(now);
     if (this.#controller.state.phase === 'awaiting-consent') {
       const decision = this.#dependencies.consumeConsent(undefined, now.getTime(), 120_000, this.#consentId);
       if (decision === 'approve') {
@@ -382,18 +406,25 @@ export class AutomaticMeetingWatchService {
    * A Meet check that timed out is held, not run again three seconds later:
    * walking a browser's Accessibility tree is work for the browser running
    * the call. Each wait doubles, from 10 s up to a minute, and an answer ends it.
-   * The held result is unreadable, so it never ends a call (followedCallUnobserved).
+   * A page the browser only partly answered for is held for 30 s
+   * (INCOMPLETE_REWALK_MS). Either held result is unreadable, so it never
+   * ends a call (followedCallUnobserved).
    */
-  private holdMeetAfterTimeout(meet: MeetProbe | undefined, now: Date): void {
-    if (!meet?.timedOut) {
-      this.#meetHeld = undefined;
-      this.#meetRetryAtUnixMs = 0;
-      this.#meetBackoffMs = 0;
+  private holdMeet(meet: MeetProbe | undefined, now: Date): void {
+    if (meet?.timedOut) {
+      this.#meetBackoffMs = Math.min(60_000, Math.max(10_000, this.#meetBackoffMs * 2));
+      this.#meetRetryAtUnixMs = now.getTime() + this.#meetBackoffMs;
+      this.#meetHeld = meet;
       return;
     }
-    this.#meetBackoffMs = Math.min(60_000, Math.max(10_000, this.#meetBackoffMs * 2));
-    this.#meetRetryAtUnixMs = now.getTime() + this.#meetBackoffMs;
-    this.#meetHeld = meet;
+    this.#meetBackoffMs = 0;
+    if (inspectionIncomplete(meet)) {
+      this.#meetRetryAtUnixMs = now.getTime() + INCOMPLETE_REWALK_MS;
+      this.#meetHeld = meet;
+      return;
+    }
+    this.#meetHeld = undefined;
+    this.#meetRetryAtUnixMs = 0;
   }
 
   /**
@@ -403,15 +434,59 @@ export class AutomaticMeetingWatchService {
    * again the moment the call comes back. Two readings in a row confirm it, so
    * a blip as the call switches devices does not cycle the microphone.
    */
-  private followMicrophone(released: boolean, unobserved: boolean): void {
-    const capture = this.#active?.capture;
+  private followMicrophone(released: boolean, unobserved: boolean, finishing = false): void {
+    const capture = this.#active?.capture ?? (this.#parked?.open ? this.#parked.capture : undefined);
     if (!capture) return;
-    const ending = this.#controller.state.phase === 'ending';
+    // Held open for resume, the call has already ended once: as in its end grace,
+    // and so is the poll that ends that grace.
+    const ending = !this.#active || finishing || this.#controller.state.phase === 'ending';
     // A reading that told nothing changes nothing.
     if (ending && unobserved) return;
     this.#microphoneLetGo = ending && released ? this.#microphoneLetGo + 1 : 0;
     if (this.#microphoneLetGo >= 2) capture.releaseMicrophone?.();
-    else capture.reopenMicrophone?.();
+    // Held open, it opens again only once the call is back (start).
+    else if (this.#active) capture.reopenMicrophone?.();
+  }
+
+  /**
+   * Heavy work waits while anyone is on a call (heavy-work.ts): while Seashell
+   * records or holds a meeting for resume, and while any app at all holds the
+   * microphone, since an unknown app may be a call. A reading that cannot say
+   * keeps the gate as it was. A microphone held for longer than a recording
+   * may last (maxDurationMinutes) belongs to an app that always listens, not
+   * to a call: heavy work goes ahead then, at background priority, rather
+   * than never.
+   */
+  private gateHeavyWork(now: Date): void {
+    const gate = this.#dependencies.heavyWork;
+    // A watcher shutting down finishes its final passes first (shutdown), whatever else is on.
+    if (this.#shuttingDown) {
+      gate.release();
+      return;
+    }
+    const longestCallMs = (this.#config.meeting?.automation?.maxDurationMinutes ??
+      DEFAULT_MEETING_AUTOMATION.maxDurationMinutes) * 60_000;
+    const call = this.#othersListening === undefined ? gate.held
+      : this.#othersListening && now.getTime() - this.#othersListeningSinceUnixMs! < longestCallMs;
+    if (this.#active || this.#closing || this.#parked || call) gate.hold();
+    else {
+      gate.release();
+      this.releaseIfQuiet();
+    }
+  }
+
+  /**
+   * Whether an app other than Seashell holds the microphone. Seashell's own
+   * helpers are left out: they hold it only while it records, which counts
+   * on its own. A detector that timed out, or a half-read list with nobody in
+   * it, cannot say, and leaves the last answer standing.
+   */
+  private observeMicrophone(snapshot: MeetingSignalSnapshot, unread: boolean, now: Date): void {
+    const others = snapshot.inputProcesses.filter((process) => !process.bundleId.startsWith(SEASHELL_BUNDLE_PREFIX));
+    if (unread || (snapshot.supported && snapshot.complete === false && others.length === 0)) return;
+    this.#othersListening = snapshot.supported && others.length > 0;
+    if (!this.#othersListening) this.#othersListeningSinceUnixMs = undefined;
+    else this.#othersListeningSinceUnixMs ??= now.getTime();
   }
 
   /** Live text gives way when the Mac is overloaded (live-text-guard.ts); the audio never does. */
@@ -533,6 +608,9 @@ export class AutomaticMeetingWatchService {
 
   async shutdown(): Promise<void> {
     this.#shuttingDown = true;
+    // What waits for a call to end finishes before the watcher exits, as before, and
+    // a stopped process must run to be stopped for good.
+    this.#dependencies.heavyWork.release();
     this.releaseIfQuiet();
     this.#signalMonitor?.stop();
     this.#calendarAbort.abort();
@@ -629,6 +707,7 @@ export class AutomaticMeetingWatchService {
     if (!resumed) this.finalizeParked();
     const startedAt = resumed?.startedAt ?? now;
     if (resumed) candidate = Object.freeze({ ...resumed.candidate, pid: candidate.pid });
+    if (resumed?.open) return this.resumeHeld(resumed, candidate, now);
     let capture: DurableLiveCaptureHandle;
     let directory: string | undefined;
     let latestStatus: DurableLiveCaptureStatus | undefined;
@@ -637,8 +716,10 @@ export class AutomaticMeetingWatchService {
     let initializingDraft = true;
     const pendingDraftChunks: CommittedCaptureChunk[] = [];
     let draftWarning: string | undefined;
+    /** Held open for resume, the meeting shows as paused: nothing it reports may say it records. */
+    const held = () => directory !== undefined && this.#parked?.directory === directory;
     const onDraftStatus = (status: BackgroundLiveTranscriptStatus) => {
-      if (directory) {
+      if (directory && !held()) {
         try { writeBackgroundMeetingState(directory, 'recording', { draftStatus: status }); }
         catch (error) {
           this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(),
@@ -656,7 +737,7 @@ export class AutomaticMeetingWatchService {
       latestStatus = status;
       const key = status.health ? captureHealthTransitionKey(status.health) : undefined;
       const at = Date.now();
-      if (directory && (key !== writtenKey || at - writtenAt >= 1000)) {
+      if (directory && !held() && (key !== writtenKey || at - writtenAt >= 1000)) {
         try {
           writeBackgroundMeetingState(directory, 'recording', {
             ...(status.health ? { captureHealth: status.health } : {}),
@@ -669,7 +750,9 @@ export class AutomaticMeetingWatchService {
       }
       const warnings = status.health ? [status.health.microphone, status.health.systemAudio]
         .flatMap(source => source.warnings.filter(w => w.resolvedAtUnixMs === undefined && w.kind !== 'unavailable')) : [];
-      const warningKey = JSON.stringify(warnings.map(w => [w.kind, w.code, w.message]));
+      // A loss is said when it first passes the threshold, not again for every second it grows by:
+      // its running total is in the meeting's health, and its end total in meeting.capture-finished.
+      const warningKey = JSON.stringify(warnings.map(w => [w.kind, w.code, w.kind === 'dropped' ? undefined : w.message]));
       if (warnings.length && warningKey !== warnedKey) this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(),
         message: warnings.map(w => w.message).join(' ') });
       warnedKey = warningKey;
@@ -747,6 +830,8 @@ export class AutomaticMeetingWatchService {
       draft = this.#dependencies.startLiveTranscript({
         libraryDir: this.#libraryDir, record, onStatus: onDraftStatus,
         ...(capture.speakerFor ? { speakerFor: capture.speakerFor } : {}),
+        // Loaded through a pause, so a call that comes back does not load the model again.
+        engineIdleMs: Math.max(60_000, this.resumeWindowMs() + 30_000),
       });
       // A Mac still overloaded from the last call gets no live text in this one either, until it calms.
       if (this.#liveTextGuard.paused) draft.pause?.(LIVE_TEXT_PAUSED);
@@ -756,6 +841,8 @@ export class AutomaticMeetingWatchService {
     } finally { initializingDraft = false; pendingDraftChunks.length = 0; }
     this.#active = { candidate, capture, directory, startedAt, ...(draft ? { draft } : {}) };
     this.#microphoneLetGo = 0;
+    // At once, not at the next poll: a final pass already running stops where it stands.
+    this.#dependencies.heavyWork.hold();
     this.projectWatch();
     if (resumed) {
       this.emit({
@@ -776,12 +863,84 @@ export class AutomaticMeetingWatchService {
     return true;
   }
 
+  /** Said each time a recording stops or pauses, with how much of the other side a busy Mac has lost so far. */
+  private emitCaptureFinished(candidate: MeetingCandidate, capture: DurableLiveCaptureHandle): void {
+    const lost = capture.health?.systemAudio.lostSeconds;
+    this.emit({ type: 'meeting.capture-finished', at: this.#dependencies.now().toISOString(), candidate,
+      sessionId: capture.sessionId, ...(lost ? { computerAudioLostSeconds: Math.round(lost * 10) / 10 } : {}) });
+  }
+
+  /** How long a meeting that stops waits to resume before its final pass. */
+  private resumeWindowMs(): number {
+    return (this.#config.meeting?.automation?.resumeWindowSeconds ?? DEFAULT_MEETING_AUTOMATION.resumeWindowSeconds) * 1_000;
+  }
+
+  private pausedStatus(): BackgroundLiveTranscriptStatus {
+    return { stage: 'stopped', queueDepth: 0,
+      detail: `Meeting paused. If it resumes within ${Math.round(this.resumeWindowMs() / 60_000) || 1} min it continues here; otherwise the final transcript starts.` };
+  }
+
+  /**
+   * The same call is back within its resume window: the capture and live
+   * draft held open for it carry on in the same processes. No tap or
+   * aggregate device is rebuilt, the microphone helper keeps running, and the
+   * live engine keeps its model.
+   */
+  private resumeHeld(resumed: ParkedMeeting, candidate: MeetingCandidate, now: Date): boolean {
+    this.#parked = undefined;
+    const { capture, directory, startedAt, draft } = resumed;
+    this.#active = { candidate, capture, directory, startedAt, ...(draft ? { draft } : {}) };
+    this.#microphoneLetGo = 0;
+    this.#dependencies.heavyWork.hold();
+    capture.resume?.();
+    // Let go of while the call had let go of its own; the call is back.
+    capture.reopenMicrophone?.();
+    if (this.#liveTextGuard.paused) draft?.pause?.(LIVE_TEXT_PAUSED);
+    this.markCapture(directory, 'recording', {
+      ...(capture.health ? { captureHealth: capture.health } : {}),
+      ...(draft ? { draftStatus: draft.status } : {}),
+      meetingKey: candidate.id,
+    });
+    this.projectWatch();
+    this.emit({ type: 'meeting.resumed', at: now.toISOString(), candidate, sessionId: capture.sessionId,
+      pausedSeconds: Math.round((now.getTime() - resumed.parkedAtUnixMs) / 1_000) });
+    return true;
+  }
+
+  /**
+   * A meeting held open for resume is over: let go of everything it held,
+   * then save it. Resolves once its capture has closed.
+   */
+  private async closeHeld(meeting: ActiveMeeting): Promise<void> {
+    try { await meeting.capture.stop('signal-ended'); }
+    finally {
+      try { await meeting.draft?.close(); }
+      catch (error) {
+        this.emit({ type: 'watch.warning', at: this.#dependencies.now().toISOString(),
+          message: `Live transcript cleanup needs attention: ${errorMessage(error)}. Final transcription will continue.` });
+      }
+    }
+  }
+
   private async finish(candidate: MeetingCandidate, reason: string): Promise<void> {
     const active = this.#active;
     if (!active) return;
     this.#active = undefined;
-    this.#closing = active;
     this.#consentId = undefined;
+    // A call whose signal ended may come back: hold its capture open rather
+    // than stopping it, so a resume rebuilds nothing (resumeHeld).
+    if (reason === 'signal-ended' && !this.#shuttingDown && this.resumeWindowMs() > 0 && active.capture.pause && active.capture.resume) {
+      const parkedAtUnixMs = this.#dependencies.now().getTime();
+      // Parked first, so nothing the capture reports as it pauses reads as recording.
+      this.#parked = { ...active, parkedAtUnixMs, resumeUntilUnixMs: parkedAtUnixMs + this.resumeWindowMs(), open: true };
+      active.capture.pause(reason);
+      this.markCapture(active.directory, 'processing', { draftStatus: this.pausedStatus() });
+      this.emitCaptureFinished(candidate, active.capture);
+      this.gateHeavyWork(this.#dependencies.now());
+      this.projectWatch();
+      return;
+    }
+    this.#closing = active;
     try {
       try {
         await active.capture.stop(reason);
@@ -796,23 +955,16 @@ export class AutomaticMeetingWatchService {
             message: `Live transcript cleanup needs attention: ${errorMessage(error)}. Final transcription will continue.` });
         }
       }
-      const resumeWindowMs = (this.#config.meeting?.automation?.resumeWindowSeconds ??
-        DEFAULT_MEETING_AUTOMATION.resumeWindowSeconds) * 1_000;
+      const resumeWindowMs = this.resumeWindowMs();
       const parkedAtUnixMs = this.#dependencies.now().getTime();
       const park = reason === 'signal-ended' && !this.#shuttingDown && resumeWindowMs > 0;
       if (park) {
         this.#parked = { ...active, parkedAtUnixMs, resumeUntilUnixMs: parkedAtUnixMs + resumeWindowMs };
-        this.markCapture(active.directory, 'processing', { draftStatus: {
-          stage: 'stopped', queueDepth: 0,
-          detail: `Meeting paused. If it resumes within ${Math.round(resumeWindowMs / 60_000) || 1} min it continues here; otherwise the final transcript starts.`,
-        } });
+        this.markCapture(active.directory, 'processing', { draftStatus: this.pausedStatus() });
       } else this.markCapture(active.directory, 'processing');
-      this.emit({
-        type: 'meeting.capture-finished',
-        at: this.#dependencies.now().toISOString(),
-        candidate,
-        sessionId: active.capture.sessionId,
-      });
+      this.emitCaptureFinished(candidate, active.capture);
+      // Nothing records now: whether a final pass may start is up to everyone else's calls.
+      this.gateHeavyWork(this.#dependencies.now());
       if (!park) this.enqueueFinalization(active);
     } catch (error) {
       this.markCapture(active.directory, 'failed');
@@ -830,10 +982,12 @@ export class AutomaticMeetingWatchService {
    * No final pass runs mid-meeting. Transcribing and separating speakers is
    * the heaviest work Seashell does, so it waits while anything records, and
    * while a meeting is paused for resume, and then runs once over the whole
-   * meeting. A call that stops and resumes is still one meeting.
+   * meeting. A call that stops and resumes is still one meeting. It waits too
+   * while any other call is on (gateHeavyWork), and one that is running when
+   * a call starts is stopped where it stands until the call ends.
    */
   private get quiet(): boolean {
-    return this.#shuttingDown || (!this.#active && !this.#parked);
+    return this.#shuttingDown || (!this.#active && !this.#parked && !this.#dependencies.heavyWork.held);
   }
 
   private untilQuiet(): Promise<void> {
@@ -856,15 +1010,23 @@ export class AutomaticMeetingWatchService {
     this.markCapture(parked.directory, 'processing', { draftStatus: {
       stage: 'stopped', queueDepth: 0, detail: 'Live draft stopped. Preparing the final transcript.',
     } });
-    this.enqueueFinalization(parked);
+    this.gateHeavyWork(this.#dependencies.now());
+    const closed = parked.open ? this.closeHeld(parked) : undefined;
+    // Its failure is the final pass's to report, whenever that runs.
+    closed?.catch(() => {});
+    this.enqueueFinalization(parked, closed);
     this.releaseIfQuiet();
   }
 
-  private enqueueFinalization(meeting: ActiveMeeting): void {
+  /** `closed`: a capture still closing, which the final pass waits for. */
+  private enqueueFinalization(meeting: ActiveMeeting, closed?: Promise<void>): void {
     if (!this.quiet) this.markCapture(meeting.directory, 'processing', { draftStatus: {
-      stage: 'stopped', queueDepth: 0, detail: 'The final transcript starts when the call now recording ends.',
+      stage: 'stopped', queueDepth: 0, detail: this.#active || this.#parked
+        ? 'The final transcript starts when the call now recording ends.'
+        : 'The final transcript starts when the call on this Mac ends.',
     } });
     const task = async () => {
+      if (closed) await closed;
       if (!this.quiet) await this.untilQuiet();
       return this.finalize(meeting.candidate, meeting.capture);
     };

@@ -14,6 +14,7 @@ import { detectSpeechRegions, dropPhantomUnits, type SpeechRegion } from './spee
 import { packSpeech, unpackUnits, type SpeechPacking } from './speech-packing.ts';
 import type { TimedTranscriptUnit } from './transcript-types.ts';
 import { defaultWhisperPrompt, whisperPromptTokens } from './vocabulary.ts';
+import { heavyWork } from './heavy-work.ts';
 import { inferenceCommand } from './inference-priority.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -282,8 +283,9 @@ export async function transcribeWithTimestamps(
     }
     const audioPath = packing ? packedPath : filePath;
 
-    const runWhisper = (disableGpu: boolean) => new Promise<void>((resolve, reject) => {
-      // The final pass never competes with a call: Darwin background priority.
+    const runWhisper = async (disableGpu: boolean) => { await heavyWork.ready(); return new Promise<void>((resolve, reject) => {
+      // The final pass never competes with a call: Darwin background priority,
+      // and stopped while one runs (heavy-work.ts).
       const run = inferenceCommand(whisperCli, [
         ...(disableGpu ? ['-ng'] : []),
         '-m', modelPath,
@@ -311,6 +313,7 @@ export async function transcribeWithTimestamps(
         stdio: ['ignore', 'ignore', 'pipe'],
       });
       const stopTrackingChild = trackChildProcess(proc);
+      heavyWork.follow(proc);
 
       let stderr = '';
       let settled = false;
@@ -342,22 +345,25 @@ export async function transcribeWithTimestamps(
         }
         resolve();
       });
-    });
+    }); };
 
     const forceCpu = !transcriptionUsesGpu(hardware);
-    try {
-      await runWhisper(forceCpu);
-    } catch (error) {
-      // A GPU run can crash, or stop before transcribing with no reason given
-      // ("failed to initialize whisper context"). Either way, retry on the CPU.
-      if (!forceCpu && error instanceof WhisperExecutionError) {
-        rmSync(outputJson, { force: true });
-        options.onFallback?.('Metal transcription failed; retrying on CPU…');
-        await runWhisper(true);
-      } else {
-        throw error;
+    // One Whisper at a time in this process, whichever track it is for.
+    await heavyWork.exclusive(async () => {
+      try {
+        await runWhisper(forceCpu);
+      } catch (error) {
+        // A GPU run can crash, or stop before transcribing with no reason given
+        // ("failed to initialize whisper context"). Either way, retry on the CPU.
+        if (!forceCpu && error instanceof WhisperExecutionError) {
+          rmSync(outputJson, { force: true });
+          options.onFallback?.('Metal transcription failed; retrying on CPU…');
+          await runWhisper(true);
+        } else {
+          throw error;
+        }
       }
-    }
+    });
 
     if (!existsSync(outputJson)) {
       throw new Error('whisper.cpp completed without writing timestamp JSON');

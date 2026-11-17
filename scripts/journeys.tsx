@@ -275,9 +275,21 @@ export const JOURNEYS: Journey[] = [
       { title: 'Video', press: [DOWN, DOWN], narrowInstead: [ESC, DOWN, DOWN], keys: '↓ ↓', note: 'On, but macOS has not allowed Screen Recording yet.' },
       { title: 'Video off', press: [ENTER], keys: 'Enter', note: 'Enter switches video. Wide, it turns off; narrow, it opens the item first.' },
       { title: 'Video on, Screen Recording allowed', press: [ENTER], keys: 'Enter', note: 'Turning it on asks macOS for Screen Recording.' },
-      { title: 'Computer audio', press: [LEFT, ...Array(13).fill(UP)], keys: '← ↑ × 13',
+      { title: 'Film your whole screen', press: [RIGHT], keys: '→', until: 'Everything on that screen',
+        note: '"Can it film my screen unasked?" ←→ choose what calls film. Chosen once, nothing asks again; one plain line says what else is filmed.' },
+      { title: 'Back to the call window', press: [LEFT], keys: '←', note: 'The default: only the call\'s own window.' },
+      { title: 'Computer audio', press: Array(13).fill(UP), narrowInstead: [ESC, ...Array(13).fill(UP)], keys: '↑ × 13',
         note: 'Meetings keep the background recorder\'s permission until a check at the Mac allows Seashell System Audio.' },
       { title: 'Computer audio checked', press: [ENTER], keys: 'Enter', note: 'Wide, Enter plays a short sound and listens; narrow, it opens the item first.' },
+    ],
+  },
+  {
+    id: 'film-screen', title: 'Film the whole screen during calls', who: 'Someone who chose, on their own Mac, to film their whole screen during calls.',
+    machine: 'ready', library: 'demo', narrow: true,
+    config: { meeting: { speakerBrowser: 'auto', backend: 'claude-code', model: 'sonnet', video: { target: 'screen' } } },
+    steps: [
+      { title: 'Recording, filming your screen', world: ({ library, background }) => liveMeeting(library, background, { filmingScreen: true }),
+        until: 'filming your screen', note: 'No question and no notification: the recording line says it, dim, and never in yellow or red.' },
     ],
   },
   {
@@ -652,7 +664,8 @@ async function nextMeeting(library: string) {
  */
 let keepHearing: (() => void) | undefined;
 
-async function liveMeeting(library: string, background: Background, options: { microphoneDown?: boolean; bundle?: boolean; liveTextPaused?: boolean } = {}) {
+async function liveMeeting(library: string, background: Background,
+  options: { microphoneDown?: boolean; bundle?: boolean; liveTextPaused?: boolean; filmingScreen?: boolean } = {}) {
   const { createTranscriptRecord } = await import('../src/transcript-record.ts');
   const { saveTranscriptRecord } = await import('../src/transcript-library.ts');
   const { createMeetingArtifact, saveMeetingArtifact } = await import('../src/meeting-artifact.ts');
@@ -668,6 +681,11 @@ async function liveMeeting(library: string, background: Background, options: { m
   }
   const health = new CaptureHealthTracker();
   if (options.microphoneDown) health.state('microphone', { state: 'unavailable', code: 'microphone_stopped', message: 'The microphone stopped.' });
+  // The person films their screen during calls: the recorder found the main display.
+  if (options.filmingScreen) {
+    health.video('starting', { kind: 'display', name: 'your screen', chosen: true });
+    health.video('recording');
+  }
   const hear = () => {
     if (!options.microphoneDown) health.pcm('microphone', { peak: 1000, rms: 500, rmsDbfs: -30 });
     health.pcm('systemAudio', { peak: 1000, rms: 500, rmsDbfs: -30 });

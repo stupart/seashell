@@ -28,6 +28,7 @@ import { askAutomationApprovalWithDialog, ensureAutomationsDirectory, loadAutoma
 import { forgetPersonVoice } from './transcript-edits.ts';
 import { listVoiceprints } from './voiceprints.ts';
 import { screenCapturePermission } from './video-capture.ts';
+import { filmTarget, MEETING_VIDEO_TARGETS, type MeetingVideoTarget } from './video-recording.ts';
 import { checkComputerAudio, type ComputerAudioCheck } from './audio-levels.ts';
 import { listTranscriptRecords } from './transcript-library.ts';
 import { meetingWhen } from './tui-state.ts';
@@ -339,6 +340,13 @@ function saveRecordingRow(config: SeashellConfig, row: RecordingRow, value: AppS
   return updateMeetingConfig({ automation: { apps } });
 }
 
+// MARK: - Video
+
+/** What calls film, as the Video item's one choice says it. */
+const FILM_WORDS: Record<MeetingVideoTarget, string> = { 'call-window': 'The call window', screen: 'Your whole screen' };
+/** Said once the whole screen is chosen, plainly: what that means for everything else on it. */
+const SCREEN_FILMED_NOTE = 'Everything on that screen is filmed during calls, including other windows and notifications.';
+
 // MARK: - Screen
 
 type MenuItem =
@@ -531,6 +539,17 @@ export default function SettingsScreen(props: SetupActionProps & {
     } catch (cause) { setup.failure(cause); }
     setRefresh(value => value + 1);
   };
+  // What calls film: ←→ choose the call's window or the whole screen, as they change a recording row.
+  const changeFilm = (step: number) => {
+    const { config } = latest.current;
+    const next = MEETING_VIDEO_TARGETS[(MEETING_VIDEO_TARGETS.indexOf(filmTarget(config)) + step + MEETING_VIDEO_TARGETS.length) % MEETING_VIDEO_TARGETS.length]!;
+    try {
+      const saved = updateMeetingConfig({ video: { target: next } });
+      setConfig(saved);
+      props.onConfigChange?.(saved);
+      setup.setMessage(undefined);
+    } catch (cause) { setup.failure(cause); }
+  };
   // Video is one switch: Enter turns it on, and asks macOS for Screen Recording if it must; Enter again turns it off.
   const switchVideo = (on: boolean) => {
     try {
@@ -573,6 +592,11 @@ export default function SettingsScreen(props: SetupActionProps & {
     // Briefs are a switch: ←→ turn them on and off wherever the row is shown, so Enter can do the step they wait on.
     if ((key.leftArrow || key.rightArrow) && selected?.kind === 'status' && selected.status.id === 'briefs' && (!compact || inDetail)) {
       switchBriefs(selected.status.action !== 'turn-on-briefs');
+      return;
+    }
+    // Video's one choice, what calls film, is changed with ←→ wherever the item is shown; Enter stays its switch.
+    if ((key.leftArrow || key.rightArrow) && selected?.kind === 'status' && selected.status.id === 'video' && (!compact || inDetail)) {
+      changeFilm(key.leftArrow ? -1 : 1);
       return;
     }
     const editingRows = inDetail && list !== undefined;
@@ -810,6 +834,11 @@ export default function SettingsScreen(props: SetupActionProps & {
         : <Paragraph width={width} color="yellow" text={`Next: ${selected.status.fix}${selected.status.copy ? ` ${selected.status.copy.how}` : ''}`} />}</Box>}
       {['prompts', 'voices', 'vocabulary', 'extractors', 'automations'].includes(selected.status.id) &&
         <Box flexDirection="column" marginTop={1} flexShrink={0}>{filesBody(selected.status.id)}</Box>}
+      {/* What calls film, beside the switch; the whole screen says plainly what else that films. */}
+      {selected.status.id === 'video' && <Box flexDirection="column" marginTop={1} flexShrink={0}>
+        <Text wrap="truncate-end">{'  '}{'What to film'.padEnd(compact ? 22 : 24)}‹ {FILM_WORDS[filmTarget(config)]} ›</Text>
+        {filmTarget(config) === 'screen' && <Box marginTop={1} flexShrink={0}><Paragraph width={width} text={SCREEN_FILMED_NOTE} /></Box>}
+      </Box>}
     </Box>
   </>;
 
@@ -830,7 +859,7 @@ export default function SettingsScreen(props: SetupActionProps & {
       // The fix leads: a step only Terminal can do is copied for it.
       ...(selected?.kind === 'status' && selected.status.copy ? [['c', 'copy the update command'] as Hint] : []),
       ...(selected?.kind === 'recording' ? [['Enter', 'change'] as Hint] : selected?.kind === 'guide' ? [['Enter', 'start'] as Hint]
-        : video ? [['Enter', video.state === 'off' ? 'turn on' : 'turn off'] as Hint]
+        : video ? [['Enter', video.state === 'off' ? 'turn on' : 'turn off'] as Hint, ['←→', 'what to film'] as Hint]
         : briefs ? !briefs.action ? [['Enter', 'turn off'] as Hint] : briefs.action === 'turn-on-briefs' ? [['Enter', 'turn on'] as Hint]
           : [['Enter', lowerFirst(FEATURE_ACTION_LABEL[briefs.action])] as Hint, ['←→', 'on/off'] as Hint]
         : list === 'prompts' ? [['Enter', 'choose a prompt'] as Hint] : list === 'voices' && listLength ? [['Enter', 'choose someone'] as Hint]

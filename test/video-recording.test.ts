@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { fileURLToPath } from 'url';
 import { browserBundleIds, type MeetingCandidate } from '../src/meeting-automation.ts';
 import {
   consumeVideoRequest,
+  filmsScreen,
   meetingVideoRequest,
+  SCREEN_TARGET,
   startRecordingWithVideo,
   videoRequestPath,
   videoTargetFor,
@@ -61,6 +64,40 @@ test('a recording started by hand films only when asked, whatever the video sett
     .toEqual({ target: { kind: 'display', display: 2 }, fps: 4, quality: 'medium' });
 });
 
+test('with the whole screen chosen, a call films the main display, on the same on and off settings', () => {
+  const screen = { meeting: { video: { target: 'screen' as const } } };
+  expect(meetingVideoRequest(screen, candidate({}))).toEqual({ target: { kind: 'display', display: 1, optedIn: true }, fps: 2, quality: 'medium' });
+  // A browser call too, whatever its tab shows.
+  expect(meetingVideoRequest({ meeting: { video: { target: 'screen', fps: 4, quality: 'low' } } },
+    candidate({ appName: 'Google Meet', bundleId: 'com.google.Chrome', pid: 0, kind: 'browser' })))
+    .toEqual({ target: SCREEN_TARGET, fps: 4, quality: 'low' });
+  // Off still means no video, overall or for that app.
+  expect(meetingVideoRequest({ meeting: { video: { target: 'screen', enabled: false } } }, candidate({}))).toBeUndefined();
+  expect(meetingVideoRequest({ meeting: { video: { target: 'screen', apps: { zoom: false } } } }, candidate({}))).toBeUndefined();
+  // Back to the call window, it is the window again.
+  expect(meetingVideoRequest({ meeting: { video: { target: 'call-window' } } }, candidate({}))?.target).toMatchObject({ kind: 'window', pid: 4242 });
+});
+
+test('the default stays the call window, never the screen', () => {
+  expect(filmsScreen({})).toBe(false);
+  expect(filmsScreen({ meeting: { video: { enabled: true } } })).toBe(false);
+  expect(meetingVideoRequest({}, candidate({}))?.target.kind).toBe('window');
+  const manual = candidate({ id: 'manual:3', appName: 'Seashell', bundleId: '', pid: 0, kind: 'manual' });
+  expect(meetingVideoRequest({}, manual, () => ({}))?.target).toMatchObject({ kind: 'window', callWindowOnly: true });
+});
+
+test('a recording started by hand with the whole screen chosen films it when asked, and still only when asked', () => {
+  const screen = { meeting: { video: { target: 'screen' as const } } };
+  const manual = candidate({ id: 'manual:4', appName: 'Seashell', bundleId: '', pid: 0, kind: 'manual' });
+  // Space: audio only, whatever is chosen.
+  expect(meetingVideoRequest(screen, manual, () => undefined)).toBeUndefined();
+  // V: what a call films, the screen.
+  expect(meetingVideoRequest(screen, manual, () => ({}))?.target).toEqual(SCREEN_TARGET);
+  // Named by hand: that window, or that display, announced as asked for.
+  expect(meetingVideoRequest(screen, manual, () => ({ window: 'zoom' }))?.target).toMatchObject({ kind: 'window', appName: 'Zoom' });
+  expect(meetingVideoRequest(screen, manual, () => ({ display: 2 }))?.target).toEqual({ kind: 'display', display: 2 });
+});
+
 test('naming a window finds a known app by id or name, and any other app by its name', () => {
   expect(videoTargetFor({ window: 'zoom' })).toEqual({ kind: 'window', appName: 'Zoom', bundleIds: ['us.zoom.xos', 'us.zoom.ZoomPhone'] });
   expect(videoTargetFor({ window: 'Google Chrome' })).toMatchObject({ appName: 'Google Chrome', bundleIds: ['com.google.Chrome'] });
@@ -89,4 +126,37 @@ test('Space with video leaves the video request, then the start command, for the
   const manual = candidate({ id: 'manual:2', bundleId: '', pid: 0, kind: 'manual' });
   expect(meetingVideoRequest({}, manual)).toEqual({ target: { kind: 'display', display: 2 }, fps: 2, quality: 'medium' });
   expect(meetingVideoRequest({}, manual)).toBeUndefined();
+});
+
+test('seashell meeting video film screen saves the choice and says plainly what it films; film window goes back', () => {
+  // A made-up home and settings file: never the owner's.
+  const home = join(root, 'home');
+  const config = join(root, 'config.json');
+  writeFileSync(config, JSON.stringify({ meeting: { video: { fps: 3 } } }));
+  const run = (...args: string[]) => {
+    const result = Bun.spawnSync([process.execPath, 'run', fileURLToPath(new URL('../src/cli.tsx', import.meta.url)), 'meeting', 'video', ...args],
+      { cwd: root, env: { ...process.env, HOME: home, SEASHELL_CONFIG: config } });
+    return { code: result.exitCode, out: result.stdout.toString(), err: result.stderr.toString() };
+  };
+  const saved = () => JSON.parse(readFileSync(config, 'utf8')).meeting.video;
+
+  const screen = run('film', 'screen');
+  expect(screen.err).toBe('');
+  expect(screen.code).toBe(0);
+  expect(screen.out).toStartWith('Calls now film your whole screen, without asking each time.\n'
+    + 'Everything on the main display is filmed during calls, including other windows and notifications.\n');
+  expect(saved()).toEqual({ fps: 3, target: 'screen' });
+  expect(JSON.parse(run('--json').out)).toMatchObject({ enabled: true, target: 'screen', fps: 3 });
+  expect(run('--status').out).toContain('Calls film your whole screen, the main display, at 3 fps, medium quality.');
+
+  const window = run('film', 'window');
+  expect(window.code).toBe(0);
+  expect(window.out).toStartWith("Calls now film only the call's window.\n");
+  expect(window.out).not.toContain('Everything on');
+  expect(saved()).toEqual({ fps: 3, target: 'call-window' });
+
+  // Chosen while video is off, it says what keeps it from filming.
+  run('off');
+  expect(run('film', 'screen').out).toContain('Video is off. Calls record audio only. Turn video on with: seashell meeting video on');
+  expect(saved()).toEqual({ fps: 3, target: 'screen', enabled: false });
 });

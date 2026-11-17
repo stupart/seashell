@@ -129,6 +129,27 @@ test('while a call records, the status says what the video films, and a whole sc
   expect(parseCaptureHealth({ ...health.snapshot, video: { state: 'filming the bank' } })).toBeUndefined();
 });
 
+test('a screen the person films during calls is said once, calmly in the title, and never as an alert', () => {
+  const health = new CaptureHealthTracker({ nowUnixMs: 1000 });
+  health.pcm('microphone', undefined, true, 1001);
+  health.video('starting', { kind: 'display', name: 'your screen', chosen: true }, 1002);
+  health.video('recording', undefined, 1003);
+  const summary = (snapshot = health.snapshot) => recordingSummary({ mode: 'recording', title: 'Design review', health: snapshot,
+    savedThroughSeconds: 12, elapsedSeconds: 20, nowUnixMs: 1004 });
+  expect(summary()).toMatchObject({ label: '● Recording 0:20 · filming your screen', calm: ' · filming your screen',
+    headline: '● Recording 0:20 · filming your screen · Design review', detail: 'Audio saved through 0:12' });
+  expect(summary().alert).toBeUndefined();
+  expect(summary().problems).toEqual([]);
+  // Saved and read back by the window showing it, it reads the same; an older reader just sees a filmed screen.
+  const saved = parseCaptureHealth(JSON.parse(JSON.stringify(health.snapshot)));
+  expect(saved?.video).toEqual({ state: 'recording', filming: 'your screen', screenFilmed: true, screenChosen: true });
+  expect(summary(saved).label).toBe('● Recording 0:20 · filming your screen');
+  expect(parseCaptureHealth({ ...health.snapshot, video: { state: 'recording', screenChosen: true } })).toBeUndefined();
+  // A screen that stops being available says so, not that a call window is missing.
+  health.video('waiting', undefined, 1005);
+  expect(summary().detail).toBe('Audio saved through 0:12 · Not filming: the screen is not available');
+});
+
 test('a microphone let go of because the call let go of its own is said plainly, never as a failure', () => {
   const health = new CaptureHealthTracker({ nowUnixMs: 1000 });
   health.pcm('microphone', undefined, true, 1100);
@@ -156,4 +177,19 @@ test('live text paused is said in yellow with no key: nothing fixes it but time,
   // The whole sentence, for `seashell` output and the transcript's last row.
   expect(paused.problems).toEqual([LIVE_TEXT_PAUSED]);
   expect(LIVE_TEXT_PAUSED).toContain('Audio is still recording');
+});
+
+test('audio a busy Mac lost is said during the call and after it, and a saved meeting asks for review', () => {
+  const health = new CaptureHealthTracker({ nowUnixMs: 0 });
+  health.pcm('microphone', undefined, true, 1_000);
+  health.pcm('systemAudio', undefined, true, 1_000);
+  health.dropped('systemAudio', 12, 2_000);
+  health.pcm('microphone', undefined, true, 2_500);
+  health.pcm('systemAudio', undefined, true, 2_500);
+  const live = recordingSummary({ mode: 'recording', health: health.snapshot, nowUnixMs: 3_000 });
+  expect(live.problems).toContain('Your Mac was too busy: 12 s of the other side was not recorded.');
+  expect(live.alert).toMatchObject({ text: 'Mac too busy · 12 s of the call not recorded', color: 'yellow' });
+  const saved = recordingSummary({ mode: 'ready', health: health.stop(4_000, []), nowUnixMs: 5_000 });
+  expect(saved.label).toBe('Saved · audio needs review');
+  expect(saved.problems).toContain('Your Mac was too busy: 12 s of the other side was not recorded.');
 });

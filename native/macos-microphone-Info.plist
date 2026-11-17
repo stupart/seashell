@@ -7,9 +7,11 @@
   <key>CFBundleName</key>
   <string>Seashell Microphone</string>
   <!-- Bump only when the PCM/exit-code contract changes: a new protocol replaces
-       the installed copy, and macOS then asks for Microphone access again. -->
+       the installed copy, and macOS then asks for Microphone access again.
+       4: the tap only copies into a lock-free ring, stdout never blocks, and
+       --device-uid records a chosen input. -->
   <key>SeashellHelperProtocol</key>
-  <string>3</string>
+  <string>4</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>Seashell records your side of the meetings it captures. Audio stays on this Mac.</string>
 </dict>

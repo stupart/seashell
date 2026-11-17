@@ -1,10 +1,10 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { defaultConfigPath } from './config.ts';
 import { MICROPHONE_HELPER } from './live-microphone.ts';
 import { helperPermission, type HelperAuthorization, type HelperPermissionOptions, type HelperPermissionStatus } from './helper-permission.ts';
-import { MICROPHONE_RUNTIME_HELPER } from './runtime-host.ts';
+import { embeddedHelperProtocol, MICROPHONE_RUNTIME_HELPER, microphoneRuntimeHelperPath, type RuntimeHostOptions } from './runtime-host.ts';
 
 export type MicrophoneAuthorization = HelperAuthorization;
 export type MicrophonePermissionStatus = HelperPermissionStatus;
@@ -80,11 +80,56 @@ export function microphoneAllowedBefore(env: NodeJS.ProcessEnv = process.env): b
   catch { return false; }
 }
 
+/**
+ * What macOS says about the installed Seashell Microphone when an update is
+ * about to replace it (its protocol differs from the packaged helper's), asked
+ * as it is, before anything replaces it. Undefined when there is nothing to
+ * replace. Never asks for access.
+ */
+export async function replacedMicrophonePermission(options: {
+  readonly bundled?: string;
+  readonly runtimeHost?: RuntimeHostOptions;
+} = {}): Promise<MicrophonePermissionStatus | undefined> {
+  const bundled = options.bundled ?? MICROPHONE_HELPER;
+  const installed = microphoneRuntimeHelperPath(options.runtimeHost);
+  try {
+    if (!existsSync(bundled) || !existsSync(installed)) return undefined;
+    const identifier = MICROPHONE_RUNTIME_HELPER.identifier;
+    const current = embeddedHelperProtocol(installed, identifier);
+    if (current === undefined || current === embeddedHelperProtocol(bundled, identifier)) return undefined;
+  } catch { return undefined; }
+  return helperPermission(installed, MICROPHONE_RUNTIME_HELPER, DETAILS, { asIs: true });
+}
+
+function copyIdentity(path: string): string | undefined {
+  try { const info = statSync(path); return `${info.dev}:${info.ino}:${info.mtimeMs}:${info.size}`; }
+  catch { return undefined; }
+}
+
 interface MicrophoneCopyNotes {
   /** The Runtime copy macOS last allowed. */
   readonly allowedCopy?: string;
   /** The copy already told about. */
   readonly noticedCopy?: string;
+}
+
+function readNotes(path: string): MicrophoneCopyNotes {
+  try {
+    const value = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+    return {
+      ...(typeof value.allowedCopy === 'string' ? { allowedCopy: value.allowedCopy } : {}),
+      ...(typeof value.noticedCopy === 'string' ? { noticedCopy: value.noticedCopy } : {}),
+    };
+  } catch { return {}; /* Nothing noted yet. */ }
+}
+
+function writeNotes(path: string, notes: MicrophoneCopyNotes): void {
+  try {
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const temporary = `${path}.${process.pid}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify(notes)}\n`, { mode: 0o600 });
+    renameSync(temporary, path);
+  } catch { /* A notice is not worth failing the recorder for. */ }
 }
 
 /**
@@ -96,35 +141,28 @@ interface MicrophoneCopyNotes {
 export async function microphoneUpdateNotice(options: {
   readonly env?: NodeJS.ProcessEnv;
   readonly check?: () => Promise<MicrophonePermissionStatus>;
+  /** replacedMicrophonePermission. */
+  readonly checkReplaced?: () => Promise<MicrophonePermissionStatus | undefined>;
 } = {}): Promise<string | undefined> {
   const env = options.env ?? process.env;
+  const path = microphoneCopyPath(env);
+  // Nothing noted means no login-agent start saw an allowed copy, and the check
+  // below would replace the copy before anyone looked. Ask the copy it replaces.
+  if (!readNotes(path).allowedCopy) {
+    const replaced = await (options.checkReplaced ?? (() => replacedMicrophonePermission()))().catch(() => undefined);
+    const allowedCopy = replaced?.authorization === 'authorized' && replaced.executable ? copyIdentity(replaced.executable) : undefined;
+    if (allowedCopy) writeNotes(path, { ...readNotes(path), allowedCopy });
+  }
   const status = await (options.check ?? (() => microphonePermission()))();
   if (!status.executable) return undefined;
-  let copy: string;
-  try { const info = statSync(status.executable); copy = `${info.dev}:${info.ino}:${info.mtimeMs}:${info.size}`; }
-  catch { return undefined; }
-  const path = microphoneCopyPath(env);
-  let notes: MicrophoneCopyNotes = {};
-  try {
-    const value = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
-    notes = {
-      ...(typeof value.allowedCopy === 'string' ? { allowedCopy: value.allowedCopy } : {}),
-      ...(typeof value.noticedCopy === 'string' ? { noticedCopy: value.noticedCopy } : {}),
-    };
-  } catch { /* Nothing noted yet. */ }
-  const save = (next: MicrophoneCopyNotes) => {
-    try {
-      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      const temporary = `${path}.${process.pid}.tmp`;
-      writeFileSync(temporary, `${JSON.stringify(next)}\n`, { mode: 0o600 });
-      renameSync(temporary, path);
-    } catch { /* A notice is not worth failing the recorder for. */ }
-  };
+  const copy = copyIdentity(status.executable);
+  if (!copy) return undefined;
+  const notes = readNotes(path);
   if (status.authorization === 'authorized') {
-    if (notes.allowedCopy !== copy) save({ ...notes, allowedCopy: copy });
+    if (notes.allowedCopy !== copy) writeNotes(path, { ...notes, allowedCopy: copy });
     return undefined;
   }
   if (status.authorization !== 'notDetermined' || !notes.allowedCopy || notes.allowedCopy === copy || notes.noticedCopy === copy) return undefined;
-  save({ ...notes, noticedCopy: copy });
+  writeNotes(path, { ...notes, noticedCopy: copy });
   return MICROPHONE_UPDATE_NOTICE;
 }

@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import chalk from 'chalk';
 import React from 'react';
 import { render } from 'ink';
 import { Writable } from 'stream';
@@ -56,4 +57,29 @@ test('a title line with no room for its detail keeps what the detail says matter
   expect((await rows(React.createElement(ScreenTitle, title), 56))[0]).toBe('🐚  Call ended · writing notes…');
   // Without a short form, the detail simply gives way.
   expect((await rows(React.createElement(ScreenTitle, { ...title, short: undefined }), 56))[0]).toBe('🐚  Call ended · Design review');
+});
+
+test('a calm part of the title is dim, its recording mark red, and the rest in the line\'s own colour', async () => {
+  let raw = '';
+  const stdout = Object.assign(new Writable({ write(chunk, _encoding, done) {
+    if (stripVTControlCharacters(chunk.toString()).trim()) raw = chunk.toString();
+    done();
+  } }), { columns: 100, rows: 10 });
+  const name = '● Recording 1:05 · filming your screen · Design review';
+  // Colours as a terminal shows them; a test's output is not one.
+  const level = chalk.level;
+  chalk.level = 3;
+  try {
+    const app = render(React.createElement(ScreenTitle, { name, bold: false, calm: ' · filming your screen' }),
+      { stdout: stdout as never, debug: true, patchConsole: false, exitOnCtrlC: false });
+    const deadline = Date.now() + 2_000;
+    while (!raw && Date.now() < deadline) await Bun.sleep(10);
+    app.unmount();
+  } finally { chalk.level = level; }
+  expect(stripVTControlCharacters(raw).split('\n')[0]).toBe(`🐚 Seashell  ${name}`);
+  // Dim (2) around the chosen screen only; never yellow (33) or red (31) for it.
+  expect(raw).toContain('\x1b[2m · filming your screen\x1b[22m');
+  expect(raw).toContain('\x1b[31m●\x1b[39m');
+  expect(raw).not.toContain('\x1b[33m');
+  expect(raw.match(/\x1b\[31m/gu)).toHaveLength(1);
 });

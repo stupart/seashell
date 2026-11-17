@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { loadConfig, resolveMeetingRoute, updateMeetingConfig } from '../src/config.ts';
+import { DEFAULT_MEETING_VIDEO } from '../src/video-recording.ts';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -161,11 +162,26 @@ test('meeting video settings are validated, and on/off keeps the rest', () => {
     [{ apps: { skype: false } }, 'meeting.video.apps maps'],
     [{ apps: { zoom: 'off' } }, 'meeting.video.apps maps'],
     [{ codec: 'hevc' }, 'meeting.video.codec is not supported'],
+    [{ target: 'display' }, 'meeting.video.target must be call-window or screen'],
+    [{ target: true }, 'meeting.video.target must be call-window or screen'],
     [[], 'meeting.video must be an object'],
   ] as const) {
     writeFileSync(path, JSON.stringify({ meeting: { video } }));
     expect(() => loadConfig(path)).toThrow(message);
   }
+});
+
+test('what calls film is the call window unless the whole screen is chosen, and choosing it keeps the rest', () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-config-video-target-'));
+  roots.push(root);
+  const path = join(root, 'config.json');
+  writeFileSync(path, JSON.stringify({ meeting: { video: { apps: { facetime: false } } } }));
+  // Nothing saved means the call's window: nobody's screen is filmed until they choose it.
+  expect(loadConfig(path).meeting?.video?.target).toBeUndefined();
+  expect(DEFAULT_MEETING_VIDEO.target).toBe('call-window');
+  expect(updateMeetingConfig({ video: { target: 'screen' } }, path).meeting?.video).toEqual({ apps: { facetime: false }, target: 'screen' });
+  expect(updateMeetingConfig({ video: { enabled: false } }, path).meeting?.video).toEqual({ apps: { facetime: false }, target: 'screen', enabled: false });
+  expect(updateMeetingConfig({ video: { target: 'call-window' } }, path).meeting?.video?.target).toBe('call-window');
 });
 
 test('briefs before meetings are on unless turned off, and the setting is checked', async () => {

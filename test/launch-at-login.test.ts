@@ -4,10 +4,17 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import type { spawnSync } from 'child_process';
 import { meetingRuntimeHostPath, type RuntimeHostOptions } from '../src/runtime-host.ts';
+import { EventEmitter } from 'events';
+import type { ChildProcess, SpawnOptions } from 'child_process';
 import {
   disableMeetingLaunchAtLogin,
   enableMeetingLaunchAtLogin,
+  LAUNCH_AGENT_RELOADER,
+  meetingLaunchAgentNeedsRefresh,
   meetingLaunchAtLoginStatus,
+  refreshMeetingLaunchAgent,
+  replaceMeetingLaunchAgent,
+  waitForMeetingLaunchAgentRefresh,
 } from '../src/launch-at-login.ts';
 
 const roots: string[] = [];
@@ -218,4 +225,123 @@ test('failed watcher shutdown is reported and preserves its login registration',
   expect(() => disableMeetingLaunchAtLogin({ launchAgentsDir: root, runner }))
     .toThrow('Could not stop');
   expect(existsSync(plistPath)).toBe(true);
+});
+
+test('the recorder runs at standard priority with normal disk I/O, not as a throttled background job', () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-launch-priority-'));
+  roots.push(root);
+  const project = join(root, 'project');
+  mkdirSync(join(project, 'src'), { recursive: true });
+  writeFileSync(join(project, 'src', 'cli.tsx'), '// fixture');
+  const runner = ((_command: string, args: string[]) => ({ status: args[0] === 'print' ? 1 : 0, stderr: '' })) as unknown as typeof spawnSync;
+  const status = enableMeetingLaunchAtLogin({ launchAgentsDir: join(root, 'agents'), projectRoot: project,
+    logsDir: join(root, 'logs'), runtimeHost: runtimeHost(root), runner, environment: { PATH: '/usr/bin' } });
+  const contents = readFileSync(status.plistPath, 'utf8');
+  expect(contents).toContain('<key>ProcessType</key>\n  <string>Standard</string>');
+  expect(contents).not.toContain('<string>Background</string>');
+  expect(contents).not.toContain('LowPriorityIO');
+});
+
+/** An install an older version set up: the same agent, scheduled as a throttled background job. */
+function upgradeFixture() {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-launch-upgrade-'));
+  roots.push(root);
+  const project = join(root, 'project');
+  mkdirSync(join(project, 'src'), { recursive: true });
+  writeFileSync(join(project, 'src', 'cli.tsx'), '// fixture');
+  let isLoaded = false;
+  const calls: string[][] = [];
+  const bootstrapped: string[] = [];
+  let refuseBootstrap = false;
+  const runner = ((_command: string, args: string[]) => {
+    calls.push(args);
+    if (args[0] === 'print') return { status: isLoaded ? 0 : 1, stderr: '' };
+    if (args[0] === 'bootout') { isLoaded = false; return { status: 0, stderr: '' }; }
+    const contents = readFileSync(args[2]!, 'utf8');
+    if (refuseBootstrap && contents.includes('<string>Standard</string>')) return { status: 1, stderr: 'Bootstrap failed: 22: Invalid argument' };
+    bootstrapped.push(contents);
+    isLoaded = true;
+    return { status: 0, stderr: '' };
+  }) as unknown as typeof spawnSync;
+  const options = { launchAgentsDir: join(root, 'agents'), projectRoot: project, logsDir: join(root, 'logs'),
+    runtimeHost: runtimeHost(root), runner, uid: 123, environment: { PATH: '/usr/bin', SEASHELL_CONFIG: '/custom/config.json' } };
+  const installed = enableMeetingLaunchAtLogin(options);
+  const old = readFileSync(installed.plistPath, 'utf8').replace('<string>Standard</string>',
+    '<string>Background</string>\n  <key>LowPriorityIO</key>\n  <true/>');
+  writeFileSync(installed.plistPath, old);
+  calls.length = 0;
+  bootstrapped.length = 0;
+  const spawned: Array<{ command: string; args: readonly string[]; options: SpawnOptions }> = [];
+  let exit: ((code: number | null) => void) | undefined;
+  const spawnReloader = (command: string, args: readonly string[], spawnOptions: SpawnOptions) => {
+    spawned.push({ command, args, options: spawnOptions });
+    const child = Object.assign(new EventEmitter(), { unref() {} });
+    exit = (code) => child.emit('exit', code);
+    return child as unknown as ChildProcess;
+  };
+  return { options, plistPath: installed.plistPath, old, calls, bootstrapped, spawned, spawnReloader,
+    exitReloader: (code: number | null) => exit?.(code), refuse: () => { refuseBootstrap = true; } };
+}
+
+test('an upgraded recorder reloads its login agent onto standard priority from outside its own job', async () => {
+  const fixture = upgradeFixture();
+  expect(meetingLaunchAgentNeedsRefresh(fixture.options)).toBe(true);
+  const refreshing = refreshMeetingLaunchAgent({ ...fixture.options, spawnReloader: fixture.spawnReloader, runtime: '/runtime/bun' });
+  expect(refreshing).toBeDefined();
+  // Nothing about the running job changes until the reloader has booted it out.
+  expect(fixture.calls).toEqual([]);
+  expect(readFileSync(fixture.plistPath, 'utf8')).toBe(fixture.old);
+  expect(fixture.spawned).toHaveLength(1);
+  const [reloader] = fixture.spawned;
+  expect(reloader!.command).toBe('/runtime/bun');
+  expect(reloader!.args).toEqual(['run', LAUNCH_AGENT_RELOADER, fixture.plistPath, '123']);
+  // Its own session and process group: launchd ends the job's group when it boots the job out.
+  expect(reloader!.options.detached).toBe(true);
+  expect(existsSync(LAUNCH_AGENT_RELOADER)).toBe(true);
+
+  const status = replaceMeetingLaunchAgent(fixture.options);
+  expect(status.loaded).toBe(true);
+  expect(fixture.calls.map(args => args[0])).toEqual(['print', 'bootout', 'bootstrap', 'print']);
+  const now = readFileSync(fixture.plistPath, 'utf8');
+  expect(now).toContain('<string>Standard</string>');
+  expect(now).not.toContain('LowPriorityIO');
+  // Everything else is as the install had it.
+  expect(now).toBe(fixture.old.replace('<string>Background</string>\n  <key>LowPriorityIO</key>\n  <true/>', '<string>Standard</string>'));
+  expect(fixture.bootstrapped).toEqual([now]);
+  expect(existsSync(`${fixture.plistPath}.next`)).toBe(false);
+  expect(existsSync(`${fixture.plistPath}.previous`)).toBe(false);
+  expect(meetingLaunchAgentNeedsRefresh(fixture.options)).toBe(false);
+  expect(refreshMeetingLaunchAgent({ ...fixture.options, spawnReloader: fixture.spawnReloader })).toBeUndefined();
+  expect(fixture.spawned).toHaveLength(1);
+  // launchd ended the watcher that asked; had it not, it would hear the reloader exit.
+  fixture.exitReloader(0);
+  expect(await refreshing).toBe(0);
+});
+
+test('a plist launchd refuses puts the old agent back and is never tried again', () => {
+  const fixture = upgradeFixture();
+  fixture.refuse();
+  refreshMeetingLaunchAgent({ ...fixture.options, spawnReloader: fixture.spawnReloader });
+  expect(() => replaceMeetingLaunchAgent(fixture.options)).toThrow('The previous settings are back in place');
+  expect(readFileSync(fixture.plistPath, 'utf8')).toBe(fixture.old);
+  expect(fixture.bootstrapped).toEqual([fixture.old]);
+  expect(meetingLaunchAgentNeedsRefresh(fixture.options)).toBe(false);
+  expect(refreshMeetingLaunchAgent({ ...fixture.options, spawnReloader: fixture.spawnReloader })).toBeUndefined();
+  expect(fixture.spawned).toHaveLength(1);
+});
+
+test('the watcher waits for its own reload, and records as before when it fails', async () => {
+  const pending = new Promise<number | null>(() => {});
+  const stopping = new AbortController();
+  const waiting = waitForMeetingLaunchAgentRefresh(pending, stopping.signal, 5_000);
+  stopping.abort();
+  expect(await waiting).toBe('stopped');
+  expect(await waitForMeetingLaunchAgentRefresh(Promise.resolve(1), new AbortController().signal, 5_000)).toBe('failed');
+  expect(await waitForMeetingLaunchAgentRefresh(pending, new AbortController().signal, 5)).toBe('late');
+});
+
+test('the reloader refuses to run without its plist and user, and touches nothing', () => {
+  const result = Bun.spawnSync([process.execPath, 'run', LAUNCH_AGENT_RELOADER]);
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr.toString()).toContain('Usage: launch-agent-reload.ts <plist> <uid>');
 });

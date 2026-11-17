@@ -31,6 +31,12 @@ export interface BackgroundLiveTranscriptOptions {
   readonly maxPending?: number;
   readonly maxSegments?: number;
   readonly maxTextCharacters?: number;
+  /**
+   * How long the local engine stays loaded with nothing to transcribe. The
+   * recorder keeps it through a meeting's resume window, so a call that
+   * pauses and comes back does not load the model again. Default 60 s.
+   */
+  readonly engineIdleMs?: number;
   readonly dependencies?: {
     readonly createTranscriber?: () => BackgroundDraftTranscriber;
     readonly saveRecord?: typeof saveTranscriptRecord;
@@ -57,12 +63,12 @@ export interface BackgroundLiveTranscriptHandle {
   close(): Promise<void>;
 }
 
-function createLocalTranscriber(): BackgroundDraftTranscriber {
+function createLocalTranscriber(idleTimeoutMs = 60_000): BackgroundDraftTranscriber {
   const root = join(dirname(fileURLToPath(import.meta.url)), '..');
   const profile = loadLocalAsrProfile(join(root, 'models', DEFAULT_WHISPER_MODEL_FILENAME));
   const prompt = defaultWhisperPrompt();
   return new OwnedWhisperServer(join(root, 'whisper.cpp', 'build', 'bin', 'whisper-server'), {
-    ...profile, requestTimeoutMs: 120_000, idleTimeoutMs: 60_000,
+    ...profile, requestTimeoutMs: 120_000, idleTimeoutMs,
     disableGpu: process.env.SEASHELL_DISABLE_GPU === '1',
     ...(prompt ? { prompt } : {}),
   });
@@ -107,7 +113,7 @@ export function startBackgroundLiveTranscript(options: BackgroundLiveTranscriptO
     maxPending,
     transcribe: (path, signal) => {
       if (closed || limited || paused || signal.aborted) return Promise.resolve('');
-      transcriber ??= (options.dependencies?.createTranscriber ?? createLocalTranscriber)();
+      transcriber ??= (options.dependencies?.createTranscriber ?? (() => createLocalTranscriber(options.engineIdleMs)))();
       return transcriber.transcribe(path, signal);
     },
     onDepth: () => report(),

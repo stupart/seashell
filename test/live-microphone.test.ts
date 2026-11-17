@@ -27,6 +27,32 @@ test('a microphone that produces no PCM releases optional capture startup and ex
   } finally { handle.stop(); await handle.done; }
 });
 
+test('a Mac too busy to run the recorder on time does not kill a microphone whose first samples come just after', async () => {
+  const states: Array<{ state: string; code?: string }> = [];
+  const chunks: string[] = [];
+  const handle = startMicrophoneCapture({
+    sessionStartedAtUnixMs: Date.now(), startupTimeoutMs: 1_000, maxRestarts: 0,
+    chunkMilliseconds: 100, minimumChunkMilliseconds: 50,
+    command: process.execPath,
+    // A healthy helper, slow to open its input on the same busy Mac.
+    commandArgs: ['-e', 'setTimeout(() => setInterval(() => process.stdout.write(Buffer.alloc(3200, 1)), 100), 2_700)'],
+    onState: (state) => states.push(state), onChunk: (chunk) => chunks.push(chunk.path),
+  });
+  try {
+    // The recorder itself is not scheduled for well past the startup deadline.
+    const until = Date.now() + 2_500;
+    while (Date.now() < until) { /* busy */ }
+    const deadline = Date.now() + 4_000;
+    while (!states.some((state) => state.state === 'active' || state.code === 'microphone_no_audio') && Date.now() < deadline) await Bun.sleep(10);
+    expect(states.map((state) => state.code)).not.toContain('microphone_no_audio');
+    expect(states.some((state) => state.state === 'active')).toBe(true);
+    expect(handle.process.exitCode).toBeNull();
+  } finally {
+    handle.stop(); await handle.done;
+    for (const path of chunks) rmSync(path, { force: true });
+  }
+}, 15_000);
+
 test('microphone controller exposes a stoppable continuous capture lifecycle', async () => {
   const states: string[] = [];
   const chunks: string[] = [];
@@ -55,6 +81,24 @@ test('microphone controller exposes a stoppable continuous capture lifecycle', a
   expect(states[0]).toBe('starting');
   expect(states.at(-1)).toBe('stopped');
   for (const path of chunks) await Bun.file(path).delete();
+});
+
+test('a microphone that opens says so, and that its helper names no device, transport, rate or buffer', async () => {
+  const opened: unknown[] = [];
+  const chunks: string[] = [];
+  const handle = startMicrophoneCapture({
+    sessionStartedAtUnixMs: Date.now(), maxRestarts: 0, chunkMilliseconds: 100, minimumChunkMilliseconds: 50,
+    command: process.execPath, commandArgs: ['-e', 'setInterval(() => process.stdout.write(Buffer.alloc(3200, 1)), 50)'],
+    onState() {}, onChunk: (chunk) => chunks.push(chunk.path), onOpened: (source) => opened.push(source),
+  });
+  try {
+    const deadline = Date.now() + 3_000;
+    while (!opened.length && Date.now() < deadline) await Bun.sleep(10);
+    expect(opened).toEqual([{ reason: 'start', missing: ['deviceId', 'transport', 'sampleRate', 'bufferFrames'] }]);
+  } finally {
+    handle.stop(); await handle.done;
+    for (const path of chunks) rmSync(path, { force: true });
+  }
 });
 
 test('microphone sample clock is anchored before delayed stdout delivery', async () => {
@@ -145,10 +189,15 @@ test.skipIf(process.platform !== 'darwin' || !Bun.file(`${import.meta.dir}/../na
   'every input shape, from AirPods to aggregate devices, comes out as sound on the meeting timeline', () => {
     // Int16, Int32 and Float32, interleaved or not, mono to 8 channels
     // (spatial, discrete and partly silent), 8 to 192 kHz: 336 cases.
-    const result = Bun.spawnSync([`${import.meta.dir}/../native/bin/seashell-microphone`, '--mix-check']);
+    // Then the handoff out of the tap: the ring with nothing reading it, stdout with nothing reading it, and the
+    // whole consumer through both stalls and an engine rebuild.
+    const result = Bun.spawnSync([`${import.meta.dir}/../native/bin/seashell-microphone`, '--mix-check'], { timeout: 60_000 });
     const report = JSON.parse(result.stdout.toString());
     expect(report.failures).toEqual([]);
     expect(report.cases).toBe(336);
     expect(report.peak).toBeGreaterThan(7_000);
+    expect(report.handoff.ring.seconds).toBeGreaterThanOrEqual(4);
+    expect(report.handoff.stdout.nonblocking).toBe(true);
+    expect(report.handoff.pipeline.silentFrames).toBe(report.handoff.pipeline.droppedSilenceFrames + report.handoff.pipeline.replacedFrames);
     expect(result.exitCode).toBe(0);
-  });
+  }, 90_000);

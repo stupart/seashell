@@ -72,7 +72,7 @@ const until = async (check: () => boolean, label: string) => {
   assert.ok(check(), `${label}\n${frame()}`);
 };
 const type = async (...keys: string[]) => { for (const key of keys) { input.write(key); await Bun.sleep(60); } };
-const DOWN = '\x1b[B', LEFT = '\x1b[D', ENTER = '\r';
+const DOWN = '\x1b[B', LEFT = '\x1b[D', RIGHT = '\x1b[C', ENTER = '\r';
 try {
   await until(() => frame().includes('Saved voices'), 'Settings lists saved voices');
   // Saved voices: choose one, and forget them only after a yes.
@@ -154,12 +154,26 @@ try {
   await until(() => screenRequests === 1 && frame().includes('Screen Recording allowed'), 'Enter turns it on and allows Screen Recording');
   assert.equal(JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.video?.enabled, true);
 
-  // Computer audio: the one-time check that lets meetings use Seashell System Audio.
-  await type(LEFT, ...Array(13).fill('\x1b[A'));
-  if (narrow) await type(ENTER);
-  await until(() => frame().includes('Enter check computer audio'), 'computer audio offers the check');
+  // What to film: the call's window unless the whole screen is chosen, with ←→ as a recording row changes.
+  // Chosen, one plain line says what else that films; nothing else asks.
+  const saved = () => JSON.parse(readFileSync(process.env.SEASHELL_CONFIG!, 'utf8')).meeting.video;
+  const note = 'Everything on that screen is filmed during calls, including other windows and notifications.';
   // Wide, the detail wraps beside the menu's border; read the words only.
   const words = () => frame().split('\n').map((line) => line.split('│').at(-1)!.trim()).join(' ').replace(/\s+/gu, ' ');
+  await until(() => frame().includes('What to film') && frame().includes('‹ The call window ›'), 'video offers what to film, the call window by default');
+  assert.ok(!words().includes(note), 'the call window needs no warning');
+  await type(RIGHT);
+  await until(() => saved().target === 'screen' && frame().includes('‹ Your whole screen ›') && words().includes(note)
+    && frame().includes('←→ what to film'), '→ chooses the whole screen and says plainly what else it films');
+  assert.equal(saved().enabled, true, 'choosing what to film leaves video on');
+  await type(LEFT);
+  await until(() => saved().target === 'call-window' && frame().includes('‹ The call window ›') && !words().includes(note), '← goes back to the call window');
+
+  // Computer audio: the one-time check that lets meetings use Seashell System Audio.
+  // On the Video row ←→ choose what to film, so Esc leaves its detail on a narrow window.
+  await type(...(narrow ? ['\x1b'] : []), ...Array(13).fill('\x1b[A'));
+  if (narrow) await type(ENTER);
+  await until(() => frame().includes('Enter check computer audio'), 'computer audio offers the check');
   // It works already, so the key bar offers the check and the ✓ row says nothing more: no "Next:", no note.
   assert.ok(!words().includes('Enter plays a test sound') && !words().includes('Next:'), words());
   await type(ENTER);

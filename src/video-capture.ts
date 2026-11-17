@@ -24,7 +24,8 @@ export type VideoState = 'starting' | 'recording' | 'waiting' | 'stopped' | 'una
 /**
  * What to record. A window is a meeting app's main window, found by its
  * process or bundle; when none fits, nothing is filmed until one does. A
- * display is filmed only when asked for by number.
+ * display is filmed only when asked for by number, or because the person
+ * films their screen during calls.
  */
 export type VideoTarget =
   | {
@@ -39,7 +40,12 @@ export type VideoTarget =
       /** The calendar event's title, which a call's tab may carry. */
       readonly callTitle?: string;
     }
-  | { readonly kind: 'display'; readonly display: number };
+  | {
+      readonly kind: 'display';
+      readonly display: number;
+      /** The person films their screen during calls (meeting.video.target "screen"): said calmly, never announced. */
+      readonly optedIn?: boolean;
+    };
 
 export interface VideoCaptureRequest {
   readonly target: VideoTarget;
@@ -67,10 +73,16 @@ export type VideoCaptureResult =
       readonly message: string; readonly requestedStop: boolean;
     };
 
-/** What is being filmed, in words for the recording status: "the Google Meet window", "display 1, the whole screen". */
+/**
+ * What is being filmed, in words for the recording status: "the Google Meet
+ * window", "display 1, the whole screen", or "your screen" when the person
+ * chose to film it.
+ */
 export interface VideoFilming {
   readonly kind: 'window' | 'display';
   readonly name: string;
+  /** A display filmed because the person films their screen during calls: no notice, and said calmly. */
+  readonly chosen?: boolean;
 }
 
 export interface StartVideoCaptureOptions {
@@ -112,7 +124,7 @@ export function defaultScreenCaptureHelper(): string {
 }
 
 const PERMISSION_DETAILS = {
-  authorized: 'Seashell Screen Capture can record call windows, including in the background.',
+  authorized: 'Seashell Screen Capture can film calls, including in the background.',
   denied: 'Screen Recording is not on for Seashell Screen Capture. Run seashell meeting video setup, then turn on ' +
     'Seashell Screen Capture in System Settings → Privacy & Security → Screen & System Audio Recording.',
   notDetermined: 'macOS has not asked yet. Run seashell meeting video setup.',
@@ -143,7 +155,10 @@ export function screenCaptureArguments(options: Pick<StartVideoCaptureOptions, '
   ];
 }
 
-/** Said when a whole display is filmed: only ever because it was asked for, and never quietly. */
+/**
+ * Said when a whole display is filmed because one recording asked for it: never quietly. A display the person
+ * films during every call is their own choice, and goes unsaid.
+ */
 export function screenFilmedNotice(filming: VideoFilming): string {
   return `${SCREEN_FILMED} (${filming.name.replace(/, the whole screen$/u, '')}) for this recording, as asked: everything on it is in the video.`;
 }
@@ -161,9 +176,17 @@ export function screenFilmedNotifier(notify: (message: string) => void): (event:
   };
 }
 
-/** In words: a browser window by the call it shows, an app's window by the app's own name, a display by number. */
-function filmingFrom(event: Record<string, unknown>): VideoFilming | undefined {
-  if (event.kind === 'display') return Number.isSafeInteger(event.display) ? { kind: 'display', name: `display ${event.display}, the whole screen` } : undefined;
+/**
+ * In words: a browser window by the call it shows, an app's window by the
+ * app's own name, a display by number, or "your screen" when filming it is the
+ * person's choice for every call.
+ */
+function filmingFrom(event: Record<string, unknown>, target: VideoTarget): VideoFilming | undefined {
+  if (event.kind === 'display') {
+    if (!Number.isSafeInteger(event.display)) return undefined;
+    return target.kind === 'display' && target.optedIn ? { kind: 'display', name: 'your screen', chosen: true }
+      : { kind: 'display', name: `display ${event.display}, the whole screen` };
+  }
   if (event.kind !== 'window') return undefined;
   // A browser tab names its service ("Google Meet"), or "the call" when it carries the event's title.
   if (typeof event.call === 'string' && event.call) return { kind: 'window', name: event.call === 'the call' ? 'the call window' : `the ${event.call} window` };
@@ -247,7 +270,7 @@ export function startVideoCapture(options: StartVideoCaptureOptions): VideoCaptu
     const message = typeof event.message === 'string' ? event.message : undefined;
     if (event.type === 'target') {
       target = targetFrom(event);
-      const filming = filmingFrom(event);
+      const filming = filmingFrom(event, options.request.target);
       if (filming) options.onTarget?.(filming);
     } else if (event.type === 'waiting') {
       options.onWaiting?.(message ?? 'Video is paused.');

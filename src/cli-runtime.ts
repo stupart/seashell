@@ -90,6 +90,8 @@ import {
   SEASHELL_LAUNCH_AGENT_LABEL,
   meetingLaunchAtLoginStatus,
   meetingWatchLogFiles,
+  refreshMeetingLaunchAgent,
+  waitForMeetingLaunchAgentRefresh,
 } from './launch-at-login.ts';
 import { WarningRateLimit, watchLogWriter } from './watch-log.ts';
 import { MEETING_SIGNALS_HELPER, readMeetingSignalSnapshot } from './meeting-automation.ts';
@@ -885,6 +887,23 @@ async function executeMeeting(command: MeetingCommand): Promise<number> {
       process.once('SIGINT', stop);
       process.once('SIGTERM', stop);
       const writeEvent = command.json ? watchLogWriter(meetingWatchLogFiles(), { fallback: print }) : print;
+      // An upgrade from a version that wrote another plist reloads the agent
+      // with this one before anything records (launch-at-login.ts).
+      if (process.env.XPC_SERVICE_NAME === SEASHELL_LAUNCH_AGENT_LABEL && !once) {
+        const refreshing = refreshMeetingLaunchAgent();
+        if (refreshing) {
+          writeEvent(JSON.stringify({ type: 'watch.restarting', at: new Date().toISOString(), reason: 'Updating the recorder\'s login settings' }));
+          const outcome = await waitForMeetingLaunchAgentRefresh(refreshing, controller.signal);
+          if (outcome === 'stopped') {
+            process.off('SIGINT', stop);
+            process.off('SIGTERM', stop);
+            return 0;
+          }
+          writeEvent(JSON.stringify({ type: 'watch.warning', at: new Date().toISOString(),
+            message: outcome === 'late' ? 'The recorder\'s login settings are still updating; it keeps watching for calls meanwhile.'
+              : 'The recorder\'s login settings could not be updated; it keeps running as before. See meeting-watch.error.log.' }));
+        }
+      }
       // A warning that stopped recurring is forgotten with how often it came back unseen.
       const warnings = new WarningRateLimit(undefined, (message, repeats) => command.json
         ? writeEvent(JSON.stringify({ type: 'watch.warning', at: new Date().toISOString(), message, repeats, final: true }))
@@ -1032,6 +1051,7 @@ async function executeMeetingVideo(
       updateMeetingConfig({ video: { apps: { ...config.meeting?.video?.apps, [app.id]: enabled } } });
     } else updateMeetingConfig({ video: { enabled } });
   }
+  if (action.operation === 'film') updateMeetingConfig({ video: { target: action.target } });
   const permission = await screenCapturePermission({ request: action.operation === 'setup' });
   if (action.operation === 'setup' && permission.authorization !== 'authorized') {
     spawnSync('/usr/bin/open', ['x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture'], { stdio: 'ignore', timeout: 5_000 });
@@ -1040,12 +1060,24 @@ async function executeMeetingVideo(
   const enabled = video?.enabled ?? DEFAULT_MEETING_VIDEO.enabled;
   const fps = video?.fps ?? DEFAULT_MEETING_VIDEO.fps;
   const quality = video?.quality ?? DEFAULT_MEETING_VIDEO.quality;
+  const target = video?.target ?? DEFAULT_MEETING_VIDEO.target;
+  const screen = target === 'screen';
   const off = meetingApps().filter((app) => video?.apps?.[app.id] === false).map((app) => app.name);
-  print(json ? JSON.stringify({ enabled, fps, quality, apps: video?.apps ?? {}, permission }, null, 2) : [
+  const turnOn = 'Calls record audio only. Turn video on with: seashell meeting video on';
+  if (json) print(JSON.stringify({ enabled, target, fps, quality, apps: video?.apps ?? {}, permission }, null, 2));
+  // What calls film now, in plain words, and only what stops it from happening.
+  else if (action.operation === 'film') print([
+    screen ? 'Calls now film your whole screen, without asking each time.' : "Calls now film only the call's window.",
+    ...(screen ? ['Everything on the main display is filmed during calls, including other windows and notifications.'] : []),
+    ...(enabled ? [] : [`Video is off. ${turnOn}`]),
+    ...(permission.authorization === 'authorized' ? [] : [permission.detail]),
+  ].join('\n'));
+  else print([
     `Meeting video · ${enabled ? 'on' : 'off'} · Screen Recording ${permission.authorization}`,
     enabled
-      ? `Calls record their app's window at ${fps} fps, ${quality} quality${off.length ? `, except ${off.join(', ')}` : ''}.`
-      : 'Calls record audio only. Turn video on with: seashell meeting video on',
+      ? `${screen ? 'Calls film your whole screen, the main display,' : "Calls record their app's window"} at ${fps} fps, ${quality} quality${
+        off.length ? `, except ${off.join(', ')}` : ''}.`
+      : turnOn,
     'Each meeting keeps its video in its folder, under capture/video. Sizes are in the README.',
     permission.detail,
     ...(permission.executable ? [`Permission belongs to: ${permission.executable}`] : []),

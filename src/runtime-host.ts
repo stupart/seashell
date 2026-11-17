@@ -172,6 +172,13 @@ export function embeddedHelperProtocol(path: string, bundleIdentifier: string): 
   return version === undefined ? 1 : Number(version);
 }
 
+/** Whether the helper at `path` speaks protocol `minimum` or later. Flags and
+ * signals a newer protocol added would end an older helper, so ask first. A
+ * missing or foreign file speaks none. */
+export function helperProtocolAtLeast(path: string, helper: StableRuntimeHelper, minimum: number): boolean {
+  try { return (embeddedHelperProtocol(path, helper.identifier) ?? 0) >= minimum; } catch { return false; }
+}
+
 /** A permission helper answers for its own macOS permission, which macOS ties
  * to its path and exact code hash. Keep one stable copy and replace it only
  * when the helper's protocol changes: rebuilding the same helper with another

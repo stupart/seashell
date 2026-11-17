@@ -399,7 +399,8 @@ export async function finalizeCaptureTranscript(
     };
     // Local Whisper keeps the GPU busy while speaker separation and speech
     // detection use the CPU and Neural Engine. With memory for both, the
-    // microphone pass runs beside system audio instead of before it.
+    // microphone pass runs beside system audio instead of before it; the two
+    // tracks' Whisper runs still take turns on the GPU (heavy-work.ts).
     if (!options.remoteRoute && (options.concurrentTracks ?? concurrentTrackTranscription())) {
       // Both finish before temporary tracks are removed, even if one fails.
       const results = await Promise.allSettled([transcribeMicrophone(), transcribeSystem()]);

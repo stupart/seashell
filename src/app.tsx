@@ -2660,7 +2660,7 @@ export default function App(props: {
       } catch (cause) { setError(`Could not start recording: ${cause instanceof Error ? cause.message : String(cause)}`); }
       return;
     }
-    // V records by hand with video of the call's window, never the screen.
+    // V records by hand with video of what a call films: the call's window, or the screen only when the person chose that.
     if (input === 'V') {
       if (watchOwnership !== 'external') { setCaution('Recording with video needs the background recorder. Press , to start it.'); return; }
       if (activeBackgroundEntry) { setCaution('Already recording. Video can only start with a new recording.'); return; }
@@ -3282,7 +3282,8 @@ export default function App(props: {
         : slot ?? (liveAnswer && recordingInView ? { text: `● Recording ${recordingClock((statusNow - recordingInView.startedAtUnixMs) / 1000)}` } : undefined)} />
         : <ScreenTitle name={heading.text} bold={Boolean(heading.color)} {...(heading.color ? { color: heading.color } : {})}
           {...(heading.keep ? { keep: heading.keep } : {})}
-          {...(summary?.detail && !quietlyDone ? { detail: summary.detail, ...(summary.short ? { short: summary.short } : {}) } : {})} status={slot} />}
+          {...(summary?.detail && !quietlyDone ? { detail: summary.detail, ...(summary.short ? { short: summary.short } : {}) } : {})}
+          {...(summary?.calm ? { calm: summary.calm } : {})} status={slot} />}
       {sheet ?? <Box flexDirection="row" flexGrow={1} overflow="hidden">
         {historyOpen && list}
         {!drawerOnly && reader}
