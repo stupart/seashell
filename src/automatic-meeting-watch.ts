@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { claimManagedProcessSignalOwnership } from './process-lifecycle.ts';
 import { finalizeCaptureTranscript } from './capture-finalizer.ts';
 import { readMacCalendarEventsAsync, suggestCalendarMeeting } from './calendar.ts';
-import { meetBrowserMatchesApp, probeMeetSpeakers } from './meet-speakers.ts';
+import { INCOMPLETE_REWALK_MS, inspectionIncomplete, meetBrowserMatchesApp, probeMeetSpeakers } from './meet-speakers.ts';
 import { writeBackgroundMeetingState, type BackgroundMeetingState, type BackgroundMeetingStatusOptions } from './background-meeting-status.ts';
 import { writeBackgroundWatchStatus, writeRecordingState } from './background-watch-status.ts';
 import { startBackgroundLiveTranscript, type BackgroundLiveTranscriptHandle, type BackgroundLiveTranscriptStatus } from './background-live-transcript.ts';
@@ -219,7 +219,7 @@ export class AutomaticMeetingWatchService {
   #recordingStateFailed = false;
   /** Readings in a row in which the call has let go of the microphone, during its end grace. */
   #microphoneLetGo = 0;
-  /** A Meet check that timed out, held instead of checking again at once; each wait doubles, up to a minute. */
+  /** A Meet check that timed out or read a page only in part, held instead of checking again at once (holdMeet). */
   #meetHeld?: MeetProbe;
   #meetRetryAtUnixMs = 0;
   #meetBackoffMs = 0;
@@ -292,7 +292,7 @@ export class AutomaticMeetingWatchService {
         state: 'unavailable', detail: 'Could not check Google Meet. Check the connection in Speakers.',
       }));
     const meetTimedOut = probing && !holding && meet?.timedOut === true;
-    if (probing && !holding) this.holdMeetAfterTimeout(meet, now);
+    if (probing && !holding) this.holdMeet(meet, now);
     // Any browser window Accessibility cannot read lands here: with no call
     // running that is routine, and a person cannot act on it. Lost access is not.
     const routine = meet?.state === 'unavailable' && (meet as MeetProbe).accessibilityTrusted === true &&
@@ -382,18 +382,25 @@ export class AutomaticMeetingWatchService {
    * A Meet check that timed out is held, not run again three seconds later:
    * walking a browser's Accessibility tree is work for the browser running
    * the call. Each wait doubles, from 10 s up to a minute, and an answer ends it.
-   * The held result is unreadable, so it never ends a call (followedCallUnobserved).
+   * A page the browser only partly answered for is held for 30 s
+   * (INCOMPLETE_REWALK_MS). Either held result is unreadable, so it never
+   * ends a call (followedCallUnobserved).
    */
-  private holdMeetAfterTimeout(meet: MeetProbe | undefined, now: Date): void {
-    if (!meet?.timedOut) {
-      this.#meetHeld = undefined;
-      this.#meetRetryAtUnixMs = 0;
-      this.#meetBackoffMs = 0;
+  private holdMeet(meet: MeetProbe | undefined, now: Date): void {
+    if (meet?.timedOut) {
+      this.#meetBackoffMs = Math.min(60_000, Math.max(10_000, this.#meetBackoffMs * 2));
+      this.#meetRetryAtUnixMs = now.getTime() + this.#meetBackoffMs;
+      this.#meetHeld = meet;
       return;
     }
-    this.#meetBackoffMs = Math.min(60_000, Math.max(10_000, this.#meetBackoffMs * 2));
-    this.#meetRetryAtUnixMs = now.getTime() + this.#meetBackoffMs;
-    this.#meetHeld = meet;
+    this.#meetBackoffMs = 0;
+    if (inspectionIncomplete(meet)) {
+      this.#meetRetryAtUnixMs = now.getTime() + INCOMPLETE_REWALK_MS;
+      this.#meetHeld = meet;
+      return;
+    }
+    this.#meetHeld = undefined;
+    this.#meetRetryAtUnixMs = 0;
   }
 
   /**

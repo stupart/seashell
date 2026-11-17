@@ -285,6 +285,25 @@ test('a Meet check that timed out is not run again three seconds later', async (
   } finally { await service.shutdown(); }
 });
 
+test('a Meet page the browser only partly answers for is walked again at most every 30 s', async () => {
+  const root = scratch('meet-incomplete');
+  const checked: number[] = [];
+  const { state, service } = busyWatch(root, () => ({
+    readLoad: () => 0,
+    readMeet: async (): Promise<MeetProbe> => {
+      checked.push(state.now);
+      return { state: 'unavailable', accessibilityTrusted: true, source: 'google-meet-accessibility',
+        detail: 'Browser Accessibility inspection was incomplete. Speaker names are off, and browser calls ask before recording.' };
+    },
+  }), { speakerBrowser: 'auto' });
+  try {
+    for (state.now = 0; state.now < 90_000; state.now += 3_000) await service.pollOnce();
+    expect(checked).toEqual([0, 30_000, 60_000]);
+    // Held, and unreadable: the call records on.
+    expect(service.phase).toBe('recording');
+  } finally { await service.shutdown(); }
+});
+
 test('the microphone is let go of while the call app has let go of its own, and opened again when the call comes back', async () => {
   const root = scratch('release-mic');
   const microphone: string[] = [];
