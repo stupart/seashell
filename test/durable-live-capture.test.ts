@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test';
 import { spawn, type ChildProcess } from 'child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { startDurableLiveCapture, type DurableLiveCaptureStatus } from '../src/durable-live-capture.ts';
@@ -14,7 +14,10 @@ import {
   pcmS16leToWav,
   type StartSystemAudioOptions,
 } from '../src/live-system-audio.ts';
-import { screenFilmedNotifier, startVideoTrack, type VideoCaptureRequest, type VideoCaptureResult } from '../src/video-capture.ts';
+import { screenFilmedNotifier, startVideoCapture, startVideoTrack, type VideoCaptureRequest, type VideoCaptureResult } from '../src/video-capture.ts';
+import { meetingVideoRequest } from '../src/video-recording.ts';
+import type { MeetingCandidate } from '../src/meeting-automation.ts';
+import { recordingSummary } from '../src/RecordingStatus.tsx';
 
 const roots: string[] = [];
 
@@ -377,6 +380,91 @@ test('what the video films is saved with the capture health, and a filmed screen
   const event = { type: 'watch.warning', message: warnings[0] };
   for (const next of [{ type: 'meeting.started' }, event, event, { type: 'watch.warning', message: 'Microphone is quiet.' }, { type: 'meeting.started' }, event]) notify(next);
   expect(notices).toEqual([warnings[0]!, warnings[0]!]);
+});
+
+/**
+ * A stand-in for seashell-screen-capture asked for a display, speaking its protocol: it keeps the arguments it was
+ * given, names the display it films, writes a movie and its sidecar, and finishes on SIGINT. Nothing is recorded.
+ */
+const FAKE_DISPLAY_HELPER = `
+const fs = require('fs');
+const args = process.argv.slice(2);
+const value = (name) => args[args.indexOf(name) + 1];
+const output = value('--output'), sidecar = value('--sidecar'), display = Number(value('--display'));
+const first = Number(value('--session-origin-unix-ms')) + 1000;
+const emit = (event) => process.stderr.write(JSON.stringify(event) + '\\n');
+const writeSidecar = (finished) => fs.writeFileSync(sidecar, JSON.stringify({ schemaVersion: 1, firstFrameUnixMs: first, frames: 2,
+  codec: 'h264', width: 1920, height: 1080, target: { kind: 'display', display }, finished }));
+process.on('SIGINT', () => { writeSidecar(true); process.exit(0); });
+fs.writeFileSync(output + '.args', JSON.stringify(args));
+emit({ type: 'target', kind: 'display', display, width: 1920, height: 1080, codec: 'h264', hardware: true });
+setTimeout(() => { fs.writeFileSync(output, Buffer.alloc(1024, 1)); writeSidecar(false); emit({ type: 'first-frame', firstFrameUnixMs: first }); }, 20);
+setInterval(() => {}, 1000);
+`;
+
+/** Record a call with the fake display helper, as the watcher starts one; returns what it said and what it gave the helper. */
+async function recordDisplay(libraryDir: string, sessionId: string, video: VideoCaptureRequest) {
+  const script = join(libraryDir, 'fake-display-helper.js');
+  writeFileSync(script, FAKE_DISPLAY_HELPER);
+  const helper = join(libraryDir, 'fake-display-helper');
+  writeFileSync(helper, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
+  chmodSync(helper, 0o755);
+  const warnings: string[] = [];
+  const handle = startDurableLiveCapture({
+    libraryDir, sessionId, systemAudio: false, microphoneStarter: microphoneWithOneChunk(libraryDir), video,
+    videoStarter: (options) => startVideoTrack({ ...options, starter: (run) => startVideoCapture({ ...run, command: helper }) }),
+    onError: (error) => warnings.push(error.message),
+  });
+  const end = Date.now() + 10_000;
+  while (handle.health?.video?.state !== 'recording' && Date.now() < end) await Bun.sleep(10);
+  const health = handle.health;
+  const manifest = await handle.stop();
+  const args = JSON.parse(readFileSync(join(handle.store.root, 'video', '000001.mp4.args'), 'utf8')) as string[];
+  // What the background recorder tells someone at the Mac: its warnings, through the notifier.
+  const notices: string[] = [];
+  const notify = screenFilmedNotifier((message) => notices.push(message));
+  notify({ type: 'meeting.started' });
+  for (const message of warnings) notify({ type: 'watch.warning', message });
+  return { health, manifest, args, warnings, notices, root: handle.store.root };
+}
+
+const zoomCall: MeetingCandidate = { id: 'audio:zoom', appName: 'Zoom', bundleId: 'us.zoom.xos', pid: 4242, kind: 'dedicated', title: 'Zoom meeting',
+  evidence: ['audio-input-process'], requiresConsent: false };
+
+test('with the whole screen chosen, a call films the main display with no notice, and the recording line says it calmly', async () => {
+  const libraryDir = mkdtempSync(join(tmpdir(), 'seashell-durable-chosen-screen-'));
+  roots.push(libraryDir);
+  const request = meetingVideoRequest({ meeting: { video: { target: 'screen' } } }, zoomCall)!;
+  const { health, manifest, args, warnings, notices, root } = await recordDisplay(libraryDir, 'chosen-screen', request);
+  // The helper is asked for the main display, and for no window.
+  expect(args[args.indexOf('--display') + 1]).toBe('1');
+  expect(args.filter((arg) => ['--pid', '--bundle-id', '--app-name', '--call-window-only', '--browser-bundle-id'].includes(arg))).toEqual([]);
+  expect(manifest.video?.segments[0]).toMatchObject({ target: { kind: 'display', display: 1 }, finished: true });
+  // No notice and no notification: the person chose it.
+  expect(warnings.filter((message) => message.includes('whole screen'))).toEqual([]);
+  expect(notices).toEqual([]);
+  expect(health?.video).toEqual({ state: 'recording', filming: 'your screen', screenFilmed: true, screenChosen: true });
+  // Saved with the capture, so the window showing the recording says it the same way.
+  expect(readCaptureHealth(root)?.video).toMatchObject({ filming: 'your screen', screenChosen: true });
+  const summary = recordingSummary({ mode: 'recording', health, elapsedSeconds: 65, savedThroughSeconds: 60, nowUnixMs: Date.now() });
+  expect(summary).toMatchObject({ label: '● Recording 1:05 · filming your screen', calm: ' · filming your screen', detail: 'Audio saved through 1:00' });
+  expect(summary.alert).toBeUndefined();
+});
+
+test('a display one recording asked for is still announced, with a notification, even with the call window chosen', async () => {
+  const libraryDir = mkdtempSync(join(tmpdir(), 'seashell-durable-asked-screen-'));
+  roots.push(libraryDir);
+  const manual = { ...zoomCall, id: 'manual:1', appName: 'Seashell', bundleId: '', pid: 0, kind: 'manual' as const };
+  const request = meetingVideoRequest({}, manual, () => ({ display: 2 }))!;
+  const { health, args, warnings, notices } = await recordDisplay(libraryDir, 'asked-screen', request);
+  expect(args[args.indexOf('--display') + 1]).toBe('2');
+  const notice = 'Seashell is filming your whole screen (display 2) for this recording, as asked: everything on it is in the video.';
+  expect(warnings).toContain(notice);
+  expect(notices).toEqual([notice]);
+  expect(health?.video).toEqual({ state: 'recording', filming: 'display 2, the whole screen', screenFilmed: true });
+  const summary = recordingSummary({ mode: 'recording', health, elapsedSeconds: 65, nowUnixMs: Date.now() });
+  expect(summary.label).toBe('● Recording 1:05 · filming the whole screen');
+  expect(summary.calm).toBeUndefined();
 });
 
 test('letting go of the microphone keeps the session recording, and reopening it continues on the same clock', async () => {

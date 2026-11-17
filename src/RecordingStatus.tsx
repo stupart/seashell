@@ -100,6 +100,8 @@ export interface RecordingSummary {
   headline: string;
   /** The headline without the meeting's title: what is happening. */
   label: string;
+  /** Part of the label said calmly, in dim: " · filming your screen", which the person chose for every call. */
+  calm?: string;
   /** Mic, computer audio and saved audio, for a wide title line. */
   detail?: string;
   /** The headline for a title line with no room for the detail, when the detail says something the title must keep:
@@ -132,11 +134,15 @@ function warningAlert(warning: string): { text: string; short?: string; fix?: Hi
 /** What the video films while a call records: always said, so it is never a surprise. */
 export function videoStatus(video: CaptureVideoHealth | undefined): string | undefined {
   if (!video) return undefined;
-  if (video.state === 'recording') return video.filming ? `Filming ${video.filming}` : 'Filming the call';
-  if (video.state === 'waiting') return 'Not filming: no call window showing';
+  // A screen the person films during every call is said in the title itself, calmly: never twice.
+  if (video.state === 'recording') return video.screenChosen ? undefined : video.filming ? `Filming ${video.filming}` : 'Filming the call';
+  if (video.state === 'waiting') return video.screenFilmed ? 'Not filming: the screen is not available' : 'Not filming: no call window showing';
   if (video.state === 'starting') return 'Video starting…';
   return video.state === 'unavailable' ? 'No video' : undefined;
 }
+
+/** Filming a screen the person chose to film during calls: no notice, never yellow or red. */
+const CALM_SCREEN = ' · filming your screen';
 
 /** "Live text paused while your Mac is busy…": drafts stopped on purpose, while the audio records. Nothing fixes it but
  * time, so its alert offers no key; the transcript's last row says why. */
@@ -153,6 +159,9 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
   const finished = props.mode === 'ready' || props.mode === 'processing';
   const now = props.nowUnixMs ?? Date.now();
   const attention = recordingNeedsAttention(props.health, finished, now);
+  // Filming a whole display is said in the title itself, where nothing cuts it off: as asked for by one recording, or,
+  // dim, as the person's own choice for every call.
+  const screen = props.health?.video?.screenChosen ? CALM_SCREEN : props.health?.video?.screenFilmed ? ' · filming the whole screen' : '';
   // A call that was noticed is asked about in the key bar; the title only says what is happening.
   const label = props.mode === 'watching' ? 'Ready · watching for calls'
     : props.mode === 'awaiting-consent' ? props.approvalPending ? 'Starting the recording…' : 'Call noticed'
@@ -162,8 +171,7 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
     : props.mode === 'starting' ? 'Starting recording…'
     : props.mode === 'processing' ? 'Call ended'
     : props.mode === 'ready' ? attention ? 'Saved · audio needs review' : 'Saved · transcript ready'
-    // Filming a whole display is said in the title itself, where nothing cuts it off.
-    : `● Recording ${recordingClock(props.elapsedSeconds)}${props.health?.video?.screenFilmed ? ' · filming the whole screen' : ''}`;
+    : `● Recording ${recordingClock(props.elapsedSeconds)}${screen}`;
   const headline = props.title ? `${label} · ${props.title}` : label;
   const showSources = ['starting', 'recording', 'no-audio', 'processing', 'ready'].includes(props.mode);
   const mic = sourceLabel(props.health?.microphone, finished, now, props.health?.coverage?.yourSideMissing);
@@ -209,6 +217,7 @@ export function recordingSummary(props: RecordingStatusProps): RecordingSummary 
   return {
     headline,
     label,
+    ...(screen === CALM_SCREEN && label.endsWith(CALM_SCREEN) ? { calm: CALM_SCREEN } : {}),
     ...(alert ? { alert } : {}),
     ...(showSources ? { detail: saved } : {}),
     // Narrow, that the notes are on their way matters more than which meeting it is: the list and the transcript say that.

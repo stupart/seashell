@@ -245,10 +245,11 @@ export function startDurableLiveCapture(
         onSegment: (segment) => store.recordVideoSegmentAsync(segment),
         onState: (state) => { videoState = state; health.video(state); status(); },
         onWarning: warn,
-        // What is filmed shows with the recording; a whole display is also said aloud, as a notice.
+        // What is filmed shows with the recording. A whole display one recording asked for is also said aloud,
+        // as a notice; one the person films during every call is their choice, and the recording line says it calmly.
         onTarget: (filming) => {
           health.video(videoState ?? 'starting', filming);
-          if (filming.kind === 'display') warn(screenFilmedNotice(filming));
+          if (filming.kind === 'display' && !filming.chosen) warn(screenFilmedNotice(filming));
           status();
         },
       });

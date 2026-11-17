@@ -683,3 +683,41 @@ test('a nearby event that is not proven to be this call caps nothing, and nothin
   // A Zoom link, but the event started 20 minutes before the recording.
   expect(await inviteesHanded({ joinUrl: 'https://zoom.us/j/123456789', startAt: '2026-11-10T14:45:00Z' })).toEqual([]);
 });
+
+test('with the whole screen chosen, a call that records by itself films the main display, and nothing asks', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'seashell-auto-screen-'));
+  roots.push(root);
+  let now = 0;
+  const events: AutomaticMeetingWatchEvent[] = [];
+  const videos: unknown[] = [];
+  let asked = 0;
+  const service = new AutomaticMeetingWatchService({
+    config: { libraryDir: root, meeting: {
+      automation: { enabled: true, mode: 'automatic', confirmationPolls: 2, endGraceSeconds: 1, cooldownSeconds: 1 },
+      video: { target: 'screen', fps: 3 },
+    } },
+    onEvent: (value) => events.push(value),
+    dependencies: {
+      now: () => new Date(now),
+      readSignals: () => ({ schemaVersion: 1, capturedAtUnixMs: now, supported: true,
+        inputProcesses: [{ pid: 42, bundleId: 'us.zoom.xos', name: 'Zoom' }] }),
+      askToRecord: async () => { asked++; return 'approve'; },
+      startCapture: (options) => {
+        videos.push(options.video);
+        const store = new CaptureSessionStore({ libraryDir: options.libraryDir, sessionId: 'screen-call', startedAtUnixMs: 1_000 });
+        return { sessionId: 'screen-call', manifestPath: store.manifestPath, store,
+          async stop() { return store.setStatus('captured', 'test'); } } satisfies DurableLiveCaptureHandle;
+      },
+      finalizeCapture: async () => createTranscriptRecord({ transcript: [{ id: 's000001', start: 0, end: 1, text: 'Hello' }], speakers: [] },
+        { id: 'screen-call', now: new Date(1_000), title: 'Zoom meeting' }),
+    },
+  });
+  const poll = async () => { const action = await service.pollOnce(); now += 1_000; return action; };
+  expect((await poll()).kind).toBe('none');
+  expect((await poll()).kind).toBe('start');
+  await service.shutdown();
+  expect(videos).toEqual([{ target: { kind: 'display', display: 1, optedIn: true }, fps: 3, quality: 'medium' }]);
+  expect(asked).toBe(0);
+  expect(events.map((value) => value.type)).not.toContain('meeting.suggested');
+  expect(events.map((value) => value.type)).toContain('meeting.started');
+});
