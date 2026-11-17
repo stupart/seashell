@@ -95,3 +95,16 @@ test('digital silence is skipped without discarding quiet but audible speech', (
   expect(hasAudiblePcmSignal(audible)).toBe(true);
   expect(pcmS16leSignalLevel(audible).peak).toBe(600);
 });
+
+test.skipIf(process.platform !== 'darwin' || !Bun.file(`${import.meta.dir}/../native/bin/seashell-system-audio`).size)(
+  'computer audio never holds up the device: the IO thread only copies, and nothing downstream waits for anyone', () => {
+    // Synthetic packets through the real ring, conversion and stdout; no device is opened.
+    const result = Bun.spawnSync([`${import.meta.dir}/../native/bin/seashell-system-audio`, '--handoff-check'], { timeout: 60_000 });
+    const report = JSON.parse(result.stdout.toString());
+    expect(report.failures).toEqual([]);
+    expect(report.ring.seconds).toBeGreaterThanOrEqual(4);
+    expect(report.ring.droppedFrames).toBe(report.ring.countedDrops);
+    expect(report.stdout.nonblocking).toBe(true);
+    expect(report.pipeline.streamFrames).toBe(report.pipeline.expectedFrames);
+    expect(result.exitCode).toBe(0);
+  }, 90_000);

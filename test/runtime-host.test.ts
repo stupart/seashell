@@ -196,7 +196,7 @@ test('every launcher of computer audio runs one stable copy that answers for its
     const bundled = helperBinary(root, 'seashell-system-audio', plist, 'sdk-27');
     const path = defaultSystemAudioHelper({ bundled, runtimeHost });
     expect(path).toBe(join(root, 'Runtime', 'Seashell System Audio'));
-    expect(embeddedHelperProtocol(path, SYSTEM_AUDIO_RUNTIME_HELPER.identifier)).toBe(1);
+    expect(embeddedHelperProtocol(path, SYSTEM_AUDIO_RUNTIME_HELPER.identifier)).toBe(2);
     // Rebuilt with the same protocol: the copy macOS already allowed stays.
     expect(defaultSystemAudioHelper({ bundled: helperBinary(root, 'rebuilt', plist, 'sdk-26.5'), runtimeHost })).toBe(path);
     expect(readFileSync(path, 'latin1')).toContain('sdk-27');
