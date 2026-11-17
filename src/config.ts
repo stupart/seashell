@@ -14,7 +14,7 @@ import { meetingApps, type MeetingAutomationConfig } from './meeting-automation.
 import { MODEL_EFFORTS, type ModelEffort, type HumainBackend, type HumainMeetingRoute } from './humain-client.ts';
 import type { MeetingEnrichmentMode } from './meeting-artifact.ts';
 import { VIDEO_QUALITIES, type VideoQuality } from './video-capture.ts';
-import type { MeetingVideoConfig } from './video-recording.ts';
+import { MEETING_VIDEO_TARGETS, type MeetingVideoConfig, type MeetingVideoTarget } from './video-recording.ts';
 import {
   DEFAULT_TRANSCRIPTION_ROUTING,
   type TranscriptionMode,
@@ -125,7 +125,7 @@ function parseMeetingVideoConfig(value: unknown): MeetingVideoConfig | undefined
     throw new Error('Sea Shell config meeting.video must be an object');
   }
   const candidate = value as Record<string, unknown>;
-  const unknown = Object.keys(candidate).find((key) => !['enabled', 'apps', 'fps', 'quality'].includes(key));
+  const unknown = Object.keys(candidate).find((key) => !['enabled', 'apps', 'fps', 'quality', 'target'].includes(key));
   if (unknown) throw new Error(`Sea Shell config meeting.video.${unknown} is not supported`);
   if (candidate.enabled !== undefined && typeof candidate.enabled !== 'boolean') {
     throw new Error('Sea Shell config meeting.video.enabled must be a boolean');
@@ -135,6 +135,9 @@ function parseMeetingVideoConfig(value: unknown): MeetingVideoConfig | undefined
   }
   if (candidate.quality !== undefined && !VIDEO_QUALITIES.includes(candidate.quality as VideoQuality)) {
     throw new Error(`Sea Shell config meeting.video.quality must be ${VIDEO_QUALITIES.join(', ')}`);
+  }
+  if (candidate.target !== undefined && !MEETING_VIDEO_TARGETS.includes(candidate.target as MeetingVideoTarget)) {
+    throw new Error(`Sea Shell config meeting.video.target must be ${MEETING_VIDEO_TARGETS.join(' or ')}`);
   }
   if (candidate.apps !== undefined) {
     const apps = candidate.apps as Record<string, unknown>;
@@ -149,6 +152,7 @@ function parseMeetingVideoConfig(value: unknown): MeetingVideoConfig | undefined
     ...(candidate.apps === undefined ? {} : { apps: { ...(candidate.apps as Record<string, boolean>) } }),
     ...(candidate.fps === undefined ? {} : { fps: candidate.fps as number }),
     ...(candidate.quality === undefined ? {} : { quality: candidate.quality as VideoQuality }),
+    ...(candidate.target === undefined ? {} : { target: candidate.target as MeetingVideoTarget }),
   };
 }
 

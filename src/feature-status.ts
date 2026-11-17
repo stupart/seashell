@@ -26,7 +26,7 @@ import { extractorsDirectory, loadExtractors } from './extractors.ts';
 import { automationsDirectory, loadAutomations, readAutomationRuns, runFailure } from './automations.ts';
 import { listVoiceprints } from './voiceprints.ts';
 import { screenCapturePermission } from './video-capture.ts';
-import { DEFAULT_MEETING_VIDEO } from './video-recording.ts';
+import { DEFAULT_MEETING_VIDEO, filmsScreen } from './video-recording.ts';
 import { meetingWhen } from './tui-state.ts';
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -381,7 +381,7 @@ export async function readFeatureStatuses(options: {
     : { state: 'ok', summary: 'On', detail: titlesDetail } as const),
   });
 
-  statuses.push(videoStatus(videoOn, screenRecording));
+  statuses.push(videoStatus(videoOn, screenRecording, filmsScreen(options.config)));
   return statuses;
 }
 
@@ -418,19 +418,22 @@ function briefsStatus(config: SeashellConfig, ready: { calendarOn: boolean; aiCo
   return { ...base, state: 'ok', summary: 'On · 15 minutes before', command: 'seashell brief next' };
 }
 
-const VIDEO_DETAIL = 'Records the call\'s window beside its audio, about 60 MB an hour. In a meeting, w plays it from the line you are reading.';
+/** What the video is, by what calls film: the call's window, or the whole screen the person chose. */
+const videoDetail = (screen: boolean) => `${screen ? 'Records your whole screen beside the call\'s audio' : 'Records the call\'s window beside its audio'}, ` +
+  'about 60 MB an hour. In a meeting, w plays it from the line you are reading.';
 
 /** Video with calls: on or off, and whether macOS lets Seashell Screen Capture record. */
-function videoStatus(on: boolean, permission: HelperPermissionStatus | undefined): FeatureStatus {
+function videoStatus(on: boolean, permission: HelperPermissionStatus | undefined, screen: boolean): FeatureStatus {
   const base = { id: 'video', label: 'Meeting video', optional: true } as const;
+  const detail = videoDetail(screen);
   // Off is a choice the person made, so there is nothing to nag about; Enter turns it back on.
-  if (!on) return { ...base, state: 'off', summary: 'Off · calls record audio only', detail: VIDEO_DETAIL,
+  if (!on) return { ...base, state: 'off', summary: 'Off · calls record audio only', detail,
     action: 'turn-on-video', command: 'seashell meeting video on' };
-  if (permission?.authorization === 'authorized') return { ...base, state: 'ok', summary: 'On · Screen Recording allowed', detail: VIDEO_DETAIL };
+  if (permission?.authorization === 'authorized') return { ...base, state: 'ok', summary: 'On · Screen Recording allowed', detail };
   if (permission?.authorization === 'unavailable') return { ...base, state: 'attention', summary: 'On · video recorder missing',
-    detail: `${VIDEO_DETAIL} The screen recorder is not installed, so calls record audio only.`, fix: 'Update Seashell.', command: 'brew upgrade stupart/tap/seashell' };
+    detail: `${detail} The screen recorder is not installed, so calls record audio only.`, fix: 'Update Seashell.', command: 'brew upgrade stupart/tap/seashell' };
   return { ...base, state: 'attention', summary: 'On · needs Screen Recording',
-    detail: `${VIDEO_DETAIL} Until macOS allows it, calls record audio only.`,
+    detail: `${detail} Until macOS allows it, calls record audio only.`,
     fix: 'Allow Seashell Screen Capture in Privacy & Security → Screen & System Audio Recording.',
     action: 'allow-screen-recording', command: 'seashell meeting video setup' };
 }

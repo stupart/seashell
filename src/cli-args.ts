@@ -8,7 +8,7 @@ import type {
   BrowserMeetingPolicy,
   MeetingAutomationMode,
 } from './meeting-automation.ts';
-import type { VideoChoice } from './video-recording.ts';
+import type { MeetingVideoTarget, VideoChoice } from './video-recording.ts';
 
 export interface TranscribeCommandOptions extends DiarizeFileOptions {
   format: TranscriptFormat;
@@ -79,6 +79,8 @@ export type MeetingCommand = {
 export type MeetingVideoAction =
   | { kind: 'video'; operation: 'status' | 'setup' }
   | { kind: 'video'; operation: 'on' | 'off'; app?: string }
+  /** `film screen` or `film window`: what calls film. */
+  | { kind: 'video'; operation: 'film'; target: MeetingVideoTarget }
   | { kind: 'video'; operation: 'open'; id: string; atSeconds?: number };
 
 export type LibraryAction =
@@ -749,7 +751,7 @@ export function clockSeconds(flag: string, raw: string): number {
 }
 
 function parseMeetingVideo(args: string[]): MeetingCommand {
-  const usage = 'Usage: seashell meeting video [setup | --status | on | off | <app> on|off | <id> [--at 12:34]] [--json]';
+  const usage = 'Usage: seashell meeting video [setup | --status | on | off | <app> on|off | film screen|window | <id> [--at 12:34]] [--json]';
   const positional: string[] = [];
   let libraryDir: string | undefined;
   let atSeconds: number | undefined;
@@ -775,6 +777,10 @@ function parseMeetingVideo(args: string[]): MeetingCommand {
     action = { kind: 'video', operation: 'status' };
   } else if (positional.length === 1 && (first === 'setup' || first === 'on' || first === 'off')) {
     action = { kind: 'video', operation: first };
+  } else if (first === 'film') {
+    // The whole screen, or only the call's window.
+    if (positional.length !== 2 || (second !== 'screen' && second !== 'window')) throw new Error(usage);
+    action = { kind: 'video', operation: 'film', target: second === 'screen' ? 'screen' : 'call-window' };
   } else if (positional.length === 2 && (second === 'on' || second === 'off')) {
     action = { kind: 'video', operation: second, app: first!.toLocaleLowerCase() };
   } else if (positional.length === 1) {
@@ -1110,7 +1116,8 @@ Usage:
   seashell record [stop]                    Record now, by hand, or stop the recording
   seashell record --video [--window <app> | --display <n>]  Record by hand with video of the call's window, an app, or a whole display
   seashell meeting video <id> [--at 12:34]  Watch a meeting's video beside its transcript
-  seashell meeting video on|off             Record the call's window with each call (or: <app> on|off)
+  seashell meeting video on|off             Record video with each call (or: <app> on|off)
+  seashell meeting video film screen|window Film your whole screen during calls, without asking, or only the call's window
   seashell meeting apps [<app> on|off|ask]  Which apps record by themselves, ask first, or never
   seashell speakers compare [--last <n>]    Try Nemotron 3 on past calls and listen where the engines disagree
   seashell speakers use <engine>            Separate voices with auto (both), nemotron3 or community-1

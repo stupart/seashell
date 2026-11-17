@@ -201,6 +201,12 @@ test('video says whether it is on and whether macOS lets it record, asking only 
   expect((await byId({ screenRecording: screen('notDetermined') })).video)
     .toMatchObject({ state: 'attention', summary: 'On · needs Screen Recording', action: 'allow-screen-recording' });
   expect((await byId({ screenRecording: screen('unavailable') })).video).toMatchObject({ state: 'attention', summary: 'On · video recorder missing' });
+  // What it records follows what calls film: the call's window by default, the whole screen once chosen.
+  expect((await byId({ screenRecording: screen('authorized') })).video?.detail).toStartWith("Records the call's window beside its audio");
+  expect((await byId({ screenRecording: screen('authorized') }, { speakerBrowser: 'auto', video: { target: 'screen' } })).video)
+    .toMatchObject({ state: 'ok', summary: 'On · Screen Recording allowed' });
+  expect((await byId({ screenRecording: screen('authorized') }, { speakerBrowser: 'auto', video: { target: 'screen' } })).video?.detail)
+    .toStartWith("Records your whole screen beside the call's audio");
 });
 
 test('saved voices, prompts, extractors and automations each say how they stand', async () => {

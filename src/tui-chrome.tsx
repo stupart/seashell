@@ -134,8 +134,13 @@ export function withFix(hints: readonly Hint[], status?: TitleStatus): Hint[] {
   return status?.fix ? [status.fix, ...hints.filter(([key]) => key !== status.fix![0])] : [...hints];
 }
 
-/** A recording's ● is red wherever it leads a line; the words after it keep the line's own colour. */
-function Marked(props: { text: string }) {
+/**
+ * A recording's ● is red wherever it leads a line; the words after it keep the line's own colour,
+ * except a calm part, in dim: what the person chose, such as filming their screen.
+ */
+function Marked(props: { text: string; calm?: string }) {
+  const at = props.calm ? props.text.indexOf(props.calm) : -1;
+  if (at > 0) return <><Marked text={props.text.slice(0, at)} /><Text dimColor>{props.calm}</Text>{props.text.slice(at + props.calm!.length)}</>;
   return props.text.startsWith('● ') ? <><Text color="red">●</Text>{props.text.slice(1)}</> : <>{props.text}</>;
 }
 
@@ -149,7 +154,9 @@ export function ScreenTitle(props: { name: string; color?: Tone; bold?: boolean;
   keep?: number;
   /** The name for a line with no room for its detail, which keeps the detail's part that matters in place of the
    * meeting's title: "Call ended · writing notes…" for "Call ended · Design review  Audio saved · writing notes". */
-  short?: string }) {
+  short?: string;
+  /** Part of the name said calmly, in dim: " · filming your screen" in "● Recording 0:20 · filming your screen". */
+  calm?: string }) {
   const { stdout } = useStdout();
   const columns = stdout?.columns ?? 80;
   const room = columns - 2;
@@ -177,7 +184,7 @@ export function ScreenTitle(props: { name: string; color?: Tone; bold?: boolean;
     <Box justifyContent="space-between">
       {/* Keyed by its shape, as the key bar is, so a longer title is measured afresh. */}
       <Text key={`${brand}-${Boolean(detail)}-${name === props.name}`} wrap="truncate-end">🐚{brand ? <Text> <Text bold color="cyan">Seashell</Text></Text> : ''}{name ? '  ' : ''}
-        <Text bold={props.bold ?? true} {...(props.color ? { color: props.color } : {})}><Marked text={name} /></Text>
+        <Text bold={props.bold ?? true} {...(props.color ? { color: props.color } : {})}><Marked text={name} {...(props.calm ? { calm: props.calm } : {})} /></Text>
         {detail ? <Text dimColor>  {detail}</Text> : null}
       </Text>
       {statusText && <Box flexShrink={0} marginLeft={2}>

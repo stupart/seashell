@@ -48,6 +48,8 @@ export interface CaptureVideoHealth {
   readonly filming?: string;
   /** A whole display was filmed in this recording; said for as long as the recording shows. */
   readonly screenFilmed?: boolean;
+  /** That display is filmed because the person films their screen during calls: said calmly, never announced. */
+  readonly screenChosen?: boolean;
 }
 export interface CaptureHealthSnapshot {
   readonly schemaVersion: 1;
@@ -167,13 +169,16 @@ export class CaptureHealthTracker {
     return this.set(source, { ...previous, state: 'released', code: undefined,
       message: `${label(source)} released: the call let go of it.` }, Math.max(this.#value.updatedAtUnixMs, nowUnixMs));
   }
-  /** What the video track is doing and filming. Once a display is filmed, that stays said. */
-  video(state: CaptureVideoState, filming?: { readonly kind: 'window' | 'display'; readonly name: string }, nowUnixMs = Date.now()): CaptureHealthSnapshot {
+  /** What the video track is doing and filming. Once a display is filmed, that stays said, and how. */
+  video(state: CaptureVideoState, filming?: { readonly kind: 'window' | 'display'; readonly name: string; readonly chosen?: boolean },
+    nowUnixMs = Date.now()): CaptureHealthSnapshot {
     const previous = this.#value.video;
     const name = clean(filming?.name, 100) ?? previous?.filming;
     const screenFilmed = previous?.screenFilmed === true || filming?.kind === 'display';
+    const screenChosen = previous?.screenChosen === true || (filming?.kind === 'display' && filming.chosen === true);
     this.#value = { ...this.#value, updatedAtUnixMs: Math.max(this.#value.updatedAtUnixMs, nowUnixMs),
-      video: Object.freeze({ state, ...(name ? { filming: name } : {}), ...(screenFilmed ? { screenFilmed: true } : {}) }) };
+      video: Object.freeze({ state, ...(name ? { filming: name } : {}), ...(screenFilmed ? { screenFilmed: true } : {}),
+        ...(screenChosen ? { screenChosen: true } : {}) }) };
     return this.#value;
   }
   /** Pass the meeting's saved chunks to keep its coverage with the final health. */
@@ -256,7 +261,8 @@ export function parseCaptureHealth(value: unknown): CaptureHealthSnapshot | unde
   const video = raw.video as CaptureVideoHealth | undefined;
   if (video !== undefined && (!video || typeof video !== 'object' || !videoStates.includes(video.state) ||
       (video.filming !== undefined && (typeof video.filming !== 'string' || clean(video.filming, 100) !== video.filming)) ||
-      (video.screenFilmed !== undefined && video.screenFilmed !== true))) return;
+      (video.screenFilmed !== undefined && video.screenFilmed !== true) ||
+      (video.screenChosen !== undefined && (video.screenChosen !== true || video.screenFilmed !== true)))) return;
   const optionalTime = (value: unknown) => value === undefined || timestamp(value);
   const optionalText = (value: unknown, limit: number) => value === undefined || (typeof value === 'string' && value.length <= limit && clean(value, limit) === value);
   for (const source of sources) {
@@ -286,7 +292,8 @@ export function parseCaptureHealth(value: unknown): CaptureHealthSnapshot | unde
     yourSideMissing: raw.coverage.yourSideMissing };
   return { schemaVersion: 1, updatedAtUnixMs: raw.updatedAtUnixMs, microphone: copy(raw.microphone), systemAudio: copy(raw.systemAudio),
     ...(coverage ? { coverage } : {}),
-    ...(video ? { video: { state: video.state, ...(video.filming ? { filming: video.filming } : {}), ...(video.screenFilmed ? { screenFilmed: true } : {}) } } : {}) };
+    ...(video ? { video: { state: video.state, ...(video.filming ? { filming: video.filming } : {}), ...(video.screenFilmed ? { screenFilmed: true } : {}),
+      ...(video.screenChosen ? { screenChosen: true } : {}) } } : {}) };
 }
 
 export function readCaptureHealth(directory: string): CaptureHealthSnapshot | undefined {

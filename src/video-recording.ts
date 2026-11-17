@@ -6,25 +6,55 @@ import { browserBundleIds, meetingApps, sameApplicationFamily, type MeetingCandi
 import { meetingCommandPath, writeMeetingCommand } from './meeting-command.ts';
 import type { VideoCaptureRequest, VideoQuality, VideoTarget } from './video-capture.ts';
 
+/**
+ * What a call's video films: the call's own window, or the whole screen, which
+ * the person chooses for their own Mac and is then never asked about.
+ */
+export type MeetingVideoTarget = 'call-window' | 'screen';
+export const MEETING_VIDEO_TARGETS: readonly MeetingVideoTarget[] = Object.freeze(['call-window', 'screen']);
+
 /** meeting.video in config.json. */
 export interface MeetingVideoConfig {
-  /** Record the call's window with each call recording. */
+  /** Record video with each call recording. */
   enabled?: boolean;
   /** Per app, by the ids of `seashell meeting apps`: false turns video off for that app. */
   apps?: Partial<Record<string, boolean>>;
   /** Frames per second, 1 to 30. Slides and screen shares need very few. */
   fps?: number;
   quality?: VideoQuality;
+  /** The call's window (the default), or the whole screen. */
+  target?: MeetingVideoTarget;
 }
 
 /**
- * On for calls. At 2 fps and medium quality a screen share measured about
- * 60 MB an hour (at most about 135 for constant motion; see the README), less
- * than the meeting's own audio, which is about 230 MB an hour.
+ * On for calls, filming the call's window. At 2 fps and medium quality a
+ * screen share measured about 60 MB an hour (at most about 135 for constant
+ * motion; see the README), less than the meeting's own audio, which is about
+ * 230 MB an hour.
  */
-export const DEFAULT_MEETING_VIDEO = Object.freeze({ enabled: true, fps: 2, quality: 'medium' as VideoQuality });
+export const DEFAULT_MEETING_VIDEO = Object.freeze({ enabled: true, fps: 2, quality: 'medium' as VideoQuality,
+  target: 'call-window' as MeetingVideoTarget });
 
-/** What a recording started by hand asked to film; neither means the call's window. Only `display` films a whole screen. */
+/** What calls film, as saved: the call's window unless the person chose the whole screen. */
+export function filmTarget(config: SeashellConfig): MeetingVideoTarget {
+  return config.meeting?.video?.target ?? DEFAULT_MEETING_VIDEO.target;
+}
+
+/** Whether calls film the whole screen: only when the person chose it. */
+export function filmsScreen(config: SeashellConfig): boolean {
+  return filmTarget(config) === 'screen';
+}
+
+/**
+ * The whole screen a call films when the person chose that: the main display,
+ * the one with the menu bar, which the helper numbers 1. Seashell does not
+ * learn where the call's window is (the helper reports which window it films,
+ * never where it sits), so a call on another display is not followed there,
+ * and a window that moves during the call leaves the movie on this display.
+ */
+export const SCREEN_TARGET: VideoTarget = Object.freeze({ kind: 'display', display: 1, optedIn: true });
+
+/** What a recording started by hand asked to film; neither means what a call films: its window, or the screen when chosen. */
 export interface VideoChoice {
   readonly window?: string;
   readonly display?: number;
@@ -96,14 +126,19 @@ function meetingAppFor(bundleId: string) {
   return bundleId ? meetingApps().find((app) => app.bundleIds.some((id) => sameApplicationFamily(bundleId, id))) : undefined;
 }
 
-/** `--window zoom`, `--window "Google Chrome"`, or any other app's name. */
-export function videoTargetFor(choice: VideoChoice): VideoTarget {
+/**
+ * `--window zoom`, `--window "Google Chrome"`, or any other app's name. Nothing
+ * named means the call's window, or the whole screen when the person films
+ * their screen during calls.
+ */
+export function videoTargetFor(choice: VideoChoice, screen = false): VideoTarget {
   if (choice.display !== undefined) return { kind: 'display', display: choice.display };
   if (choice.window) {
     const wanted = choice.window.toLocaleLowerCase();
     const app = meetingApps().find((candidate) => candidate.id === wanted || candidate.name.toLocaleLowerCase() === wanted);
     return { kind: 'window', appName: app?.name ?? choice.window, ...(app ? { bundleIds: app.bundleIds } : {}) };
   }
+  if (screen) return SCREEN_TARGET;
   // Nothing named: a call's window, and a browser's only while it shows the call. Never the screen.
   return { kind: 'window', bundleIds: meetingApps().flatMap((app) => app.bundleIds), callWindowOnly: true, browserBundleIds: browserBundleIds() };
 }
@@ -112,9 +147,11 @@ export function videoTargetFor(choice: VideoChoice): VideoTarget {
  * Whether this recording gets video, and of what. A call records its app's
  * window when video is on for that app: in a browser, only while the tab looks
  * like the call (its service, or the calendar event's title). With no such
- * window, nothing is filmed until one shows. A recording started by hand gets
- * video only when it was asked for, so pressing Space never films the screen
- * unasked, and only `--display` films a whole screen.
+ * window, nothing is filmed until one shows. When the person chose to film
+ * their screen during calls, a call films the main display instead, on the
+ * same on and off settings. A recording started by hand gets video only when
+ * it was asked for, so pressing Space never films the screen unasked; asked
+ * for, it films what a call would, or the window or display it names.
  */
 export function meetingVideoRequest(
   config: SeashellConfig,
@@ -126,11 +163,12 @@ export function meetingVideoRequest(
   try {
     if (candidate.kind === 'manual') {
       const choice = consume();
-      return choice ? { target: videoTargetFor(choice), ...settings } : undefined;
+      return choice ? { target: videoTargetFor(choice, filmsScreen(config)), ...settings } : undefined;
     }
     if (!(video?.enabled ?? DEFAULT_MEETING_VIDEO.enabled)) return undefined;
     const app = meetingAppFor(candidate.bundleId);
     if (app && video?.apps?.[app.id] === false) return undefined;
+    if (filmsScreen(config)) return { target: SCREEN_TARGET, ...settings };
     const bundleIds = [...new Set([candidate.bundleId, ...(app?.bundleIds ?? [])].filter(Boolean))];
     const callTitle = candidate.calendar?.title.trim();
     return {

@@ -129,6 +129,27 @@ test('while a call records, the status says what the video films, and a whole sc
   expect(parseCaptureHealth({ ...health.snapshot, video: { state: 'filming the bank' } })).toBeUndefined();
 });
 
+test('a screen the person films during calls is said once, calmly in the title, and never as an alert', () => {
+  const health = new CaptureHealthTracker({ nowUnixMs: 1000 });
+  health.pcm('microphone', undefined, true, 1001);
+  health.video('starting', { kind: 'display', name: 'your screen', chosen: true }, 1002);
+  health.video('recording', undefined, 1003);
+  const summary = (snapshot = health.snapshot) => recordingSummary({ mode: 'recording', title: 'Design review', health: snapshot,
+    savedThroughSeconds: 12, elapsedSeconds: 20, nowUnixMs: 1004 });
+  expect(summary()).toMatchObject({ label: '● Recording 0:20 · filming your screen', calm: ' · filming your screen',
+    headline: '● Recording 0:20 · filming your screen · Design review', detail: 'Audio saved through 0:12' });
+  expect(summary().alert).toBeUndefined();
+  expect(summary().problems).toEqual([]);
+  // Saved and read back by the window showing it, it reads the same; an older reader just sees a filmed screen.
+  const saved = parseCaptureHealth(JSON.parse(JSON.stringify(health.snapshot)));
+  expect(saved?.video).toEqual({ state: 'recording', filming: 'your screen', screenFilmed: true, screenChosen: true });
+  expect(summary(saved).label).toBe('● Recording 0:20 · filming your screen');
+  expect(parseCaptureHealth({ ...health.snapshot, video: { state: 'recording', screenChosen: true } })).toBeUndefined();
+  // A screen that stops being available says so, not that a call window is missing.
+  health.video('waiting', undefined, 1005);
+  expect(summary().detail).toBe('Audio saved through 0:12 · Not filming: the screen is not available');
+});
+
 test('a microphone let go of because the call let go of its own is said plainly, never as a failure', () => {
   const health = new CaptureHealthTracker({ nowUnixMs: 1000 });
   health.pcm('microphone', undefined, true, 1100);

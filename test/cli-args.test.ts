@@ -387,13 +387,15 @@ describe('video CLI parsing', () => {
     expect(video('setup')).toEqual({ kind: 'video', operation: 'setup' });
     expect(video('off')).toEqual({ kind: 'video', operation: 'off' });
     expect(video('Zoom', 'on')).toEqual({ kind: 'video', operation: 'on', app: 'zoom' });
+    expect(video('film', 'screen')).toEqual({ kind: 'video', operation: 'film', target: 'screen' });
+    expect(video('film', 'window', '--json')).toEqual({ kind: 'video', operation: 'film', target: 'call-window' });
     expect(video('meeting-20261110-ab12', '--at', '12:34')).toEqual({ kind: 'video', operation: 'open', id: 'meeting-20261110-ab12', atSeconds: 754 });
     expect(video('meeting-1', '--at', '1:02:03')).toMatchObject({ atSeconds: 3723 });
     expect(video('meeting-1', '--at', '90')).toMatchObject({ atSeconds: 90 });
     expect(parseCliArgs(['meeting', 'video', 'meeting-1', '--library-dir', '/tmp/lib', '--json']))
       .toMatchObject({ kind: 'meeting', libraryDir: '/tmp/lib', json: true });
     for (const args of [['setup', '--status'], ['on', '--at', '1:00'], ['meeting-1', '--at', 'soon'], ['meeting-1', '--at', '1:2:3:4'],
-      ['a', 'b', 'c'], ['zoom', 'maybe'], ['--loud']]) {
+      ['a', 'b', 'c'], ['zoom', 'maybe'], ['--loud'], ['film'], ['film', 'display'], ['film', 'screen', '2'], ['film', 'screen', '--status']]) {
       expect(() => parseCliArgs(['meeting', 'video', ...args])).toThrow();
     }
   });
