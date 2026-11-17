@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — film your whole screen, by choice
+
+- **Your whole screen, without asking:** calls can film your whole screen
+  instead of only the call's window. `seashell meeting video film screen`
+  turns it on, `film window` turns it back, and Settings → Video has a **What
+  to film** choice (←→). It films the main display. Nothing asks and no
+  notification comes; while a call records, the title line says "filming your
+  screen", dimmed. Video on or off, and per app, still apply. The call's window
+  stays the default.
+- A display filmed because one recording asked for it (`seashell record --video
+  --display N`) is still announced with a notification.
+
 ## Unreleased — your own notes, and briefs before meetings
 
 - **Your notes:** during a call, `+` writes a one-line note, timed when you

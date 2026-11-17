@@ -431,9 +431,10 @@ window with the Meet in it, or the Zoom, Teams or FaceTime window. Whatever
 anyone shares in the call shows in that window, so it is in the video. The
 window is recorded even on another desktop or under other windows.
 
-Seashell never films your screen in place of the call. When the call's app has
-no window to film (minimized, still opening, or only a floating picture), the
-audio records alone and Seashell looks for the window again every 30 seconds.
+Unless you choose to film your whole screen (below), Seashell never films your
+screen in place of the call. When the call's app has no window to film
+(minimized, still opening, or only a floating picture), the audio records alone
+and Seashell looks for the window again every 30 seconds.
 A browser window is filmed only while its tab looks like the call: Google Meet,
 Zoom, Teams, Webex, Whereby or Around, or the calendar event's title. Switch to
 another tab and filming pauses until the call's tab is back; the movie never
@@ -449,8 +450,8 @@ seashell meeting video --status   # check, without asking
 ```
 
 Until then, calls still record their audio and Seashell warns that video was
-skipped. In Seashell, press **,** and choose **Video**: Enter asks macOS for
-Screen Recording, and Space turns video on or off.
+skipped. In Seashell, press **,** and choose **Video**: Enter turns video on,
+asking macOS for Screen Recording if it must, and off again.
 
 A recording you start yourself has video only when you ask for it. In Seashell,
 **Shift+V** records with video of the call's window and **Space** records audio
@@ -462,9 +463,29 @@ seashell record --video --window zoom   # one app's window, by id or name
 seashell record --video --display 2     # a whole display; 1 is the main display
 ```
 
-Only `--display` films a whole display. When it does, you get a notification,
-and the title line says "filming the whole screen" for the rest of the
-recording.
+`--display` films a whole display for that one recording. When it does, you get
+a notification, and the title line says "filming the whole screen" for the rest
+of the recording.
+
+**Your whole screen, by choice.** On your own Mac, every call can film your
+whole screen instead of the call's window, without asking each time:
+
+```bash
+seashell meeting video film screen    # calls film your whole screen
+seashell meeting video film window    # back to the call's window, the default
+```
+
+In Seashell, press **,**, choose **Video**, and press ←→ to change **What to
+film**. Everything on that screen is filmed during calls, including other
+windows and notifications. Video on or off, overall or for one app, still
+applies, and **Shift+V** or `seashell record --video` films the screen too.
+Nothing asks and no notification comes; while a call records, the title line
+says "filming your screen", dimmed.
+
+It films the main display, the one with the menu bar. Seashell does not learn
+which display the call's window is on, so a call on another display is not
+followed there, and a call window moved to another display during the call
+leaves the movie on the main display.
 
 Watch a meeting's video beside its transcript:
 
@@ -488,11 +509,12 @@ seashell meeting video facetime off      # on or off, per app
 ```
 
 In `config.json`, `meeting.video` holds `enabled`, `apps` (per app, by the ids
-of `seashell meeting apps`, `true` or `false`), `fps` (1 to 30, default 2) and
-`quality` (`low` 1280 px, `medium` 1920 px, the default, or `high` 2560 px):
+of `seashell meeting apps`, `true` or `false`), `fps` (1 to 30, default 2),
+`quality` (`low` 1280 px, `medium` 1920 px, the default, or `high` 2560 px) and
+`target` (`call-window`, the default, or `screen`):
 
 ```json
-{ "meeting": { "video": { "enabled": true, "apps": { "facetime": false }, "fps": 2, "quality": "medium" } } }
+{ "meeting": { "video": { "enabled": true, "apps": { "facetime": false }, "fps": 2, "quality": "medium", "target": "call-window" } } }
 ```
 
 **Where it lives.** Each meeting folder keeps its movies in `capture/video/`
@@ -541,7 +563,7 @@ until it is closed.
 | `/` | Search titles, speakers and transcripts. `Enter` on a result opens it at the match |
 | `L` | Jump to the latest words of a live transcript |
 | `Space` | Record by hand, or stop the recording (it asks first). In a window that captures by itself, pause or resume |
-| `Shift+V` | Record by hand with video of the call's window. Never the whole screen: for that, `seashell record --video --display 1` |
+| `Shift+V` | Record by hand with video of the call's window, or of your whole screen if you chose that in Settings → Video. One display by number: `seashell record --video --display 1` |
 | `W` | Watch the meeting's video beside its transcript, from the line at the top. Shown only when there is video |
 | `F` | Import audio or video |
 | `Shift+F` | Import and run speaker diarization |
@@ -590,7 +612,8 @@ holds:
 - **Insights** (the files in the Extractors folder) and **Automations:** what
   each folder holds, any file that does not load, and the last automation runs.
   Enter opens the folder.
-- **Video:** on or off, and whether macOS lets Seashell record the screen.
+- **Video:** on or off, whether macOS lets Seashell record the screen, and
+  **What to film**: the call window, or your whole screen. ←→ changes it.
 - **Vocabulary:** how many words it holds. Enter opens the file.
 - **Briefs:** before meetings, on or off. Enter switches it.
 
@@ -1527,8 +1550,8 @@ seashell ai test --json
 - Default capture, transcription, durable chunks, and speaker inference stay
   local. Explicitly consented cloud transcription uploads the selected audio.
 - Roster and active-speaker evidence stays local in the built-in identity pass.
-- Meeting video, when on, records only the call's window (or the main display
-  when no window fits) and stays on this Mac.
+- Meeting video, when on, records only the call's window, or your whole
+  screen if you choose that, and stays on this Mac.
 - Voiceprints of the people you name stay in
   `~/Library/Application Support/Sea Shell/Voices`, outside the transcript
   library, and are never uploaded or sent to an AI provider.
